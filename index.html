@@ -2477,6 +2477,7 @@ window.copyInviteLink = function() {
         <div id="dashboard-user-role" style="font-size:11px;color:var(--gold);font-weight:600;letter-spacing:0.04em;margin-top:1px;"></div>
       </div>
       <button class="logout-btn" id="invite-user-btn" onclick="window.openInviteModal()" style="display:none;border-color:var(--gold-dim);color:var(--gold);" title="Generate an invite link for a new user">+ Invite User</button>
+      <button class="logout-btn" id="scan-btn" onclick="window.openScanner()" style="border-color:var(--gold-dim);color:var(--gold);display:inline-flex;align-items:center;gap:5px;" title="Scan QR code"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M0 .5A.5.5 0 0 1 .5 0h3a.5.5 0 0 1 0 1H1v2.5a.5.5 0 0 1-1 0v-3zm12 0a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0V1h-2.5a.5.5 0 0 1-.5-.5zM.5 12a.5.5 0 0 1 .5.5V15h2.5a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5v-3a.5.5 0 0 1 .5-.5zm15 0a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1 0-1H15v-2.5a.5.5 0 0 1 .5-.5z"/></svg> Scan</button>
       <button class="logout-btn" onclick="window.doLogout()">Sign out</button>
     </div>
   </div>
@@ -8093,6 +8094,33 @@ window.BOMS          = BOMS;
 </script>
 
 
+<!-- ══ QR SCANNER MODAL ═══════════════════════════════════════════════ -->
+<div id="scanner-overlay" style="display:none;position:fixed;inset:0;z-index:900;background:rgba(5,12,20,0.95);align-items:center;justify-content:center;">
+  <div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:24px;width:100%;max-width:400px;margin:16px;box-sizing:border-box;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div>
+        <div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">QR Scanner</div>
+        <div style="font-size:16px;font-weight:700;color:var(--white);font-family:Merriweather,serif;">Scan Record</div>
+      </div>
+      <button onclick="window.closeScanner()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);width:32px;height:32px;border-radius:4px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;">✕</button>
+    </div>
+    <div style="position:relative;width:100%;padding-bottom:100%;background:#000;border-radius:6px;overflow:hidden;margin-bottom:16px;">
+      <video id="scanner-video" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" playsinline autoplay muted></video>
+      <canvas id="scanner-canvas" style="display:none;"></canvas>
+      <div style="position:absolute;inset:0;pointer-events:none;">
+        <div style="position:absolute;top:16px;left:16px;width:32px;height:32px;border-top:3px solid var(--gold);border-left:3px solid var(--gold);"></div>
+        <div style="position:absolute;top:16px;right:16px;width:32px;height:32px;border-top:3px solid var(--gold);border-right:3px solid var(--gold);"></div>
+        <div style="position:absolute;bottom:16px;left:16px;width:32px;height:32px;border-bottom:3px solid var(--gold);border-left:3px solid var(--gold);"></div>
+        <div style="position:absolute;bottom:16px;right:16px;width:32px;height:32px;border-bottom:3px solid var(--gold);border-right:3px solid var(--gold);"></div>
+        <div id="scan-line" style="position:absolute;left:16px;right:16px;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent);animation:scanline 2s ease-in-out infinite;"></div>
+      </div>
+    </div>
+    <div id="scanner-status" style="font-size:12px;color:var(--muted);text-align:center;min-height:20px;">Point camera at a QR code</div>
+    <div id="scanner-result" style="display:none;margin-top:12px;padding:12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;font-size:13px;color:var(--green);text-align:center;font-weight:700;"></div>
+  </div>
+</div>
+<style>@keyframes scanline{0%,100%{top:20%;opacity:0.7}50%{top:78%;opacity:1}}</style>
+
 <!-- ══ ADD CONTAINER MODAL ════════════════════════════════════════════════════ -->
 <div id="container-modal-overlay" class="inv-modal-overlay">
   <div class="inv-modal">
@@ -10286,6 +10314,139 @@ window.saveAdjModal = async function() {
 
 })();
 
+</script>
+
+<!-- ══ QR SCANNER SCRIPT ════════════════════════════════════════════════════════════════════ -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script>
+(function() {
+  var _stream   = null;
+  var _scanning = false;
+  var _raf      = null;
+
+  window.openScanner = function() {
+    var ov = document.getElementById('scanner-overlay');
+    if (!ov) return;
+    ov.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    document.getElementById('scanner-status').textContent = 'Starting camera…';
+    document.getElementById('scanner-result').style.display = 'none';
+    _scanning = true;
+
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }
+    }).then(function(stream) {
+      _stream = stream;
+      var video = document.getElementById('scanner-video');
+      video.srcObject = stream;
+      video.play();
+      video.addEventListener('loadedmetadata', function() {
+        document.getElementById('scanner-status').textContent = 'Point camera at a QR code';
+        _scanLoop();
+      });
+    }).catch(function(err) {
+      document.getElementById('scanner-status').textContent = 'Camera error: ' + (err.message || 'permission denied');
+    });
+  };
+
+  window.closeScanner = function() {
+    _scanning = false;
+    if (_raf) { cancelAnimationFrame(_raf); _raf = null; }
+    if (_stream) { _stream.getTracks().forEach(function(t) { t.stop(); }); _stream = null; }
+    var video = document.getElementById('scanner-video');
+    if (video) video.srcObject = null;
+    var ov = document.getElementById('scanner-overlay');
+    if (ov) ov.style.display = 'none';
+    document.body.style.overflow = '';
+  };
+
+  function _scanLoop() {
+    if (!_scanning) return;
+    var video  = document.getElementById('scanner-video');
+    var canvas = document.getElementById('scanner-canvas');
+    if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      _raf = requestAnimationFrame(_scanLoop);
+      return;
+    }
+    var w = video.videoWidth;
+    var h = video.videoHeight;
+    canvas.width  = w;
+    canvas.height = h;
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, w, h);
+    var imgData = ctx.getImageData(0, 0, w, h);
+
+    if (typeof jsQR === 'function') {
+      var code = jsQR(imgData.data, w, h, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) { _handleScan(code.data); return; }
+    }
+    _raf = requestAnimationFrame(_scanLoop);
+  }
+
+  function _handleScan(raw) {
+    _scanning = false;
+    if (_raf) { cancelAnimationFrame(_raf); _raf = null; }
+    var statusEl = document.getElementById('scanner-status');
+    var resultEl = document.getElementById('scanner-result');
+
+    var data = null;
+    try { data = JSON.parse(raw); } catch(e) {}
+
+    if (!data) {
+      statusEl.textContent = 'Not a Pulse QR code — try again';
+      _scanning = true;
+      _raf = requestAnimationFrame(_scanLoop);
+      return;
+    }
+
+    function goToInventory(tab, callback) {
+      window.closeScanner();
+      // Find and click inventory nav item
+      var navEl = null;
+      document.querySelectorAll('.nav-item').forEach(function(n) {
+        if ((n.getAttribute('onclick')||'').indexOf('inventory') > -1) navEl = n;
+      });
+      if (window.showPage) window.showPage('inventory', navEl);
+      setTimeout(function() {
+        // Switch to correct sub-tab
+        document.querySelectorAll('.inv-tab').forEach(function(t) {
+          if ((t.getAttribute('onclick')||'').indexOf(tab) > -1) {
+            if (window.showInvTab) window.showInvTab(tab, t);
+          }
+        });
+        setTimeout(callback, 350);
+      }, 200);
+    }
+
+    // Liquid container: {id, ref, type}
+    if (data.id && data.ref) {
+      resultEl.textContent = '✓ ' + data.ref + ' — ' + (data.type || 'container');
+      resultEl.style.display = 'block';
+      statusEl.textContent = 'Opening record…';
+      setTimeout(function() {
+        goToInventory('liquid', function() {
+          if (window.editContainer) window.editContainer(data.id);
+        });
+      }, 700);
+    }
+    // Dry goods batch: {batch, sku, desc, qty, date}
+    else if (data.sku) {
+      resultEl.textContent = '✓ ' + (data.desc || data.sku);
+      resultEl.style.display = 'block';
+      statusEl.textContent = 'Opening record…';
+      setTimeout(function() {
+        goToInventory('drygoods', function() {
+          if (window.openSKUPanel) window.openSKUPanel(data.sku);
+        });
+      }, 700);
+    }
+    else {
+      statusEl.textContent = 'QR found but not a Pulse record — try again';
+      _scanning = true;
+      _raf = requestAnimationFrame(_scanLoop);
+    }
+  }
+})();
 </script>
 </body>
 </html>
