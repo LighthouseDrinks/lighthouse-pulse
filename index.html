@@ -3837,10 +3837,10 @@ window.copyInviteLink = function() {
 <div id="job-detail-overlay" onclick="if(event.target===this)window.closeJobDetail()" style="display:none;position:fixed;inset:0;z-index:300;background:rgba(5,12,20,0.85);align-items:flex-start;justify-content:center;overflow-y:auto;padding:32px 16px;"></div>
 <div id="job-detail-panel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:301;background:rgba(5,12,20,0.88);overflow-y:auto;padding:24px 16px;">
   <!-- Inner container -->
-  <div style="width:100%;max-width:1100px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:8px;overflow:hidden;margin:0 auto;">
+  <div style="width:100%;max-width:1100px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:8px;margin:0 auto;display:flex;flex-direction:column;">
 
   <!-- Panel header -->
-  <div style="padding:20px 24px 16px;border-bottom:1px solid var(--navy-border);display:flex;align-items:flex-start;justify-content:space-between;background:var(--navy-mid);">
+  <div style="padding:20px 24px 16px;border-bottom:1px solid var(--navy-border);display:flex;align-items:flex-start;justify-content:space-between;background:var(--navy-mid);position:sticky;top:0;z-index:2;">
     <div>
       <div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">Job Detail</div>
       <div style="font-size:20px;font-weight:700;color:var(--white);font-family:Merriweather,serif;" id="jd-title">—</div>
@@ -3853,7 +3853,7 @@ window.copyInviteLink = function() {
   </div>
 
   <!-- Sub-tabs -->
-  <div style="display:flex;border-bottom:1px solid var(--navy-border);padding:0 24px;overflow-x:auto;">
+  <div style="display:flex;border-bottom:1px solid var(--navy-border);padding:0 24px;overflow-x:auto;position:sticky;top:69px;z-index:2;background:var(--navy-mid);">
     <button class="jd-tab active" data-tab="overview" onclick="window.showJobTab('overview',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid var(--gold);color:var(--gold);cursor:pointer;white-space:nowrap;">Overview</button>
     <button class="jd-tab" data-tab="jobsheet" onclick="window.showJobTab('jobsheet',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;">Job Sheet</button>
     <button class="jd-tab" data-tab="components" onclick="window.showJobTab('components',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;">Components</button>
@@ -3864,7 +3864,7 @@ window.copyInviteLink = function() {
   </div>
 
   <!-- Tab content -->
-  <div id="jd-content" style="padding:24px;flex:1;padding-bottom:80px;">
+  <div id="jd-content" style="padding:24px 24px 32px 24px;flex:1;overflow-y:auto;">
     <div id="jd-tab-overview" class="jd-tab-panel">
       <div id="jd-overview-content" style="color:var(--muted);font-size:13px;">Loading…</div>
     </div>
@@ -3887,7 +3887,7 @@ window.copyInviteLink = function() {
   </div>
 
   <!-- Stage advance bar -->
-  <div id="jd-stage-bar" style="padding:16px 24px;border-top:1px solid var(--navy-border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;background:var(--navy-dark);">
+  <div id="jd-stage-bar" style="padding:16px 24px;border-top:1px solid var(--navy-border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;background:var(--navy-dark);position:sticky;bottom:0;z-index:2;">
     <div id="jd-stage-info" style="font-size:12px;color:var(--muted);min-width:160px;flex:1;"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
       <button id="jd-btn-delete" onclick="window.deleteJobFromDetail()" style="font-size:11px;padding:7px 14px;background:transparent;border:1px solid var(--red);color:var(--red);cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Delete</button>
@@ -12408,7 +12408,13 @@ window.saveAdjModal = async function() {
 
       // Auto-init from BOM if empty
       if (!comps.length) {
-        await window.initComponentsFromBOM(jobId, true); // silent=true
+        await window.initComponentsFromBOM(jobId, true);
+        comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
+      }
+      // Also handle stale rows with no useful data (from old broken loader)
+      if (comps.length && comps.every(function(c){ return !c.sku_id && !c.item_name; })) {
+        await supaMut('DELETE','job_components','?job_id=eq.'+jobId, null);
+        await window.initComponentsFromBOM(jobId, true);
         comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
       }
 
@@ -12500,17 +12506,59 @@ window.saveAdjModal = async function() {
       return;
     }
     try {
-      var items = await supaGet('bom_items?bom_id=eq.' + j.bom_id + '&select=*,dry_goods_skus(description,id)');
-      for (var i=0;i<items.length;i++) {
-        var item = items[i];
-        if (!item.sku_id && !item.description) continue;
+      // BOM stores components as individual SKU ID columns — read the BOM row directly
+      var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=*');
+      if (!bomRows || !bomRows.length) {
+        if (!silent) window.toast && window.toast('BOM not found.','error');
+        return;
+      }
+      var bom = bomRows[0];
+
+      // Map of column name -> label
+      var skuCols = [
+        { col: 'liquid_sku_id',       label: 'Liquid' },
+        { col: 'bottle_sku_id',       label: 'Bottle' },
+        { col: 'cork_sku_id',         label: 'Cork' },
+        { col: 'ropp_sku_id',         label: 'ROPP Capsule' },
+        { col: 'foil_sku_id',         label: 'Foil / Heat Shrink' },
+        { col: 'front_label_sku_id',  label: 'Front Label' },
+        { col: 'back_label_sku_id',   label: 'Back Label' },
+        { col: 'neck_label_sku_id',   label: 'Neck Label' },
+        { col: 'shipper_sku_id',      label: 'Shipper' },
+        { col: 'divider_sku_id',      label: 'Divider / Insert' },
+        { col: 'string_twine_sku_id', label: 'String / Twine' },
+        { col: 'monocarton_sku_id',   label: 'Monocarton' },
+        { col: 'gift_tube_sku_id',    label: 'Gift Tube' },
+        { col: 'tube_lid_sku_id',     label: 'Tube Lid' }
+      ];
+
+      // Collect non-null SKU IDs and look up their descriptions
+      var skuIds = skuCols.map(function(s){ return bom[s.col]; }).filter(Boolean);
+      var descMap = {};
+      if (skuIds.length) {
+        try {
+          var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,description');
+          skuRows.forEach(function(r){ descMap[r.id] = r.description; });
+        } catch(e) {}
+      }
+
+      for (var i=0;i<skuCols.length;i++) {
+        var skuId = bom[skuCols[i].col];
+        if (!skuId) continue;
+        var itemName = descMap[skuId] || skuCols[i].label;
+        // qty_required: 1 per bottle for most items except shipper (use bottles_per_shipper)
+        var qty = (skuCols[i].col === 'shipper_sku_id' && j.bottle_target && bom.bottles_per_shipper)
+          ? Math.ceil(j.bottle_target / bom.bottles_per_shipper)
+          : (j.bottle_target || null);
+
         await supaMut('POST','job_components','', {
           job_id: jobId,
-          sku_id: item.sku_id||null,
-          item_name: (item.dry_goods_skus&&item.dry_goods_skus.description)||item.description||item.sku_id||'Item',
-          qty_required: item.quantity||null
+          sku_id: skuId,
+          item_name: itemName,
+          qty_required: qty
         });
       }
+
       if (!silent) { window.toast && window.toast('Components loaded from BOM.','success'); loadComponentsTab(jobId); }
     } catch(e) { if (!silent) window.toast && window.toast('Error: '+e.message,'error'); }
   };
@@ -12894,7 +12942,9 @@ window.saveAdjModal = async function() {
         var res = await supaMut('POST','job_drygoods_prep','',{job_id:jobId});
         pid = res[0].id;
       }
-      var items = await supaGet('bom_items?bom_id=eq.' + j.bom_id + '&select=*,dry_goods_skus(description,id)');
+      // BOM items are stored as SKU columns on boms table, not in bom_items
+      var bomDgRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=*');
+      var items = []; // placeholder - DG prep uses job_components now
       for (var i=0;i<items.length;i++) {
         var item = items[i];
         if (!item.sku_id && !item.description) continue;
