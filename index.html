@@ -3887,7 +3887,7 @@ window.copyInviteLink = function() {
   </div>
 
   <!-- Stage advance bar -->
-  <div id="jd-stage-bar" style="padding:16px 24px;border-top:1px solid var(--navy-border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;background:var(--navy-dark);position:sticky;bottom:0;z-index:2;">
+  <div id="jd-stage-bar" style="padding:16px 24px;border-top:1px solid var(--navy-border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;background:var(--navy-dark);">
     <div id="jd-stage-info" style="font-size:12px;color:var(--muted);min-width:160px;flex:1;"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
       <button id="jd-btn-delete" onclick="window.deleteJobFromDetail()" style="font-size:11px;padding:7px 14px;background:transparent;border:1px solid var(--red);color:var(--red);cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Delete</button>
@@ -11356,6 +11356,7 @@ window.saveAdjModal = async function() {
   var _jobBoms = [];
   var _currentJobId = null;
   var _jobStageFilter = 'all';
+  var _staffMap = {}; // uuid -> display_name
 
   var STAGE_STYLE = {
     planning:  'background:rgba(232,156,58,0.15);color:var(--amber);border:1px solid rgba(232,156,58,0.3);',
@@ -11406,6 +11407,13 @@ window.saveAdjModal = async function() {
 
   // ── Load jobs ────────────────────────────────────────────────────────────────
   async function loadJobs() {
+    // Load staff map for name lookups
+    if (!Object.keys(_staffMap).length) {
+      try {
+        var staff = await supaGet('app_users?select=auth_user_id,display_name');
+        staff.forEach(function(u){ _staffMap[u.auth_user_id] = u.display_name || u.auth_user_id.substring(0,8); });
+      } catch(e) {}
+    }
     try {
       var rows = await supaGet('jobs?order=created_at.desc&select=*,clients(name)');
       if (Array.isArray(rows)) {
@@ -12261,14 +12269,15 @@ window.saveAdjModal = async function() {
           var row = document.createElement('div');
           row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--navy-border);gap:8px;';
 
-          var assignedName = t.assigned_to ? (t.assigned_to.substring(0,8) + '…') : 'Unassigned';
+          var assignedName = t.assigned_to ? (_staffMap[t.assigned_to] || t.assigned_to.substring(0,8)) : 'Unassigned';
+          var assignedColor = t.assigned_to ? 'var(--white)' : 'var(--red)';
 
           row.innerHTML = '<div style="flex:1;">'
             + '<div style="font-size:13px;color:var(--white);">' + t.title + '</div>'
             + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">'
             + (t.assigned_role||'').replace(/_/g,' ').toUpperCase()
             + (t.due_date ? ' · Due ' + t.due_date : '')
-            + ' · ' + assignedName
+            + ' · <span style="color:' + assignedColor + ';">' + assignedName + '</span>'
             + '</div></div>'
             + '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">'
             + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:3px 8px;border-radius:3px;' + ts + '">' + t.status + '</span>'
@@ -12296,6 +12305,10 @@ window.saveAdjModal = async function() {
         });
       }
 
+      // Remove any previously rendered task sections
+      var old = el.querySelectorAll('div[data-task-section]');
+      old.forEach(function(d){ d.remove(); });
+      taskDiv.setAttribute('data-task-section','1');
       el.appendChild(taskDiv);
     } catch(e) {}
   }
@@ -12308,11 +12321,8 @@ window.saveAdjModal = async function() {
         accepted_at: new Date().toISOString()
       });
       window.toast && window.toast('Task accepted.', 'success');
-      if (_currentJobId) {
-        var j = _jobs.find(function(x){ return x.id === _currentJobId; });
-        if (j) { renderJobOverview(j); }
-      }
-      await loadJobs();
+      if (_currentJobId) refreshJobTasks(_currentJobId);
+      loadMyTasks();
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
 
@@ -12324,13 +12334,20 @@ window.saveAdjModal = async function() {
         completed_at: new Date().toISOString()
       });
       window.toast && window.toast('Task completed. ✓', 'success');
-      if (_currentJobId) {
-        var j = _jobs.find(function(x){ return x.id === _currentJobId; });
-        if (j) { renderJobOverview(j); }
-      }
-      await loadJobs();
+      if (_currentJobId) refreshJobTasks(_currentJobId);
+      loadMyTasks();
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
+
+  // Refresh just the task list section without rebuilding the whole overview
+  async function refreshJobTasks(jobId) {
+    var el = document.getElementById('jd-overview-content');
+    if (!el) return;
+    // Remove existing task div (last child added by loadJobTasksForDetail)
+    var taskDivs = el.querySelectorAll('div[style*="margin-top: 24px"], div[style*="margin-top:24px"]');
+    taskDivs.forEach(function(d){ d.remove(); });
+    await loadJobTasksForDetail(jobId);
+  }
 
   window.advanceJobStage = async function() {
     if (!_currentJobId) return;
@@ -12406,14 +12423,9 @@ window.saveAdjModal = async function() {
     try {
       var comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
 
-      // Auto-init from BOM if empty
-      if (!comps.length) {
-        await window.initComponentsFromBOM(jobId, true);
-        comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
-      }
-      // Also handle stale rows with no useful data (from old broken loader)
-      if (comps.length && comps.every(function(c){ return !c.sku_id && !c.item_name; })) {
-        await supaMut('DELETE','job_components','?job_id=eq.'+jobId, null);
+      // Auto-init from BOM if empty or stale
+      if (!comps.length || comps.every(function(c){ return !c.sku_id && !c.item_name; })) {
+        if (comps.length) await supaMut('DELETE','job_components','?job_id=eq.'+jobId, null);
         await window.initComponentsFromBOM(jobId, true);
         comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
       }
@@ -12423,81 +12435,151 @@ window.saveAdjModal = async function() {
         return;
       }
 
-      // Fetch current stock levels for all SKUs in one batch
+      // Fetch stock by summing dry_goods_batches per sku_id
       var skuIds = comps.filter(function(c){return c.sku_id;}).map(function(c){return c.sku_id;});
       var stockMap = {};
       if (skuIds.length) {
         try {
-          var stockRows = await supaGet('v_dry_goods_inventory?id=in.(' + skuIds.join(',') + ')&select=id,total_stock');
-          stockRows.forEach(function(r){ stockMap[r.id] = r.total_stock||0; });
-        } catch(e) {}
+          var batchRows = await supaGet('dry_goods_batches?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,quantity_remaining');
+          batchRows.forEach(function(r){
+            stockMap[r.sku_id] = (stockMap[r.sku_id]||0) + (r.quantity_remaining||0);
+          });
+        } catch(e) { console.warn('Stock fetch failed:', e); }
       }
 
-      el.innerHTML = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:12px;font-weight:700;">Components Tracker</div>';
+      // Check for existing sign-off
+      var compSignoff = null;
+      try { var sfRows = await supaGet('job_drygoods_prep?job_id=eq.'+jobId+'&limit=1'); compSignoff = sfRows[0]||null; } catch(e){}
+
+      var signoffHtml = compSignoff && compSignoff.signed_by_coordinator
+        ? '<div style="background:rgba(61,186,120,0.1);border:1px solid var(--green);border-radius:5px;padding:10px 14px;font-size:12px;color:var(--green);margin-bottom:12px;">\u2713 Signed off by ' + compSignoff.signed_by_coordinator + (compSignoff.signed_at_coordinator ? ' on ' + compSignoff.signed_at_coordinator.slice(0,10) : '') + '</div>'
+        : '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;"><button id="comp-signoff-btn" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Sign Off Components</button></div>';
+
+      el.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">'
+        + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">Components Tracker</div>'
+        + signoffHtml + '</div>';
+
+      // Input style helper
+      var inpStyle = 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:4px 7px;font-size:11px;border-radius:3px;box-sizing:border-box;width:100%;';
 
       var tbl = document.createElement('table');
-      tbl.className = 'data-table'; tbl.style.cssText = 'width:100%;table-layout:fixed;';
+      tbl.className = 'data-table';
+      tbl.style.cssText = 'width:100%;border-collapse:collapse;';
       tbl.innerHTML = '<thead><tr>'
-        + '<th style="width:30%;">Item</th>'
-        + '<th style="width:10%;text-align:right;">Req</th>'
-        + '<th style="width:12%;text-align:center;">On-Site</th>'
-        + '<th style="width:10%;text-align:center;">Order</th>'
-        + '<th style="width:15%;">PO No.</th>'
-        + '<th style="width:10%;text-align:right;">Qty Ord.</th>'
-        + '<th style="width:13%;">Exp. Delivery</th>'
+        + '<th style="text-align:left;padding:8px 10px 8px 0;">Item</th>'
+        + '<th style="text-align:right;padding:8px 6px;white-space:nowrap;">Required</th>'
+        + '<th style="text-align:right;padding:8px 6px;white-space:nowrap;">On-Site Qty</th>'
+        + '<th style="text-align:center;padding:8px 6px;white-space:nowrap;">On-Site \u2714</th>'
+        + '<th style="text-align:center;padding:8px 6px;white-space:nowrap;">Order</th>'
+        + '<th style="padding:8px 6px;min-width:100px;">PO No.</th>'
+        + '<th style="padding:8px 6px;min-width:70px;">Qty Ord.</th>'
+        + '<th style="padding:8px 6px;min-width:120px;">Exp. Delivery</th>'
         + '</tr></thead><tbody></tbody>';
       el.appendChild(tbl);
       var tbody = tbl.querySelector('tbody');
 
       comps.forEach(function(c) {
         var cid = c.id;
-        var onSite = c.sku_id ? (stockMap[c.sku_id]||0) : null;
-        var onSiteStr = onSite !== null ? String(onSite) : '—';
-        var onSiteColor = onSite !== null
-          ? (onSite >= (c.qty_required||0) ? 'var(--green)' : onSite > 0 ? 'var(--amber)' : 'var(--red)')
-          : 'var(--muted)';
+        var onSite = c.sku_id !== null && c.sku_id !== undefined ? (stockMap[c.sku_id]||0) : null;
+        var reqQty = c.qty_required || 0;
+        var sufficient = onSite !== null && onSite >= reqQty;
+
+        var onSiteStr = onSite !== null ? onSite.toLocaleString() : '—';
+        var onSiteColor = onSite === null ? 'var(--muted)' : sufficient ? 'var(--green)' : onSite > 0 ? 'var(--amber)' : 'var(--red)';
 
         var tr = document.createElement('tr');
-        tr.innerHTML = '<td style="font-size:12px;">' + (c.item_name||c.sku_id||'—') + '</td>'
-          + '<td style="font-size:12px;text-align:right;">' + (c.qty_required||'—') + '</td>'
-          + '<td style="text-align:center;font-size:13px;font-weight:700;color:' + onSiteColor + ';">' + onSiteStr + '</td>'
-          + '<td style="text-align:center;"></td>'
-          + '<td></td>'
-          + '<td></td>'
-          + '<td></td>';
+        tr.innerHTML = '<td style="padding:7px 10px 7px 0;font-size:12px;">' + (c.item_name||c.sku_id||'—') + '</td>'
+          + '<td style="padding:7px 6px;text-align:right;font-size:12px;">' + (reqQty ? reqQty.toLocaleString() : '—') + '</td>'
+          + '<td style="padding:7px 6px;text-align:right;font-size:13px;font-weight:700;color:' + onSiteColor + ';">' + onSiteStr + '</td>'
+          + '<td style="padding:7px 6px;text-align:center;"></td>'
+          + '<td style="padding:7px 6px;text-align:center;"></td>'
+          + '<td style="padding:7px 6px;"></td>'
+          + '<td style="padding:7px 6px;"></td>'
+          + '<td style="padding:7px 6px;"></td>';
 
-        // Order checkbox
+        // On-site checkbox (auto from stock, not editable)
+        var cbOnSite = document.createElement('input');
+        cbOnSite.type = 'checkbox';
+        cbOnSite.checked = sufficient;
+        cbOnSite.disabled = true;
+        cbOnSite.title = sufficient ? 'Sufficient stock on site' : 'Not yet on site';
+        cbOnSite.style.cssText = 'opacity:' + (sufficient ? '1' : '0.4') + ';cursor:not-allowed;accent-color:var(--green);';
+        tr.cells[3].appendChild(cbOnSite);
+
+        // Order checkbox — greyed out if sufficient
         var cbOrder = document.createElement('input');
-        cbOrder.type = 'checkbox'; cbOrder.checked = !!c.is_ordered;
-        cbOrder.onchange = function(){ window.updateComponent(cid,'is_ordered',this.checked); };
-        tr.cells[3].appendChild(cbOrder);
+        cbOrder.type = 'checkbox';
+        cbOrder.checked = !!c.is_ordered;
+        if (sufficient) {
+          cbOrder.disabled = true;
+          cbOrder.title = 'Sufficient stock on site — order not required';
+          cbOrder.style.cssText = 'opacity:0.3;cursor:not-allowed;';
+        } else {
+          cbOrder.onchange = function(){ window.updateComponent(cid,'is_ordered',this.checked); };
+        }
+        tr.cells[4].appendChild(cbOrder);
 
         // PO input
         var poIn = document.createElement('input');
         poIn.type = 'text'; poIn.value = c.po_number||''; poIn.placeholder = 'PO-';
-        poIn.style.cssText = 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:3px 7px;font-size:11px;width:90px;border-radius:3px;';
+        poIn.style.cssText = inpStyle;
         poIn.onblur = function(){ window.updateComponent(cid,'po_number',this.value); };
-        tr.cells[4].appendChild(poIn);
+        tr.cells[5].appendChild(poIn);
 
         // Qty ordered
         var qtyIn = document.createElement('input');
         qtyIn.type = 'number'; qtyIn.value = c.po_value||''; qtyIn.placeholder = '0';
-        qtyIn.style.cssText = 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:3px 7px;font-size:11px;width:60px;border-radius:3px;text-align:right;';
+        qtyIn.style.cssText = inpStyle + 'text-align:right;';
         qtyIn.onblur = function(){ window.updateComponent(cid,'po_value',parseFloat(this.value)||null); };
-        tr.cells[5].appendChild(qtyIn);
+        tr.cells[6].appendChild(qtyIn);
 
         // Delivery date
         var dtIn = document.createElement('input');
         dtIn.type = 'date'; dtIn.value = c.expected_delivery||'';
-        dtIn.style.cssText = 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:3px 5px;font-size:11px;border-radius:3px;';
+        dtIn.style.cssText = inpStyle;
         dtIn.onblur = function(){ window.updateComponent(cid,'expected_delivery',this.value); };
-        tr.cells[6].appendChild(dtIn);
+        tr.cells[7].appendChild(dtIn);
 
         tbody.appendChild(tr);
       });
 
+      // Wire sign-off button
+      var sfBtn = document.getElementById('comp-signoff-btn');
+      if (sfBtn) {
+        sfBtn.addEventListener('click', function() { window.signOffComponents(jobId); });
+      }
+
     } catch(e) { el.innerHTML = '<div style="color:var(--red);">Error: ' + e.message + '</div>'; }
   }
+
+  window.signOffComponents = async function(jobId) {
+    var name = (window.CURRENT_USER && window.CURRENT_USER.email) || '';
+    var displayName = prompt('Sign off Components Tracker — enter your name:', name);
+    if (!displayName) return;
+    try {
+      // Upsert into job_drygoods_prep as sign-off record
+      var existing = await supaGet('job_drygoods_prep?job_id=eq.'+jobId+'&limit=1');
+      if (existing.length) {
+        await supaMut('PATCH','job_drygoods_prep','?id=eq.'+existing[0].id,{
+          signed_by_coordinator: displayName,
+          signed_at_coordinator: new Date().toISOString()
+        });
+      } else {
+        await supaMut('POST','job_drygoods_prep','',{
+          job_id: jobId,
+          signed_by_coordinator: displayName,
+          signed_at_coordinator: new Date().toISOString()
+        });
+      }
+      // Mark components task complete
+      try {
+        var tasks = await supaGet('job_tasks?job_id=eq.'+jobId+'&task_type=eq.components&limit=1');
+        if (tasks.length) await supaMut('PATCH','job_tasks','?id=eq.'+tasks[0].id,{status:'completed',completed_at:new Date().toISOString()});
+      } catch(e) {}
+      window.toast && window.toast('Components signed off.','success');
+      loadComponentsTab(jobId);
+    } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
+  };
 
   window.initComponentsFromBOM = async function(jobId, silent) {
     var j = _jobs.find(function(x){ return x.id === jobId; });
@@ -12546,10 +12628,16 @@ window.saveAdjModal = async function() {
         var skuId = bom[skuCols[i].col];
         if (!skuId) continue;
         var itemName = descMap[skuId] || skuCols[i].label;
-        // qty_required: 1 per bottle for most items except shipper (use bottles_per_shipper)
-        var qty = (skuCols[i].col === 'shipper_sku_id' && j.bottle_target && bom.bottles_per_shipper)
-          ? Math.ceil(j.bottle_target / bom.bottles_per_shipper)
-          : (j.bottle_target || null);
+        // Qty logic: shippers and dividers = ceil(bottles / case_size), others = bottle target
+        var isCaseItem = skuCols[i].col === 'shipper_sku_id' || skuCols[i].col === 'divider_sku_id';
+        var qty;
+        if (isCaseItem && j.bottle_target && bom.bottles_per_shipper) {
+          qty = Math.ceil(j.bottle_target / bom.bottles_per_shipper);
+        } else if (skuCols[i].col === 'liquid_sku_id') {
+          qty = null; // liquid qty is in litres, handled separately
+        } else {
+          qty = j.bottle_target || null;
+        }
 
         await supaMut('POST','job_components','', {
           job_id: jobId,
@@ -13238,12 +13326,13 @@ window.saveAdjModal = async function() {
   // ── My Tasks on Overview ─────────────────────────────────────────────────────
   async function loadMyTasks() {
     try {
-      var role = window.CURRENT_USER_ROLE || (window.CURRENT_USER && window.CURRENT_USER.role) || null;
+      var userId = window.CURRENT_USER ? window.CURRENT_USER.id : null;
       var tasks;
-      if (role) {
-        tasks = await supaGet('job_tasks?assigned_role=eq.' + role + '&status=neq.completed&order=created_at.asc&limit=10');
+      if (userId) {
+        // Show tasks explicitly assigned to this user
+        tasks = await supaGet('job_tasks?assigned_to=eq.' + userId + '&status=neq.completed&order=created_at.asc&limit=20');
       } else {
-        tasks = await supaGet('job_tasks?status=neq.completed&order=created_at.asc&limit=10');
+        tasks = [];
       }
       renderOverviewTasks(tasks);
     } catch(e) { console.warn('Tasks load error:', e); }
@@ -13265,7 +13354,8 @@ window.saveAdjModal = async function() {
       var actions = '';
       if (t.status === 'pending') actions = '<button onclick="window.acceptTask(\'' + t.id + '\')" style="font-size:10px;background:transparent;border:1px solid var(--blue);color:var(--blue);padding:3px 8px;border-radius:3px;cursor:pointer;margin-right:6px;">Accept</button>';
       if (t.status === 'accepted') actions = '<button onclick="window.completeTask(\'' + t.id + '\')" style="font-size:10px;background:transparent;border:1px solid var(--green);color:var(--green);padding:3px 8px;border-radius:3px;cursor:pointer;">Complete</button>';
-      return '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--navy-border);">'
+      var taskTab = { bom_link:'jobsheet', components:'components', liquid_signoff:'liquid', drygoods_prep:'components', weights_measures:'weights', quality:'quality' }[t.task_type] || 'overview';
+      return '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--navy-border);cursor:pointer;" data-job-id="' + t.job_id + '" data-tab="' + taskTab + '" onclick="(function(el){window.openJobDetail(el.dataset.jobId);setTimeout(function(){var tb=document.querySelector(\'.jd-tab[data-tab=\'+el.dataset.tab+\'\']\');if(tb)window.showJobTab(el.dataset.tab,tb);},600);})(this)">'
         + '<div><div style="font-size:13px;color:var(--white);">' + t.title + '</div>'
         + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">Job: ' + (t.job_id||'—') + (t.due_date ? ' · Due ' + t.due_date : '') + '</div></div>'
         + '<div style="display:flex;align-items:center;gap:8px;">' + actions
