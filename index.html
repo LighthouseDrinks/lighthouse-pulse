@@ -11880,26 +11880,572 @@ window.saveAdjModal = async function() {
   };
 
   // ── Liquid, Dry Goods, Quality, Weights — skeleton content ───────────────────
+  // ── LIQUID SIGN-OFF (5.02.02) ──────────────────────────────────────────────
   async function loadLiquidTab(jobId) {
     var el = document.getElementById('jd-liquid-content');
     if (!el) return;
-    el.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">Liquid Sign-Off Document — full build in next session.</div>';
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px 0;">Loading…</div>';
+    var j = _jobs.find(function(x){ return x.id === jobId; });
+
+    try {
+      var rows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1');
+      var d = rows[0] || {};
+
+      var yn = function(val, field) {
+        var opts = ['yes','no','na'].map(function(v) {
+          return '<option value="' + v + '"' + (val===v?' selected':'') + '>' + v.toUpperCase() + '</option>';
+        }).join('');
+        return '<select id="lso-' + field + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:4px 8px;font-size:12px;border-radius:3px;">' + opts + '</select>';
+      };
+      var inp = function(id, val, placeholder, type) {
+        type = type||'text';
+        return '<input type="' + type + '" id="lso-' + id + '" value="' + (val||'') + '" placeholder="' + (placeholder||'') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">';
+      };
+      var row = function(label, input) {
+        return '<tr><td style="font-size:12px;color:var(--muted);padding:8px 12px 8px 0;white-space:nowrap;width:220px;">' + label + '</td><td style="padding:6px 0;">' + input + '</td></tr>';
+      };
+
+      var html = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:16px;font-weight:700;">5.02.02 Liquid Sign-Off Document</div>';
+
+      // Job header
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;">'
+        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Job No</div><div style="font-size:14px;font-weight:700;color:var(--gold);">' + jobId + '</div></div>'
+        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Product</div><div style="font-size:13px;color:var(--white);">' + (j ? j.product_name : '') + '</div></div>'
+        + '</div>';
+
+      // Yield calcs
+      html += '<div class="inv-section-title">Bottle / Liquid Targets &amp; Yield</div>';
+      html += '<table style="width:100%;border-collapse:collapse;margin-bottom:20px;">';
+      html += row('Target type', '<span style="color:var(--white);font-size:12px;">' + (j && j.job_target_type === 'liquid' ? 'Liquid Target' : 'Bottle Target') + '</span>');
+      if (j && j.job_target_type === 'bottles') {
+        html += row('Ordered quantity (bottles)', inp('bottle-target', d.bottles_to_produce||j.bottle_target, 'e.g. 7000', 'number'));
+      } else {
+        html += row('Estimated bottle yield', inp('bottle-target', d.bottles_to_produce||j.bottles_to_produce, 'e.g. 7000', 'number'));
+      }
+      html += row('No. of litres sent in', inp('litres-in', d.litres_in||j.liquid_litres, 'e.g. 500.00', 'number'));
+      html += row('ABV of liquid sent in (%)', inp('abv-in', d.abv_in||j.abv_in, 'e.g. 63.5', 'number'));
+      html += row('CBW Rotations', inp('cbw', d.cbw_rotations||j.cbw_rotations, 'e.g. 12'));
+      html += row('LH recorded ABV matches warrant', yn(d.abv_matches_warrant===true?'yes':d.abv_matches_warrant===false?'no':'', 'abv-match') );
+      html += row('Bottle label ABV (%)', inp('label-abv', d.label_abv||j.label_abv, 'e.g. 40.0', 'number'));
+      html += row('Litres of water required', inp('water-req', d.water_required||j.water_required, 'auto-calculated', 'number'));
+      html += row('Final litres ready for bottling', inp('final-litres', d.final_litres||j.final_litres, 'auto-calculated', 'number'));
+      html += row('No. of bottles to be produced', inp('bottles-prod', d.bottles_to_produce, 'auto-calculated', 'number'));
+      html += row('Planned residue (litres)', inp('residue', d.planned_residue||j.planned_residue, 'e.g. 5.0', 'number'));
+      html += row('Planned yield section complete', '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="lso-yield-complete"' + (d.yield_section_complete?' checked':'') + '><span style="font-size:12px;color:var(--white);">Yes</span></label>');
+      html += '</table>';
+
+      // Liquid checklist A-H
+      html += '<div class="inv-section-title">Liquid Checklist</div>';
+      html += '<table style="width:100%;border-collapse:collapse;margin-bottom:20px;">';
+      var checks = [
+        ['A', 'Liquid on site', 'liquid-on-site', 'cb'],
+        ['B', 'Dilution required', 'dilution-req', 'yn'],
+        ['C', 'Dilution complete', 'dilution-done', 'yn'],
+        ['D', 'Colouring required', 'colouring-req', 'yn'],
+        ['E', 'Colour specification', 'colour-spec', 'text'],
+        ['F', 'Colouring complete', 'colouring-done', 'yn'],
+        ['G', 'Chill filtration required', 'chill-req', 'yn'],
+        ['H', 'Chill filtration complete', 'chill-done', 'yn']
+      ];
+      var fieldMap = {
+        'liquid-on-site': d.liquid_on_site,
+        'dilution-req': d.dilution_required,
+        'dilution-done': d.dilution_complete,
+        'colouring-req': d.colouring_required,
+        'colour-spec': d.colour_spec,
+        'colouring-done': d.colouring_complete,
+        'chill-req': d.chill_filtration_req,
+        'chill-done': d.chill_filtration_done
+      };
+      checks.forEach(function(c) {
+        var letter = c[0], label = c[1], fid = c[2], type = c[3];
+        var input;
+        if (type === 'cb') {
+          input = '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="lso-' + fid + '"' + (fieldMap[fid]?' checked':'') + '><span style="font-size:12px;color:var(--white);">Yes</span></label>';
+        } else if (type === 'yn') {
+          input = yn(fieldMap[fid]||'', fid);
+        } else {
+          input = inp(fid, fieldMap[fid]||'', '');
+        }
+        html += '<tr><td style="font-size:12px;color:var(--gold);font-weight:700;padding:8px 8px 8px 0;width:24px;">' + letter + '</td>'
+          + '<td style="font-size:12px;color:var(--muted);padding:8px 12px 8px 0;width:200px;">' + label + '</td>'
+          + '<td style="padding:6px 0;">' + input + '</td></tr>';
+      });
+      html += '</table>';
+
+      // Sign-off
+      html += '<div class="inv-section-title">Sign-Off — Warehouse &amp; Liquid Manager</div>';
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;">'
+        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Name</label>' + inp('signed-by', d.signed_by, 'Name') + '</div>'
+        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Date &amp; Time</label><input type="datetime-local" id="lso-signed-at" value="' + (d.signed_at ? d.signed_at.slice(0,16) : '') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"></div>'
+        + '</div>';
+
+      var lsoBtnId = d.id||'';
+      var lsoDiv = document.createElement('div');
+      lsoDiv.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;';
+      var lsoBtn = document.createElement('button');
+      lsoBtn.className = 'btn btn-gold';
+      lsoBtn.textContent = 'Save Sign-Off';
+      lsoBtn.onclick = function(){ window.saveLiquidSignoff(jobId, lsoBtnId); };
+      lsoDiv.appendChild(lsoBtn);
+      el.innerHTML = html;
+      el.appendChild(lsoDiv);
+      return;
+
+      el.innerHTML = html;
+    } catch(e) {
+      el.innerHTML = '<div style="color:var(--red);font-size:12px;">Error: ' + e.message + '</div>';
+    }
   }
+
+  window.saveLiquidSignoff = async function(jobId, existingId) {
+    var gv = function(id) { var e = document.getElementById('lso-'+id); return e ? (e.type==='checkbox' ? e.checked : e.value.trim()) : null; };
+    var payload = {
+      job_id: jobId,
+      litres_in: parseFloat(gv('litres-in'))||null,
+      abv_in: parseFloat(gv('abv-in'))||null,
+      cbw_rotations: gv('cbw')||null,
+      abv_matches_warrant: gv('abv-match') === 'yes' ? true : gv('abv-match') === 'no' ? false : null,
+      label_abv: parseFloat(gv('label-abv'))||null,
+      water_required: parseFloat(gv('water-req'))||null,
+      final_litres: parseFloat(gv('final-litres'))||null,
+      bottles_to_produce: parseInt(gv('bottles-prod'))||null,
+      planned_residue: parseFloat(gv('residue'))||null,
+      yield_section_complete: gv('yield-complete'),
+      liquid_on_site: gv('liquid-on-site'),
+      dilution_required: gv('dilution-req')||null,
+      dilution_complete: gv('dilution-done')||null,
+      colouring_required: gv('colouring-req')||null,
+      colour_spec: gv('colour-spec')||null,
+      colouring_complete: gv('colouring-done')||null,
+      chill_filtration_req: gv('chill-req')||null,
+      chill_filtration_done: gv('chill-done')||null,
+      signed_by: gv('signed-by')||null,
+      signed_at: (document.getElementById('lso-signed-at')||{}).value || null
+    };
+    try {
+      if (existingId) {
+        await supaMut('PATCH', 'job_liquid_signoff', '?id=eq.'+existingId, payload);
+      } else {
+        await supaMut('POST', 'job_liquid_signoff', '', payload);
+      }
+      window.toast && window.toast('Liquid sign-off saved.', 'success');
+      loadLiquidTab(jobId);
+    } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
+  };
+
+  // ── DRY GOODS PREPARATION (5.02.15) ────────────────────────────────────────
   async function loadDryGoodsTab(jobId) {
     var el = document.getElementById('jd-drygoods-content');
     if (!el) return;
-    el.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">Dry Goods Preparation Document — full build in next session.</div>';
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px 0;">Loading…</div>';
+    var j = _jobs.find(function(x){ return x.id === jobId; });
+
+    try {
+      var preps = await supaGet('job_drygoods_prep?job_id=eq.' + jobId + '&limit=1');
+      var d = preps[0] || {};
+      var items = d.id ? await supaGet('job_drygoods_prep_items?prep_id=eq.' + d.id + '&order=created_at.asc') : [];
+
+      // If no items and BOM linked, offer to load from BOM
+      var html = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:16px;font-weight:700;">5.02.15 Dry Goods Preparation Document</div>';
+
+      // Header fields
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:20px;">'
+        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Job No</div><div style="font-size:14px;font-weight:700;color:var(--gold);">' + jobId + '</div></div>'
+        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Product</div><div style="font-size:12px;color:var(--white);">' + (j ? j.product_name : '') + '</div></div>'
+        + '<div><label style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;display:block;margin-bottom:4px;">Batch No</label>'
+        + '<input type="text" id="dgp-batch" value="' + (d.batch_no||'') + '" placeholder="e.g. B-0042" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"></div>'
+        + '</div>';
+      html += '<div style="margin-bottom:20px;"><label style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;display:block;margin-bottom:4px;">Notes</label>'
+        + '<textarea id="dgp-notes" rows="2" placeholder="Any notes…" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">' + (d.notes||'') + '</textarea></div>';
+
+      html += '<div class="inv-section-title" style="display:flex;align-items:center;justify-content:space-between;">Stock Check<button data-job="' + jobId + '" data-prep="' + (d.id||'') + '" onclick="window.loadDGItemsFromBOM(this.dataset.job,this.dataset.prep)" class="btn btn-outline" style="font-size:10px;padding:4px 10px;">Load from BOM</button></div>';
+
+      // Items table
+      html += '<div id="dgp-items-wrap"><table class="data-table" style="width:100%;margin-bottom:20px;">'
+        + '<thead><tr><th>IT No.</th><th>Item Name</th><th style="text-align:center;">Stock Check</th><th>Qty Required</th><th>Qty Picked</th></tr></thead>'
+        + '<tbody id="dgp-items-tbody">';
+
+      if (!items.length) {
+        html += '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--muted);font-size:12px;">No items — click <strong style="color:var(--gold)">Load from BOM</strong> to populate.</td></tr>';
+      } else {
+        items.forEach(function(item) {
+          html += '<tr>'
+            + '<td style="font-size:11px;color:var(--muted);">' + (item.it_number||'—') + '</td>'
+            + '<td style="font-weight:600;">' + (item.item_name||'—') + '</td>'
+            + '<td style="text-align:center;" id="dgp-sc-cell-' + item.id + '"><input type="checkbox" data-item="' + item.id + '" class="dgp-sc-cb"' + (item.stock_checked?' checked':'') + '></td>'
+            + '<td>' + (item.qty_required||'—') + '</td>'
+            + '<td><input type="number" class="dgp-picked" data-item="' + item.id + '" value="' + (item.qty_picked||'') + '" placeholder="0" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:4px 8px;font-size:11px;width:80px;border-radius:3px;"></td>'
+            + '</tr>';
+        });
+      }
+
+      html += '</tbody></table></div>';
+
+      // Note
+      html += '<div style="background:rgba(74,158,221,0.08);border-left:3px solid var(--blue);padding:10px 14px;font-size:11px;color:var(--text);margin-bottom:20px;line-height:1.5;">'
+        + '<strong style="color:var(--blue);">Note:</strong> Stock check means all required dry goods have been physically checked and are available in Warehouse 4 (Production Warehouse).'
+        + '</div>';
+
+      // Sign-offs
+      html += '<div class="inv-section-title">Sign-Off</div>'
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">'
+        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Warehouse &amp; Liquid Manager</label>'
+        + '<input type="text" id="dgp-wh-name" value="' + (d.signed_by_warehouse||'') + '" placeholder="Name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
+        + '</div>'
+        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Date</label>'
+        + '<input type="date" id="dgp-wh-date" value="' + (d.signed_at_warehouse ? d.signed_at_warehouse.slice(0,10) : '') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
+        + '</div>'
+        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Client Coordinator</label>'
+        + '<input type="text" id="dgp-cc-name" value="' + (d.signed_by_coordinator||'') + '" placeholder="Name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
+        + '</div>'
+        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Date</label>'
+        + '<input type="date" id="dgp-cc-date" value="' + (d.signed_at_coordinator ? d.signed_at_coordinator.slice(0,10) : '') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
+        + '</div></div>';
+
+      html += '<div style="display:flex;gap:10px;justify-content:flex-end;"><button data-job="' + jobId + '" data-prep="' + (d.id||'') + '" onclick="window.saveDGPrep(this.dataset.job,this.dataset.prep)" class="btn btn-gold">Save Dry Goods Prep</button></div>';
+
+      el.innerHTML = html;
+
+      // Wire up inline saves for items
+      el.querySelectorAll('.dgp-sc-cb').forEach(function(cb) {
+        cb.addEventListener('change', function() {
+          window.updateDGItem(this.dataset.item, 'stock_checked', this.checked);
+        });
+      });
+      el.querySelectorAll('.dgp-picked').forEach(function(inp) {
+        inp.addEventListener('blur', function() {
+          window.updateDGItem(this.dataset.item, 'qty_picked', parseFloat(this.value)||0);
+        });
+      });
+
+    } catch(e) {
+      el.innerHTML = '<div style="color:var(--red);font-size:12px;">Error: ' + e.message + '</div>';
+    }
   }
+
+  window.saveDGPrep = async function(jobId, existingId) {
+    var gv = function(id) { var e = document.getElementById('dgp-'+id); return e ? e.value.trim() : null; };
+    var payload = {
+      job_id: jobId,
+      batch_no: gv('batch')||null,
+      notes: gv('notes')||null,
+      signed_by_warehouse: gv('wh-name')||null,
+      signed_at_warehouse: gv('wh-date') ? gv('wh-date')+'T00:00:00Z' : null,
+      signed_by_coordinator: gv('cc-name')||null,
+      signed_at_coordinator: gv('cc-date') ? gv('cc-date')+'T00:00:00Z' : null
+    };
+    try {
+      if (existingId) {
+        await supaMut('PATCH', 'job_drygoods_prep', '?id=eq.'+existingId, payload);
+      } else {
+        await supaMut('POST', 'job_drygoods_prep', '', payload);
+      }
+      window.toast && window.toast('Dry goods prep saved.', 'success');
+      loadDryGoodsTab(jobId);
+    } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
+  };
+
+  window.loadDGItemsFromBOM = async function(jobId, prepId) {
+    var j = _jobs.find(function(x){ return x.id === jobId; });
+    if (!j || !j.bom_id) { window.toast && window.toast('No BOM linked to this job.','error'); return; }
+    try {
+      // Ensure prep record exists
+      var pid = prepId;
+      if (!pid) {
+        var res = await supaMut('POST','job_drygoods_prep','',{job_id:jobId});
+        pid = res[0].id;
+      }
+      var items = await supaGet('bom_items?bom_id=eq.' + j.bom_id + '&select=*,dry_goods_skus(description,id)');
+      for (var i=0;i<items.length;i++) {
+        var item = items[i];
+        if (!item.sku_id && !item.description) continue;
+        await supaMut('POST','job_drygoods_prep_items','',{
+          prep_id: pid, job_id: jobId,
+          sku_id: item.sku_id||null,
+          item_name: (item.dry_goods_skus&&item.dry_goods_skus.description)||item.description||item.sku_id||'Item',
+          qty_required: item.quantity||null
+        });
+      }
+      window.toast && window.toast('Items loaded from BOM.','success');
+      loadDryGoodsTab(jobId);
+    } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
+  };
+
+  window.updateDGItem = async function(itemId, field, value) {
+    try {
+      var p = {}; p[field] = value;
+      await supaMut('PATCH','job_drygoods_prep_items','?id=eq.'+itemId, p);
+    } catch(e) { console.warn('DG item update failed:', e); }
+  };
+
+  // ── QUALITY CHECKLIST (5.02.18) ─────────────────────────────────────────────
   async function loadQualityTab(jobId) {
     var el = document.getElementById('jd-quality-content');
     if (!el) return;
-    el.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">Quality Checklist — full build in next session.</div>';
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px 0;">Loading…</div>';
+    var j = _jobs.find(function(x){ return x.id === jobId; });
+
+    try {
+      var checks = await supaGet('job_quality_checks?job_id=eq.' + jobId + '&order=check_round.asc,check_type.asc');
+
+      var html = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;font-weight:700;">5.02.18 Quality Checklist</div>';
+      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:16px;">Checks: 10 min after job start, after each break, start of each new day. Final check at end of job with random bottle.</div>';
+
+      // Header
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;">'
+        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Job No</div><div style="font-size:14px;font-weight:700;color:var(--gold);">' + jobId + '</div></div>'
+        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Product</div><div style="font-size:12px;color:var(--white);">' + (j ? j.product_name : '') + '</div></div>'
+        + '</div>';
+
+      // Add check round button
+      html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">'
+        + '<div class="inv-section-title" style="margin-bottom:0;border:none;padding:0;">Check Rounds</div>'
+        + '<button data-job="' + jobId + '" onclick="window.addQualityCheck(this.dataset.job,\'online\')" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">+ Add Online Check</button>'
+        + '</div>';
+
+      // Render existing check rounds
+      var online = checks.filter(function(c){ return c.check_type==='online'; });
+      var offline = checks.filter(function(c){ return c.check_type==='offline'||c.check_type==='final'; });
+
+      if (!online.length && !offline.length) {
+        html += '<div style="text-align:center;padding:32px;color:var(--muted);font-size:12px;">No quality checks recorded yet. Click <strong style="color:var(--gold)">+ Add Online Check</strong> to begin.</div>';
+      }
+
+      online.forEach(function(c) {
+        html += renderQualityCheckCard(c, 'online');
+      });
+
+      if (online.length > 0) {
+        html += '<div style="margin:16px 0;display:flex;align-items:center;justify-content:space-between;">'
+          + '<div class="inv-section-title" style="margin-bottom:0;border:none;padding:0;">Off-line Checks (Pallet)</div>'
+          + '<button data-job="' + jobId + '" onclick="window.addQualityCheck(this.dataset.job,\'offline\')" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">+ Add Offline Check</button>'
+          + '</div>';
+        offline.forEach(function(c) {
+          html += renderQualityCheckCard(c, 'offline');
+        });
+      }
+
+      // Sign-off
+      var lastCheck = checks[checks.length-1] || {};
+      html += '<div class="inv-section-title">Quality Sign-Off</div>'
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">'
+        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Completed By (Quality)</label>'
+        + '<input type="text" id="qc-signed-by" value="' + (lastCheck.checked_by||'') + '" placeholder="Name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"></div>'
+        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Date</label>'
+        + '<input type="date" id="qc-date" value="' + (lastCheck.checked_at ? lastCheck.checked_at.slice(0,10) : '') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"></div>'
+        + '</div>';
+
+      el.innerHTML = html;
+    } catch(e) {
+      el.innerHTML = '<div style="color:var(--red);font-size:12px;">Error: ' + e.message + '</div>';
+    }
   }
+
+  function renderQualityCheckCard(c, type) {
+    var isOnline = type === 'online';
+    var sat = c.satisfactory === true ? '<span style="color:var(--green);font-weight:700;">SATISFACTORY</span>' : c.satisfactory === false ? '<span style="color:var(--red);font-weight:700;">FAIL</span>' : '<span style="color:var(--muted);">Not set</span>';
+    var html = '<div style="background:var(--navy-card);border:1px solid var(--navy-border);border-radius:6px;padding:16px;margin-bottom:12px;">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">'
+      + '<div style="font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:0.1em;">' + (isOnline ? 'Online' : 'Offline') + ' Check — Round ' + c.check_round + '</div>'
+      + '<div style="display:flex;align-items:center;gap:12px;">' + sat
+      + '<span style="font-size:10px;color:var(--muted);">' + (c.checked_at ? new Date(c.checked_at).toLocaleString('en-IE') : 'Time not set') + '</span></div></div>';
+
+    if (isOnline) {
+      var onlineFields = [
+        ['spec_crosscheck','Cross-check vs Bottling Spec'],['abv_actual','ABV (actual)'],
+        ['front_label','Front label position'],['back_label','Back label position'],
+        ['outer_barcode','Outer case barcode'],['label_barcode','Label barcode'],
+        ['pallet_type','Pallet type used'],['weight_check','Weight check'],['lot_number','Lot no. on bottle']
+      ];
+      html += '<table style="width:100%;border-collapse:collapse;">';
+      onlineFields.forEach(function(f) {
+        html += '<tr><td style="font-size:11px;color:var(--muted);padding:5px 12px 5px 0;width:180px;">' + f[1] + '</td>'
+          + '<td style="font-size:12px;color:var(--white);padding:5px 0;">' + (c[f[0]]||'—') + '</td></tr>';
+      });
+      html += '</table>';
+    } else {
+      var offlineFields = [
+        ['bottle_check','Bottle check'],['lot_no_check','Lot no. check'],
+        ['pallet_construction','Pallet construction'],['final_wrapping','Final wrapping'],['pallet_labels','Pallet labels']
+      ];
+      html += '<table style="width:100%;border-collapse:collapse;">';
+      offlineFields.forEach(function(f) {
+        html += '<tr><td style="font-size:11px;color:var(--muted);padding:5px 12px 5px 0;width:180px;">' + f[1] + '</td>'
+          + '<td style="font-size:12px;color:var(--white);padding:5px 0;">' + (c[f[0]]||'—') + '</td></tr>';
+      });
+      html += '</table>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  window.addQualityCheck = async function(jobId, type) {
+    // Get next round number
+    try {
+      var existing = await supaGet('job_quality_checks?job_id=eq.' + jobId + '&check_type=eq.' + type + '&order=check_round.desc&limit=1');
+      var nextRound = existing.length ? (existing[0].check_round + 1) : 1;
+
+      var payload = {
+        job_id: jobId, check_round: nextRound, check_type: type,
+        checked_at: new Date().toISOString(),
+        satisfactory: null
+      };
+
+      if (type === 'online') {
+        // Prompt for each online field
+        var fields = ['spec_crosscheck','abv_actual','front_label','back_label','outer_barcode','label_barcode','pallet_type','weight_check','lot_number'];
+        var prompts = ['Cross-check vs Spec (OK/Issue)','ABV actual (e.g. 40.1)','Front label position (OK/Off)','Back label position (OK/Off)','Outer case barcode (OK/Missing)','Label barcode (OK/Missing)','Pallet type used','Weight check result','Lot no. on bottle'];
+        for (var i=0;i<fields.length;i++) {
+          var val = prompt(prompts[i]);
+          if (val !== null) payload[fields[i]] = val;
+        }
+        var sat = confirm('Mark this check as SATISFACTORY?');
+        payload.satisfactory = sat;
+        payload.checked_by = (window.CURRENT_USER && window.CURRENT_USER.email) || '';
+      } else {
+        var ofields = ['bottle_check','lot_no_check','pallet_construction','final_wrapping','pallet_labels'];
+        var oprompts = ['Bottle check (OK/Fail)','Lot no. check (OK/Fail)','Pallet construction (OK/Fail)','Final wrapping (OK/Fail)','Pallet labels (OK/Fail)'];
+        for (var j=0;j<ofields.length;j++) {
+          var oval = prompt(oprompts[j]);
+          if (oval !== null) payload[ofields[j]] = oval;
+        }
+        var osat = confirm('Mark this check as SATISFACTORY?');
+        payload.satisfactory = osat;
+        payload.checked_by = (window.CURRENT_USER && window.CURRENT_USER.email) || '';
+      }
+
+      await supaMut('POST','job_quality_checks','', payload);
+      window.toast && window.toast('Quality check round ' + nextRound + ' saved.','success');
+      loadQualityTab(jobId);
+    } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
+  };
+
+  // ── WEIGHTS & MEASURES ────────────────────────────────────────────────────────
   async function loadWeightsTab(jobId) {
     var el = document.getElementById('jd-weights-content');
     if (!el) return;
-    el.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">Weights &amp; Measures — full build in next session.</div>';
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px 0;">Loading…</div>';
+
+    try {
+      var batches = await supaGet('job_weights_measures?job_id=eq.' + jobId + '&order=sample_batch.asc');
+
+      var html = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;font-weight:700;">Weights &amp; Measures — e-mark Directive</div>';
+      html += '<div style="font-size:11px;color:var(--muted);margin-bottom:16px;">Carry out two independent counts before filling out this form.</div>';
+
+      html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">'
+        + '<div class="inv-section-title" style="margin-bottom:0;border:none;padding:0;">Sample Batches</div>'
+        + '<button data-job="' + jobId + '" onclick="window.addWMBatch(this.dataset.job)" class="btn btn-gold" style="font-size:11px;padding:6px 14px;">+ Add Sample Batch</button>'
+        + '</div>';
+
+      if (!batches.length) {
+        html += '<div style="text-align:center;padding:32px;color:var(--muted);font-size:12px;">No weight samples recorded. Click <strong style="color:var(--gold)">+ Add Sample Batch</strong> to begin.</div>';
+      } else {
+        batches.forEach(function(b) {
+          html += renderWMBatch(b, jobId);
+        });
+      }
+
+      el.innerHTML = html;
+    } catch(e) {
+      el.innerHTML = '<div style="color:var(--red);font-size:12px;">Error: ' + e.message + '</div>';
+    }
   }
+
+  function renderWMBatch(b, jobId) {
+    var sat = b.satisfactory === true ? '<span style="color:var(--green);font-weight:700;">✓ SATISFACTORY</span>' : b.satisfactory === false ? '<span style="color:var(--red);font-weight:700;">✗ FAIL</span>' : '<span style="color:var(--muted);">Pending</span>';
+    var html = '<div style="background:var(--navy-card);border:1px solid var(--navy-border);border-radius:6px;padding:16px;margin-bottom:16px;">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">'
+      + '<div style="font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:0.1em;">Sample Batch ' + b.sample_batch + '</div>'
+      + '<div style="display:flex;align-items:center;gap:16px;">' + sat
+      + '<span style="font-size:10px;color:var(--muted);">' + (b.sample_date||'') + ' ' + (b.sample_time||'') + '</span></div></div>';
+
+    html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px;">'
+      + '<div><div style="font-size:10px;color:var(--muted);">Bottle Capacity</div><div style="font-size:13px;color:var(--white);">' + (b.bottle_capacity_ml||'—') + ' mL</div></div>'
+      + '<div><div style="font-size:10px;color:var(--muted);">T1 Tolerance</div><div style="font-size:13px;color:var(--white);">' + (b.t1_tolerance_ml||15) + ' mL</div></div>'
+      + '<div><div style="font-size:10px;color:var(--muted);">T2 Tolerance</div><div style="font-size:13px;color:var(--white);">' + (b.t2_tolerance_ml||30) + ' mL</div></div>'
+      + '</div>';
+
+    html += '<table class="data-table" style="width:100%;font-size:11px;">'
+      + '<thead><tr><th>Bottle</th><th>Empty (g)</th><th>Cap (g)</th><th>ABV</th><th>Full (g)</th><th>SG</th><th>Liquid (mL)</th></tr></thead><tbody>';
+    for (var i=1;i<=5;i++) {
+      html += '<tr>'
+        + '<td style="color:var(--muted);font-weight:700;">Bottle ' + i + '</td>'
+        + '<td>' + (b['bottle_'+i+'_empty_g']||'—') + '</td>'
+        + '<td>' + (b['bottle_'+i+'_cap_g']||'—') + '</td>'
+        + '<td>' + (b['bottle_'+i+'_abv']||'—') + '</td>'
+        + '<td>' + (b['bottle_'+i+'_full_g']||'—') + '</td>'
+        + '<td>' + (b['bottle_'+i+'_sg']||'—') + '</td>'
+        + '<td>' + (b['bottle_'+i+'_liquid_ml']||'—') + '</td>'
+        + '</tr>';
+    }
+    html += '</tbody></table>';
+
+    if (b.sample_mean_ml !== null && b.sample_mean_ml !== undefined) {
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;padding-top:12px;border-top:1px solid var(--navy-border);">'
+        + '<div><div style="font-size:10px;color:var(--muted);">Sample Mean</div><div style="font-size:15px;font-weight:700;color:var(--white);">' + (b.sample_mean_ml||'—') + ' mL</div></div>'
+        + '<div><div style="font-size:10px;color:var(--muted);">Std Deviation</div><div style="font-size:15px;font-weight:700;color:var(--white);">' + (b.std_deviation||'—') + '</div></div>'
+        + '</div>';
+    }
+
+    html += '</div>';
+    return html;
+  }
+
+  window.addWMBatch = async function(jobId) {
+    try {
+      var existing = await supaGet('job_weights_measures?job_id=eq.' + jobId + '&order=sample_batch.desc&limit=1');
+      var nextBatch = existing.length ? (existing[0].sample_batch + 1) : 1;
+
+      var cap = prompt('Bottle capacity (mL)? e.g. 700');
+      if (!cap) return;
+
+      var payload = {
+        job_id: jobId, sample_batch: nextBatch,
+        bottle_capacity_ml: parseFloat(cap),
+        t1_tolerance_ml: 15, t2_tolerance_ml: 30,
+        sample_date: new Date().toISOString().split('T')[0],
+        sample_time: new Date().toTimeString().slice(0,5)
+      };
+
+      // Collect 5 bottles
+      var liquids = [];
+      for (var i=1;i<=5;i++) {
+        var emptyG = parseFloat(prompt('Bottle ' + i + ' — Empty weight (g)?')||0);
+        var capG   = parseFloat(prompt('Bottle ' + i + ' — Cap weight (g)?')||0);
+        var abv    = parseFloat(prompt('Bottle ' + i + ' — ABV (%)?')||0);
+        var fullG  = parseFloat(prompt('Bottle ' + i + ' — Full weight with liquid (g)?')||0);
+        var sg     = parseFloat(prompt('Bottle ' + i + ' — Specific gravity?')||0);
+        // Calculate liquid mL: (fullG - emptyG - capG) / sg
+        var liquidMl = sg > 0 ? Math.round(((fullG - emptyG - capG) / sg) * 100) / 100 : null;
+        payload['bottle_'+i+'_empty_g']   = emptyG||null;
+        payload['bottle_'+i+'_cap_g']     = capG||null;
+        payload['bottle_'+i+'_abv']       = abv||null;
+        payload['bottle_'+i+'_full_g']    = fullG||null;
+        payload['bottle_'+i+'_sg']        = sg||null;
+        payload['bottle_'+i+'_liquid_ml'] = liquidMl;
+        if (liquidMl) liquids.push(liquidMl);
+      }
+
+      // Calculate mean and std deviation
+      if (liquids.length) {
+        var mean = liquids.reduce(function(a,b){return a+b;},0) / liquids.length;
+        var variance = liquids.reduce(function(a,b){return a+Math.pow(b-mean,2);},0) / liquids.length;
+        var stdDev = Math.sqrt(variance);
+        payload.sample_mean_ml = Math.round(mean * 100) / 100;
+        payload.std_deviation  = Math.round(stdDev * 100) / 100;
+
+        // T1 check: mean must be >= nominal - T1
+        var nominal = parseFloat(cap);
+        payload.satisfactory = mean >= (nominal - 15);
+      }
+
+      payload.completed_by = (window.CURRENT_USER && window.CURRENT_USER.email) || '';
+      await supaMut('POST','job_weights_measures','', payload);
+      window.toast && window.toast('Sample batch ' + nextBatch + ' recorded.', payload.satisfactory ? 'success' : 'error');
+      loadWeightsTab(jobId);
+    } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
+  };
 
   // ── My Tasks on Overview ─────────────────────────────────────────────────────
   async function loadMyTasks() {
