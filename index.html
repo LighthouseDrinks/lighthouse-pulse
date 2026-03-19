@@ -3862,6 +3862,7 @@ window.copyInviteLink = function() {
     <button class="jd-tab" data-tab="quality" onclick="window.showJobTab('quality',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;">Quality</button>
     <button class="jd-tab" data-tab="tasks" onclick="window.showJobTab('tasks',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;">Tasks</button>
     <button class="jd-tab" data-tab="weights" onclick="window.showJobTab('weights',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;">Weights &amp; Measures</button>
+    <button class="jd-tab" data-tab="results" onclick="window.showJobTab('results',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;">Results</button>
   </div>
 
   <!-- Tab content -->
@@ -3885,6 +3886,9 @@ window.copyInviteLink = function() {
     </div>
     <div id="jd-tab-tasks" class="jd-tab-panel" style="display:none;">
       <div id="jd-tasks-content" style="color:var(--muted);font-size:13px;">Loading…</div>
+    </div>
+    <div id="jd-tab-results" class="jd-tab-panel" style="display:none;">
+      <div id="jd-results-content" style="color:var(--muted);font-size:13px;">Loading…</div>
     </div>
   </div>
 
@@ -12166,13 +12170,9 @@ window.saveAdjModal = async function() {
     panel.style.flexDirection = 'column';
     panel.style.alignItems = 'center';
     document.body.style.overflow = 'hidden';
-    // Load job summary tab by default
-    var defaultTab = document.querySelector('[data-tab="jobsheet"]');
+    // Default to Job Summary tab
+    var defaultTab = document.querySelector('.jd-tab[data-tab="jobsheet"]');
     if (defaultTab) window.showJobTab('jobsheet', defaultTab);
-
-    // Default to overview tab
-    window.showJobTab('overview', document.querySelector('.jd-tab[data-tab="overview"]'));
-    renderJobOverview(j);
   };
 
   window.closeJobDetail = function() {
@@ -12194,6 +12194,7 @@ window.saveAdjModal = async function() {
     // Load content on demand
     if (tab === 'jobsheet'   && _currentJobId) loadJobSheetTab(_currentJobId);
     if (tab === 'tasks'      && _currentJobId) loadTasksTab(_currentJobId);
+    if (tab === 'results'    && _currentJobId) loadResultsTab(_currentJobId);
     if (tab === 'components' && _currentJobId) loadComponentsTab(_currentJobId);
     if (tab === 'liquid' && _currentJobId) loadLiquidTab(_currentJobId);
     if (tab === 'quality' && _currentJobId) loadQualityTab(_currentJobId);
@@ -12340,6 +12341,61 @@ window.saveAdjModal = async function() {
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
 
+  // Auto-complete the task for a given job + task_type
+  window.autoCompleteTask = async function(jobId, taskType) {
+    try {
+      var tasks = await supaGet('job_tasks?job_id=eq.' + jobId + '&task_type=eq.' + taskType + '&status=neq.completed&limit=1');
+      if (tasks.length) {
+        await supaMut('PATCH', 'job_tasks', '?id=eq.' + tasks[0].id, {
+          status: 'completed',
+          completed_by: window.CURRENT_USER ? window.CURRENT_USER.email : 'auto',
+          completed_at: new Date().toISOString()
+        });
+        loadMyTasks();
+        if (_currentJobId === jobId) refreshJobTasks(jobId);
+      }
+    } catch(e) { console.warn('autoCompleteTask failed:', e.message); }
+  };
+
+  // Check if a task's underlying document is complete before allowing manual Complete
+  window.checkTaskDocDone = async function(task) {
+    var jobId = task.job_id;
+    var type = task.task_type;
+    try {
+      if (type === 'liquid_signoff') {
+        var rows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1');
+        if (!rows.length || !rows[0].signed_by) {
+          window.toast && window.toast('Complete and save the Liquid Sign-Off tab first.', 'error');
+          openTaskInJob(jobId, type);
+          return false;
+        }
+      } else if (type === 'components' || type === 'drygoods_prep') {
+        var prep = await supaGet('job_drygoods_prep?job_id=eq.' + jobId + '&limit=1');
+        if (!prep.length || !prep[0].signed_by_coordinator) {
+          window.toast && window.toast('Sign off the Components tab first.', 'error');
+          openTaskInJob(jobId, type);
+          return false;
+        }
+      } else if (type === 'weights_measures') {
+        var wm = await supaGet('job_weights_measures?job_id=eq.' + jobId + '&limit=1');
+        if (!wm.length) {
+          window.toast && window.toast('Record at least one Weights & Measures sample batch first.', 'error');
+          openTaskInJob(jobId, type);
+          return false;
+        }
+      } else if (type === 'quality') {
+        var qc = await supaGet('job_quality_checks?job_id=eq.' + jobId + '&limit=1');
+        if (!qc.length) {
+          window.toast && window.toast('Complete at least one Quality check round first.', 'error');
+          openTaskInJob(jobId, type);
+          return false;
+        }
+      }
+      // bom_link — manual confirm is fine, no underlying form
+    } catch(e) { console.warn('checkTaskDocDone error:', e.message); }
+    return true;
+  };
+
   // Refresh just the task list section without rebuilding the whole overview
   async function refreshJobTasks(jobId) {
     var el = document.getElementById('jd-overview-content');
@@ -12410,7 +12466,12 @@ window.saveAdjModal = async function() {
             var cb = document.createElement('button');
             cb.textContent = 'Complete';
             cb.style.cssText = 'font-size:11px;background:transparent;border:1px solid var(--green);color:var(--green);padding:5px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;';
-            cb.onclick = function(){ window.completeTask(t.id); };
+            (function(task) {
+              cb.onclick = async function(){
+                var ok = await window.checkTaskDocDone(task);
+                if (ok) window.completeTask(task.id);
+              };
+            })(t);
             btnWrap.insertBefore(cb, btnWrap.firstChild);
           }
         }
@@ -12428,6 +12489,22 @@ window.saveAdjModal = async function() {
     if (!nextStage) return;
 
     if (nextStage === 'complete') {
+      // Gate: Results tab must be fully completed
+      var missing = [];
+      if (!j.lot_number)              missing.push('Batch / Lot No');
+      if (!j.actual_bottles_produced) missing.push('Total Bottles Produced');
+      if (!j.actual_cases)            missing.push('Total Cases');
+      if (!j.date_commenced)          missing.push('Date / Time Commenced');
+      if (!j.date_completed)          missing.push('Date / Time Ended');
+      if (!j.line_clearance_complete) missing.push('Line Clearance');
+      if (!j.delivery_cleared)        missing.push('Delivery Cleared');
+      if (!j.results_signed_by)       missing.push('Production Manager Sign-Off');
+      if (missing.length) {
+        window.toast && window.toast('Complete the Results tab first: ' + missing.join(', '), 'error');
+        var tb = document.querySelector('[data-tab="results"]');
+        if (tb) window.showJobTab('results', tb);
+        return;
+      }
       if (!confirm('Mark this job as Complete? This will trigger inventory depletion.')) return;
     }
 
@@ -12654,6 +12731,7 @@ window.saveAdjModal = async function() {
         if (tasks.length) await supaMut('PATCH','job_tasks','?id=eq.'+tasks[0].id,{status:'completed',completed_at:new Date().toISOString()});
       } catch(e) {}
       window.toast && window.toast('Components signed off.','success');
+      await window.autoCompleteTask(jobId, 'components');
       loadComponentsTab(jobId);
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
@@ -12772,104 +12850,331 @@ window.saveAdjModal = async function() {
         + '<div style="flex:1;font-size:13px;color:var(--white);">' + (val||'—') + '</div></div>';
     };
 
-    var html = '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid var(--gold);">'
-      + '<div><div style="font-size:18px;font-weight:700;color:var(--white);font-family:Merriweather,serif;">Job Summary</div>'
-      + '<div style="font-size:11px;color:var(--muted);margin-top:2px;">Lighthouse Drinks Ltd · Cork, Ireland</div></div>'
-      + '<div style="text-align:right;border:2px solid var(--gold);padding:8px 16px;border-radius:4px;">'
-      + '<div style="font-size:11px;color:var(--muted);">Job No</div>'
-      + '<div style="font-size:22px;font-weight:700;color:var(--gold);font-family:monospace;">' + jobId + '</div></div></div>';
+    var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-bottom:12px;border-bottom:2px solid var(--gold);">'
+      + '<div><div style="font-size:16px;font-weight:700;color:var(--white);font-family:Merriweather,serif;">' + (j.product_name||jobId) + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:3px;">' + jobId + (j.po_number ? ' &nbsp;&middot;&nbsp; PO: ' + j.po_number : '') + '</div></div>'
+      + '<button data-job="' + jobId + '" onclick="window.printJobSheet(this.dataset.job)" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#128424; Print</button>'
+      + '</div>';
 
     html += sec('Job Information');
     html += rowAll('Client', clientName);
-    html += rowAll('Product Full Name', j.product_name);
-    html += rowAll('Purchase Order Number', j.po_number);
-    html += rowAll('Bottle Spec (BOM)', bomName);
-    html += rowAll('Job Origin', j.job_origin === 'internal' ? 'Internal' : 'External (Client)');
+    html += rowAll('BOM', bomName);
     html += rowAll('Payment Terms', payLabel[j.payment_type] || j.payment_type);
+    html += rowAll('Accepted by Lighthouse', j.accepted_by);
+    if (j.notes) html += rowAll('Notes', j.notes);
 
     html += sec('Job Target');
     html += rowAll('Target Type', isLiquid ? 'Liquid Target' : 'Bottle Target');
     if (isLiquid) {
       html += rowAll('Litres of Liquid Sent In', j.liquid_litres ? j.liquid_litres + ' L' : null);
-      html += rowAll('ABV of Liquid Sent In', j.abv_in ? j.abv_in + '%' : null);
     } else {
       html += rowAll('Number of Bottles', j.bottle_target ? j.bottle_target.toLocaleString() + ' bottles' : null);
-      html += rowAll('ABV of Liquid Sent In', j.abv_in ? j.abv_in + '%' : null);
     }
 
     html += sec('Liquid Control');
-    html += rowAll('Dilution Required', isDilution ? 'Yes' : 'No');
+    html += rowAll('ABV of Liquid Sent In', j.abv_in ? j.abv_in + '%' : null);
+    html += rowAll('Dilution Required', isDilution ? '<span style="color:var(--amber);">Yes</span>' : 'No');
     if (isDilution) {
       html += rowAll('Bottling ABV', j.bottling_abv ? j.bottling_abv + '%' : null);
       html += rowAll('Water Required', j.water_required ? j.water_required + ' L' : null);
       html += rowAll('Final Litres', j.final_litres ? j.final_litres + ' L' : null);
     }
-    html += rowAll('Chill Filtration', j.chill_filtration ? 'Yes' : 'No');
-    html += rowAll('Colouring', j.colouring ? 'Yes' : 'No');
+    html += rowAll('Chill Filtration', j.chill_filtration ? '<span style="color:var(--amber);">Yes</span>' : 'No');
+    html += rowAll('Colouring', j.colouring ? '<span style="color:var(--amber);">Yes</span>' : 'No');
     if (j.colouring && bom && bom.colour_spec) html += rowAll('Colour Specification', bom.colour_spec);
 
     if (bom) {
-      html += sec('Bottle Specification (BOM)');
+      html += sec('Bottle Specification');
       html += rowAll('Volume', bom.volume_cl ? bom.volume_cl + ' cl' : null);
       html += rowAll('Bottling ABV', bom.abv ? bom.abv + '%' : null);
       html += rowAll('Bottles per Case', bom.bottles_per_shipper);
       html += rowAll('Bottling Speed (BPH)', bom.bph);
 
-      html += sec('Packaging & Additional Information');
-      if (ai.labelBarcode)    html += rowAll('Label Barcode', ai.labelBarcode);
-      if (ai.shipperBarcode)  html += rowAll('Shipper Barcode', ai.shipperBarcode);
-      if (ai.intendedMarket)  html += rowAll('Intended Market', ai.intendedMarket);
-      if (ai.dutyStamp)       html += rowAll('Duty Stamp', ai.dutyStamp);
-      if (ai.annex2)          html += rowAll('Annex 2', ai.annex2);
-      if (ai.lotNumber)       html += rowAll('Lot Number', ai.lotNumber);
-      if (ai.pallet)          html += rowAll('Pallet Type', ai.pallet);
-      if (ai.casesLayer)      html += rowAll('Cases per Layer', ai.casesLayer);
-      if (ai.layersPallet)    html += rowAll('Layers per Pallet', ai.layersPallet);
-      if (ai.labelPosition)   html += rowAll('Label Position', ai.labelPosition);
-      if (ai.notes || bom.notes) html += rowAll('BOM Notes', ai.notes || bom.notes);
+      var hasAdditional = ai.labelBarcode || ai.shipperBarcode || ai.intendedMarket || ai.dutyStamp || ai.annex2 || ai.lotNumber || ai.pallet || ai.casesLayer || ai.layersPallet || ai.labelPosition || ai.notes || bom.notes;
+      if (hasAdditional) {
+        html += sec('Packaging & Additional Information');
+        if (ai.labelBarcode)    html += rowAll('Label Barcode', ai.labelBarcode);
+        if (ai.shipperBarcode)  html += rowAll('Shipper Barcode', ai.shipperBarcode);
+        if (ai.intendedMarket)  html += rowAll('Intended Market', ai.intendedMarket);
+        if (ai.dutyStamp)       html += rowAll('Duty Stamp', ai.dutyStamp);
+        if (ai.annex2)          html += rowAll('Annex 2', ai.annex2);
+        if (ai.lotNumber)       html += rowAll('Lot Number', ai.lotNumber);
+        if (ai.pallet)          html += rowAll('Pallet Type', ai.pallet);
+        if (ai.casesLayer)      html += rowAll('Cases per Layer', ai.casesLayer);
+        if (ai.layersPallet)    html += rowAll('Layers per Pallet', ai.layersPallet);
+        if (ai.labelPosition)   html += rowAll('Label Position', ai.labelPosition);
+        if (ai.notes || bom.notes) html += rowAll('BOM Notes', ai.notes || bom.notes);
+      }
     }
 
-    html += sec('Sign-Off');
-    html += rowAll('Approved By (Client)', j.client_approved_by);
-    html += rowAll('Client Approval Date', j.client_approved_at ? new Date(j.client_approved_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) : null);
-    html += rowAll('Accepted by Lighthouse', j.accepted_by);
-    html += rowAll('Acceptance Date', j.accepted_at ? new Date(j.accepted_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) : null);
-    if (j.notes) html += rowAll('Notes', j.notes);
-
-    // Sign-off blocks for print
-    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:32px;margin-top:32px;padding-top:20px;border-top:1px solid var(--navy-border);">'
-      + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Approved By (Client)</div>'
-      + '<div style="border-bottom:1px solid var(--navy-border);height:40px;"></div>'
-      + '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Signature &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Date</div></div>'
-      + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Accepted by Lighthouse Drinks</div>'
-      + '<div style="border-bottom:1px solid var(--navy-border);height:40px;"></div>'
-      + '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Signature &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Date</div></div>'
-      + '</div>';
-
     html += '<div style="display:flex;gap:10px;margin-top:20px;padding-top:16px;border-top:1px solid var(--navy-border);">'
-      + '<button data-job="' + jobId + '" onclick="window.printJobSheet(this.dataset.job)" class="btn btn-outline" style="font-size:11px;padding:8px 16px;">&#128424; Print</button>'
-      + '<button onclick="window.editJobFromDetail()" class="btn btn-gold" style="font-size:11px;padding:8px 16px;">Edit</button>'
+      + '<button onclick="window.editJobFromDetail()" class="btn btn-gold" style="font-size:11px;padding:8px 16px;">Edit Job</button>'
       + '</div>';
 
     el.innerHTML = html;
   }
 
-  window.printJobSheet = function(jobId) {
-    // Grab the rendered Job Summary tab content directly
-    var contentEl = document.getElementById('jd-jobsheet-content');
-    var innerHtml = contentEl ? contentEl.innerHTML : '';
-    // Strip the action buttons div at the bottom before printing
-    innerHtml = innerHtml.replace(/<div style="display:flex;gap:10px;margin-top:20px;.*?<\/div>/s, '');
-    var win = window.open('','_blank','width=900,height:1100');
-    win.document.write('<html><head><title>Job Summary - ' + jobId + '</title>'
+  window.printJobSheet = async function(jobId) {
+    var j = _jobs.find(function(x){ return x.id === jobId; });
+    if (!j) return;
+
+    // Load full BOM for print
+    var bom = null;
+    try {
+      var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=*');
+      bom = bomRows[0] || null;
+    } catch(e) {}
+    var ai = (bom && bom.additional_info) || {};
+    var clientName = (j.clients && j.clients.name) || j.client_id || '';
+    var bomName = (bom && bom.product_name) || j.bom_id || '';
+    var payLabel = { credit:'Credit Account', upfront:'Pay Upfront', before_leaving:'Pay Before Leaving' };
+    var isLiquid = j.job_target_type === 'liquid';
+
+    function section(title) {
+      return '<tr><td colspan="2" style="background:#0d3349;color:#c9a84c;font-weight:700;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;padding:8px 12px;border:1px solid #1e3a50;">' + title + '</td></tr>';
+    }
+    function row(label, val) {
+      if (!val && val !== 0) return '';
+      return '<tr><td style="padding:7px 12px;border:1px solid #dde;font-weight:600;width:220px;background:#f8f9fc;font-size:12px;color:#333;">' + label + '</td>'
+        + '<td style="padding:7px 12px;border:1px solid #dde;font-size:12px;color:#111;">' + val + '</td></tr>';
+    }
+
+    var rows = section('Job Information')
+      + row('Job No', j.id)
+      + row('Product Full Name', j.product_name)
+      + row('Client', clientName)
+      + row('Purchase Order Number', j.po_number)
+      + row('BOM', bomName)
+      + row('Payment Terms', payLabel[j.payment_type] || j.payment_type)
+      + section('Job Target')
+      + row('Target Type', isLiquid ? 'Liquid Target' : 'Bottle Target')
+      + (isLiquid ? row('Litres of Liquid Sent In', j.liquid_litres ? j.liquid_litres + ' L' : '') : '')
+      + row(isLiquid ? 'ABV of Liquid Sent In' : 'Number of Bottles', isLiquid ? (j.abv_in + '%') : (j.bottle_target ? j.bottle_target.toLocaleString() + ' bottles' : ''))
+      + (!isLiquid ? row('ABV of Liquid Sent In', j.abv_in ? j.abv_in + '%' : '') : '')
+      + section('Liquid Control')
+      + row('Dilution Required', j.dilution ? 'Yes' : 'No')
+      + (j.dilution ? row('Bottling ABV', j.bottling_abv ? j.bottling_abv + '%' : '') : '')
+      + (j.dilution ? row('Water Required', j.water_required ? j.water_required + ' L' : '') : '')
+      + (j.dilution ? row('Final Litres', j.final_litres ? j.final_litres + ' L' : '') : '')
+      + row('Chill Filtration', j.chill_filtration ? 'Yes' : 'No')
+      + row('Colouring', j.colouring ? 'Yes' : 'No')
+      + (j.colouring && bom && bom.colour_spec ? row('Colour Specification', bom.colour_spec) : '');
+
+    if (bom) {
+      rows += section('Bottle Specification')
+        + row('Volume', bom.volume_cl ? bom.volume_cl + ' cl' : '')
+        + row('Bottling ABV', bom.abv ? bom.abv + '%' : '')
+        + row('Bottles per Case', bom.bottles_per_shipper)
+        + row('Bottling Speed (BPH)', bom.bph);
+      if (ai.labelBarcode || ai.shipperBarcode || ai.intendedMarket || ai.dutyStamp || ai.annex2 || ai.lotNumber || ai.pallet || ai.casesLayer || ai.layersPallet || ai.labelPosition) {
+        rows += section('Packaging & Additional Information')
+          + (ai.labelBarcode   ? row('Label Barcode', ai.labelBarcode) : '')
+          + (ai.shipperBarcode ? row('Shipper Barcode', ai.shipperBarcode) : '')
+          + (ai.intendedMarket ? row('Intended Market', ai.intendedMarket) : '')
+          + (ai.dutyStamp      ? row('Duty Stamp', ai.dutyStamp) : '')
+          + (ai.annex2         ? row('Annex 2', ai.annex2) : '')
+          + (ai.lotNumber      ? row('Lot Number', ai.lotNumber) : '')
+          + (ai.pallet         ? row('Pallet Type', ai.pallet) : '')
+          + (ai.casesLayer     ? row('Cases per Layer', ai.casesLayer) : '')
+          + (ai.layersPallet   ? row('Layers per Pallet', ai.layersPallet) : '')
+          + (ai.labelPosition  ? row('Label Position', ai.labelPosition) : '');
+      }
+    }
+
+    rows += section('Sign-Off')
+      + row('Approved By (Client)', j.client_approved_by || '')
+      + row('Client Approval Date', j.client_approved_at ? j.client_approved_at.slice(0,10) : '')
+      + row('Accepted by Lighthouse Drinks', j.accepted_by || '')
+      + row('Acceptance Date', j.accepted_at ? j.accepted_at.slice(0,10) : '');
+    if (j.notes) rows += row('Notes', j.notes);
+
+    var win = window.open('', '_blank', 'width=900,height=1100');
+    win.document.write('<!DOCTYPE html><html><head><title>Job Summary — ' + j.id + '</title>'
       + '<style>'
-      + 'body{font-family:Arial,sans-serif;padding:32px;color:#1a1a2e;font-size:13px;}'
-      + 'button{display:none!important;}'
-      + '@media print{body{padding:16px;}}'
-      + '</style></head>'
-      + '<body>' + innerHtml
-      + '<script>window.onload=function(){window.print();}<\/script></body></html>');
+      + 'body{font-family:Arial,sans-serif;margin:0;padding:32px;color:#111;}'
+      + 'table{width:100%;border-collapse:collapse;margin-bottom:0;}'
+      + '@media print{body{padding:16px;} .no-print{display:none;}}'
+      + '</style></head><body>'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;padding-bottom:16px;border-bottom:3px solid #c9a84c;">'
+      + '<div>'
+      + '<div style="font-size:22px;font-weight:700;color:#0d3349;font-family:Georgia,serif;">Job Summary</div>'
+      + '<div style="font-size:11px;color:#666;margin-top:4px;">Lighthouse Drinks Ltd &nbsp;&middot;&nbsp; Cork, Ireland</div>'
+      + '</div>'
+      + '<div style="text-align:right;border:2px solid #c9a84c;padding:10px 18px;border-radius:4px;">'
+      + '<div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:0.1em;">Job No</div>'
+      + '<div style="font-size:22px;font-weight:700;color:#c9a84c;font-family:monospace;">' + j.id + '</div>'
+      + '</div></div>'
+      + '<table>' + rows + '</table>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:40px;padding-top:20px;border-top:2px solid #0d3349;">'
+      + '<div><div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Approved By (Client)</div>'
+      + '<div style="border-bottom:1px solid #333;height:48px;margin-bottom:6px;"></div>'
+      + '<div style="font-size:10px;color:#666;">Signature &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Date: _______________</div></div>'
+      + '<div><div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Accepted by Lighthouse Drinks</div>'
+      + '<div style="border-bottom:1px solid #333;height:48px;margin-bottom:6px;"></div>'
+      + '<div style="font-size:10px;color:#666;">Signature &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Date: _______________</div></div>'
+      + '</div>'
+      + '<div class="no-print" style="margin-top:24px;text-align:center;">'
+      + '<button onclick="window.print()" style="background:#c9a84c;border:none;color:#0d3349;font-weight:700;padding:10px 28px;font-size:13px;cursor:pointer;border-radius:4px;">Print</button>'
+      + '</div>'
+      + '<script>window.onload=function(){window.print();}<\/script>'
+      + '</body></html>');
     win.document.close();
+  };
+
+  // ── RESULTS TAB (5.02.16 Final Yield & Waste) ───────────────────────────
+  async function loadResultsTab(jobId) {
+    var el = document.getElementById('jd-results-content');
+    if (!el) return;
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px 0;">Loading…</div>';
+    var j = _jobs.find(function(x){ return x.id === jobId; });
+    if (!j) { el.innerHTML = '<div style="color:var(--red);">Job not found.</div>'; return; }
+
+    // Pull BOM for case/pallet info
+    var bom = null;
+    try {
+      var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=bottles_per_shipper,additional_info');
+      bom = bomRows[0] || null;
+    } catch(e) {}
+    var ai = (bom && bom.additional_info) || {};
+    var bottlesPerCase  = (bom && bom.bottles_per_shipper) || null;
+    var casesPerLayer   = ai.casesLayer || null;
+    var layersPerPallet = ai.layersPallet || null;
+    var casesPerPallet  = (casesPerLayer && layersPerPallet)
+      ? (parseInt(casesPerLayer) * parseInt(layersPerPallet)) : null;
+
+    var inp = function(id, val, placeholder, type, readonly) {
+      var style = readonly
+        ? 'background:rgba(13,27,42,0.4);border:1px solid var(--navy-border);color:var(--muted);'
+        : 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);';
+      return '<input type="' + (type||'text') + '" id="res-' + id + '" value="'
+        + (val!=null?String(val).replace(/"/g,'&quot;'):'') + '" placeholder="' + (placeholder||'') + '"'
+        + (readonly ? ' readonly' : '')
+        + ' style="' + style + 'padding:7px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;">';
+    };
+    var frow = function(label, inputHtml, required) {
+      return '<div style="display:grid;grid-template-columns:260px 1fr;gap:12px;align-items:start;padding:10px 0;border-bottom:1px solid var(--navy-border);">'
+        + '<label style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);padding-top:8px;">' + label
+        + (required ? ' <span style="color:var(--red);">*</span>' : '') + '</label>'
+        + '<div>' + inputHtml + '</div></div>';
+    };
+    var cb = function(id, checked, label) {
+      return '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;color:var(--white);padding:4px 0;">'
+        + '<input type="checkbox" id="res-' + id + '"' + (checked ? ' checked' : '')
+        + ' style="width:16px;height:16px;accent-color:var(--green);">' + label + '</label>';
+    };
+    var sub = function(txt) { return '<div style="font-size:10px;color:var(--muted);margin-top:3px;">' + txt + '</div>'; };
+
+    // Auto-calculate
+    var autoCase = (j.actual_bottles_produced && bottlesPerCase)
+      ? Math.ceil(j.actual_bottles_produced / bottlesPerCase) : null;
+    var actualCases = j.actual_cases || autoCase;
+    var autoHours = null;
+    if (j.date_commenced && j.date_completed) {
+      var ms = new Date(j.date_completed) - new Date(j.date_commenced);
+      autoHours = Math.round(ms / 36000) / 100;
+    }
+    var actualHours = j.actual_job_hours || autoHours;
+
+    var html = '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">Fields marked <span style="color:var(--red);">*</span> must be completed before the job can be moved to Complete.</div>';
+
+    html += '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">Final Yield</div>';
+
+    html += frow('Batch / Lot No', inp('lot-no', j.lot_number, 'e.g. B-0042'), true);
+    html += frow('Total Bottles Produced', inp('bottles', j.actual_bottles_produced, 'e.g. 6820', 'number') + sub('Planned: ' + (j.bottle_target ? j.bottle_target.toLocaleString() : '—') + ' bottles'), true);
+    html += frow('Total Cases', inp('cases', actualCases, 'Auto-calculated', 'number') + sub('Auto-calculated from bottles ÷ case size'), true);
+    html += frow('Cases per Layer', inp('cases-layer', casesPerLayer, 'From BOM', 'text', !!casesPerLayer));
+    html += frow('Cases per Pallet', inp('cases-pallet', casesPerPallet, 'Auto-calculated', 'text', !!(casesPerLayer && layersPerPallet)));
+    html += frow('Date / Time Job Commenced', inp('commenced', j.date_commenced ? j.date_commenced.slice(0,16) : '', '', 'datetime-local'), true);
+    html += frow('Date / Time Job Ended', inp('completed', j.date_completed ? j.date_completed.slice(0,16) : '', '', 'datetime-local'), true);
+    html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub('Auto-calculated from start/end times'));
+    html += frow('Line Clearance Checklist Complete', cb('line-clearance', !!j.line_clearance_complete, 'Confirmed complete'), true);
+    html += frow('Liquid Leftover (litres)', inp('liquid-leftover', j.liquid_leftover||0, '0 if none', 'number'), true);
+    html += frow('Delivery Cleared with Management', cb('delivery-cleared', !!j.delivery_cleared, 'Cleared for release'), true);
+
+    html += '<div style="margin-top:16px;">'
+      + '<label style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);display:block;margin-bottom:6px;">Notes</label>'
+      + '<textarea id="res-notes" rows="3" placeholder="Any notes on the run, issues encountered…" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;font-family:Lato,sans-serif;">' + (j.results_notes||'') + '</textarea>'
+      + '</div>';
+
+    html += '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">Production Manager Sign-Off</div>';
+    html += frow('Name', inp('signed-by', j.results_signed_by, 'Production Manager name'), true);
+    html += frow('Date', inp('signed-at', j.results_signed_at ? j.results_signed_at.slice(0,10) : '', '', 'date'), true);
+
+    html += '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--navy-border);">'
+      + '<button data-job="' + jobId + '" onclick="window.saveResults(this.dataset.job)" class="btn btn-gold" style="font-size:11px;padding:8px 18px;">Save Results</button>'
+      + '</div>';
+
+    el.innerHTML = html;
+
+    // Auto-calculate cases and hours on change
+    var btlsEl = document.getElementById('res-bottles');
+    var casesEl = document.getElementById('res-cases');
+    var bpcEl   = document.getElementById('res-btls-per-case');
+    var commEl  = document.getElementById('res-commenced');
+    var compEl  = document.getElementById('res-completed');
+    var hoursEl = document.getElementById('res-hours');
+
+    function recalcCases() {
+      var b = parseFloat(btlsEl.value)||0;
+      var bpc = parseFloat((bpcEl&&bpcEl.value)||bottlesPerCase||0);
+      if (b && bpc && casesEl) casesEl.value = Math.ceil(b/bpc);
+    }
+    function recalcHours() {
+      var s = new Date(commEl.value), e = new Date(compEl.value);
+      if (!isNaN(s) && !isNaN(e) && e > s && hoursEl) hoursEl.value = Math.round((e-s)/36000)/100;
+    }
+    if (btlsEl) btlsEl.oninput = recalcCases;
+    if (bpcEl && !bpcEl.readOnly) bpcEl.oninput = recalcCases;
+    if (commEl) commEl.onchange = recalcHours;
+    if (compEl) compEl.onchange = recalcHours;
+  }
+
+  window.saveResults = async function(jobId) {
+    var gv = function(id) {
+      var e = document.getElementById('res-'+id);
+      if (!e) return null;
+      if (e.type === 'checkbox') return e.checked;
+      return e.value.trim();
+    };
+    var required = [
+      ['lot-no','Batch / Lot No'], ['bottles','Total Bottles Produced'],
+      ['cases','Total Cases'],     ['commenced','Date / Time Commenced'],
+      ['completed','Date / Time Ended'], ['liquid-leftover','Liquid Leftover'],
+      ['signed-by','Production Manager Name'], ['signed-at','Sign-Off Date']
+    ];
+    for (var i = 0; i < required.length; i++) {
+      var val = gv(required[i][0]);
+      if (val === null || val === '') {
+        window.toast && window.toast(required[i][1] + ' is required.', 'error');
+        var el = document.getElementById('res-' + required[i][0]);
+        if (el) { el.style.borderColor = 'var(--red)'; el.focus(); }
+        return;
+      }
+    }
+    if (!gv('line-clearance')) { window.toast && window.toast('Line Clearance must be confirmed.', 'error'); return; }
+    if (!gv('delivery-cleared')) { window.toast && window.toast('Delivery must be cleared with Management.', 'error'); return; }
+
+    var commenced = gv('commenced');
+    var completed  = gv('completed');
+    var payload = {
+      lot_number:              gv('lot-no') || null,
+      actual_bottles_produced: parseInt(gv('bottles')) || null,
+      actual_cases:            parseInt(gv('cases')) || null,
+      date_commenced:          commenced ? new Date(commenced).toISOString() : null,
+      date_completed:          completed ? new Date(completed).toISOString() : null,
+      actual_job_hours:        parseFloat(gv('hours')) || null,
+      line_clearance_complete: true,
+      liquid_leftover:         parseFloat(gv('liquid-leftover')) || 0,
+      delivery_cleared:        true,
+      results_notes:           gv('notes') || null,
+      results_signed_by:       gv('signed-by') || null,
+      results_signed_at:       gv('signed-at') ? gv('signed-at') + 'T00:00:00Z' : null
+    };
+    try {
+      await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, payload);
+      window.toast && window.toast('Results saved.', 'success');
+      await loadJobs();
+    } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
 
   // ── LIQUID SIGN-OFF (5.02.02) ──────────────────────────────────────────────
@@ -12884,101 +13189,144 @@ window.saveAdjModal = async function() {
       var d = rows[0] || {};
 
       var inp = function(id, val, placeholder, type, readonly) {
-        return '<input type="' + (type||'text') + '" id="lso-' + id + '" value="' + (val!=null?String(val).replace(/"/g,''):'') + '" placeholder="' + (placeholder||'') + '"'
-          + (readonly?' readonly style="background:rgba(13,27,42,0.4);border:1px solid var(--navy-border);color:var(--muted);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"'
-                    :' style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"')
-          + '>';
+        var style = readonly
+          ? 'background:rgba(13,27,42,0.4);border:1px solid var(--navy-border);color:var(--muted);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;'
+          : 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;';
+        return '<input type="' + (type||'text') + '" id="lso-' + id + '" value="'
+          + (val!=null?String(val).replace(/"/g,'&quot;'):'') + '" placeholder="' + (placeholder||'') + '"'
+          + (readonly ? ' readonly' : '') + ' style="' + style + '">';
       };
-      var row = function(label, input, fromJob) {
-        return '<tr><td style="font-size:12px;color:var(--muted);padding:8px 12px 8px 0;white-space:nowrap;width:240px;">'
-          + label + (fromJob ? ' <span style="font-size:9px;color:var(--blue);letter-spacing:0.05em;">FROM JOB</span>' : '')
-          + '</td><td style="padding:6px 0;">' + input + '</td></tr>';
+      var frow = function(label, inputHtml, hint) {
+        return '<div style="display:grid;grid-template-columns:240px 1fr;gap:12px;align-items:start;padding:10px 0;border-bottom:1px solid var(--navy-border);">'
+          + '<div style="font-size:12px;color:var(--muted);padding-top:8px;">' + label + '</div>'
+          + '<div>' + inputHtml + (hint ? '<div style="font-size:10px;color:var(--blue);margin-top:3px;">' + hint + '</div>' : '') + '</div></div>';
       };
-      var info = function(label, val) {
-        return '<tr><td style="font-size:12px;color:var(--muted);padding:8px 12px 8px 0;white-space:nowrap;width:240px;">' + label + '</td>'
-          + '<td style="font-size:13px;font-weight:600;color:var(--white);padding:8px 0;">' + (val||'—') + '</td></tr>';
+      var cbRow = function(id, label, checked, hint) {
+        return frow(label,
+          '<label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding-top:6px;">'
+          + '<input type="checkbox" id="lso-' + id + '"' + (checked ? ' checked' : '')
+          + ' style="width:16px;height:16px;accent-color:var(--green);">'
+          + '<span style="font-size:13px;color:var(--white);">Confirmed</span></label>', hint);
+      };
+      var sec = function(t) {
+        return '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:20px 0 10px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">' + t + '</div>';
       };
 
-      var html = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:16px;font-weight:700;">5.02.02 Liquid Sign-Off Document</div>';
-
-      // Header summary
-      html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:20px;">'
-        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Job No</div><div style="font-size:14px;font-weight:700;color:var(--gold);">' + jobId + '</div></div>'
-        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Product</div><div style="font-size:12px;color:var(--white);">' + (j?j.product_name:'') + '</div></div>'
-        + '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Stage</div><div style="font-size:12px;color:var(--white);">' + (j?j.stage:'') + '</div></div>'
-        + '</div>';
-
-      // Pre-populated from job (read-only) + confirmation fields
-      html += '<div class="inv-section-title">Yield Details <span style="font-size:10px;font-weight:400;color:var(--blue);letter-spacing:0.05em;text-transform:none;margin-left:8px;">Pre-filled from job</span></div>';
-      html += '<table style="width:100%;border-collapse:collapse;margin-bottom:20px;">';
-      html += info('Target bottles', j && j.bottle_target ? j.bottle_target.toLocaleString() + ' bottles' : null);
-      html += info('Litres sent in', j && j.liquid_litres ? j.liquid_litres + ' L' : null);
-      html += info('ABV of liquid sent in', j && j.abv_in ? j.abv_in + '%' : null);
-      html += info('Bottling ABV', j && j.bottling_abv ? j.bottling_abv + '%' : null);
-      html += info('Dilution required', j && j.dilution ? '<span style="color:var(--amber);">Yes</span>' : 'No');
-      html += info('Water required', j && j.water_required ? j.water_required + ' L' : '0 L');
-      html += info('Final litres at bottling strength', j && j.final_litres ? j.final_litres + ' L' : null);
-      html += info('Chill filtration', j && j.chill_filtration ? '<span style="color:var(--amber);">Yes</span>' : 'No');
-      html += info('Colouring required', j && j.colouring ? '<span style="color:var(--amber);">Yes</span>' : 'No');
-      html += '</table>';
-
-      // What the Warehouse & Liquid Manager actually fills in
-      html += '<div class="inv-section-title">Liquid Manager Confirmation</div>';
-      html += '<table style="width:100%;border-collapse:collapse;margin-bottom:20px;">';
-      html += row('Liquid on site', '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="lso-liquid-on-site"' + (d.liquid_on_site?' checked':'') + '><span style="font-size:12px;color:var(--white);">Confirmed on site</span></label>');
-      html += row('LH recorded ABV (%)', inp('abv-actual', d.abv_in, '', 'number'));
-      html += row('LH ABV matches warrant', '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="lso-abv-match"' + (d.abv_matches_warrant?' checked':'') + '><span style="font-size:12px;color:var(--white);">Matches</span></label>');
-      html += row('CBW Rotations', inp('cbw', d.cbw_rotations, 'e.g. 12'));
-      if (j && j.dilution) {
-        html += row('Actual water added (L)', inp('water-actual', d.water_required, '', 'number'));
-      }
-      if (j && j.colouring) {
-        html += row('Actual caramel / colour added', inp('caramel-actual', d.colour_spec, 'e.g. 250ml E150a'));
-        html += row('Colouring complete', '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="lso-colouring-done"' + (d.colouring_complete==='yes'?' checked':'') + '><span style="font-size:12px;color:var(--white);">Done</span></label>');
-      }
-      if (j && j.chill_filtration) {
-        html += row('Chill filtration complete', '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="lso-chill-done"' + (d.chill_filtration_done==='yes'?' checked':'') + '><span style="font-size:12px;color:var(--white);">Done</span></label>');
-      }
-      html += '</table>';
-
-      // Sign-off
-      html += '<div class="inv-section-title">Sign-Off — Warehouse &amp; Liquid Manager</div>';
-      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;">'
-        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Name</label>' + inp('signed-by', d.signed_by, 'Your name') + '</div>'
-        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Date &amp; Time</label><input type="datetime-local" id="lso-signed-at" value="' + (d.signed_at ? d.signed_at.slice(0,16) : '') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"></div>'
-        + '</div>';
+      var abvIn = j && j.abv_in ? j.abv_in + '%' : null;
 
       var lsoBtnId = d.id||'';
+      var alreadySigned = !!(d.signed_by && d.signed_at);
+
+      var signedBlock = alreadySigned
+        ? '<div style="background:rgba(61,186,120,0.12);border:1px solid var(--green);border-radius:6px;padding:10px 16px;display:flex;align-items:center;gap:10px;">'
+          + '<span style="color:var(--green);font-size:16px;">&#10003;</span>'
+          + '<div><div style="font-size:12px;font-weight:700;color:var(--green);">Signed Off</div>'
+          + '<div style="font-size:11px;color:var(--muted);">By ' + d.signed_by + ' on ' + new Date(d.signed_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) + '</div></div>'
+          + '</div>'
+        : '<button id="lso-signoff-btn" disabled style="background:var(--navy-border);border:none;color:var(--muted);font-size:12px;padding:8px 18px;border-radius:4px;cursor:not-allowed;font-family:Lato,sans-serif;font-weight:700;">Sign Off</button>';
+
+      var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">'
+        + '<div style="font-size:14px;font-weight:700;color:var(--white);">Liquid Sign-Off</div>'
+        + '<div style="display:flex;gap:8px;align-items:center;">'
+        + '<button data-job="' + jobId + '" onclick="window.printLiquidSignoff(this.dataset.job)" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#128424; Print</button>'
+        + signedBlock
+        + '</div></div>';
+
+      // Pre-filled from job
+      html += sec('From Job — Reference Values');
+      html += frow('Target bottles', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j && j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—') + '</span>');
+      html += frow('Litres sent in', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j && j.liquid_litres ? j.liquid_litres + ' L' : '—') + '</span>');
+      html += frow('ABV of liquid sent in', '<span style="font-size:13px;color:var(--amber);font-weight:700;">' + (abvIn || '—') + '</span>');
+      html += frow('Dilution required', '<span style="font-size:13px;font-weight:600;color:' + (j&&j.dilution?'var(--amber)':'var(--muted)') + ';">' + (j&&j.dilution?'Yes — water required: ' + (j.water_required||'—') + ' L':'No') + '</span>');
+      if (j && j.dilution) html += frow('Final litres after dilution', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j.final_litres ? j.final_litres + ' L' : '—') + '</span>');
+      html += frow('Chill filtration required', '<span style="font-size:13px;font-weight:600;color:' + (j&&j.chill_filtration?'var(--amber)':'var(--muted)') + ';">' + (j&&j.chill_filtration?'Yes':'No') + '</span>');
+      if (j && j.colouring) html += frow('Colouring required', '<span style="font-size:13px;font-weight:600;color:var(--amber);">Yes</span>');
+
+      // Liquid manager fills in
+      html += sec('Liquid Manager Confirmation');
+      html += cbRow('liquid-on-site', 'Liquid on site', !!d.liquid_on_site);
+      html += frow('LH recorded ABV of liquid received (%)',
+        inp('abv-actual', d.abv_in, 'Enter measured ABV', 'number'),
+        abvIn ? 'Expected: ' + abvIn + ' (as per job)' : null);
+      html += cbRow('abv-match', 'ABV matches warrant', !!d.abv_matches_warrant);
+      html += frow('CBW Rotations', inp('cbw', d.cbw_rotations, 'e.g. 12'));
+
+      if (j && j.dilution) {
+        html += sec('Dilution');
+        html += frow('Litres started with', inp('litres-start', d.litres_in || j.liquid_litres, 'e.g. 500', 'number'));
+        html += frow('Actual water added (L)', inp('water-actual', d.water_required, 'e.g. 145.2', 'number'));
+        html += frow('Final batch litres (after dilution)',
+          inp('final-batch', d.final_litres || j.final_litres, 'e.g. 645.2', 'number'),
+          'Should be: ' + (j.final_litres ? j.final_litres + ' L' : '—'));
+        html += cbRow('dilution-done', 'Dilution complete', d.dilution_complete === 'yes');
+      }
+
+      if (j && j.chill_filtration) {
+        html += sec('Chill Filtration');
+        html += cbRow('chill-done', 'Chill filtration complete', d.chill_filtration_done === 'yes');
+      }
+
+      if (j && j.colouring) {
+        html += sec('Colouring');
+        html += frow('Actual caramel / colour added', inp('caramel-actual', d.colour_spec, 'e.g. 250 ml E150a'),
+          'Must be added after dilution');
+        html += cbRow('colouring-done', 'Colouring complete', d.colouring_complete === 'yes');
+      }
+
+      // Name field only shown when not yet signed
+      if (!alreadySigned) {
+        html += sec('Sign Off');
+        html += frow('Your Name',
+          '<input type="text" id="lso-signed-by" value="' + (d.signed_by||'') + '" placeholder="Enter your name to enable sign-off" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;">',
+          'Once signed off, this document locks and the task completes automatically');
+      }
+
       el.innerHTML = html;
-      var lsoDiv = document.createElement('div');
-      lsoDiv.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;';
-      var lsoBtn = document.createElement('button');
-      lsoBtn.className = 'btn btn-gold';
-      lsoBtn.textContent = 'Save Sign-Off';
-      lsoBtn.onclick = function(){ window.saveLiquidSignoff(jobId, lsoBtnId); };
-      lsoDiv.appendChild(lsoBtn);
-      el.appendChild(lsoDiv);
+
+      // Wire sign-off button — enable when name entered
+      var signBtn = document.getElementById('lso-signoff-btn');
+      if (signBtn && !alreadySigned) {
+        function checkSignReady() {
+          var nameEl = document.getElementById('lso-signed-by');
+          var ready = nameEl && nameEl.value.trim().length > 1;
+          signBtn.disabled = !ready;
+          signBtn.style.background = ready ? 'var(--gold)' : 'var(--navy-border)';
+          signBtn.style.color = ready ? 'var(--navy-dark)' : 'var(--muted)';
+          signBtn.style.cursor = ready ? 'pointer' : 'not-allowed';
+          signBtn.textContent = ready ? 'Sign Off ✓' : 'Sign Off';
+        }
+        var nameInp = document.getElementById('lso-signed-by');
+        if (nameInp) nameInp.addEventListener('input', checkSignReady);
+        // Also update button when any field changes
+        el.querySelectorAll('input, select').forEach(function(inp) {
+          inp.addEventListener('change', checkSignReady);
+        });
+        checkSignReady();
+        signBtn.onclick = function() { if (!signBtn.disabled) window.saveLiquidSignoff(jobId, lsoBtnId); };
+      }
 
     } catch(e) {
       el.innerHTML = '<div style="color:var(--red);font-size:12px;">Error: ' + e.message + '</div>';
     }
   }
-
   window.saveLiquidSignoff = async function(jobId, existingId) {
-    var gv = function(id) { var e = document.getElementById('lso-'+id); return e ? (e.type==='checkbox' ? e.checked : e.value.trim()) : null; };
+    var gv = function(id) { var e = document.getElementById('lso-'+id); return e?(e.type==='checkbox'?e.checked:e.value.trim()):null; };
     var j = _jobs.find(function(x){ return x.id === jobId; })||{};
     var payload = {
-      job_id: jobId,
-      abv_in: parseFloat(gv('abv-actual'))||null,
+      job_id:              jobId,
+      abv_in:              parseFloat(gv('abv-actual'))||null,
       abv_matches_warrant: !!(document.getElementById('lso-abv-match')||{}).checked,
-      cbw_rotations: gv('cbw')||null,
-      liquid_on_site: !!(document.getElementById('lso-liquid-on-site')||{}).checked,
-      water_required: j.dilution ? parseFloat(gv('water-actual'))||null : null,
-      colour_spec: j.colouring ? gv('caramel-actual')||null : null,
-      colouring_complete: j.colouring ? ((document.getElementById('lso-colouring-done')||{}).checked ? 'yes' : 'no') : null,
+      cbw_rotations:       gv('cbw')||null,
+      liquid_on_site:      !!(document.getElementById('lso-liquid-on-site')||{}).checked,
+      litres_in:           j.dilution ? parseFloat(gv('litres-start'))||null : null,
+      water_required:      j.dilution ? parseFloat(gv('water-actual'))||null : null,
+      final_litres:        j.dilution ? parseFloat(gv('final-batch'))||null : null,
+      dilution_complete:   j.dilution ? ((document.getElementById('lso-dilution-done')||{}).checked ? 'yes' : 'no') : null,
       chill_filtration_done: j.chill_filtration ? ((document.getElementById('lso-chill-done')||{}).checked ? 'yes' : 'no') : null,
-      signed_by: gv('signed-by')||null,
-      signed_at: (document.getElementById('lso-signed-at')||{}).value || null
+      colour_spec:         j.colouring ? gv('caramel-actual')||null : null,
+      colouring_complete:  j.colouring ? ((document.getElementById('lso-colouring-done')||{}).checked ? 'yes' : 'no') : null,
+      signed_by:           gv('signed-by')||null,
+      signed_at:           new Date().toISOString()
     };
     try {
       if (existingId) {
@@ -12987,8 +13335,33 @@ window.saveAdjModal = async function() {
         await supaMut('POST', 'job_liquid_signoff', '', payload);
       }
       window.toast && window.toast('Liquid sign-off saved.', 'success');
+      await window.autoCompleteTask(jobId, 'liquid_signoff');
       loadLiquidTab(jobId);
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
+  };
+
+  window.printLiquidSignoff = function(jobId) {
+    var j = _jobs.find(function(x){ return x.id === jobId; });
+    var el = document.getElementById('jd-liquid-content');
+    if (!el || !j) return;
+    var inner = el.innerHTML;
+    // Remove buttons
+    inner = inner.replace(/<button[^>]*>[\s\S]*?<\/button>/g, '');
+    var win = window.open('','_blank','width=860,height=1100');
+    win.document.write('<!DOCTYPE html><html><head><title>Liquid Sign-Off — ' + jobId + '</title>'
+      + '<style>body{font-family:Arial,sans-serif;padding:32px;color:#111;font-size:13px;}'
+      + 'input,select,textarea{border:1px solid #999!important;background:#f9f9f9!important;color:#111!important;}'
+      + 'input[type=checkbox]{width:14px;height:14px;}'
+      + '@media print{body{padding:16px;}}</style></head>'
+      + '<body><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;padding-bottom:12px;border-bottom:3px solid #c9a84c;">'
+      + '<div><div style="font-size:20px;font-weight:700;color:#0d3349;">Liquid Sign-Off</div>'
+      + '<div style="font-size:11px;color:#666;margin-top:2px;">Lighthouse Drinks Ltd · ' + (j.product_name||'') + '</div></div>'
+      + '<div style="border:2px solid #c9a84c;padding:8px 16px;border-radius:4px;text-align:right;">'
+      + '<div style="font-size:10px;color:#666;">Job No</div>'
+      + '<div style="font-size:18px;font-weight:700;color:#c9a84c;font-family:monospace;">' + jobId + '</div></div></div>'
+      + inner
+      + '<script>window.onload=function(){window.print();}<\/script></body></html>');
+    win.document.close();
   };
 
   // ── DRY GOODS PREPARATION (5.02.15) ────────────────────────────────────────
@@ -13148,7 +13521,7 @@ window.saveAdjModal = async function() {
     try {
       var checks = await supaGet('job_quality_checks?job_id=eq.' + jobId + '&order=check_round.asc,check_type.asc');
 
-      var html = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;font-weight:700;">5.02.18 Quality Checklist</div>';
+      var html = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;font-weight:700;">Quality Checklist</div>';
       html += '<div style="font-size:12px;color:var(--muted);margin-bottom:16px;">Checks: 10 min after job start, after each break, start of each new day. Final check at end of job with random bottle.</div>';
 
       // Header
@@ -13276,6 +13649,7 @@ window.saveAdjModal = async function() {
 
       await supaMut('POST','job_quality_checks','', payload);
       window.toast && window.toast('Quality check round ' + nextRound + ' saved.','success');
+      await window.autoCompleteTask(jobId, 'quality');
       loadQualityTab(jobId);
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
@@ -13402,6 +13776,7 @@ window.saveAdjModal = async function() {
       payload.completed_by = (window.CURRENT_USER && window.CURRENT_USER.email) || '';
       await supaMut('POST','job_weights_measures','', payload);
       window.toast && window.toast('Sample batch ' + nextBatch + ' recorded.', payload.satisfactory ? 'success' : 'error');
+      await window.autoCompleteTask(jobId, 'weights_measures');
       loadWeightsTab(jobId);
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
@@ -13488,7 +13863,13 @@ window.saveAdjModal = async function() {
         var cb = document.createElement('button');
         cb.textContent = 'Mark Complete';
         cb.style.cssText = 'background:transparent;border:1px solid var(--green);color:var(--green);font-size:11px;padding:5px 12px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;';
-        cb.onclick = function(e){ e.stopPropagation(); window.completeTask(t.id); };
+        (function(task) {
+          cb.onclick = async function(e){
+            e.stopPropagation();
+            var ok = await window.checkTaskDocDone(task);
+            if (ok) window.completeTask(task.id);
+          };
+        })(t);
         actions.appendChild(cb);
       }
 
