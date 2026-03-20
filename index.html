@@ -2156,6 +2156,13 @@ function showDashboard(user) {
     cogBtn.style.display = (user.role === 'managing_director' || user.role === 'operations_director') ? 'inline-flex' : 'none';
   }
 
+  // Clock button — all staff
+  var clockBtn = document.getElementById('header-clock-btn');
+  if (clockBtn && user.role !== 'client') {
+    clockBtn.style.display = '';
+    setTimeout(function(){ window.initHeaderClock && window.initHeaderClock(); }, 500);
+  }
+
   // Trigger KPI loads
   setTimeout(function() {
     if (typeof window.loadCaskKPI      === 'function') window.loadCaskKPI();
@@ -2427,55 +2434,146 @@ async function loadPortalData(clientId) {
 }
 
 // ── Invite modal ─────────────────────────────────────────────────────────────
+window._resendKey = '';
+
 window.openInviteModal = function() {
+  // Populate client dropdown
   var sel = document.getElementById('inv-client-select');
   if (sel && window._clients && window._clients.length) {
     sel.innerHTML = '<option value="">— Select client —</option>';
-    window._clients.filter(function(c){return !c.is_internal;}).sort(function(a,b){return (a.name||'').localeCompare(b.name||'');}).forEach(function(c){
-      var opt=document.createElement('option'); opt.value=c.id; opt.textContent=c.name; sel.appendChild(opt);
+    window._clients.filter(function(cl){return !cl.is_internal;}).sort(function(a,b){return (a.name||'').localeCompare(b.name||'');}).forEach(function(cl){
+      var opt=document.createElement('option'); opt.value=cl.id; opt.textContent=cl.name; sel.appendChild(opt);
     });
   }
-  var roleSel = document.getElementById('inv-role-select'); if(roleSel) roleSel.value='operations_director'; window.selectInviteRole('operations_director');
-  document.getElementById('invite-link-box').textContent='Click “Generate” to create a link…';
-  document.getElementById('inv-copy-btn').style.display='none';
+  // Reset form
+  var fields = ['inv-first-name','inv-last-name','inv-email'];
+  fields.forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
+  var roleSel=document.getElementById('inv-role-select'); if(roleSel) roleSel.value='';
+  var statusEl=document.getElementById('inv-status'); if(statusEl) statusEl.textContent='';
+  var copyBtn=document.getElementById('inv-copy-btn'); if(copyBtn) copyBtn.style.display='none';
+  // Show saved Resend key hint
+  var rkEl=document.getElementById('inv-resend-key'); if(rkEl) rkEl.value=window._resendKey||'';
   document.getElementById('invite-modal-overlay').classList.add('open');
 };
-window.closeInviteModal = function() { document.getElementById('invite-modal-overlay').classList.remove('open'); };
+
+window.closeInviteModal = function() {
+  document.getElementById('invite-modal-overlay').classList.remove('open');
+};
+
 window.selectInviteRole = function(role) {
-  // role dropdown — no toggle buttons to update
-  var cr = document.getElementById('inv-client-row');
-  if (cr) cr.classList.toggle('show', role==='client');
-  document.getElementById('invite-link-box').textContent='Click “Generate” to create a link…';
-  document.getElementById('inv-copy-btn').style.display='none';
-  window._inviteRole = role;
+  var cr=document.getElementById('inv-client-row');
+  if(cr) cr.style.display=(role==='client')?'':'none';
+  window._inviteRole=role;
 };
-window._inviteRole = 'operations_director';
-window.generateInviteLink = function() {
-  var role=window._inviteRole, clientId=null, clientName=null;
-  if (role==='client') {
-    var sel=document.getElementById('inv-client-select');
-    clientId=sel?sel.value:null;
-    if (!clientId){alert('Please select a client account.');return;}
-    clientName=sel.options[sel.selectedIndex].textContent;
+window._inviteRole='';
+
+window.sendInviteEmail = async function() {
+  var firstName=(document.getElementById('inv-first-name').value||'').trim();
+  var lastName =(document.getElementById('inv-last-name').value||'').trim();
+  var email    =(document.getElementById('inv-email').value||'').trim().toLowerCase();
+  var role     =(document.getElementById('inv-role-select').value||'').trim();
+  var resendKey=(window._resendKey||'').trim();
+  var statusEl =document.getElementById('inv-status');
+
+  // Validate
+  if(!firstName||!lastName){statusEl.textContent='Please enter first and last name.';statusEl.style.color='var(--red)';return;}
+  if(!email||!email.includes('@')){statusEl.textContent='Please enter a valid email address.';statusEl.style.color='var(--red)';return;}
+  if(!role){statusEl.textContent='Please select a role.';statusEl.style.color='var(--red)';return;}
+  if(!resendKey){statusEl.textContent='No Resend API key found. Add it in Settings → System.';statusEl.style.color='var(--red)';return;}
+
+  var clientId=null, clientName=null;
+  if(role==='client'){
+    var csel=document.getElementById('inv-client-select');
+    clientId=csel?csel.value:null;
+    if(!clientId){statusEl.textContent='Please select a client account.';statusEl.style.color='var(--red)';return;}
+    clientName=csel.options[csel.selectedIndex].textContent;
   }
-  var payload={role:role,client_id:clientId,client_name:clientName,exp:Date.now()+(7*24*60*60*1000),nonce:Math.random().toString(36).substr(2,9)};
+
+  statusEl.textContent='Generating invite link…';statusEl.style.color='var(--muted)';
+
+  // Generate token
+  var payload={role:role,client_id:clientId,client_name:clientName,first_name:firstName,last_name:lastName,email:email,exp:Date.now()+(7*24*60*60*1000),nonce:Math.random().toString(36).substr(2,9)};
   var token=btoa(JSON.stringify(payload));
-  var link='https://pulse.lighthousedrinks.com'+'?invite='+encodeURIComponent(token);
-  document.getElementById('invite-link-box').textContent=link;
-  document.getElementById('inv-copy-btn').style.display='inline-block';
-  if (window._sb) {
-    window._sb.auth.getSession().then(function(sr){
-      var at=(sr.data&&sr.data.session&&sr.data.session.access_token)||SUPA_KEY;
-      fetch(SUPA_URL+'/rest/v1/invite_tokens',{method:'POST',headers:{'apikey':SUPA_KEY,'Authorization':'Bearer '+at,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify({token:token,role:role,client_id:clientId,expires_at:new Date(payload.exp).toISOString(),created_by:window.CURRENT_USER?window.CURRENT_USER.email:null})}).catch(function(){});
+  var link='https://pulse.lighthousedrinks.com?invite='+encodeURIComponent(token);
+
+  // Save to invite_tokens
+  try {
+    var t=await window._sb.auth.getSession();
+    var at=(t.data&&t.data.session&&t.data.session.access_token)||'';
+    await fetch('https://anhawgzgxoywophqbmji.supabase.co/rest/v1/invite_tokens',{
+      method:'POST',
+      headers:{apikey:'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs',Authorization:'Bearer '+at,'Content-Type':'application/json',Prefer:'return=minimal'},
+      body:JSON.stringify({token:token,role:role,client_id:clientId,expires_at:new Date(payload.exp).toISOString(),created_by:window.CURRENT_USER?window.CURRENT_USER.email:null,first_name:firstName,last_name:lastName,invitee_email:email})
     });
+  } catch(e){console.warn('Token save error:',e);}
+
+  // Also pre-create app_users record so name/role is ready when they sign up
+  try {
+    var t2=await window._sb.auth.getSession();
+    var at2=(t2.data&&t2.data.session&&t2.data.session.access_token)||'';
+    await fetch('https://anhawgzgxoywophqbmji.supabase.co/rest/v1/pending_invites',{
+      method:'POST',
+      headers:{apikey:'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs',Authorization:'Bearer '+at2,'Content-Type':'application/json',Prefer:'return=minimal'},
+      body:JSON.stringify({email:email,first_name:firstName,last_name:lastName,role:role,client_id:clientId,invite_token:token,created_at:new Date().toISOString()})
+    });
+  } catch(e){console.warn('Pending invite save:',e);}
+
+  // Send email via Resend
+  statusEl.textContent='Sending invite email…';
+  try {
+    var roleLabels={managing_director:'Managing Director',operations_director:'Operations Director',quality_compliance:'Quality & Compliance Manager',financial_controller:'Financial Controller',production_manager:'Production Manager',warehouse_liquid:'Warehouse & Liquid Manager',client_coordinator:'Client Coordinator',production_operator:'Production Operator',client:'Client'};
+    var emailBody='<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#f9f9f9;">'
+      +'<div style="background:#0d1b2a;padding:24px;border-radius:8px;text-align:center;margin-bottom:24px;">'
+      +'<h1 style="color:#c9a84c;font-size:20px;margin:0;">Lighthouse Drinks</h1>'
+      +'<p style="color:#7a93a8;font-size:12px;margin:4px 0 0;">Operations Dashboard</p></div>'
+      +'<h2 style="color:#0d1b2a;font-size:18px;">You&#39;re invited to Pulse, '+firstName+'!</h2>'
+      +'<p style="color:#333;line-height:1.6;">You have been added as <strong>'+( roleLabels[role]||role)+'</strong> on the Lighthouse Drinks Pulse operations platform.</p>'
+      +'<p style="color:#333;line-height:1.6;">Click the button below to set up your account. This link expires in <strong>7 days</strong>.</p>'
+      +'<div style="text-align:center;margin:32px 0;">'
+      +'<a href="'+link+'" style="background:#c9a84c;color:#0d1b2a;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:700;font-size:15px;">Set Up My Account</a></div>'
+      +'<p style="color:#888;font-size:12px;text-align:center;">If you weren&#39;t expecting this, you can ignore this email.</p></div>';
+
+    var res=await fetch('https://api.resend.com/emails',{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+resendKey,'Content-Type':'application/json'},
+      body:JSON.stringify({
+        from:'Pulse by Lighthouse Drinks <'+(window._fromEmail||'noreply@lighthousedrinks.com')+'>',  
+        to:[email],
+        subject:'You are invited to Pulse — Lighthouse Drinks',
+        html:emailBody
+      })
+    });
+    var data=await res.json();
+    if(res.ok){
+      statusEl.textContent='✓ Invite sent to '+email;
+      statusEl.style.color='var(--green)';
+      document.getElementById('inv-copy-btn').style.display='inline-block';
+      window.toast&&window.toast('Invite sent to '+firstName+' '+lastName,'success');
+    } else {
+      statusEl.textContent='Email error: '+(data.message||data.name||'Check your Resend API key');
+      statusEl.style.color='var(--red)';
+      // Still show copy link as fallback
+      document.getElementById('inv-copy-btn').style.display='inline-block';
+    }
+  } catch(e){
+    statusEl.textContent='Email failed: '+e.message+' — use Copy Link instead';
+    statusEl.style.color='var(--amber)';
+    document.getElementById('inv-copy-btn').style.display='inline-block';
   }
 };
+
 window.copyInviteLink = function() {
-  var link=document.getElementById('invite-link-box').textContent;
-  if (!link||link.includes('Click'))return;
+  // Regenerate link from current form values
+  var firstName=(document.getElementById('inv-first-name').value||'').trim();
+  var lastName =(document.getElementById('inv-last-name').value||'').trim();
+  var email    =(document.getElementById('inv-email').value||'').trim().toLowerCase();
+  var role     =window._inviteRole||'';
+  var payload={role:role,first_name:firstName,last_name:lastName,email:email,exp:Date.now()+(7*24*60*60*1000),nonce:Math.random().toString(36).substr(2,9)};
+  var link='https://pulse.lighthousedrinks.com?invite='+encodeURIComponent(btoa(JSON.stringify(payload)));
   navigator.clipboard.writeText(link).then(function(){
-    var btn=document.getElementById('inv-copy-btn');
-    if(btn){btn.textContent='Copied!';setTimeout(function(){btn.textContent='Copy Link';},2000);}
+    window.toast&&window.toast('Link copied to clipboard','success');
+  }).catch(function(){
+    prompt('Copy this link:',link);
   });
 };
 </script>
@@ -2522,6 +2620,7 @@ window.copyInviteLink = function() {
         <div id="dashboard-user-role" style="font-size:11px;color:var(--gold);font-weight:600;letter-spacing:0.04em;margin-top:1px;"></div>
       </div>
       <button class="logout-btn" id="invite-user-btn" onclick="window.openInviteModal()" style="display:none;border-color:var(--gold-dim);color:var(--gold);" title="Generate an invite link for a new user">+ Invite User</button>
+      <button id="header-clock-btn" onclick="window.headerClockAction()" style="display:none;border-color:var(--green);color:var(--green);font-weight:700;" class="logout-btn" title="Clock in or out">&#9654; Clock In</button>
       <button class="logout-btn mob-show" id="scan-btn" onclick="window.openScanner()" style="border-color:var(--gold-dim);color:var(--gold);display:none;align-items:center;gap:5px;" title="Scan QR code"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M0 .5A.5.5 0 0 1 .5 0h3a.5.5 0 0 1 0 1H1v2.5a.5.5 0 0 1-1 0v-3zm12 0a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0V1h-2.5a.5.5 0 0 1-.5-.5zM.5 12a.5.5 0 0 1 .5.5V15h2.5a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5v-3a.5.5 0 0 1 .5-.5zm15 0a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1 0-1H15v-2.5a.5.5 0 0 1 .5-.5z"/></svg> Scan</button>
       <button id="settings-cog-btn" onclick="window.openSettings()" class="logout-btn" style="display:none;border-color:var(--gold-dim);color:var(--gold);" title="Settings">&#9881; Settings</button>
       <button class="logout-btn" onclick="window.doLogout()">Sign out</button>
@@ -10044,105 +10143,6 @@ async function loadGoodsIn() {
 var _inviteRole     = 'operations_director';
 var _inviteClientId = null;
 
-window.openInviteModal = function() {
-  // Populate client dropdown
-  var sel = document.getElementById('inv-client-select');
-  if (sel && window._clients && window._clients.length) {
-    sel.innerHTML = '<option value="">— Select client —</option>';
-    window._clients
-      .filter(function(c) { return !c.is_internal; })
-      .sort(function(a,b) { return (a.name||'').localeCompare(b.name||''); })
-      .forEach(function(c) {
-        var opt = document.createElement('option');
-        opt.value = c.id; opt.textContent = c.name;
-        sel.appendChild(opt);
-      });
-  }
-  // Reset state
-  var roleSel = document.getElementById('inv-role-select'); if(roleSel) roleSel.value='operations_director'; window.selectInviteRole('operations_director');
-  document.getElementById('invite-link-box').textContent = 'Click “Generate” to create a link…';
-  document.getElementById('inv-copy-btn').style.display = 'none';
-  document.getElementById('invite-modal-overlay').classList.add('open');
-};
-
-window.closeInviteModal = function() {
-  document.getElementById('invite-modal-overlay').classList.remove('open');
-};
-
-window.selectInviteRole = function(role) {
-  _inviteRole = role;
-  // role dropdown — no toggle buttons to update
-  var clientRow = document.getElementById('inv-client-row');
-  if (clientRow) clientRow.classList.toggle('show', role === 'client');
-  document.getElementById('invite-link-box').textContent = 'Click “Generate” to create a link…';
-  document.getElementById('inv-copy-btn').style.display = 'none';
-};
-
-window.generateInviteLink = function() {
-  var role = _inviteRole;
-  var clientId   = null;
-  var clientName = null;
-
-  if (role === 'client') {
-    var sel = document.getElementById('inv-client-select');
-    clientId = sel ? sel.value : null;
-    if (!clientId) {
-      alert('Please select a client account for this invite.');
-      return;
-    }
-    clientName = sel.options[sel.selectedIndex].textContent;
-  }
-
-  // Build payload — expires in 7 days
-  var payload = {
-    role:        role,
-    client_id:   clientId,
-    client_name: clientName,
-    exp:         Date.now() + (7 * 24 * 60 * 60 * 1000),
-    iat:         Date.now(),
-    nonce:       Math.random().toString(36).substr(2, 9)
-  };
-
-  var token = btoa(JSON.stringify(payload));
-  var base  = 'https://pulse.lighthousedrinks.com';
-  var link  = base + '?invite=' + encodeURIComponent(token);
-
-  document.getElementById('invite-link-box').textContent = link;
-  document.getElementById('inv-copy-btn').style.display = 'inline-block';
-
-  // Store in Supabase invite_tokens table (best-effort, for audit trail)
-  var sessionPromise = _sb.auth.getSession();
-  sessionPromise.then(function(sessionRes) {
-    var accessToken = (sessionRes.data && sessionRes.data.session && sessionRes.data.session.access_token)
-      || 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-    fetch('https://anhawgzgxoywophqbmji.supabase.co/rest/v1/invite_tokens', {
-      method: 'POST',
-      headers: {
-        'apikey':        'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs',
-        'Authorization': 'Bearer ' + accessToken,
-        'Content-Type':  'application/json',
-        'Prefer':        'return=minimal'
-      },
-      body: JSON.stringify({
-        token:       token,
-        role:        role,
-        client_id:   clientId,
-        expires_at:  new Date(payload.exp).toISOString(),
-        created_by:  window.CURRENT_USER ? window.CURRENT_USER.email : null
-      })
-    }).catch(function(e) { console.warn('invite_tokens insert failed:', e); });
-  });
-};
-
-window.copyInviteLink = function() {
-  var link = document.getElementById('invite-link-box').textContent;
-  if (!link || link.includes('Click')) return;
-  navigator.clipboard.writeText(link).then(function() {
-    var btn = document.getElementById('inv-copy-btn');
-    if (btn) { btn.textContent = 'Copied!'; setTimeout(function() { btn.textContent = 'Copy Link'; }, 2000); }
-  });
-};
-
 // Close on overlay click
 document.getElementById('invite-modal-overlay').addEventListener('click', function(e) {
   if (e.target === this) window.closeInviteModal();
@@ -10221,11 +10221,28 @@ window.loadCaskKPI = async function() {
 <!-- ══ INVITE MODAL ═════════════════════════════════════════════════════════ -->
 <div id="invite-modal-overlay">
   <div class="invite-modal-card">
-    <div class="invite-modal-title">Generate Invite Link</div>
-    <div class="invite-modal-sub">The recipient clicks the link to create their account. Role is pre-set.</div>
+    <div class="invite-modal-title">Invite New Employee</div>
+    <div class="invite-modal-sub">Fill in the details below. They'll receive an email with a signup link. Their name, email and role will be pre-set when they join.</div>
 
-    <div class="invite-section-label">Role</div>
-    <select id="inv-role-select" onchange="window.selectInviteRole(this.value)" style="width:100%;padding:9px 12px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;margin-bottom:12px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+      <div>
+        <div class="invite-section-label">First Name <span style="color:var(--red);">*</span></div>
+        <input type="text" id="inv-first-name" placeholder="e.g. Sarah" style="width:100%;padding:9px 12px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;box-sizing:border-box;">
+      </div>
+      <div>
+        <div class="invite-section-label">Last Name <span style="color:var(--red);">*</span></div>
+        <input type="text" id="inv-last-name" placeholder="e.g. Murphy" style="width:100%;padding:9px 12px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;box-sizing:border-box;">
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <div class="invite-section-label">Email Address <span style="color:var(--red);">*</span></div>
+      <input type="email" id="inv-email" placeholder="e.g. sarah@example.com" style="width:100%;padding:9px 12px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;box-sizing:border-box;">
+    </div>
+
+    <div class="invite-section-label">Role <span style="color:var(--red);">*</span></div>
+    <select id="inv-role-select" onchange="window.selectInviteRole(this.value)" style="width:100%;padding:9px 12px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;margin-bottom:12px;color-scheme:dark;">
+      <option value="">— Select a role —</option>
       <option value="managing_director">Managing Director</option>
       <option value="operations_director">Operations Director</option>
       <option value="quality_compliance">Quality &amp; Compliance Manager</option>
@@ -10237,18 +10254,18 @@ window.loadCaskKPI = async function() {
       <option value="client">Client (Portal Access)</option>
     </select>
 
-    <div class="invite-client-row" id="inv-client-row">
+    <div class="invite-client-row" id="inv-client-row" style="display:none;">
       <div class="invite-section-label">Client Account</div>
-      <select id="inv-client-select" style="width:100%;padding:9px 12px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;">
+      <select id="inv-client-select" style="width:100%;padding:9px 12px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;color-scheme:dark;">
         <option value="">— Select client —</option>
       </select>
     </div>
 
-    <div class="invite-section-label" style="margin-top:20px;">Generated Link</div>
-    <div class="invite-link-box" id="invite-link-box">Click "Generate" to create a link…</div>
 
-    <button class="invite-copy-btn" onclick="window.generateInviteLink()">Generate</button>
-    <button class="invite-copy-btn" id="inv-copy-btn" onclick="window.copyInviteLink()" style="display:none;">Copy Link</button>
+    <div id="inv-status" style="font-size:12px;margin-top:12px;min-height:18px;"></div>
+
+    <button class="invite-copy-btn" onclick="window.sendInviteEmail()" style="margin-top:8px;">Send Invite Email</button>
+    <button class="invite-copy-btn" id="inv-copy-btn" onclick="window.copyInviteLink()" style="display:none;">Copy Link Instead</button>
     <button class="invite-close-btn" onclick="window.closeInviteModal()">Close</button>
   </div>
 </div>
@@ -14176,7 +14193,21 @@ window.saveAdjModal = async function() {
 
       <!-- System tab -->
       <div id="stab-system" class="settings-tab-panel" style="display:none;">
-        <div style="color:var(--muted);font-size:13px;">Additional system settings will appear here.</div>
+        <div style="max-width:420px;">
+          <div style="font-size:13px;font-weight:700;color:var(--white);margin-bottom:16px;">Email Settings</div>
+          <div style="margin-bottom:14px;">
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:5px;">Resend API Key</label>
+            <input type="password" id="sys-resend-key" placeholder="re_xxxxxxxxxxxx" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:4px;font-family:Lato,sans-serif;">
+            <div style="font-size:10px;color:var(--muted);margin-top:4px;">Get from <a href="https://resend.com" target="_blank" style="color:var(--gold);">resend.com</a> &rarr; API Keys. Save once, used for all system emails.</div>
+          </div>
+          <div style="margin-bottom:14px;">
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:5px;">From Address</label>
+            <input type="text" id="sys-from-email" placeholder="noreply@lighthousedrinks.com" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:4px;font-family:Lato,sans-serif;">
+            <div style="font-size:10px;color:var(--muted);margin-top:4px;">Must be from a verified domain in Resend.</div>
+          </div>
+          <button onclick="window.saveSystemSettings()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save Settings</button>
+          <span id="sys-save-status" style="font-size:12px;margin-left:12px;"></span>
+        </div>
       </div>
 
     </div>
@@ -14898,6 +14929,7 @@ window.saveAdjModal = async function() {
     if (tab==='permissions') renderPermissionsMatrix();
     if (tab==='users') renderUsersList();
     if (tab==='geofence') loadGeofenceIntoSettings();
+    if (tab==='system') loadSystemSettings();
   };
 
   // ── Geofence in settings ─────────────────────────────────────────────────────
@@ -14929,6 +14961,55 @@ window.saveAdjModal = async function() {
       window.toast&&window.toast('Geofence settings saved.','success');
     } catch(e){ window.toast&&window.toast('Error: '+e.message,'error'); }
   };
+
+  // ── System settings ──────────────────────────────────────────────────────────
+  async function loadSystemSettings() {
+    try {
+      var rows = await sbGet('app_settings?key=eq.system&limit=1');
+      if (rows.length && rows[0].value) {
+        var s = rows[0].value;
+        var keyEl = document.getElementById('sys-resend-key');
+        var fromEl = document.getElementById('sys-from-email');
+        if (keyEl && s.resend_key) keyEl.value = s.resend_key;
+        if (fromEl && s.from_email) fromEl.value = s.from_email;
+      }
+    } catch(e) { console.warn('System settings load error:', e); }
+  }
+
+  window.saveSystemSettings = async function() {
+    var key  = (document.getElementById('sys-resend-key').value||'').trim();
+    var from = (document.getElementById('sys-from-email').value||'').trim();
+    var statusEl = document.getElementById('sys-save-status');
+    try {
+      var val = JSON.stringify({ resend_key: key, from_email: from });
+      var existing = await sbGet('app_settings?key=eq.system&limit=1');
+      if (existing.length) {
+        await sbPatch('app_settings','?key=eq.system',{value:val,updated_at:new Date().toISOString()});
+      } else {
+        await sbPost('app_settings',{key:'system',value:val});
+      }
+      // Cache for this session
+      window._resendKey  = key;
+      window._fromEmail  = from;
+      if (statusEl) { statusEl.textContent = '✓ Saved'; statusEl.style.color = 'var(--green)'; setTimeout(function(){ statusEl.textContent=''; }, 3000); }
+      window.toast && window.toast('System settings saved.','success');
+    } catch(e) {
+      if (statusEl) { statusEl.textContent = 'Error: '+e.message; statusEl.style.color = 'var(--red)'; }
+    }
+  };
+
+  // Load system settings on app init (so Resend key is available immediately)
+  async function loadSystemSettingsGlobal() {
+    try {
+      var rows = await sbGet('app_settings?key=eq.system&limit=1');
+      if (rows.length && rows[0].value) {
+        var s = rows[0].value;
+        window._resendKey = s.resend_key || '';
+        window._fromEmail = s.from_email || 'noreply@lighthousedrinks.com';
+      }
+    } catch(e) {}
+  }
+  loadSystemSettingsGlobal();
 
   // ── Open/close ───────────────────────────────────────────────────────────────
   window.openSettings = function() {
@@ -14971,6 +15052,116 @@ window.saveAdjModal = async function() {
       attempts++;
     }, 300);
   });
+
+})();
+</script>
+<!-- ══ HEADER CLOCK SCRIPT ══════════════════════════════════════════════════ -->
+<script>
+(function() {
+  'use strict';
+
+  var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
+  var SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+  var _hClockState = 'clocked_out';
+  var _hClockSince = null;
+  var _hTicker     = null;
+
+  async function getToken() {
+    try { var s=await window._sb.auth.getSession(); return (s.data&&s.data.session&&s.data.session.access_token)||SUPA_KEY; }
+    catch(e){ return SUPA_KEY; }
+  }
+
+  async function loadHeaderClockState() {
+    if (!window.CURRENT_USER) return;
+    try {
+      var t = await getToken();
+      var r = await fetch(SUPA_URL+'clock_events?order=timestamp.desc&limit=100',{headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t}});
+      var rows = await r.json();
+      if (!Array.isArray(rows)) rows = [];
+      var uid = window.CURRENT_USER.id || '';
+      var mine = rows.filter(function(x){ return x.user_id === uid; });
+      var last = mine[0] || null;
+      if (!last || last.event_type === 'clock_out') {
+        _hClockState = 'clocked_out'; _hClockSince = null;
+      } else if (last.event_type === 'clock_in') {
+        _hClockState = 'clocked_in'; _hClockSince = last.timestamp;
+      } else if (last.event_type === 'break_start') {
+        _hClockState = 'on_break'; _hClockSince = last.timestamp;
+      }
+      renderHeaderClockBtn();
+    } catch(e) { console.warn('Header clock state error:', e); }
+  }
+
+  function fmtDur(fromStr) {
+    if (!fromStr) return '';
+    var diff = Date.now() - new Date(fromStr).getTime();
+    var h = Math.floor(diff/3600000), m = Math.floor((diff%3600000)/60000);
+    return h > 0 ? h+'h '+m+'m' : m+'m';
+  }
+
+  function renderHeaderClockBtn() {
+    var btn = document.getElementById('header-clock-btn');
+    if (!btn) return;
+    if (_hClockState === 'clocked_in') {
+      var since = _hClockSince ? new Date(_hClockSince).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'}) : '';
+      btn.style.borderColor = 'var(--red)';
+      btn.style.color = 'var(--red)';
+      btn.innerHTML = '&#9646; Clocked In ' + (since ? since : '') + (_hClockSince ? ' &middot; ' + fmtDur(_hClockSince) : '');
+    } else if (_hClockState === 'on_break') {
+      btn.style.borderColor = 'var(--amber)';
+      btn.style.color = 'var(--amber)';
+      btn.innerHTML = '&#9646; On Break &middot; ' + fmtDur(_hClockSince);
+    } else {
+      btn.style.borderColor = 'var(--green)';
+      btn.style.color = 'var(--green)';
+      btn.innerHTML = '&#9654; Clock In';
+    }
+  }
+
+  window.headerClockAction = async function() {
+    if (!window.CURRENT_USER) return;
+    var eventType = (_hClockState === 'clocked_out') ? 'clock_in' : 'clock_out';
+    // Optimistic UI update
+    if (eventType === 'clock_in') {
+      _hClockState = 'clocked_in'; _hClockSince = new Date().toISOString();
+    } else {
+      _hClockState = 'clocked_out'; _hClockSince = null;
+    }
+    renderHeaderClockBtn();
+    try {
+      var t = await getToken();
+      var r = await fetch(SUPA_URL+'clock_events', {
+        method: 'POST',
+        headers: {apikey:SUPA_KEY, Authorization:'Bearer '+t, 'Content-Type':'application/json', Prefer:'return=minimal'},
+        body: JSON.stringify({
+          user_id: window.CURRENT_USER.id,
+          event_type: eventType,
+          within_geofence: false
+        })
+      });
+      if (!r.ok) { var e=await r.json(); throw new Error(e.message||r.statusText); }
+      window.toast && window.toast(eventType==='clock_in'?'Clocked in \u2713':'Clocked out \u2713','success');
+      // Sync People page if open
+      if (typeof window.loadSchedule === 'function') {
+        // refresh clock state in people tab if visible
+        var peoplePage = document.getElementById('page-people');
+        if (peoplePage && peoplePage.classList.contains('active')) {
+          typeof window.initPeoplePage === 'function' && window.initPeoplePage();
+        }
+      }
+    } catch(e) {
+      // Revert optimistic update
+      await loadHeaderClockState();
+      window.toast && window.toast('Error: '+e.message,'error');
+    }
+  };
+
+  window.initHeaderClock = async function() {
+    await loadHeaderClockState();
+    // Tick every 60s to update duration
+    if (_hTicker) clearInterval(_hTicker);
+    _hTicker = setInterval(renderHeaderClockBtn, 60000);
+  };
 
 })();
 </script>
