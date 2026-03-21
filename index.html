@@ -15886,8 +15886,62 @@ window.saveAdjModal = async function() {
     }, 50);
   }
 
+  /* ── Geofence check ──────────────────────────────────────────────────────── */
+  function getDistanceMetres(lat1,lon1,lat2,lon2){
+    var R=6371000,dLat=(lat2-lat1)*Math.PI/180,dLon=(lon2-lon1)*Math.PI/180;
+    var a=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)*Math.sin(dLon/2);
+    return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+  }
+
+  async function checkGeofence(){
+    // Returns {within:bool, distance:num, allowed:bool}
+    // allowed = within fence OR role is in remote-allowed list
+    try {
+      var rows = await sbGet('geofence_settings?id=eq.1&limit=1');
+      var g = rows[0];
+      if(!g||!g.latitude||!g.longitude) return {within:true,allowed:true,unconfigured:true};
+      var role = window.CURRENT_USER&&window.CURRENT_USER.role||'';
+      var remoteRoles = g.allow_remote_roles||[];
+      if(remoteRoles.indexOf(role)>=0) return {within:false,allowed:true,remote:true};
+      // Get device position
+      var pos = await new Promise(function(res,rej){
+        if(!navigator.geolocation){rej(new Error('Geolocation not supported'));return;}
+        navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000,maximumAge:60000});
+      });
+      var dist = getDistanceMetres(pos.coords.latitude,pos.coords.longitude,g.latitude,g.longitude);
+      var within = dist <= (g.radius_metres||200);
+      return {within:within,allowed:within,distance:Math.round(dist),radius:g.radius_metres||200};
+    } catch(e){
+      // Geolocation denied or error — fail open (let them clock, flag it)
+      return {within:false,allowed:true,error:e.message};
+    }
+  }
+
   async function fireClockEvent(eventType) {
     if (!window.CURRENT_USER) return;
+
+    // Only enforce geofence on clock_in
+    if (eventType === 'clock_in') {
+      var btn = document.getElementById('header-clock-btn');
+      if(btn){ btn.textContent = 'Checking\u2026'; btn.disabled = true; }
+      var geo = await checkGeofence();
+      if(btn){ btn.disabled = false; }
+      if(!geo.allowed){
+        renderHeaderClockBtn();
+        window.toast && window.toast(
+          'You are ' + (geo.distance||'?') + 'm from the facility (max ' + geo.radius + 'm). Move closer to clock in.',
+          'error'
+        );
+        return;
+      }
+      if(geo.unconfigured){
+        // Geofence not set up yet — warn admin, allow through
+        if(['managing_director','operations_director'].indexOf(window.CURRENT_USER.role)>=0){
+          window.toast && window.toast('Geofence not configured. Set it in Settings \u2192 Geofence.','info');
+        }
+      }
+    }
+
     // Optimistic update
     if (eventType === 'clock_in')         { _hClockState = 'clocked_in'; _hClockSince = new Date().toISOString(); }
     else if (eventType === 'break_start') { _hClockState = 'on_break';   _hClockSince = new Date().toISOString(); }
@@ -15897,13 +15951,23 @@ window.saveAdjModal = async function() {
     var labels = { clock_in:'Clocked in \u2713', clock_out:'Clocked out \u2713', break_start:'Break started \u2713', break_end:'Break ended \u2713' };
     try {
       var t = await getToken();
+      var withinFence = (typeof geo !== 'undefined') ? !!(geo.within) : false;
       var r = await fetch(SUPA_URL+'clock_events', {
         method: 'POST',
         headers: {apikey:SUPA_KEY, Authorization:'Bearer '+t, 'Content-Type':'application/json', Prefer:'return=minimal'},
-        body: JSON.stringify({ user_id: window.CURRENT_USER.id, event_type: eventType, within_geofence: false })
+        body: JSON.stringify({ user_id: window.CURRENT_USER.id, event_type: eventType, within_geofence: withinFence })
       });
       if (!r.ok) { var e=await r.json(); throw new Error(e.message||r.statusText); }
       window.toast && window.toast(labels[eventType]||'Done','success');
+      /* Refresh timesheet if the clock-in tab is currently visible */
+      try {
+        var ci=document.getElementById('people-clockin');
+        var pu=window.CURRENT_USER&&(window.CURRENT_USER.id);
+        var su=window._selAuth||window._sel;
+        if(ci&&ci.style.display!=='none'&&window.tsLoad&&(!su||su===pu)){
+          window.tsLoad();
+        }
+      } catch(e){}
     } catch(e) {
       await loadHeaderClockState();
       window.toast && window.toast('Error: '+e.message,'error');
@@ -16260,6 +16324,7 @@ window.tsShowDrop=function(v){renderDrop(v||'');};
 window.tsSelect=function(uid){
   var emp=_emps.find(function(e){return e.id===uid;});if(!emp)return;
   _sel=uid;_selAuth=emp.auth_user_id||null;_selName=emp.display_name||'';_selRole=emp.role||'';
+  window._sel=_sel;window._selAuth=_selAuth;
   var inp=document.getElementById('ts-search');if(inp)inp.value=emp.display_name||'';
   var drop=document.getElementById('ts-emp-drop');if(drop)drop.style.display='none';
   document.getElementById('ts-placeholder').style.display='none';
