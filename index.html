@@ -15897,23 +15897,37 @@ window.saveAdjModal = async function() {
     // Returns {within:bool, distance:num, allowed:bool}
     // allowed = within fence OR role is in remote-allowed list
     try {
-      var rows = await sbGet('geofence_settings?id=eq.1&limit=1');
+      var t = await getToken();
+      var gfRes = await fetch(SUPA_URL+'geofence_settings?id=eq.1&limit=1',{headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t}});
+      var rows = await gfRes.json();
+      if(!Array.isArray(rows)) rows=[];
       var g = rows[0];
-      if(!g||!g.latitude||!g.longitude) return {within:true,allowed:true,unconfigured:true};
+      console.log('[GEO] geofence_settings row:', JSON.stringify(g));
+      if(!g||!g.latitude||!g.longitude){
+        console.log('[GEO] Not configured — passing through');
+        return {within:true,allowed:true,unconfigured:true};
+      }
       var role = window.CURRENT_USER&&window.CURRENT_USER.role||'';
       var remoteRoles = g.allow_remote_roles||[];
-      if(remoteRoles.indexOf(role)>=0) return {within:false,allowed:true,remote:true};
+      console.log('[GEO] role='+role+' remoteRoles='+JSON.stringify(remoteRoles));
+      if(remoteRoles.indexOf(role)>=0){
+        console.log('[GEO] Role is remote-allowed — bypassing fence');
+        return {within:false,allowed:true,remote:true};
+      }
       // Get device position
+      console.log('[GEO] Requesting GPS position...');
       var pos = await new Promise(function(res,rej){
         if(!navigator.geolocation){rej(new Error('Geolocation not supported'));return;}
-        navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000,maximumAge:60000});
+        navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000,maximumAge:30000});
       });
       var dist = getDistanceMetres(pos.coords.latitude,pos.coords.longitude,g.latitude,g.longitude);
       var within = dist <= (g.radius_metres||200);
+      console.log('[GEO] Position: '+pos.coords.latitude+','+pos.coords.longitude+' Distance: '+Math.round(dist)+'m Radius: '+(g.radius_metres||200)+'m Within: '+within);
       return {within:within,allowed:within,distance:Math.round(dist),radius:g.radius_metres||200};
     } catch(e){
-      // Geolocation denied or error — fail open (let them clock, flag it)
-      return {within:false,allowed:true,error:e.message};
+      console.log('[GEO] Error in checkGeofence:', e.message);
+      // Fail CLOSED — don't silently allow on error, surface it
+      return {within:false,allowed:false,error:e.message};
     }
   }
 
@@ -15928,10 +15942,11 @@ window.saveAdjModal = async function() {
       if(btn){ btn.disabled = false; }
       if(!geo.allowed){
         renderHeaderClockBtn();
-        window.toast && window.toast(
-          'You are ' + (geo.distance||'?') + 'm from the facility (max ' + geo.radius + 'm). Move closer to clock in.',
-          'error'
-        );
+        if(geo.error){
+          window.toast && window.toast('You are outside the Geofence — please try again when you reach the facility.','error');
+        } else {
+          window.toast && window.toast('You are outside the Geofence — please try again when you reach the facility.','error');
+        }
         return;
       }
       if(geo.unconfigured){
