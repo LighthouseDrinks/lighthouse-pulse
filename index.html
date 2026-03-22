@@ -16409,13 +16409,29 @@ window.lvInit = async function(){
 function lvRenderKPIs(){
   var p=_lvProfile||{};
   var empType=p.employment_type||'full_time';
-  var entitlement=parseFloat(p.leave_entitlement)||20;
+  var fullEntitlement=parseFloat(p.leave_entitlement)||20;
+
+  // Pro-rate if employee joined mid-year (after Jan 1 of current year)
+  function proRate(ent){
+    if(!p.employment_start) return ent;
+    var yr=new Date().getFullYear();
+    var startOfYear=new Date(yr,0,1);
+    var joinDate=new Date(p.employment_start);
+    if(joinDate<=startOfYear) return ent; // joined before or on Jan 1 — full entitlement
+    var endOfYear=new Date(yr,11,31);
+    var totalDays=(endOfYear-startOfYear)/(1000*60*60*24);
+    var remainingDays=(endOfYear-joinDate)/(1000*60*60*24);
+    var fraction=remainingDays/totalDays;
+    return Math.ceil(ent*fraction); // round up to nearest whole day
+  }
+
+  var entitlement=proRate(fullEntitlement);
 
   // For part-time: 8% of hours worked this calendar year from clock_events
   if(empType==='part_time'){
     lvCalcPartTimeEntitlement().then(function(hrs){
-      var accrued=Math.round(hrs*0.08*2)/2; // round to nearest 0.5
-      setKPIs(accrued);
+      var accrued=Math.round(hrs*0.08*2)/2;
+      setKPIs(proRate(accrued));
     });
   } else {
     setKPIs(entitlement);
@@ -16474,7 +16490,7 @@ function lvRenderHistory(){
       +'<td style="text-align:center;color:var(--white);">'+(days%1===0?days:days.toFixed(1))+'</td>'
       +'<td style="text-align:center;color:var(--muted);">'+(r.leave_type==='half_day'?'Half':'Full')+'</td>'
       +'<td style="text-align:right;"><span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:'+sc+';">'+r.status+'</span>'
-      +(r.status==='pending'?' <button onclick="window.lvCancel(\''+r.id+'\')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:10px;margin-left:4px;">✕</button>':'')
+      +((r.status==='pending'||r.status==='approved')?' <button onclick="window.lvCancel(\''+r.id+'\',\''+r.status+'\')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:10px;margin-left:6px;" title="Cancel this request">✕</button>':'')
       +'</td>'
       +'</tr>';
   });
@@ -16590,10 +16606,33 @@ async function lvSendApprovalEmail(appId,from,to,days,leaveType,notes){
 }
 
 /* ── Cancel own pending request ── */
-window.lvCancel = async function(id){
-  var t=await tok();
-  await fetch(SU+'leave_requests?id=eq.'+id,{method:'PATCH',headers:{apikey:SK,Authorization:'Bearer '+t,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify({status:'cancelled'})});
-  window.lvInit();
+window.lvCancel = async function(id, currentStatus){
+  var msg = currentStatus==='approved'
+    ? 'This leave has already been approved. Cancel it anyway?\nThe days will be returned to your balance.'
+    : 'Cancel this leave request?';
+
+  // Styled in-app confirmation modal
+  var ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(5,12,20,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML='<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px 28px 22px;max-width:380px;width:100%;">'
+    +'<div style="font-size:14px;font-weight:700;color:var(--white);margin-bottom:10px;">Cancel Leave Request</div>'
+    +'<div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:22px;">'+msg.replace('\n','<br>')+'</div>'
+    +'<div style="display:flex;gap:10px;justify-content:flex-end;">'
+    +'<button id="_lvcX" style="padding:8px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">Keep</button>'
+    +'<button id="_lvcOK" style="padding:8px 18px;background:var(--red);border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">Cancel Leave</button>'
+    +'</div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#_lvcX').onclick = function(){ ov.remove(); };
+  ov.onclick = function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#_lvcOK').onclick = async function(){
+    ov.remove();
+    var t=await tok();
+    var res=await fetch(SU+'leave_requests?id=eq.'+id,{method:'PATCH',headers:{apikey:SK,Authorization:'Bearer '+t,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify({status:'cancelled'})});
+    if(!res.ok){ window.toast&&window.toast('Error cancelling leave. Please try again.','error'); return; }
+    window.toast&&window.toast('Leave cancelled. Days returned to your balance.','success');
+    _lvRequests=[]; // force fresh fetch
+    setTimeout(window.lvInit, 400); // small delay to ensure DB commit
+  };
 };
 
 /* ── Manager approval view ── */
