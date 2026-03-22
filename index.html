@@ -16940,6 +16940,30 @@ function renderRoster(){
   var grid=document.getElementById('roster-grid');if(!grid) return;
   var days=wdays(_wo),today=new Date();today.setHours(0,0,0,0);
   var canEdit=isAdm();
+
+  // Check if this week is already published
+  var isPublished=Object.values(_roster).some(function(s){return s.pub;});
+  var pubBtn=document.getElementById('roster-publish-btn');
+  var pubBadge=document.getElementById('roster-published-badge');
+  if(pubBtn){
+    // Always keep publish button active
+    pubBtn.innerHTML='&#9993; Publish';
+    pubBtn.style.background='';
+    pubBtn.style.border='';
+    pubBtn.style.color='';
+    pubBtn.style.cursor='pointer';
+    pubBtn.onclick=window.rosterPublish;
+    // Show/hide published badge next to button
+    var badge=document.getElementById('roster-published-badge');
+    if(!badge){
+      badge=document.createElement('span');
+      badge.id='roster-published-badge';
+      badge.style.cssText='font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:4px 10px;border-radius:3px;background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.3);color:var(--green);';
+      pubBtn.parentNode.insertBefore(badge, pubBtn);
+    }
+    badge.style.display=isPublished?'inline-block':'none';
+    badge.textContent='\u2713 Published';
+  }
   var h='<table style="width:100%;border-collapse:collapse;min-width:600px;"><thead><tr><th style="padding:10px 14px;text-align:left;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);border-bottom:2px solid var(--navy-border);min-width:140px;">Employee</th>';
   days.forEach(function(d,i){var iT=d.getTime()===today.getTime(),iW=i>=5;h+='<th style="padding:10px 8px;text-align:center;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;border-bottom:2px solid var(--navy-border);min-width:88px;color:'+(iT?'var(--gold)':iW?'rgba(255,255,255,0.3)':'var(--muted)')+'"><div>'+DN[i]+'</div><div style="font-size:14px;font-weight:700;margin-top:2px;">'+(iT?'<span style="background:var(--gold);color:var(--navy-dark);border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;">':'')+d.getDate()+(iT?'</span>':'')+'</div></th>';});
   h+='</tr></thead><tbody>';
@@ -17016,27 +17040,155 @@ window.rosterPublish=async function(){
   var days=wdays(_wo),ws=ds(days[0]),rk2=window._resendKey||'';
   if(!rk2){window.toast&&window.toast('Add Resend key in Settings \u2192 System','error');return;}
   if(!Object.keys(_roster).length){window.toast&&window.toast('No shifts to publish','error');return;}
+  if(Object.values(_roster).some(function(s){return s.pub;})){
+    var confirmed = await new Promise(function(resolve){
+      var ov=document.createElement('div');
+      ov.style.cssText='position:fixed;inset:0;background:rgba(5,12,20,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+      ov.innerHTML='<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px 28px 22px;max-width:380px;width:100%;">'
+        +'<div style="font-size:14px;font-weight:700;color:var(--white);margin-bottom:10px;">Republish Roster</div>'
+        +'<div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:22px;">This week has already been published. Publish again and resend emails to all staff?</div>'
+        +'<div style="display:flex;gap:10px;justify-content:flex-end;">'
+        +'<button id="_rpX" style="padding:8px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">Cancel</button>'
+        +'<button id="_rpOK" style="padding:8px 18px;background:var(--gold);border:none;border-radius:4px;color:var(--navy-dark);cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">&#9993; Republish</button>'
+        +'</div></div>';
+      document.body.appendChild(ov);
+      ov.querySelector('#_rpX').onclick=function(){ov.remove();resolve(false);};
+      ov.querySelector('#_rpOK').onclick=function(){ov.remove();resolve(true);};
+      ov.onclick=function(e){if(e.target===ov){ov.remove();resolve(false);}};
+    });
+    if(!confirmed) return;
+  }
   var bar=document.getElementById('roster-status-bar');
   if(bar){bar.style.display='block';bar.style.cssText+='background:rgba(201,168,76,0.1);color:var(--gold);border:1px solid var(--gold-dim);';bar.textContent='Publishing\u2026';}
+  // Remove any shifts that clash with approved leave before publishing
+  try{
+    var we2=ds(days[6]);
+    var leaveDays=await get('leave_requests?status=eq.approved&start_date=lte.'+we2+'&end_date=gte.'+ws+'&select=user_id,start_date,end_date');
+    for(var li=0;li<leaveDays.length;li++){
+      var lv2=leaveDays[li];
+      var lc=new Date(lv2.start_date),le=new Date(lv2.end_date);
+      while(lc<=le){
+        var ld2=ds(lc);
+        // Delete any shift for this user on this leave day
+        await del('roster_shifts','?user_id=eq.'+lv2.user_id+'&shift_date=eq.'+ld2);
+        // Remove from local _roster too
+        Object.keys(_roster).forEach(function(k){if(k.includes('__'+ld2)&&k.startsWith(lv2.user_id)) delete _roster[k];});
+        lc.setDate(lc.getDate()+1);
+      }
+    }
+  }catch(e){console.warn('Leave clash removal:',e);}
   try{await patch('roster_shifts','?week_start=eq.'+ws,{published:true});}catch(e){}
-  var byE={};Object.keys(_roster).forEach(function(k){var p=k.split('__'),u=p[0],d=p[1];if(!byE[u]) byE[u]=[];byE[u].push({date:d,sh:_roster[k]});});
-  var em={};_emps.forEach(function(e){em[e.id]=e.email||'';});
-  try{var hr=await get('hr_profiles?select=user_id,email');hr.forEach(function(p){if(p.email) em[p.user_id]=p.email;});}catch(e){}
-  var wl=days[0].toLocaleDateString('en-IE',{day:'numeric',month:'long'})+' \u2013 '+days[6].toLocaleDateString('en-IE',{day:'numeric',month:'long',year:'numeric'});
+  // Build byE - consolidate shifts per employee regardless of which UUID was used
+  // First build a map: any UUID -> canonical app UUID
+  var uuidToCanon={};
+  _emps.forEach(function(e){
+    if(e.id)           uuidToCanon[e.id]           = e.id;
+    if(e.auth_user_id) uuidToCanon[e.auth_user_id] = e.id; // auth UUID maps to app UUID
+  });
+  var byE={};
+  Object.keys(_roster).forEach(function(k){
+    var p=k.split('__'), u=p[0], d=p[1];
+    var canon=uuidToCanon[u]||u; // normalise to app UUID
+    if(!byE[canon]) byE[canon]=[];
+    byE[canon].push({date:d,sh:_roster[k]});
+  });
+  // Also include employees who have approved leave this week but no shifts (they'd be skipped otherwise)
+  try{
+    var we3=ds(days[6]);
+    var allLeave=await get('leave_requests?status=eq.approved&start_date=lte.'+we3+'&end_date=gte.'+ds(days[0])+'&select=user_id');
+    allLeave.forEach(function(l){
+      var canon=uuidToCanon[l.user_id]||l.user_id;
+      if(!byE[canon]) byE[canon]=[]; // ensure they appear in the loop even with no shifts
+    });
+  }catch(e){}
+
+  // Build email + name maps covering both app UUID and auth UUID
+  var em={}, nm={};
+  _emps.forEach(function(e){
+    if(e.id)          { em[e.id]          = e.email||''; nm[e.id]          = e.display_name||''; }
+    if(e.auth_user_id){ em[e.auth_user_id] = e.email||''; nm[e.auth_user_id] = e.display_name||''; }
+  });
+  // Also pull emails from hr_profiles (most reliable source)
+  try{
+    var hr=await get('hr_profiles?select=user_id,email,first_name,last_name');
+    hr.forEach(function(p){
+      if(p.email){ em[p.user_id]=p.email; }
+      if(p.first_name){ nm[p.user_id]=(p.first_name+' '+( p.last_name||'')).trim(); }
+    });
+  }catch(e){}
+  // Also pull directly from app_users by auth_user_id for any remaining gaps
+  try{
+    var au=await get('app_users?select=id,auth_user_id,email,display_name');
+    au.forEach(function(u){
+      if(u.email){
+        if(u.id)           { em[u.id]           = em[u.id]           || u.email; nm[u.id]           = nm[u.id]           || u.display_name||''; }
+        if(u.auth_user_id) { em[u.auth_user_id]  = em[u.auth_user_id]  || u.email; nm[u.auth_user_id]  = nm[u.auth_user_id]  || u.display_name||''; }
+      }
+    });
+  }catch(e){}
+
+  var wl=days[0].toLocaleDateString('en-IE',{day:'numeric',month:'long'})+' – '+days[6].toLocaleDateString('en-IE',{day:'numeric',month:'long',year:'numeric'});
   var sent=0,fail=0;
+  var sentEmails={}; // deduplicate — never send twice to same address
   for(var uid in byE){
     var email=em[uid];if(!email||!email.includes('@')) continue;
-    var emp=_emps.find(function(e){return e.id===uid;})||{display_name:'Team Member'};
-    var rows=byE[uid].sort(function(a,b){return a.date>b.date?1:-1;}).map(function(s){
+    if(sentEmails[email]) continue; // skip duplicate
+    sentEmails[email]=true;
+    var empName=nm[uid]||'Team Member';
+    var emp={display_name:empName};
+    var shifts=byE[uid].sort(function(a,b){return a.date>b.date?1:-1;});
+    // Fetch approved leave for this employee this week
+    var empLeaveRows=[];
+    try{
+      var empLv=await get('leave_requests?user_id=eq.'+uid+'&status=eq.approved&start_date=lte.'+ds(days[6])+'&end_date=gte.'+ds(days[0])+'&select=start_date,end_date');
+      empLv.forEach(function(lv3){
+        var lc2=new Date(lv3.start_date),le2=new Date(lv3.end_date);
+        while(lc2<=le2){
+          var ld3=ds(lc2);
+          if(ld3>=ds(days[0])&&ld3<=ds(days[6])) empLeaveRows.push({date:ld3,leave:true});
+          lc2.setDate(lc2.getDate()+1);
+        }
+      });
+    }catch(e){}
+    var leaveDates=empLeaveRows.map(function(l){return l.date;});
+    var allRows=shifts.filter(function(s){return leaveDates.indexOf(s.date)<0;})
+      .map(function(s){return {date:s.date,leave:false,sh:s.sh};})
+      .concat(empLeaveRows)
+      .sort(function(a,b){return a.date>b.date?1:-1;});
+    var rows=allRows.map(function(s){
       var dn=new Date(s.date+'T00:00:00').toLocaleDateString('en-IE',{weekday:'long',day:'numeric',month:'short'});
+      if(s.leave){
+        return '<tr>'
+          +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#c0cfe0;">'+dn+'</td>'
+          +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;font-weight:700;color:#3dba78;">Annual Leave</td>'
+          +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#7a93a8;">Approved</td>'
+          +'</tr>';
+      }
       var col=s.sh.sn==='Day Shift'?'#c9a84c':s.sh.sn==='Evening Shift'?'#4a9edd':'#7a93a8';
-      return '<tr><td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#c0cfe0;">'+dn+'</td><td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;font-weight:700;color:'+col+';">'+s.sh.sn+'</td><td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#7a93a8;">'+(s.sh.st||'').slice(0,5)+' \u2013 '+(s.sh.et||'').slice(0,5)+'</td></tr>';
+      return '<tr>'
+        +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#c0cfe0;">'+dn+'</td>'
+        +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;font-weight:700;color:'+col+';">'+s.sh.sn+'</td>'
+        +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#7a93a8;">'+(s.sh.st||'').slice(0,5)+' – '+(s.sh.et||'').slice(0,5)+'</td>'
+        +'</tr>';
     }).join('');
-    var html='<div style="font-family:sans-serif;max-width:520px;margin:0 auto;background:#0d1b2a;padding:28px 20px;"><div style="text-align:center;margin-bottom:20px;"><h1 style="color:#c9a84c;font-size:18px;margin:0;">Lighthouse Drinks</h1><p style="color:#4a9edd;font-size:12px;margin:4px 0 0;">Your Roster \u2013 '+wl+'</p></div><p style="color:#c0cfe0;font-size:14px;">Hi '+emp.display_name+',</p><table style="width:100%;border-collapse:collapse;background:#152336;border-radius:6px;overflow:hidden;"><thead><tr><th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Day</th><th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Shift</th><th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Hours</th></tr></thead><tbody>'+rows+'</tbody></table><p style="color:#4a6a8a;font-size:11px;margin-top:16px;text-align:center;">Lighthouse Drinks Ltd \u00b7 Cork, Ireland</p></div>';
+    var html=
+      '<div style="font-family:sans-serif;max-width:540px;margin:0 auto;background:#0d1b2a;padding:32px 24px;">'
+      +'<h1 style="color:#c9a84c;font-size:19px;font-family:Georgia,serif;margin:0 0 4px;">Lighthouse Drinks</h1>'
+      +'<p style="color:#4a6a8a;font-size:11px;margin:0 0 24px;">Operations Dashboard</p>'
+      +'<p style="color:#c0cfe0;font-size:14px;margin:0 0 6px;">Hi '+emp.display_name+',</p>'
+      +'<p style="color:#7a93a8;font-size:13px;margin:0 0 20px;">Your roster for the week of <strong style="color:#c0cfe0;">'+wl+'</strong> has been published. Your shifts are shown below.</p>'
+      +'<table style="width:100%;border-collapse:collapse;background:#0f2337;border-radius:6px;overflow:hidden;margin-bottom:24px;">'
+      +'<thead><tr>'
+      +'<th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.12em;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Day</th>'
+      +'<th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.12em;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Shift</th>'
+      +'<th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.12em;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Hours</th>'
+      +'</tr></thead><tbody>'+rows+'</tbody></table>'
+      +'<p style="color:#4a6a8a;font-size:11px;text-align:center;margin:0;">Pulse &middot; Lighthouse Drinks Ltd &middot; Cork, Ireland</p>'
+      +'</div>';
     try{
       await window.sendEmail({
         to:[email],
-        subject:'Your Roster \u2013 '+wl,
+        subject:'Your Roster is Published \u2013 '+wl,
         html:html,
         from:'Lighthouse Drinks <'+(window._fromEmail||'noreply@lighthousedrinks.com')+'>'
       });
@@ -17063,7 +17215,7 @@ function buildRosterPanel(){
     +'<div style="display:flex;gap:8px;flex-wrap:wrap;">'
     +'<button onclick="window.rosterCopyLastWeek()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#9112; Copy Last Week</button>'
     +'<button onclick="window.rosterClearWeek()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;color:var(--muted);">Clear Week</button>'
-    +'<button onclick="window.rosterPublish()" class="btn btn-gold" style="font-size:11px;padding:6px 18px;">&#9993; Publish</button>'
+    +'<button id="roster-publish-btn" onclick="window.rosterPublish()" class="btn btn-gold" style="font-size:11px;padding:6px 18px;">&#9993; Publish</button>'
     +'</div></div>'
     +'<div id="roster-status-bar" style="display:none;font-size:11px;padding:8px 14px;border-radius:4px;margin-bottom:12px;"></div>'
     +'<div style="overflow-x:auto;"><div id="roster-grid"></div></div>'
