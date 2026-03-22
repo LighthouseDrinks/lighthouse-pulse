@@ -909,9 +909,70 @@
       white-space: normal;
     }
 
-    /* ── Row tap feedback ── */
-    .data-table tbody tr:active,
-    .job-table tbody tr:active { background: rgba(201,168,76,0.06); }
+    /* ── Tap-to-expand row detail ── */
+    /* Rows in expandable tables get a subtle tap cue */
+    .mob-expandable tbody tr.mob-data-row {
+      cursor: pointer;
+      position: relative;
+    }
+    .mob-expandable tbody tr.mob-data-row:active {
+      background: rgba(201,168,76,0.06) !important;
+    }
+    /* The expand indicator chevron on first visible cell */
+    .mob-expandable tbody tr.mob-data-row td:first-child::after {
+      content: '';
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-right: 1.5px solid var(--muted);
+      border-bottom: 1.5px solid var(--muted);
+      transform: rotate(45deg);
+      margin-left: 7px;
+      vertical-align: middle;
+      opacity: 0.5;
+      transition: transform 0.15s;
+    }
+    .mob-expandable tbody tr.mob-data-row.mob-expanded td:first-child::after {
+      transform: rotate(-135deg);
+      opacity: 0.9;
+      border-color: var(--gold);
+    }
+    /* The detail drawer row */
+    .mob-expandable tbody tr.mob-detail-row { display: none; }
+    .mob-expandable tbody tr.mob-detail-row.mob-expanded { display: table-row; }
+    .mob-detail-cell {
+      padding: 0 10px 10px !important;
+      background: rgba(255,255,255,0.025) !important;
+      border-bottom: 1px solid var(--navy-border) !important;
+    }
+    .mob-detail-inner {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 16px;
+      padding: 10px 0 4px;
+      font-size: 11px;
+    }
+    .mob-detail-inner .mob-d-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .mob-detail-inner .mob-d-label {
+      font-size: 9px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      font-weight: 700;
+    }
+    .mob-detail-inner .mob-d-value {
+      color: var(--white);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    /* ── Row tap feedback (tables without expand) ── */
+    .data-table:not(.mob-expandable) tbody tr:active,
+    .job-table:not(.mob-expandable) tbody tr:active { background: rgba(201,168,76,0.06); }
 
     /* ── Job chips ── */
     .job-status-bar { gap: 6px; }
@@ -2152,7 +2213,10 @@ function showDashboard(user) {
   document.querySelectorAll('.page').forEach(function(p) { p.style.display=''; });
   document.body.style.overflow = '';
   var emailEl = document.getElementById('dashboard-user-email');
-  if (emailEl) emailEl.textContent = user.email;
+  if (emailEl) {
+    var displayName = user.display_name || user.first_name || '';
+    emailEl.textContent = displayName ? displayName + ' · ' + user.email : user.email;
+  }
 
   // Role title display
   var ROLE_LABELS = {
@@ -2170,16 +2234,18 @@ function showDashboard(user) {
   var roleEl = document.getElementById('dashboard-user-role');
   if (roleEl) roleEl.textContent = ROLE_LABELS[user.role] || user.role;
 
-  // Only MD and OD can invite users
+  // Invite button — super admins + anyone with invite_users permission
+  var _superAdminRoles = ['managing_director','operations_director','business_analyst'];
   var inviteBtn = document.getElementById('invite-user-btn');
   if (inviteBtn) {
-    inviteBtn.style.display = (user.role === 'managing_director' || user.role === 'operations_director') ? '' : 'none';
+    var canInvite = _superAdminRoles.indexOf(user.role) >= 0 || (window.canDo && window.canDo('invite_users'));
+    inviteBtn.style.display = canInvite ? '' : 'none';
   }
 
-  // Settings cog — MD and OD only
+  // Settings cog — super admins only
   var cogBtn = document.getElementById('settings-cog-btn');
   if (cogBtn) {
-    cogBtn.style.display = (user.role === 'managing_director' || user.role === 'operations_director') ? 'inline-flex' : 'none';
+    cogBtn.style.display = _superAdminRoles.indexOf(user.role) >= 0 ? 'inline-flex' : 'none';
   }
 
   // Clock button — all staff
@@ -2242,11 +2308,7 @@ async function handleSession(session) {
       showPortal(window.CURRENT_USER);
     } else if (STAFF_ROLES.indexOf(role) !== -1) {
       showDashboard(window.CURRENT_USER);
-      // Show settings cog for MD and Ops Dir
-      if (role === 'managing_director' || role === 'operations_director') {
-        var cogBtn = document.getElementById('settings-cog-btn');
-        if (cogBtn) cogBtn.style.display = 'inline-flex';
-      }
+      // Settings cog visibility is handled inside showDashboard
     } else {
       await _sb.auth.signOut();
       window.CURRENT_USER = null;
@@ -2500,6 +2562,22 @@ window.selectInviteRole = function(role) {
 };
 window._inviteRole='';
 
+// ── Central email helper — routes through Supabase Edge Function to avoid CORS ──
+window.sendEmail = async function(opts) {
+  // opts: { to, subject, html, from (optional) }
+  var resendKey = (window._resendKey||'').trim();
+  if (!resendKey) throw new Error('No Resend API key. Add it in Settings → System.');
+  var from = opts.from || ('Pulse by Lighthouse Drinks <'+(window._fromEmail||'noreply@lighthousedrinks.com')+'>');
+  var res = await fetch('https://anhawgzgxoywophqbmji.supabase.co/functions/v1/send-email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: opts.to, subject: opts.subject, html: opts.html, from: from, resendKey: resendKey })
+  });
+  var data = await res.json();
+  if (!res.ok) throw new Error(data.message || data.name || data.error || 'Email failed');
+  return data;
+};
+
 window.sendInviteEmail = async function() {
   var firstName=(document.getElementById('inv-first-name').value||'').trim();
   var lastName =(document.getElementById('inv-last-name').value||'').trim();
@@ -2566,30 +2644,17 @@ window.sendInviteEmail = async function() {
       +'<a href="'+link+'" style="background:#c9a84c;color:#0d1b2a;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:700;font-size:15px;">Set Up My Account</a></div>'
       +'<p style="color:#888;font-size:12px;text-align:center;">If you weren&#39;t expecting this, you can ignore this email.</p></div>';
 
-    var res=await fetch('https://api.resend.com/emails',{
-      method:'POST',
-      headers:{'Authorization':'Bearer '+resendKey,'Content-Type':'application/json'},
-      body:JSON.stringify({
-        from:'Pulse by Lighthouse Drinks <'+(window._fromEmail||'noreply@lighthousedrinks.com')+'>',  
-        to:[email],
-        subject:'You are invited to Pulse — Lighthouse Drinks',
-        html:emailBody
-      })
+    var res=await window.sendEmail({
+      to:[email],
+      subject:'You are invited to Pulse — Lighthouse Drinks',
+      html:emailBody
     });
-    var data=await res.json();
-    if(res.ok){
-      statusEl.textContent='✓ Invite sent to '+email;
-      statusEl.style.color='var(--green)';
-      document.getElementById('inv-copy-btn').style.display='inline-block';
-      window.toast&&window.toast('Invite sent to '+firstName+' '+lastName,'success');
-    } else {
-      statusEl.textContent='Email error: '+(data.message||data.name||'Check your Resend API key');
-      statusEl.style.color='var(--red)';
-      // Still show copy link as fallback
-      document.getElementById('inv-copy-btn').style.display='inline-block';
-    }
+    statusEl.textContent='✓ Invite sent to '+email;
+    statusEl.style.color='var(--green)';
+    document.getElementById('inv-copy-btn').style.display='inline-block';
+    window.toast&&window.toast('Invite sent to '+firstName+' '+lastName,'success');
   } catch(e){
-    statusEl.textContent='Email failed: '+e.message+' — use Copy Link instead';
+    statusEl.textContent='Email failed: '+(e.message||'unknown error')+' — use Copy Link instead';
     statusEl.style.color='var(--amber)';
     document.getElementById('inv-copy-btn').style.display='inline-block';
   }
@@ -2616,37 +2681,13 @@ window.copyInviteLink = function() {
 <!-- ══ HEADER ══════════════════════════════════════════ -->
 <header>
   <div class="logo-area">
-    <!-- Lighthouse SVG icon (matches caramel calculator) -->
-    <svg class="logo-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="48" height="48" fill="#152336"/>
-      <!-- Lighthouse body -->
-      <rect x="20" y="28" width="8" height="13" fill="#c9a84c" opacity="0.9"/>
-      <polygon points="18,28 30,28 27,14 21,14" fill="#e0bf72"/>
-      <rect x="19" y="12" width="10" height="3" fill="#c9a84c"/>
-      <!-- Light rays -->
-      <line x1="24" y1="10" x2="24" y2="6" stroke="#c9a84c" stroke-width="1.5" opacity="0.8"/>
-      <line x1="24" y1="10" x2="30" y2="7" stroke="#c9a84c" stroke-width="1" opacity="0.5"/>
-      <line x1="24" y1="10" x2="18" y2="7" stroke="#c9a84c" stroke-width="1" opacity="0.5"/>
-      <!-- Base -->
-      <rect x="16" y="41" width="16" height="3" fill="#c9a84c" opacity="0.6"/>
-      <!-- Windows -->
-      <rect x="22" y="20" width="4" height="4" fill="#0d1b2a" opacity="0.6"/>
-      <rect x="22" y="32" width="4" height="5" fill="#152336"/>
-    </svg>
     <div class="logo-text">
       Lighthouse Drinks
       <span class="logo-sub">Operations Dashboard</span>
     </div>
   </div>
   <div class="header-right">
-    <div class="header-meta">
-      <strong>Lighthouse Drinks Ltd</strong>
-      Private Label Irish Whiskey · Cork, Ireland
-    </div>
-    <div class="header-badge">
-      <div class="status-dot"></div>
-      Live
-    </div>
+    <div class="header-meta" id="header-live-clock" style="font-variant-numeric:tabular-nums;letter-spacing:0.02em;"></div>
     <div class="header-user">
       <div style="text-align:right;line-height:1.4;">
         <span class="header-user-email" id="dashboard-user-email"></span>
@@ -5833,20 +5874,39 @@ function renderBoms() {
     var clientName  = clientsMap[b.clientId] || b.clientId || '—';
     var linked      = jobCounts[b.product] || 0;
     var volAbv      = (b.volume ? b.volume + 'cl' : '') + (b.abv ? (b.volume ? ' / ' : '') + b.abv + '%' : '') || '—';
-    return '<tr>'
+    var bid = b.id;
+    var bprod = b.product.replace(/'/g,"\\'");
+    return '<tr class="mob-data-row" style="cursor:pointer;" onclick="viewBom(\'' + bid + '\')">'
       + '<td style="color:var(--white);font-weight:700;">' + b.product + '</td>'
       + '<td style="font-size:11px;color:var(--muted);">' + clientName + '</td>'
       + '<td style="font-size:11px;">' + volAbv + '</td>'
-      + '<td style="font-size:11px;color:var(--text);">' + (b.bottle || '—') + '</td>'
-      + '<td style="font-size:11px;color:var(--text);">' + closureText + '</td>'
-      + '<td style="font-size:11px;">' + (linked ? '<span style="color:var(--gold-light);font-weight:700;">' + linked + '</span>' : '<span style="color:var(--muted);">0</span>') + '</td>'
-      + '<td style="white-space:nowrap;">'
-      +   '<button onclick="viewBom(\'' + b.id + '\')" class="view-bom-btn">View</button> '
-      +   '<button onclick="editBom(\'' + b.id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:11px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Edit</button> '
-      +   '<button onclick="deleteBom(\'' + b.id + '\',\'' + b.product.replace(/'/g,"\\'") + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--red);font-size:11px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button>'
+      + '<td class="mob-hide" style="font-size:11px;color:var(--text);">' + (b.bottle || '—') + '</td>'
+      + '<td class="mob-hide" style="font-size:11px;color:var(--text);">' + closureText + '</td>'
+      + '<td class="mob-hide" style="font-size:11px;">' + (linked ? '<span style="color:var(--gold-light);font-weight:700;">' + linked + '</span>' : '<span style="color:var(--muted);">0</span>') + '</td>'
+      + '<td style="white-space:nowrap;" onclick="event.stopPropagation();">'
+      +   '<button onclick="viewBom(\'' + bid + '\')" class="view-bom-btn">View</button> '
+      +   '<button onclick="editBom(\'' + bid + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:11px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Edit</button> '
+      +   '<span class="mob-hide"><button onclick="deleteBom(\'' + bid + '\',\'' + bprod + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--red);font-size:11px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button></span>'
       + '</td>'
-      + '</tr>';
+      + '</tr>'
+      // Detail drawer
+      + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="7">'
+      + '<div class="mob-detail-inner">'
+      + '<div class="mob-d-item"><span class="mob-d-label">Bottle</span><span class="mob-d-value">' + (b.bottle||'—') + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Closure</span><span class="mob-d-value">' + closureText + '</span></div>'
+      + (b.labelFront ? '<div class="mob-d-item"><span class="mob-d-label">Front Label</span><span class="mob-d-value">' + b.labelFront + '</span></div>' : '')
+      + '<div class="mob-d-item"><span class="mob-d-label">Jobs</span><span class="mob-d-value">' + (linked || '0') + '</span></div>'
+      + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
+      + '<button onclick="event.stopPropagation();viewBom(\'' + bid + '\')" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">View</button>'
+      + '<button onclick="event.stopPropagation();editBom(\'' + bid + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;margin-right:8px;">Edit</button>'
+      + '<button onclick="event.stopPropagation();deleteBom(\'' + bid + '\',\'' + bprod + '\')" style="background:transparent;border:1px solid rgba(224,87,87,0.3);color:var(--red);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Delete</button>'
+      + '</div>'
+      + '</div></td></tr>';
   }).join('');
+
+  // Wire tap-to-expand on mobile
+  var bomTbl = tbody.closest('table');
+  if (bomTbl && window.mobExpandInit) window.mobExpandInit(bomTbl);
 }
 
 // ── Modal ────────────────────────────────────────────────────────────────────
@@ -6769,164 +6829,61 @@ window.loadBoms = async function initBoms() {
   </div>
 
   <div class="two-col">
-    <!-- Recent Deliveries -->
+    <!-- Left column: Recent Jobs + Activity -->
     <div>
+      <!-- Recent Jobs -->
       <div class="card">
         <div class="card-title">
           <span class="section-num">A</span>
-          Recent Batch Activity
+          Recent Jobs
           <div class="card-title-actions">
-            <button class="btn btn-outline" onclick="showPage('batches', document.querySelector('.nav-item:nth-child(3)'))">View All</button>
+            <button class="btn btn-outline" onclick="showPage('jobs', document.querySelector('.nav-item[onclick*=\'jobs\']'))">View All</button>
           </div>
         </div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Batch Ref</th>
-              <th>Product</th>
-              <th>Volume</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><span class="batch-tag">LHD-0044</span></td>
-              <td class="strong">Single Malt 12yr</td>
-              <td>2,400 L</td>
-              <td><span class="pill green">Bottling</span></td>
-            </tr>
-            <tr>
-              <td><span class="batch-tag">LHD-0043</span></td>
-              <td class="strong">Blended Reserve</td>
-              <td>1,800 L</td>
-              <td><span class="pill green">QC Passed</span></td>
-            </tr>
-            <tr>
-              <td><span class="batch-tag">LHD-0042</span></td>
-              <td class="strong">Peated Expression</td>
-              <td>1,200 L</td>
-              <td><span class="pill amber">QC Pending</span></td>
-            </tr>
-            <tr>
-              <td><span class="batch-tag">LHD-0041</span></td>
-              <td class="strong">Blended Malt NAS</td>
-              <td>3,000 L</td>
-              <td><span class="pill red">Review</span></td>
-            </tr>
-          </tbody>
-        </table>
+        <div id="ov-recent-jobs-list">
+          <div style="color:var(--muted);font-size:12px;padding:12px 0;">Loading…</div>
+        </div>
       </div>
 
-      <!-- Activity Feed -->
+      <!-- Clock-in activity today -->
       <div class="card">
         <div class="card-title">
           <span class="section-num">B</span>
-          Activity Log
-        </div>
-        <div class="feed-item">
-          <div class="feed-dot green"></div>
-          <div>
-            <div class="feed-text"><strong>LHD-0044</strong> — Bottling commenced. 2,400 L dispatched to line 2.</div>
-            <div class="feed-time">Today · 09:14</div>
+          Today's Attendance
+          <div class="card-title-actions">
+            <button onclick="window.loadOverviewAttendance()" style="background:transparent;border:none;color:var(--muted);font-size:11px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.08em;">↻ Refresh</button>
           </div>
         </div>
-        <div class="feed-item">
-          <div class="feed-dot gold"></div>
-          <div>
-            <div class="feed-text"><strong>Pricing quote</strong> generated for Clancy's Off-Licence — €18.40/btl.</div>
-            <div class="feed-time">Today · 08:31</div>
-          </div>
-        </div>
-        <div class="feed-item">
-          <div class="feed-dot amber"></div>
-          <div>
-            <div class="feed-text"><strong>LHD-0041</strong> — ABV reading 40.12%, expected 40.00%. Liquid Manager notified.</div>
-            <div class="feed-time">Yesterday · 16:55</div>
-          </div>
-        </div>
-        <div class="feed-item">
-          <div class="feed-dot blue"></div>
-          <div>
-            <div class="feed-text"><strong>Caramel addition</strong> completed — LHD-0043. 1.42 L E150a added. Record 5.05.10 filed.</div>
-            <div class="feed-time">Yesterday · 11:20</div>
-          </div>
-        </div>
-        <div class="feed-item">
-          <div class="feed-dot green"></div>
-          <div>
-            <div class="feed-text"><strong>LHD-0042</strong> — Filling complete. Sent to QC lab.</div>
-            <div class="feed-time">2 days ago · 14:02</div>
-          </div>
+        <div id="ov-attendance-list">
+          <div style="color:var(--muted);font-size:12px;padding:12px 0;">Loading…</div>
         </div>
       </div>
     </div>
 
     <!-- Right column -->
     <div>
-      <!-- Production capacity -->
+      <!-- Upcoming scheduled jobs -->
       <div class="card">
         <div class="card-title">
           <span class="section-num">C</span>
-          Production Capacity
+          Upcoming Schedule
         </div>
-        <div class="gauge-row">
-          <div class="gauge-item">
-            <div class="gauge-label">Filling Line 1</div>
-            <div class="progress-bar"><div class="progress-fill green" style="width:82%"></div></div>
-            <div class="gauge-val">82%</div>
-          </div>
-          <div class="gauge-item">
-            <div class="gauge-label">Filling Line 2</div>
-            <div class="progress-bar"><div class="progress-fill" style="width:68%"></div></div>
-            <div class="gauge-val">68%</div>
-          </div>
-          <div class="gauge-item">
-            <div class="gauge-label">Maturation Store</div>
-            <div class="progress-bar"><div class="progress-fill amber" style="width:91%"></div></div>
-            <div class="gauge-val">91%</div>
-          </div>
-          <div class="gauge-item">
-            <div class="gauge-label">Blending Vats</div>
-            <div class="progress-bar"><div class="progress-fill green" style="width:45%"></div></div>
-            <div class="gauge-val">45%</div>
-          </div>
-          <div class="gauge-item">
-            <div class="gauge-label">Warehouse Space</div>
-            <div class="progress-bar"><div class="progress-fill red" style="width:97%"></div></div>
-            <div class="gauge-val">97%</div>
-          </div>
+        <div id="ov-upcoming-jobs">
+          <div style="color:var(--muted);font-size:12px;padding:12px 0;">Loading…</div>
         </div>
       </div>
 
-      <!-- Key stats -->
+      <!-- My tasks (already wired) -->
       <div class="card">
         <div class="card-title">
           <span class="section-num">D</span>
-          This Month — Key Figures
+          My Open Tasks
+          <div class="card-title-actions">
+            <button onclick="window.loadMyTasks && window.loadMyTasks()" style="background:transparent;border:none;color:var(--muted);font-size:11px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.08em;">↻ Refresh</button>
+          </div>
         </div>
-        <div class="stat-row">
-          <div class="stat-row-label">Bottles Produced</div>
-          <div class="stat-row-value">11,840</div>
-        </div>
-        <div class="stat-row">
-          <div class="stat-row-label">Litres Blended</div>
-          <div class="stat-row-value">8,400 L</div>
-        </div>
-        <div class="stat-row">
-          <div class="stat-row-label">Avg. ABV Accuracy</div>
-          <div class="stat-row-value">±0.03%</div>
-        </div>
-        <div class="stat-row">
-          <div class="stat-row-label">Caramel Additions</div>
-          <div class="stat-row-value">6 batches</div>
-        </div>
-        <div class="stat-row">
-          <div class="stat-row-label">Client Quotes Sent</div>
-          <div class="stat-row-value">14</div>
-        </div>
-        <div class="stat-row">
-          <div class="stat-row-label">Quotes Converted</div>
-          <div class="stat-row-value">9 (64%)</div>
+        <div id="overview-tasks-list">
+          <div style="color:var(--muted);font-size:12px;padding:12px 0;">Loading tasks…</div>
         </div>
       </div>
 
@@ -6937,15 +6894,15 @@ window.loadBoms = async function initBoms() {
           Quick Launch
         </div>
         <div style="display:flex; flex-direction:column; gap:8px;">
-          <button class="btn btn-gold" style="width:100%; justify-content:center;" onclick="showPage('tools', document.querySelector('.nav-item:nth-child(2)'))">
+          <button class="btn btn-gold" style="width:100%; justify-content:center;" onclick="window.openNewJobModal && window.openNewJobModal()">
             <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/></svg>
-            Open Calculator Tools
+            New Job
           </button>
-          <button class="btn btn-outline" style="width:100%; justify-content:center;">
-            New Batch Record
+          <button class="btn btn-outline" style="width:100%; justify-content:center;" onclick="showPage('inventory', document.querySelector('.nav-item[onclick*=\'inventory\']'))">
+            Inventory
           </button>
-          <button class="btn btn-outline" style="width:100%; justify-content:center;">
-            Generate Compliance Report
+          <button class="btn btn-outline" style="width:100%; justify-content:center;" onclick="openCalc('caramel')">
+            Caramel Calculator
           </button>
         </div>
       </div>
@@ -7361,14 +7318,27 @@ window.loadBoms = async function initBoms() {
       return;
     }
     tbody.innerHTML = list.map(function(c){
-      return '<tr>'
-        +'<td style="color:var(--white);font-weight:700;">'+c.company+'<span class="mob-tap-hint">'+(c.contact||'')+(c.phone?' · '+c.phone:'')+'</span></td>'
+      var emailLink = c.email ? '<a href="mailto:'+c.email+'" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">'+c.email+'</a>' : '—';
+      return '<tr class="mob-data-row">'
+        +'<td style="color:var(--white);font-weight:700;">'+c.company+'</td>'
         +'<td class="mob-hide">'+c.contact+'</td>'
-        +'<td class="mob-hide"><a href="mailto:'+c.email+'" style="color:var(--gold);text-decoration:none;">'+c.email+'</a></td>'
+        +'<td class="mob-hide">'+emailLink+'</td>'
         +'<td class="mob-hide" style="color:var(--muted);font-size:12px;">'+(c.phone||'—')+'</td>'
         +'<td class="mob-hide" style="color:var(--muted);font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(c.notes||'—')+'</td>'
-        +'<td><button data-editclient="'+c.id+'" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button><button class="client-delete-btn mob-hide" data-deleteclient="'+c.id+'" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button></td>'
-        +'</tr>';
+        +'<td><button data-editclient="'+c.id+'" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
+        +'<button class="client-delete-btn mob-hide" data-deleteclient="'+c.id+'" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button></td>'
+        +'</tr>'
+        // Detail drawer
+        +'<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="6">'
+        +'<div class="mob-detail-inner">'
+        +(c.contact ? '<div class="mob-d-item"><span class="mob-d-label">Contact</span><span class="mob-d-value">'+c.contact+'</span></div>' : '')
+        +'<div class="mob-d-item"><span class="mob-d-label">Email</span><span class="mob-d-value">'+emailLink+'</span></div>'
+        +(c.phone ? '<div class="mob-d-item"><span class="mob-d-label">Phone</span><span class="mob-d-value">'+c.phone+'</span></div>' : '')
+        +(c.notes ? '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Notes</span><span class="mob-d-value">'+c.notes+'</span></div>' : '')
+        +'<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
+        +'<button data-editclient="'+c.id+'" class="mob-detail-edit-btn" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;">Edit Client</button>'
+        +'</div>'
+        +'</div></td></tr>';
     }).join('');
     tbody.querySelectorAll('[data-editclient]').forEach(function(btn){
       btn.addEventListener('click', function(e){
@@ -7376,6 +7346,9 @@ window.loadBoms = async function initBoms() {
         window.openClientModal(this.getAttribute('data-editclient'));
       });
     });
+    // Wire tap-to-expand on mobile
+    var cliTbl = tbody.closest('table');
+    if (cliTbl && window.mobExpandInit) window.mobExpandInit(cliTbl);
 
 
   }
@@ -7537,16 +7510,16 @@ window.loadBoms = async function initBoms() {
       <span id="bom-count-label" style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);">0 specs</span>
     </div>
     <div style="overflow-x:visible;padding:0;">
-      <table class="job-table" id="boms-table">
+      <table class="job-table mob-expandable" id="boms-table">
         <thead>
           <tr>
             <th>Product Name</th>
             <th>Client</th>
-            <th>Liquid / ABV</th>
-            <th>Bottle</th>
-            <th>Closure</th>
-            <th>GI Verified</th>
-            <th>Jobs</th>
+            <th>Vol / ABV</th>
+            <th class="mob-hide">Bottle</th>
+            <th class="mob-hide">Closure</th>
+            <th class="mob-hide">GI</th>
+            <th class="mob-hide">Jobs</th>
             <th></th>
           </tr>
         </thead>
@@ -7873,6 +7846,43 @@ window.loadBoms = async function initBoms() {
     if (window.toast) window.toast('Coming soon.', 'info');
   };
 
+  // ── Tap-to-expand for mobile tables ──────────────────────────────────────────
+  // Add class `mob-expandable` to any table. Each data row must have class
+  // `mob-data-row` and a sibling `mob-detail-row` immediately after it.
+  // The detail row contains a single td.mob-detail-cell with a .mob-detail-inner grid.
+  // Call mobExpandInit(table) after rendering, or use MutationObserver for dynamic tables.
+  window.mobExpandInit = function(tableEl) {
+    if (!tableEl) return;
+    tableEl.classList.add('mob-expandable');
+    tableEl.querySelectorAll('tr.mob-data-row').forEach(function(row) {
+      // Avoid double-binding
+      if (row._mobBound) return;
+      row._mobBound = true;
+      row.addEventListener('click', function(e) {
+        // Don't trigger if they tapped a button/link/select inside the row
+        if (e.target.closest('button,a,select,input')) return;
+        var detail = row.nextElementSibling;
+        if (!detail || !detail.classList.contains('mob-detail-row')) return;
+        var isOpen = row.classList.contains('mob-expanded');
+        // Close all others in this table first
+        tableEl.querySelectorAll('tr.mob-data-row.mob-expanded').forEach(function(r) {
+          r.classList.remove('mob-expanded');
+          var d = r.nextElementSibling;
+          if (d && d.classList.contains('mob-detail-row')) d.classList.remove('mob-expanded');
+        });
+        if (!isOpen) {
+          row.classList.add('mob-expanded');
+          detail.classList.add('mob-expanded');
+        }
+      });
+    });
+  };
+
+  // Auto-init any mob-expandable tables already in DOM
+  document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('table.mob-expandable').forEach(window.mobExpandInit);
+  });
+
 ;
 
   window.openMoreDrawer = function() {
@@ -7891,18 +7901,18 @@ window.loadBoms = async function initBoms() {
     document.body.style.overflow = '';
   };
 
-  // Live clock in header meta
+  // Live clock in header — ticks every second with HH:MM:SS
   function updateClock() {
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('en-IE', { hour:'2-digit', minute:'2-digit' });
-    const dateStr = now.toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' });
-    const el = document.querySelector('.header-meta');
+    var now = new Date();
+    var timeStr = now.toLocaleTimeString('en-IE', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    var dateStr = now.toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' });
+    var el = document.getElementById('header-live-clock');
     if (el) {
-      el.innerHTML = `<strong>Lighthouse Drinks Ltd</strong>Cork, Ireland · ${dateStr} · ${timeStr}`;
+      el.innerHTML = '<strong style="color:var(--white);">' + dateStr + '</strong> &nbsp;<span style="color:var(--gold);font-weight:700;font-family:\'Lato\',monospace;">' + timeStr + '</span>';
     }
   }
   updateClock();
-  setInterval(updateClock, 30000);
+  setInterval(updateClock, 1000);
 </script>
 
 <!-- ── JOBS ──────────────────────────────────────────── -->
@@ -7952,7 +7962,7 @@ window.loadBoms = async function initBoms() {
   <div class="card" style="padding:0;overflow:hidden;">
     <div style="height:10px;"></div>
     <div class="table-wrap">
-      <table class="data-table" id="jobs-main-table">
+      <table class="data-table mob-expandable" id="jobs-main-table">
         <thead>
           <tr>
             <th>Job No.</th>
@@ -7962,7 +7972,7 @@ window.loadBoms = async function initBoms() {
             <th class="mob-hide">Target</th>
             <th class="mob-hide">Scheduled</th>
             <th>Stage</th>
-            <th>Tasks</th>
+            <th class="mob-hide">Tasks</th>
             <th></th>
           </tr>
         </thead>
@@ -10658,8 +10668,9 @@ window.renderLiquid = function() {
     var sc      = 'status-' + (c.status||'empty');
     var typ     = c.type.charAt(0).toUpperCase() + c.type.slice(1);
     var id      = escId(c.id);
-    return '<tr>'
-      + '<td style="font-weight:700;color:var(--white);">' + c.reference + '<span class="mob-tap-hint">' + typ + ' · ' + clientName(c.client_id) + '</span></td>'
+    var spiritLabel = c.spirit_type ? (SPIRIT_LABELS[c.spirit_type]||c.spirit_type) : '—';
+    return '<tr class="mob-data-row">'
+      + '<td style="font-weight:700;color:var(--white);">' + c.reference + '</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + typ + '</td>'
       + '<td class="mob-hide" style="font-size:12px;">' + clientName(c.client_id) + '</td>'
       + '<td class="mob-hide">' + spirit + '</td>'
@@ -10674,8 +10685,27 @@ window.renderLiquid = function() {
       + '<button onclick="editContainer(\'' + id + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
       + '<span class="mob-hide"><button onclick="showContainerQR(\'' + id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">QR</button>'
       + '<button onclick="deleteContainer(\'' + id + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Del</button></span>'
-      + '</td></tr>';
+      + '</td></tr>'
+      // Detail drawer
+      + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="12">'
+      + '<div class="mob-detail-inner">'
+      + '<div class="mob-d-item"><span class="mob-d-label">Type</span><span class="mob-d-value">' + typ + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Client</span><span class="mob-d-value">' + clientName(c.client_id) + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Spirit</span><span class="mob-d-value">' + spiritLabel + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">ABV</span><span class="mob-d-value">' + abv + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">LPA</span><span class="mob-d-value" style="color:var(--gold-light);">' + lpa + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Fill Date</span><span class="mob-d-value">' + fill + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Age</span><span class="mob-d-value">' + age + '</span></div>'
+      + (c.location ? '<div class="mob-d-item"><span class="mob-d-label">Location</span><span class="mob-d-value">' + c.location + '</span></div>' : '')
+      + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
+      + '<button onclick="event.stopPropagation();editContainer(\'' + id + '\')" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">Edit</button>'
+      + '<button onclick="event.stopPropagation();showContainerQR(\'' + id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">QR</button>'
+      + '</div>'
+      + '</div></td></tr>';
   }).join('');
+  // Wire tap-to-expand on mobile
+  var liqTbl = tbody.closest('table');
+  if (liqTbl && window.mobExpandInit) window.mobExpandInit(liqTbl);
 };
 
 function fmtDate(d) { return d ? new Date(d).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) : '—'; }
@@ -11402,19 +11432,20 @@ window.renderDryGoods = function() {
     var totalVal   = skuBatches.reduce(function(s,b){ return s + parseFloat(b.unit_cost||0)*parseInt(b.quantity_remaining||0); },0);
 
     var stockCol = totalStock === 0 ? 'var(--red)' : (sku.reorder_point && totalStock <= sku.reorder_point) ? 'var(--amber)' : 'var(--green)';
+    var supplierName = (function(){
+      if (sku.supplier_id && window.SUPPLIERS) {
+        var s = window.SUPPLIERS.find(function(x){return x.id===sku.supplier_id;});
+        if (s) return s.name;
+      }
+      return sku.supplier||'—';
+    }());
 
-    rows.push('<tr style="cursor:pointer;" onclick="window.openSKUPanel(\''+sku.id+'\')">'
+    rows.push('<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openSKUPanel(\''+sku.id+'\')">'
       + '<td class="mob-hide" style="font-family:monospace;font-size:11px;color:var(--gold);">'+sku.id+'</td>'
-      + '<td style="color:var(--white);font-weight:600;">'+sku.description+'<span class="mob-tap-hint">'+sku.id+' · '+catName(sku.category_id)+'</span></td>'
+      + '<td style="color:var(--white);font-weight:600;">'+sku.description+'</td>'
       + '<td class="mob-hide"><span class="spirit-badge" style="background:rgba(122,147,168,0.15);color:var(--text);">'+catName(sku.category_id)+'</span></td>'
       + '<td class="mob-hide" style="font-size:12px;">'+clientName(sku.client_id)+'</td>'
-      + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">'+(function(){
-        if (sku.supplier_id && window.SUPPLIERS) {
-          var s = window.SUPPLIERS.find(function(x){return x.id===sku.supplier_id;});
-          if (s) return s.name;
-        }
-        return sku.supplier||'—';
-      }())+'</td>'
+      + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">'+supplierName+'</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--text);">'+(sku.location ? '<span style="background:rgba(74,158,221,0.12);color:var(--blue);padding:2px 7px;border-radius:3px;font-size:10px;letter-spacing:0.04em;">'+sku.location+'</span>' : '<span style="color:var(--muted);">—</span>')+'</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">'+(sku.unit_of_measure||'units')+'</td>'
       + '<td style="font-weight:700;color:'+stockCol+';">'+totalStock.toLocaleString()+(sku.reorder_point && totalStock <= sku.reorder_point ? ' <span style="color:var(--amber);font-size:10px;">⚠</span>' : '')+'</td>'
@@ -11425,9 +11456,24 @@ window.renderDryGoods = function() {
       + '<span class="mob-hide"><button onclick="window.openEditSKUModal(\''+sku.id+'\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Edit</button>'
       + '<button onclick="window.openAddBatchModalForSKU(\''+sku.id+'\')" style="background:transparent;border:1px solid var(--green);color:var(--green);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">+ Delivery</button></span>'
       + '</td>'
-      + '</tr>');
+      + '</tr>'
+      // Detail drawer
+      + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="11">'
+      + '<div class="mob-detail-inner">'
+      + '<div class="mob-d-item"><span class="mob-d-label">SKU</span><span class="mob-d-value" style="font-family:monospace;color:var(--gold);">'+sku.id+'</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Category</span><span class="mob-d-value">'+catName(sku.category_id)+'</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Client</span><span class="mob-d-value">'+clientName(sku.client_id)+'</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Supplier</span><span class="mob-d-value">'+supplierName+'</span></div>'
+      + (sku.location ? '<div class="mob-d-item"><span class="mob-d-label">Location</span><span class="mob-d-value">'+sku.location+'</span></div>' : '')
+      + '<div class="mob-d-item"><span class="mob-d-label">Deliveries</span><span class="mob-d-value">'+activeBatches.length+' active</span></div>'
+      + (totalVal > 0 ? '<div class="mob-d-item"><span class="mob-d-label">Value</span><span class="mob-d-value">€'+totalVal.toLocaleString('en-IE',{minimumFractionDigits:2,maximumFractionDigits:2})+'</span></div>' : '')
+      + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;"><button onclick="event.stopPropagation();window.openAddBatchModalForSKU(\''+sku.id+'\')" style="background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);color:var(--green);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">+ Add Delivery</button><button onclick="event.stopPropagation();window.openEditSKUModal(\''+sku.id+'\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Edit</button></div>'
+      + '</div></td></tr>');
   });
   tbody.innerHTML = rows.join('');
+  // Wire tap-to-expand on mobile
+  var dgTbl = tbody.closest('table');
+  if (dgTbl && window.mobExpandInit) window.mobExpandInit(dgTbl);
 };
 
 // ── Export dry goods to Excel ─────────────────────────────────────────────────
@@ -12184,9 +12230,11 @@ window.saveAdjModal = async function() {
       var statusStyle = STATUS_STYLE[s.status] || STATUS_STYLE.pending;
       var added = s.created_at ? new Date(s.created_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) : '—';
       var emailCell = s.email ? '<a href="mailto:' + s.email + '" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">' + s.email + '</a>' : '—';
+
       var tr = document.createElement('tr');
+      tr.className = 'mob-data-row';
       tr.style.cursor = 'pointer';
-      tr.innerHTML = '<td style="color:var(--white);font-weight:600;">' + s.name + '<span class="mob-tap-hint">' + (s.category||'') + '</span></td>'
+      tr.innerHTML = '<td style="color:var(--white);font-weight:600;">' + s.name + '</td>'
         + '<td style="font-size:12px;color:var(--muted);">' + (s.category||'—') + '</td>'
         + '<td style="font-size:12px;">' + (s.contact_name||'—') + '</td>'
         + '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + emailCell + '</td>'
@@ -12195,13 +12243,41 @@ window.saveAdjModal = async function() {
         + '<td><span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:3px 8px;' + statusStyle + '">' + (s.status||'pending') + '</span></td>'
         + '<td style="white-space:nowrap;"><button class="supp-view-btn" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-right:4px;">View</button>'
         + '<button class="supp-edit-btn" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button></td>';
+
+      // Detail drawer row
+      var detailTr = document.createElement('tr');
+      detailTr.className = 'mob-detail-row';
+      var emailLink = s.email ? '<a href="mailto:' + s.email + '" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">' + s.email + '</a>' : '—';
+      detailTr.innerHTML = '<td class="mob-detail-cell" colspan="8">'
+        + '<div class="mob-detail-inner">'
+        + (s.contact_name ? '<div class="mob-d-item"><span class="mob-d-label">Contact</span><span class="mob-d-value">' + s.contact_name + '</span></div>' : '')
+        + '<div class="mob-d-item"><span class="mob-d-label">Email</span><span class="mob-d-value">' + emailLink + '</span></div>'
+        + (s.phone ? '<div class="mob-d-item"><span class="mob-d-label">Phone</span><span class="mob-d-value">' + s.phone + '</span></div>' : '')
+        + '<div class="mob-d-item"><span class="mob-d-label">Added</span><span class="mob-d-value">' + added + '</span></div>'
+        + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
+        + '<button class="mob-detail-view-btn" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">View</button>'
+        + '<button class="mob-detail-edit-btn" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Edit</button>'
+        + '</div>'
+        + '</div></td>';
+
       (function(supplier) {
-        tr.addEventListener('click', function() { window.viewSupplier(supplier.id); });
+        tr.addEventListener('click', function(e) {
+          if (e.target.closest('button,a')) return;
+          window.viewSupplier(supplier.id);
+        });
         tr.querySelector('.supp-view-btn').addEventListener('click', function(e) { e.stopPropagation(); window.viewSupplier(supplier.id); });
         tr.querySelector('.supp-edit-btn').addEventListener('click', function(e) { e.stopPropagation(); window.editSupplier(supplier.id); });
+        detailTr.querySelector('.mob-detail-view-btn').addEventListener('click', function(e) { e.stopPropagation(); window.viewSupplier(supplier.id); });
+        detailTr.querySelector('.mob-detail-edit-btn').addEventListener('click', function(e) { e.stopPropagation(); window.editSupplier(supplier.id); });
       })(s);
+
       tbody.appendChild(tr);
+      tbody.appendChild(detailTr);
     });
+
+    // Wire tap-to-expand on mobile
+    var suppTbl = tbody.closest('table');
+    if (suppTbl && window.mobExpandInit) window.mobExpandInit(suppTbl);
   }
 
   // Open modal for new supplier
@@ -12539,34 +12615,26 @@ window.saveAdjModal = async function() {
         ? new Date(j.scheduled_start).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'})
         : '—';
       var jid = String(j.id).replace(/'/g, "\\'");
-      var row = '<tr style="cursor:pointer;" onclick="window.openJobDetail(\'' + jid + '\')">';
+      var row = '<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openJobDetail(\'' + jid + '\')">';
       row += '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + j.id + '</td>';
-      row += '<td style="font-weight:600;color:var(--white);">' + (j.product_name||'—') + '<span class="mob-tap-hint">' + clientName + '</span></td>';
+      row += '<td style="font-weight:600;color:var(--white);">' + (j.product_name||'—') + '</td>';
       row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + clientName + '</td>';
       row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + (j.po_number||'—') + '</td>';
       row += '<td class="mob-hide" style="font-size:12px;">' + target + '</td>';
       row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + schedDate + '</td>';
       row += '<td><span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:3px 8px;' + stageStyle + '">' + stageLabel + '</span></td>';
       row += '<td id="task-pills-' + j.id + '" style="font-size:11px;"></td>';
-      var delBtn = document.createElement('button');
-      delBtn.textContent = 'Delete';
-      delBtn.style.cssText = 'background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;';
-      var viewBtn = document.createElement('button');
-      viewBtn.textContent = 'View';
-      viewBtn.style.cssText = 'background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;';
-      var btnCell = document.createElement('td');
-      btnCell.style.cssText = 'white-space:nowrap;';
-      btnCell.style.display = 'flex';
-      btnCell.style.gap = '6px';
-      (function(jobObj) {
-        viewBtn.onclick = function(e){ e.stopPropagation(); window.openJobDetail(jobObj.id); };
-        delBtn.onclick  = function(e){ e.stopPropagation(); window.deleteJobDirect(jobObj.id); };
-      })(j);
-      btnCell.appendChild(viewBtn);
-      btnCell.appendChild(delBtn);
-      // We'll handle this via DOM after innerHTML — placeholder for now
       row += '<td class="job-row-actions" data-id="' + j.id + '" style="white-space:nowrap;"></td>';
       row += '</tr>';
+      // Detail drawer row (shown on mobile tap)
+      row += '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="9">';
+      row += '<div class="mob-detail-inner">';
+      row += '<div class="mob-d-item"><span class="mob-d-label">Client</span><span class="mob-d-value">' + clientName + '</span></div>';
+      row += '<div class="mob-d-item"><span class="mob-d-label">PO Number</span><span class="mob-d-value">' + (j.po_number||'—') + '</span></div>';
+      row += '<div class="mob-d-item"><span class="mob-d-label">Target</span><span class="mob-d-value">' + target + '</span></div>';
+      row += '<div class="mob-d-item"><span class="mob-d-label">Scheduled</span><span class="mob-d-value">' + schedDate + '</span></div>';
+      row += '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Tasks</span><span class="mob-d-value" id="mob-task-pills-' + j.id + '" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:2px;"></span></div>';
+      row += '</div></td></tr>';
       return row;
     }).join('');
 
@@ -12589,6 +12657,9 @@ window.saveAdjModal = async function() {
 
     // Load task counts per job
     loadTaskPills(list.map(function(j){return j.id;}));
+    // Wire tap-to-expand on mobile
+    var tbl = document.getElementById('jobs-main-table');
+    if (tbl && window.mobExpandInit) window.mobExpandInit(tbl);
   };
 
   async function loadTaskPills(jobIds) {
@@ -12602,14 +12673,17 @@ window.saveAdjModal = async function() {
       });
       jobIds.forEach(function(id) {
         var el = document.getElementById('task-pills-' + id);
-        if (!el) return;
+        var elMob = document.getElementById('mob-task-pills-' + id);
+        if (!el && !elMob) return;
         var m = map[id];
-        if (!m) { el.innerHTML = ''; return; }
         var html = '';
-        if (m.pending) html += '<span style="font-size:9px;background:rgba(232,156,58,0.15);color:var(--amber);padding:2px 6px;border-radius:10px;margin-right:4px;">' + m.pending + ' pending</span>';
-        if (m.accepted) html += '<span style="font-size:9px;background:rgba(74,158,221,0.15);color:var(--blue);padding:2px 6px;border-radius:10px;margin-right:4px;">' + m.accepted + ' active</span>';
-        if (m.completed) html += '<span style="font-size:9px;background:rgba(61,186,120,0.15);color:var(--green);padding:2px 6px;border-radius:10px;">' + m.completed + ' done</span>';
-        el.innerHTML = html;
+        if (m) {
+          if (m.pending) html += '<span style="font-size:9px;background:rgba(232,156,58,0.15);color:var(--amber);padding:2px 6px;border-radius:10px;margin-right:4px;">' + m.pending + ' pending</span>';
+          if (m.accepted) html += '<span style="font-size:9px;background:rgba(74,158,221,0.15);color:var(--blue);padding:2px 6px;border-radius:10px;margin-right:4px;">' + m.accepted + ' active</span>';
+          if (m.completed) html += '<span style="font-size:9px;background:rgba(61,186,120,0.15);color:var(--green);padding:2px 6px;border-radius:10px;">' + m.completed + ' done</span>';
+        }
+        if (el) el.innerHTML = html;
+        if (elMob) elMob.innerHTML = html || '<span style="font-size:11px;color:var(--muted);">None assigned</span>';
       });
     } catch(e) {}
   }
@@ -15591,6 +15665,7 @@ window.saveAdjModal = async function() {
     { key:'timesheet_edit',     label:'Edit & delete clock records', category:'People' },
     { key:'reports_view',       label:'View reports',                category:'Reports' },
     { key:'settings_access',    label:'Access settings',             category:'System' },
+    { key:'invite_users',       label:'Invite new users',            category:'System' },
   ];
 
   var ROLES = [
@@ -15917,7 +15992,7 @@ window.saveAdjModal = async function() {
   if (!Array.isArray(window.onUserAuthenticated)) window.onUserAuthenticated = [];
   window.onUserAuthenticated.push(async function(user) {
     await loadPermissions();
-    if (user.role === 'managing_director' || user.role === 'operations_director') {
+    if (user.role === 'managing_director' || user.role === 'operations_director' || user.role === 'business_analyst') {
       var btn = document.getElementById('settings-cog-btn');
       if (btn) { btn.style.display='inline-flex'; }
     }
@@ -16436,11 +16511,8 @@ async function lvSendApprovalEmail(appId,from,to,days,leaveType,notes){
   var dateStr=from===to?fmtDate(from):fmtDate(from)+' – '+fmtDate(to);
   var typeLabel=leaveType==='half_day'?'Half Day':'Full Day(s)';
 
-  await fetch('https://api.resend.com/emails',{
-    method:'POST',
-    headers:{'Authorization':'Bearer '+resendKey,'Content-Type':'application/json'},
-    body:JSON.stringify({
-      from:'Pulse by Lighthouse Drinks <'+(window._fromEmail||'noreply@lighthousedrinks.com')+'>',
+  try {
+    await window.sendEmail({
       to:[mgr.email],
       subject:'Leave Request – '+empName.trim()+' – '+dateStr,
       html:'<div style="font-family:sans-serif;max-width:520px;">'
@@ -16454,8 +16526,8 @@ async function lvSendApprovalEmail(appId,from,to,days,leaveType,notes){
         +'</table>'
         +'<p>Please log into <strong>Pulse</strong> to approve or decline this request.</p>'
         +'</div>'
-    })
-  }).catch(function(){});
+    });
+  } catch(e){ console.warn('Leave notification email failed:', e.message); }
 }
 
 /* ── Cancel own pending request ── */
@@ -16793,7 +16865,15 @@ window.rosterPublish=async function(){
       return '<tr><td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#c0cfe0;">'+dn+'</td><td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;font-weight:700;color:'+col+';">'+s.sh.sn+'</td><td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#7a93a8;">'+(s.sh.st||'').slice(0,5)+' \u2013 '+(s.sh.et||'').slice(0,5)+'</td></tr>';
     }).join('');
     var html='<div style="font-family:sans-serif;max-width:520px;margin:0 auto;background:#0d1b2a;padding:28px 20px;"><div style="text-align:center;margin-bottom:20px;"><h1 style="color:#c9a84c;font-size:18px;margin:0;">Lighthouse Drinks</h1><p style="color:#4a9edd;font-size:12px;margin:4px 0 0;">Your Roster \u2013 '+wl+'</p></div><p style="color:#c0cfe0;font-size:14px;">Hi '+emp.display_name+',</p><table style="width:100%;border-collapse:collapse;background:#152336;border-radius:6px;overflow:hidden;"><thead><tr><th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Day</th><th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Shift</th><th style="padding:10px 14px;text-align:left;font-size:10px;text-transform:uppercase;color:#4a9edd;border-bottom:2px solid #1e3a5a;">Hours</th></tr></thead><tbody>'+rows+'</tbody></table><p style="color:#4a6a8a;font-size:11px;margin-top:16px;text-align:center;">Lighthouse Drinks Ltd \u00b7 Cork, Ireland</p></div>';
-    try{var res=await fetch('https://api.resend.com/emails',{method:'POST',headers:{'Authorization':'Bearer '+rk2,'Content-Type':'application/json'},body:JSON.stringify({from:'Lighthouse Drinks <'+(window._fromEmail||'noreply@lighthousedrinks.com')+'>',to:[email],subject:'Your Roster \u2013 '+wl,html:html})});if(res.ok) sent++;else fail++;}catch(e){fail++;}
+    try{
+      await window.sendEmail({
+        to:[email],
+        subject:'Your Roster \u2013 '+wl,
+        html:html,
+        from:'Lighthouse Drinks <'+(window._fromEmail||'noreply@lighthousedrinks.com')+'>'
+      });
+      sent++;
+    }catch(e){fail++;}
   }
   if(bar){bar.textContent='Published! '+sent+' email'+(sent!==1?'s':'')+' sent'+(fail?' ('+fail+' failed)':'');bar.style.color=fail?'var(--amber)':'var(--green)';}
   window.toast&&window.toast('Roster published!','success');
