@@ -799,9 +799,8 @@
     .four-col { grid-template-columns: 1fr 1fr; }
   }
 
-  /* ── Tap-to-expand detail rows: hidden by default at all sizes ── */
+  /* ── Tap-to-expand detail rows: always hidden on desktop ── */
   .mob-expandable tbody tr.mob-detail-row { display: none; }
-  .mob-expandable tbody tr.mob-detail-row.mob-expanded { display: table-row; }
 
   /* ─── RESPONSIVE — MOBILE ──────────────────────────────── */
   @media (max-width: 768px) {
@@ -1959,12 +1958,48 @@
 const SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co';
 const SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
 
+// ── Centralised error logger ──────────────────────────────────────────────────
+// All catch blocks should call logError() rather than being silent or ad-hoc.
+// In the future this can be wired to a monitoring service (e.g. Sentry).
+window.logError = function(context, err) {
+  var msg = (err && err.message) ? err.message : String(err);
+  console.error('[Pulse] ' + context + ':', msg, err);
+};
+
+// ── Safe HTML escape utility ──────────────────────────────────────────────────
+// Use escapeHtml() around any database value before building HTML strings.
+// This prevents XSS if a field ever contains characters like < > " ' &
+window.escapeHtml = function(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
 // ── Core fetch helper ─────────────────────────────────────────────────────────
+// Single canonical API entry point for all Supabase REST calls.
+// Uses the user's live JWT when available so Supabase RLS fires correctly.
+// Falls back to anon key only when no session exists (e.g. login screen).
 async function sbFetch(path, opts = {}) {
-  const method  = (opts.method || 'GET').toUpperCase();
+  const method = (opts.method || 'GET').toUpperCase();
+
+  // Resolve the best available bearer token
+  let bearerToken = SUPA_KEY;
+  try {
+    if (window._sb) {
+      const s = await window._sb.auth.getSession();
+      if (s.data && s.data.session && s.data.session.access_token) {
+        bearerToken = s.data.session.access_token;
+      }
+    }
+  } catch(e) { /* session not ready yet — anon key fallback is intentional */ }
+
   const baseHeaders = {
     'apikey':        SUPA_KEY,
-    'Authorization': 'Bearer ' + SUPA_KEY,
+    'Authorization': 'Bearer ' + bearerToken,
     'Content-Type':  'application/json'
   };
   if (['POST','PATCH','PUT'].includes(method)) {
@@ -1980,7 +2015,7 @@ async function sbFetch(path, opts = {}) {
     clearTimeout(timer);
     if (!res.ok) {
       const err = await res.text();
-      console.error('Supabase ' + method + ' ' + path + ' →', res.status, err);
+      window.logError('sbFetch ' + method + ' ' + path + ' → ' + res.status, err);
       throw new Error('DB ' + res.status + ': ' + err);
     }
     const text = await res.text();
@@ -1993,32 +2028,23 @@ async function sbFetch(path, opts = {}) {
 }
 
 // ── CRUD helpers ──────────────────────────────────────────────────────────────
+// db is the single API client. All modules should use db.select / insert /
+// update / delete rather than calling fetch() directly.
 const db = {
-  // SELECT with optional query string e.g. '?stage=eq.Intake&order=created_at.desc'
-  select: (table, qs = '') => sbFetch('/rest/v1/' + table + qs),
-
-  // INSERT — payload is object or array
-  insert: (table, payload) => sbFetch('/rest/v1/' + table, {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  }),
-
-  // UPDATE — qs filters which rows e.g. '?id=eq.JOB-520'
-  update: (table, qs, payload) => sbFetch('/rest/v1/' + table + qs, {
-    method: 'PATCH',
-    body: JSON.stringify(payload)
-  }),
-
-  // DELETE
-  delete: (table, qs) => sbFetch('/rest/v1/' + table + qs, { method: 'DELETE' }),
-
-  // UPSERT
-  upsert: (table, payload) => sbFetch('/rest/v1/' + table, {
+  select: (table, qs = '')         => sbFetch('/rest/v1/' + table + qs),
+  insert: (table, payload)         => sbFetch('/rest/v1/' + table, { method: 'POST', body: JSON.stringify(payload) }),
+  update: (table, qs, payload)     => sbFetch('/rest/v1/' + table + qs, { method: 'PATCH', body: JSON.stringify(payload) }),
+  delete: (table, qs)              => sbFetch('/rest/v1/' + table + qs, { method: 'DELETE' }),
+  upsert: (table, payload)         => sbFetch('/rest/v1/' + table, {
     method: 'POST',
     headers: { 'Prefer': 'resolution=merge-duplicates,return=representation' },
     body: JSON.stringify(payload)
-  })
+  }),
+  rpc:    (fn, payload = {})       => sbFetch('/rest/v1/rpc/' + fn, { method: 'POST', body: JSON.stringify(payload) })
 };
+
+// Expose db globally so all script blocks can use the same client
+window.db = db;
 
 // ── App-level cache (populated on first load) ─────────────────────────────────
 window.APP = {
@@ -2032,7 +2058,6 @@ window.APP = {
 };
 
 async function loadClients() {
-  // Always re-fetch if cache is empty or stale
   if (APP.loaded.clients && APP.clients && APP.clients.length > 0) return APP.clients;
   try {
     var rows = await db.select('clients', '?order=name.asc');
@@ -2041,22 +2066,26 @@ async function loadClients() {
       APP.loaded.clients = true;
     }
   } catch(e) {
-    console.warn('loadClients failed:', e.message);
+    window.logError('loadClients', e);
   }
   return APP.clients || [];
 }
 
 async function loadCategories() {
   if (APP.loaded.categories) return APP.categories;
-  APP.categories = await db.select('dry_goods_categories', '?order=sort_order.asc');
-  APP.loaded.categories = true;
+  try {
+    APP.categories = await db.select('dry_goods_categories', '?order=sort_order.asc');
+    APP.loaded.categories = true;
+  } catch(e) {
+    window.logError('loadCategories', e);
+    APP.categories = [];
+  }
   return APP.categories;
 }
 
 async function loadCaskKPI() {
   try {
-    var rows = await db.select('liquid_containers',
-      '?type=eq.cask&select=id,status');
+    var rows   = await db.select('liquid_containers', '?type=eq.cask&select=id,status');
     var total  = rows.length;
     var active = rows.filter(function(r){ return r.status !== 'empty'; }).length;
     var el1 = document.getElementById('kpi-casks-storage');
@@ -2066,47 +2095,43 @@ async function loadCaskKPI() {
   } catch(e) {
     var el1 = document.getElementById('kpi-casks-storage');
     if (el1) el1.textContent = '—';
-    console.warn('Cask KPI load failed:', e.message);
+    window.logError('loadCaskKPI', e);
   }
 }
 
 window.loadOverviewValues = async function loadOverviewValues() {
-  var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-  async function ovFetch(table, qs) {
-    var res = await fetch(SUPA_URL + table + (qs||''), {
-      headers:{'apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY}
-    });
-    return res.ok ? res.json() : [];
-  }
-  function setText(id,v){ var e=document.getElementById(id); if(e) e.textContent=v; }
+  function setText(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; }
 
   try {
-    var containers = await ovFetch('liquid_containers','?client_id=eq.CLI-000&status=neq.empty');
-    var liqVal = containers.reduce(function(s,c){ return s + parseFloat(c.current_lpa||0)*parseFloat(c.lpa_price||0); },0);
-    setText('ov-lh-liquid-value', liqVal > 0 ? '€'+liqVal.toLocaleString('en-IE',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—');
-    var lhCasks = containers.filter(function(c){ return c.type==='cask'; }).length;
-    setText('ov-lh-liquid-sub', lhCasks + ' cask'+(lhCasks!==1?'s':'')+' · at recorded LPA price');
-  } catch(e) { console.warn('Liquid value:', e.message); }
+    var containers = await db.select('liquid_containers', '?client_id=eq.CLI-000&status=neq.empty');
+    var liqVal = containers.reduce(function(s,c){ return s + parseFloat(c.current_lpa||0) * parseFloat(c.lpa_price||0); }, 0);
+    setText('ov-lh-liquid-value', liqVal > 0 ? '€' + liqVal.toLocaleString('en-IE', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—');
+    var lhCasks = containers.filter(function(c){ return c.type === 'cask'; }).length;
+    setText('ov-lh-liquid-sub', lhCasks + ' cask' + (lhCasks !== 1 ? 's' : '') + ' · at recorded LPA price');
+  } catch(e) { window.logError('loadOverviewValues:liquid', e); }
 
   try {
-    var lhSkus    = await ovFetch('dry_goods_skus','?client_id=eq.CLI-000&is_active=eq.true&select=id');
-    var skuIds    = lhSkus.map(function(s){ return s.id; });
-    var dgVal     = 0;
-    var dgBatches = 0;
+    var lhSkus = await db.select('dry_goods_skus', '?client_id=eq.CLI-000&is_active=eq.true&select=id');
+    var skuIds = lhSkus.map(function(s){ return s.id; });
+    var dgVal = 0, dgBatches = 0;
     if (skuIds.length) {
-      var lhBatches = await ovFetch('dry_goods_batches','?sku_id=in.('+skuIds.join(',')+')&quantity_remaining=gt.0&select=quantity_remaining,unit_cost');
-      dgVal     = lhBatches.reduce(function(s,b){ return s + parseFloat(b.unit_cost||0)*parseInt(b.quantity_remaining||0); },0);
+      var lhBatches = await db.select('dry_goods_batches', '?sku_id=in.(' + skuIds.join(',') + ')&quantity_remaining=gt.0&select=quantity_remaining,unit_cost');
+      dgVal     = lhBatches.reduce(function(s,b){ return s + parseFloat(b.unit_cost||0) * parseInt(b.quantity_remaining||0); }, 0);
       dgBatches = lhBatches.length;
     }
-    setText('ov-lh-dg-value', dgVal > 0 ? '€'+dgVal.toLocaleString('en-IE',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—');
-    setText('ov-lh-dg-sub', dgBatches+(dgBatches!==1?' active deliveries':' active delivery')+' in stock');
-  } catch(e) { console.warn('DG value:', e.message); }
-}
+    setText('ov-lh-dg-value', dgVal > 0 ? '€' + dgVal.toLocaleString('en-IE', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—');
+    setText('ov-lh-dg-sub', dgBatches + (dgBatches !== 1 ? ' active deliveries' : ' active delivery') + ' in stock');
+  } catch(e) { window.logError('loadOverviewValues:dryGoods', e); }
+};
 
 async function loadContainers() {
-  APP.containers = await db.select('liquid_containers', '?order=type.asc,reference.asc');
-  APP.loaded.containers = true;
+  try {
+    APP.containers = await db.select('liquid_containers', '?order=type.asc,reference.asc');
+    APP.loaded.containers = true;
+  } catch(e) {
+    window.logError('loadContainers', e);
+    APP.containers = [];
+  }
   return APP.containers;
 }
 
@@ -2128,6 +2153,16 @@ function toast(msg, type = 'success') {
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 3200);
 }
+
+// ── Global runtime error capture ──────────────────────────────────────────────
+// Catches unhandled JS errors and promise rejections that would otherwise be
+// completely invisible in production. Logs to console with context.
+window.addEventListener('error', function(e) {
+  window.logError('Unhandled error [' + (e.filename||'?') + ':' + e.lineno + ']', e.error || e.message);
+});
+window.addEventListener('unhandledrejection', function(e) {
+  window.logError('Unhandled promise rejection', e.reason);
+});
 </script>
 
 <!-- ══ AUTH + USER MANAGEMENT ══════════════════════════════════════════════ -->
@@ -2322,7 +2357,7 @@ async function handleSession(session) {
     var STAFF_ROLES = ['managing_director','operations_director','business_analyst','quality_compliance','financial_controller','production_manager','warehouse_liquid','client_coordinator','production_operator'];
     window.CURRENT_USER = { id: uid, app_user_id: appUserId, email: email, role: role, client_id: clientId, client_name: clientName };
     // Store email in app_users for settings panel display
-    try { await fetch(SUPA_URL + 'app_users?id=eq.' + uid, { method:'PATCH', headers:{ apikey:SUPA_KEY, Authorization:'Bearer '+token, 'Content-Type':'application/json' }, body: JSON.stringify({ email: email }) }); } catch(e) {}
+    try { await window.db.update('app_users', '?id=eq.' + uid, { email: email }); } catch(e) { window.logError('store user email', e); }
     if (role === 'client') {
       showPortal(window.CURRENT_USER);
     } else if (STAFF_ROLES.indexOf(role) !== -1) {
@@ -2522,39 +2557,94 @@ window.showPortalPage = function(pageId, navEl) {
 // ── Portal data ──────────────────────────────────────────────────────────────
 async function loadPortalData(clientId) {
   if (!clientId) return;
-  var H = { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + SUPA_KEY };
+  var esc = window.escapeHtml;
+
+  // Jobs table
   try {
-    var jobs = await fetch(SUPA_URL+'/rest/v1/jobs?client_id=eq.'+clientId+'&order=created_at.desc',{headers:H}).then(function(r){return r.json();});
+    var jobs = await db.select('jobs', '?client_id=eq.' + clientId + '&order=created_at.desc');
     var tb = document.getElementById('portal-jobs-tbody');
-    if (tb) tb.innerHTML = jobs.length ? jobs.map(function(j){
-      var col = j.stage==='Complete'?'var(--green)':j.stage==='In Progress'?'var(--gold)':'var(--muted)';
-      return '<tr><td><span class="job-num">'+(j.job_id||j.id)+'</span></td><td style="color:var(--white);font-weight:600;">'+(j.product_name||'—')+'</td><td>'+(j.qty_bottles?Number(j.qty_bottles).toLocaleString():'—')+'</td><td><span style="color:'+col+';">'+(j.stage||'—')+'</span></td><td>'+(j.bottling_date?new Date(j.bottling_date).toLocaleDateString('en-IE'):'—')+'</td><td style="color:var(--muted);font-size:12px;">'+(j.notes||'')+'</td></tr>';
-    }).join(''):'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No jobs on file.</td></tr>';
-  } catch(e){}
+    if (tb) tb.innerHTML = jobs.length ? jobs.map(function(j) {
+      var col    = j.stage === 'Complete' ? 'var(--green)' : j.stage === 'In Progress' ? 'var(--gold)' : 'var(--muted)';
+      var jobId  = esc(j.job_id || j.id);
+      var name   = esc(j.product_name || '—');
+      var qty    = j.qty_bottles ? Number(j.qty_bottles).toLocaleString() : '—';
+      var stage  = esc(j.stage || '—');
+      var date   = j.bottling_date ? new Date(j.bottling_date).toLocaleDateString('en-IE') : '—';
+      var notes  = esc(j.notes || '');
+      return '<tr>'
+        + '<td><span class="job-num">' + jobId + '</span></td>'
+        + '<td style="color:var(--white);font-weight:600;">' + name + '</td>'
+        + '<td>' + qty + '</td>'
+        + '<td><span style="color:' + col + ';">' + stage + '</span></td>'
+        + '<td>' + date + '</td>'
+        + '<td style="color:var(--muted);font-size:12px;">' + notes + '</td>'
+        + '</tr>';
+    }).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No jobs on file.</td></tr>';
+  } catch(e) { window.logError('loadPortalData:jobs', e); }
+
+  // BOMs table
   try {
-    var boms = await fetch(SUPA_URL+'/rest/v1/boms?client_id=eq.'+clientId+'&order=created_at.desc',{headers:H}).then(function(r){return r.json();});
+    var boms = await db.select('boms', '?client_id=eq.' + clientId + '&order=created_at.desc');
     var tb2 = document.getElementById('portal-boms-tbody');
-    if (tb2) tb2.innerHTML = boms.length ? boms.map(function(b){
-      return '<tr><td style="color:var(--white);font-weight:600;">'+(b.product_name||'—')+'</td><td>'+(b.notes||'—').substring(0,40)+'</td><td>'+(b.gi_verified?'<span style="color:var(--green);">✓</span>':'—')+'</td><td style="color:var(--muted);font-size:12px;">'+(b.notes?b.notes.substring(0,60)+'…':'')+'</td></tr>';
-    }).join(''):'<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px;">No BOMs on file.</td></tr>';
-  } catch(e){}
+    if (tb2) tb2.innerHTML = boms.length ? boms.map(function(b) {
+      var name     = esc(b.product_name || '—');
+      var preview  = esc((b.notes || '—').substring(0, 40));
+      var fullNote = esc(b.notes ? b.notes.substring(0, 60) + '…' : '');
+      var verified = b.gi_verified ? '<span style="color:var(--green);">✓</span>' : '—';
+      return '<tr>'
+        + '<td style="color:var(--white);font-weight:600;">' + name + '</td>'
+        + '<td>' + preview + '</td>'
+        + '<td>' + verified + '</td>'
+        + '<td style="color:var(--muted);font-size:12px;">' + fullNote + '</td>'
+        + '</tr>';
+    }).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px;">No BOMs on file.</td></tr>';
+  } catch(e) { window.logError('loadPortalData:boms', e); }
+
+  // Dry goods table
   try {
-    var dg = await fetch(SUPA_URL+'/rest/v1/dry_goods_deliveries?client_id=eq.'+clientId+'&order=delivery_date.desc&select=*,dry_goods_categories(name)',{headers:H}).then(function(r){return r.json();});
+    var dg = await db.select('dry_goods_deliveries', '?client_id=eq.' + clientId + '&order=delivery_date.desc&select=*,dry_goods_categories(name)');
     var tb3 = document.getElementById('portal-dg-tbody');
-    if (tb3) tb3.innerHTML = dg.length ? dg.map(function(d){
-      var rem=Number(d.quantity_remaining||0),tot=Number(d.quantity_received||0);
-      var col=rem/tot>0.5?'var(--green)':rem/tot>0.2?'var(--amber)':'var(--red)';
-      return '<tr><td style="color:var(--white);">'+(d.description||'—')+'</td><td>'+(d.dry_goods_categories?d.dry_goods_categories.name:'—')+'</td><td>'+tot.toLocaleString()+'</td><td><span style="color:'+col+';font-weight:600;">'+rem.toLocaleString()+'</span></td><td>'+(d.delivery_date?new Date(d.delivery_date).toLocaleDateString('en-IE'):'—')+'</td></tr>';
-    }).join(''):'<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No dry goods on file.</td></tr>';
-  } catch(e){}
+    if (tb3) tb3.innerHTML = dg.length ? dg.map(function(d) {
+      var rem  = Number(d.quantity_remaining || 0);
+      var tot  = Number(d.quantity_received  || 0);
+      var col  = rem / tot > 0.5 ? 'var(--green)' : rem / tot > 0.2 ? 'var(--amber)' : 'var(--red)';
+      var desc = esc(d.description || '—');
+      var cat  = esc(d.dry_goods_categories ? d.dry_goods_categories.name : '—');
+      var date = d.delivery_date ? new Date(d.delivery_date).toLocaleDateString('en-IE') : '—';
+      return '<tr>'
+        + '<td style="color:var(--white);">' + desc + '</td>'
+        + '<td>' + cat + '</td>'
+        + '<td>' + tot.toLocaleString() + '</td>'
+        + '<td><span style="color:' + col + ';font-weight:600;">' + rem.toLocaleString() + '</span></td>'
+        + '<td>' + date + '</td>'
+        + '</tr>';
+    }).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No dry goods on file.</td></tr>';
+  } catch(e) { window.logError('loadPortalData:dryGoods', e); }
+
+  // Liquid containers table
   try {
-    var liq = await fetch(SUPA_URL+'/rest/v1/liquid_containers?client_id=eq.'+clientId+'&order=reference.asc',{headers:H}).then(function(r){return r.json();});
+    var liq = await db.select('liquid_containers', '?client_id=eq.' + clientId + '&order=reference.asc');
     var tb4 = document.getElementById('portal-liq-tbody');
-    if (tb4) tb4.innerHTML = liq.length ? liq.map(function(c){
-      var sc=c.status==='empty'?'var(--muted)':c.status==='in_use'?'var(--amber)':'var(--green)';
-      return '<tr><td style="color:var(--white);font-weight:600;">'+(c.reference||'—')+'</td><td>'+(c.type||'—')+'</td><td>'+(c.spirit_type||'—')+'</td><td>'+(c.abv?c.abv+'%':'—')+'</td><td>'+(c.current_litres?parseFloat(c.current_litres).toFixed(1)+'L':'—')+'</td><td>'+(c.current_lpa?parseFloat(c.current_lpa).toFixed(3):'—')+'</td><td><span style="color:'+sc+';">'+(c.status||'—').replace('_',' ')+'</span></td></tr>';
-    }).join(''):'<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No liquid containers on file.</td></tr>';
-  } catch(e){}
+    if (tb4) tb4.innerHTML = liq.length ? liq.map(function(c) {
+      var sc      = c.status === 'empty' ? 'var(--muted)' : c.status === 'in_use' ? 'var(--amber)' : 'var(--green)';
+      var ref     = esc(c.reference   || '—');
+      var type    = esc(c.type        || '—');
+      var spirit  = esc(c.spirit_type || '—');
+      var abv     = c.abv    ? esc(c.abv) + '%' : '—';
+      var litres  = c.current_litres ? parseFloat(c.current_litres).toFixed(1) + 'L' : '—';
+      var lpa     = c.current_lpa    ? parseFloat(c.current_lpa).toFixed(3) : '—';
+      var status  = esc((c.status || '—').replace('_', ' '));
+      return '<tr>'
+        + '<td style="color:var(--white);font-weight:600;">' + ref + '</td>'
+        + '<td>' + type + '</td>'
+        + '<td>' + spirit + '</td>'
+        + '<td>' + abv + '</td>'
+        + '<td>' + litres + '</td>'
+        + '<td>' + lpa + '</td>'
+        + '<td><span style="color:' + sc + ';">' + status + '</span></td>'
+        + '</tr>';
+    }).join('') : '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No liquid containers on file.</td></tr>';
+  } catch(e) { window.logError('loadPortalData:liquid', e); }
 }
 
 // ── Invite modal ─────────────────────────────────────────────────────────────
@@ -2583,21 +2673,16 @@ window.openInviteModal = function() {
     // Populate with admin/manager roles
     var adminRoleKeys=['managing_director','operations_director','business_analyst','production_manager'];
     var adminRoleLabels={'managing_director':'Managing Director','operations_director':'Operations Director','business_analyst':'Business Analyst','production_manager':'Production Manager'};
-    try{
-      window._sb.auth.getSession().then(function(t){
-        var tok=(t.data&&t.data.session&&t.data.session.access_token)||'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-        fetch('https://anhawgzgxoywophqbmji.supabase.co/rest/v1/app_users?select=id,display_name,role&order=display_name.asc',{headers:{apikey:'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs',Authorization:'Bearer '+tok}})
-        .then(function(r){return r.json();})
-        .then(function(users){
-          (users||[]).filter(function(u){return adminRoleKeys.indexOf(u.role)>=0;}).forEach(function(u){
-            var opt=document.createElement('option');
-            opt.value=u.id;
-            opt.textContent=(u.display_name||u.id.substring(0,8))+' — '+(adminRoleLabels[u.role]||u.role);
-            rtSel.appendChild(opt);
-          });
+    db.select('app_users', '?select=id,display_name,role&order=display_name.asc')
+      .then(function(users) {
+        (users || []).filter(function(u) { return adminRoleKeys.indexOf(u.role) >= 0; }).forEach(function(u) {
+          var opt = document.createElement('option');
+          opt.value = u.id;
+          opt.textContent = (u.display_name || u.id.substring(0, 8)) + ' — ' + (adminRoleLabels[u.role] || u.role);
+          rtSel.appendChild(opt);
         });
-      });
-    }catch(e){}
+      })
+      .catch(function(e) { window.logError('openInviteModal:loadManagers', e); });
   }
   // Show saved Resend key hint
   var rkEl=document.getElementById('inv-resend-key'); if(rkEl) rkEl.value=window._resendKey||'';
@@ -2665,25 +2750,13 @@ window.sendInviteEmail = async function() {
 
   // Save to invite_tokens
   try {
-    var t=await window._sb.auth.getSession();
-    var at=(t.data&&t.data.session&&t.data.session.access_token)||'';
-    await fetch('https://anhawgzgxoywophqbmji.supabase.co/rest/v1/invite_tokens',{
-      method:'POST',
-      headers:{apikey:'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs',Authorization:'Bearer '+at,'Content-Type':'application/json',Prefer:'return=minimal'},
-      body:JSON.stringify({token:token,role:role,client_id:clientId,expires_at:new Date(payload.exp).toISOString(),created_by:window.CURRENT_USER?window.CURRENT_USER.email:null,first_name:firstName,last_name:lastName,invitee_email:email})
-    });
-  } catch(e){console.warn('Token save error:',e);}
+    await window.db.insert('invite_tokens', {token:token,role:role,client_id:clientId,expires_at:new Date(payload.exp).toISOString(),created_by:window.CURRENT_USER?window.CURRENT_USER.email:null,first_name:firstName,last_name:lastName,invitee_email:email});
+  } catch(e){window.logError('Token save', e);}
 
   // Also pre-create app_users record so name/role is ready when they sign up
   try {
-    var t2=await window._sb.auth.getSession();
-    var at2=(t2.data&&t2.data.session&&t2.data.session.access_token)||'';
-    await fetch('https://anhawgzgxoywophqbmji.supabase.co/rest/v1/pending_invites',{
-      method:'POST',
-      headers:{apikey:'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs',Authorization:'Bearer '+at2,'Content-Type':'application/json',Prefer:'return=minimal'},
-      body:JSON.stringify({email:email,first_name:firstName,last_name:lastName,role:role,client_id:clientId,invite_token:token,created_at:new Date().toISOString()})
-    });
-  } catch(e){console.warn('Pending invite save:',e);}
+    await window.db.insert('pending_invites', {email:email,first_name:firstName,last_name:lastName,role:role,client_id:clientId,invite_token:token,created_at:new Date().toISOString()});
+  } catch(e){window.logError('Pending invite save', e);}
 
   // Send email via Resend
   statusEl.textContent='Sending invite email…';
@@ -4228,30 +4301,15 @@ window.copyInviteLink = function() {
 <script>
 (function() {
   'use strict';
-  var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+  // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
   var _hrCurrentUserId  = null;
   var _hrCurrentProfile = null;
   var _hrAllUsers       = [];
 
-  async function getToken() {
-    try { var s=await window._sb.auth.getSession(); return (s.data&&s.data.session&&s.data.session.access_token)||SUPA_KEY; } catch(e){ return SUPA_KEY; }
-  }
-  async function sbGet(p) {
-    var t=await getToken(); var r=await fetch(SUPA_URL+p,{headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t}});
-    var d=await r.json(); return Array.isArray(d)?d:[];
-  }
-  async function sbPost(table,body) {
-    var t=await getToken(); var r=await fetch(SUPA_URL+table,{method:'POST',headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t,'Content-Type':'application/json',Prefer:'return=representation'},body:JSON.stringify(body)});
-    if(!r.ok){var e=await r.json();throw new Error(e.message||r.statusText);} return r.json();
-  }
-  async function sbPatch(table,query,body) {
-    var t=await getToken(); var r=await fetch(SUPA_URL+table+query,{method:'PATCH',headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t,'Content-Type':'application/json',Prefer:'return=representation'},body:JSON.stringify(body)});
-    if(!r.ok){var e=await r.json();throw new Error(e.message||r.statusText);} return r.json();
-  }
-  async function sbDelete(table,query) {
-    var t=await getToken(); await fetch(SUPA_URL+table+query,{method:'DELETE',headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t}});
-  }
+  function sbGet(p)                    { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
+  function sbPost(table, body)         { return window.db.insert(table, body); }
+  function sbPatch(table, query, body) { return window.db.update(table, query, body); }
+  function sbDelete(table, query)      { return window.db.delete(table, query); }
 
   function isAdmin() {
     var role=window.CURRENT_USER&&window.CURRENT_USER.role;
@@ -4648,7 +4706,7 @@ window.copyInviteLink = function() {
       calcEl.style.display='';
       contentEl.innerHTML='Hours on record: <strong style="color:var(--white);">'+hrs.toFixed(1)+'h</strong><br>'
         +'Accrued (8%): <strong style="color:var(--gold);">'+accrued.toFixed(1)+'h</strong> ≈ '+(accrued/8).toFixed(1)+' days';
-    } catch(e){}
+    } catch(e){ window.logError('holiday hours calc', e); }
   }
 
   // ── Save tab ──────────────────────────────────────────────────────────────────
@@ -5105,14 +5163,22 @@ const FACTORY_RATE   = 300;  // € per hour
 
   function getBottlePrice() {
     const sel = document.getElementById('bottleType');
-    return sel.value ? parseFloat(sel.value) : null;
+    return (sel && sel.value) ? parseFloat(sel.value) : null;
   }
 
-  function getCorkPrice() { const v = parseFloat(document.getElementById('corkPrice').value); return isNaN(v) ? null : v; }
+  function getCorkPrice() {
+    const el = document.getElementById('corkPrice');
+    if (!el) return null;
+    const v = parseFloat(el.value);
+    return isNaN(v) ? null : v;
+  }
 
   function getRoppPrice() {
-    const size = document.getElementById('roppSize').value;
-    const type = document.getElementById('roppType').value;
+    const sizeEl = document.getElementById('roppSize');
+    const typeEl = document.getElementById('roppType');
+    if (!sizeEl || !typeEl) return null;
+    const size = sizeEl.value;
+    const type = typeEl.value;
     if (!size || !type) return null;
     return parseFloat(type);
   }
@@ -5252,6 +5318,10 @@ const FACTORY_RATE   = 300;  // € per hour
   }
 
   function updateSummary() {
+    // Calculator modal may not be open — bail out silently if key elements aren't present
+    const container = document.getElementById('summary-lines');
+    if (!container) return;
+
     let total = 0;
     const lines = [];
 
@@ -5264,7 +5334,6 @@ const FACTORY_RATE   = 300;  // € per hour
       if (checked && price !== null) total += price;
     });
 
-    const container = document.getElementById('summary-lines');
     container.innerHTML = '';
     lines.forEach(l => {
       const div = document.createElement('div');
@@ -5478,23 +5547,29 @@ function renderJobs(){
     renderQueue(); return;
   }
 
+  var esc = window.escapeHtml;
   tbody.innerHTML = list.map(function(j){
-    var qty = j.target==='Liquid'
-      ? (j.litres  ? j.litres.toLocaleString()+' L'   : '\u2014')
-      : (j.bottles ? j.bottles.toLocaleString()+' btl' : '\u2014');
-    var abv = j.target==='Liquid' && j.abvIn ? j.abvIn+'%' : '\u2014';
-    var sc  = STAGE_CSS[j.stage]||'stage-1';
+    var qty = j.target === 'Liquid'
+      ? (j.litres  ? j.litres.toLocaleString()  + ' L'   : '\u2014')
+      : (j.bottles ? j.bottles.toLocaleString() + ' btl' : '\u2014');
+    var sc      = STAGE_CSS[j.stage] || 'stage-1';
+    var jobId   = esc(j.id);
+    var product = esc(j.product);
+    var client  = esc(j.client);
+    var po      = esc(j.po || '');
+    var stage   = esc(j.stage);
+    var prodDate = j.prodDate ? esc(j.prodDate) : '<span style="color:var(--muted)">—</span>';
     return '<tr>'
-      +'<td class="mob-hide"><span class="job-num">'+j.id+'</span></td>'
-      +'<td style="color:var(--white);font-weight:700;">'+j.product+'<span class="mob-tap-hint">'+j.id+' · '+j.client+'</span></td>'
-      +'<td class="mob-hide"><div>'+j.client+'</div><div style="font-size:10px;color:var(--muted);margin-top:2px;">'+(j.po||'')+'</div></td>'
-      +'<td class="mob-hide">'+qty+'</td>'
-      +'<td class="mob-hide" style="font-size:11px;color:var(--muted);">'+liqCtrl(j)+'</td>'
-      +'<td class="mob-hide" style="font-size:12px;color:var(--text);white-space:nowrap;">'+(j.prodDate||'<span style="color:var(--muted)">—</span>')+'</td>'
-      +'<td><span class="stage-badge '+sc+'">'+j.stage+'</span></td>'
-      +'<td class="mob-hide"><select data-jobid="'+j.id+'" class="stage-select" style="font-family:Lato,sans-serif;font-size:10px;background:var(--navy-mid);border:1px solid var(--navy-border);padding:4px 8px;color:var(--muted);outline:none;cursor:pointer;">'+stageOpts(j.stage)+'</select></td>'
-      +'<td style="white-space:nowrap;"><button class="job-edit-btn" data-editjob="'+j.id+'" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button><span class="mob-hide"><button class="job-delete-btn" data-deletejob="'+j.id+'" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Del</button></span></td>'
-      +'</tr>';
+      + '<td class="mob-hide"><span class="job-num">' + jobId + '</span></td>'
+      + '<td style="color:var(--white);font-weight:700;">' + product + '<span class="mob-tap-hint">' + jobId + ' · ' + client + '</span></td>'
+      + '<td class="mob-hide"><div>' + client + '</div><div style="font-size:10px;color:var(--muted);margin-top:2px;">' + po + '</div></td>'
+      + '<td class="mob-hide">' + qty + '</td>'
+      + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + liqCtrl(j) + '</td>'
+      + '<td class="mob-hide" style="font-size:12px;color:var(--text);white-space:nowrap;">' + prodDate + '</td>'
+      + '<td><span class="stage-badge ' + sc + '">' + stage + '</span></td>'
+      + '<td class="mob-hide"><select data-jobid="' + jobId + '" class="stage-select" style="font-family:Lato,sans-serif;font-size:10px;background:var(--navy-mid);border:1px solid var(--navy-border);padding:4px 8px;color:var(--muted);outline:none;cursor:pointer;">' + stageOpts(j.stage) + '</select></td>'
+      + '<td style="white-space:nowrap;"><button class="job-edit-btn" data-editjob="' + jobId + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button><span class="mob-hide"><button class="job-delete-btn" data-deletejob="' + jobId + '" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Del</button></span></td>'
+      + '</tr>';
   }).join('');
 
   // Stage dropdown handlers
@@ -5530,15 +5605,16 @@ function renderQueue(){
     qel.innerHTML = '<div style="text-align:center;padding:32px 0;color:var(--muted);font-size:12px;">No jobs ready to schedule yet.</div>';
     return;
   }
+  var esc = window.escapeHtml;
   qel.innerHTML = q.map(function(j){
-    var sc = STAGE_CSS[j.stage]||'stage-1';
+    var sc = STAGE_CSS[j.stage] || 'stage-1';
     return '<div class="queue-item">'
-      +'<div class="queue-left">'
-      +'<span class="job-num">'+j.id+'</span>'
-      +'<div class="queue-detail"><strong>'+j.product+'</strong><span>'+j.client+'</span></div>'
-      +'</div>'
-      +'<span class="stage-badge '+sc+'">'+j.stage+'</span>'
-      +'</div>';
+      + '<div class="queue-left">'
+      + '<span class="job-num">' + esc(j.id) + '</span>'
+      + '<div class="queue-detail"><strong>' + esc(j.product) + '</strong><span>' + esc(j.client) + '</span></div>'
+      + '</div>'
+      + '<span class="stage-badge ' + sc + '">' + esc(j.stage) + '</span>'
+      + '</div>';
   }).join('');
 }
 
@@ -5546,16 +5622,14 @@ function renderQueue(){
 function populateClientDropdown(selectedId){
   var sel = el('mf-client');
   if(!sel) return;
-  // Use APP.clients (keyed by id) so the select value = client ID
   var rawClients = (window.APP && window.APP.clients) ? window.APP.clients : [];
   var sorted = rawClients.slice().sort(function(a,b){
     return (a.name||'').toLowerCase().localeCompare((b.name||'').toLowerCase());
   });
   var opts = '<option value="">— Select client —</option>';
   sorted.forEach(function(c){
-    var esc = (c.name||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-    var sel_attr = (c.id === selectedId) ? ' selected' : '';
-    opts += '<option value="'+c.id+'"'+sel_attr+'>'+esc+'</option>';
+    var selected = (c.id === selectedId) ? ' selected' : '';
+    opts += '<option value="' + window.escapeHtml(c.id) + '"' + selected + '>' + window.escapeHtml(c.name || '') + '</option>';
   });
   sel.innerHTML = opts;
 }
@@ -6006,40 +6080,61 @@ function renderBoms() {
     window.APP.clients.forEach(function(c){ clientsMap[c.id] = c.name; });
   }
 
+  var esc = window.escapeHtml;
   tbody.innerHTML = BOMS.map(function(b) {
-    var closureText = b.ropp || b.cork || '—';
-    var clientName  = clientsMap[b.clientId] || b.clientId || '—';
+    var closureText = esc(b.ropp || b.cork || '—');
+    var clientName  = esc(clientsMap[b.clientId] || b.clientId || '—');
     var linked      = jobCounts[b.product] || 0;
-    var volAbv      = (b.volume ? b.volume + 'cl' : '') + (b.abv ? (b.volume ? ' / ' : '') + b.abv + '%' : '') || '—';
-    var bid = b.id;
-    var bprod = b.product.replace(/'/g,"\\'");
-    return '<tr class="mob-data-row" style="cursor:pointer;" onclick="viewBom(\'' + bid + '\')">'
-      + '<td style="color:var(--white);font-weight:700;">' + b.product + '</td>'
+    var rawVolAbv   = (b.volume ? b.volume + 'cl' : '') + (b.abv ? (b.volume ? ' / ' : '') + b.abv + '%' : '');
+    var volAbv      = esc(rawVolAbv || '—');
+    var bid         = esc(b.id);
+    var product     = esc(b.product);
+    var bottle      = esc(b.bottle || '—');
+    var labelFront  = esc(b.labelFront || '');
+    var linkedHtml  = linked
+      ? '<span style="color:var(--gold-light);font-weight:700;">' + linked + '</span>'
+      : '<span style="color:var(--muted);">0</span>';
+
+    return '<tr class="mob-data-row bom-row" style="cursor:pointer;" data-bomid="' + bid + '" data-bomprod="' + product + '">'
+      + '<td style="color:var(--white);font-weight:700;">' + product + '</td>'
       + '<td style="font-size:11px;color:var(--muted);">' + clientName + '</td>'
       + '<td style="font-size:11px;">' + volAbv + '</td>'
-      + '<td class="mob-hide" style="font-size:11px;color:var(--text);">' + (b.bottle || '—') + '</td>'
+      + '<td class="mob-hide" style="font-size:11px;color:var(--text);">' + bottle + '</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--text);">' + closureText + '</td>'
-      + '<td class="mob-hide" style="font-size:11px;">' + (linked ? '<span style="color:var(--gold-light);font-weight:700;">' + linked + '</span>' : '<span style="color:var(--muted);">0</span>') + '</td>'
-      + '<td style="white-space:nowrap;" onclick="event.stopPropagation();">'
-      +   '<button onclick="viewBom(\'' + bid + '\')" class="view-bom-btn">View</button> '
-      +   '<button onclick="editBom(\'' + bid + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:11px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Edit</button> '
-      +   '<span class="mob-hide"><button onclick="deleteBom(\'' + bid + '\',\'' + bprod + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--red);font-size:11px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button></span>'
+      + '<td class="mob-hide" style="font-size:11px;">' + linkedHtml + '</td>'
+      + '<td style="white-space:nowrap;">'
+      +   '<button class="view-bom-btn bom-action-view" data-bomid="' + bid + '">View</button> '
+      +   '<button class="bom-action-edit" data-bomid="' + bid + '" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:11px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Edit</button> '
+      +   '<span class="mob-hide"><button class="bom-action-delete" data-bomid="' + bid + '" data-bomprod="' + product + '" style="background:transparent;border:1px solid var(--navy-border);color:var(--red);font-size:11px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button></span>'
       + '</td>'
       + '</tr>'
-      // Detail drawer
       + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="7">'
       + '<div class="mob-detail-inner">'
-      + '<div class="mob-d-item"><span class="mob-d-label">Bottle</span><span class="mob-d-value">' + (b.bottle||'—') + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Bottle</span><span class="mob-d-value">' + bottle + '</span></div>'
       + '<div class="mob-d-item"><span class="mob-d-label">Closure</span><span class="mob-d-value">' + closureText + '</span></div>'
-      + (b.labelFront ? '<div class="mob-d-item"><span class="mob-d-label">Front Label</span><span class="mob-d-value">' + b.labelFront + '</span></div>' : '')
+      + (labelFront ? '<div class="mob-d-item"><span class="mob-d-label">Front Label</span><span class="mob-d-value">' + labelFront + '</span></div>' : '')
       + '<div class="mob-d-item"><span class="mob-d-label">Jobs</span><span class="mob-d-value">' + (linked || '0') + '</span></div>'
       + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
-      + '<button onclick="event.stopPropagation();viewBom(\'' + bid + '\')" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">View</button>'
-      + '<button onclick="event.stopPropagation();editBom(\'' + bid + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;margin-right:8px;">Edit</button>'
-      + '<button onclick="event.stopPropagation();deleteBom(\'' + bid + '\',\'' + bprod + '\')" style="background:transparent;border:1px solid rgba(224,87,87,0.3);color:var(--red);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Delete</button>'
+      + '<button class="bom-action-view" data-bomid="' + bid + '" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">View</button>'
+      + '<button class="bom-action-edit" data-bomid="' + bid + '" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;margin-right:8px;">Edit</button>'
+      + '<button class="bom-action-delete" data-bomid="' + bid + '" data-bomprod="' + product + '" style="background:transparent;border:1px solid rgba(224,87,87,0.3);color:var(--red);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Delete</button>'
       + '</div>'
       + '</div></td></tr>';
   }).join('');
+
+  // Wire row and button events — no inline onclick needed
+  tbody.querySelectorAll('tr.bom-row').forEach(function(row) {
+    row.addEventListener('click', function() { window.viewBom(this.getAttribute('data-bomid')); });
+  });
+  tbody.querySelectorAll('.bom-action-view').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); window.viewBom(this.getAttribute('data-bomid')); });
+  });
+  tbody.querySelectorAll('.bom-action-edit').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); window.editBom(this.getAttribute('data-bomid')); });
+  });
+  tbody.querySelectorAll('.bom-action-delete').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); window.deleteBom(this.getAttribute('data-bomid'), this.getAttribute('data-bomprod')); });
+  });
 
   // Wire tap-to-expand on mobile
   var bomTbl = tbody.closest('table');
@@ -6103,9 +6198,6 @@ var BOM_DROPDOWNS = [
 
 window.onBomClientChange = async function() {
   var clientId = gv('bm-client');
-  var SURL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SKEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-  var H    = { 'apikey': SKEY, 'Authorization': 'Bearer ' + SKEY };
 
   // Reset all component dropdowns
   BOM_DROPDOWNS.forEach(function(d) {
@@ -6120,11 +6212,10 @@ window.onBomClientChange = async function() {
 
   try {
     var results = await Promise.all([
-      fetch(SURL + 'dry_goods_skus?client_id=eq.' + clientId + '&is_active=eq.true&order=description.asc', {headers:H}).then(function(r){ return r.json(); }),
-      fetch(SURL + 'dry_goods_batches?order=delivery_date.asc&select=sku_id,quantity_remaining', {headers:H}).then(function(r){ return r.json(); }),
-      fetch(SURL + 'dry_goods_categories?order=sort_order.asc', {headers:H}).then(function(r){ return r.json(); }),
-      // Load liquid records — filter to bottling_strength if column exists, else all
-      fetch(SURL + 'liquid_containers?client_id=eq.' + clientId + '&status=eq.active&order=reference.asc', {headers:H}).then(function(r){ return r.json(); }).catch(function(){ return []; })
+      window.db.select('dry_goods_skus', '?client_id=eq.' + clientId + '&is_active=eq.true&order=description.asc'),
+      window.db.select('dry_goods_batches', '?order=delivery_date.asc&select=sku_id,quantity_remaining'),
+      window.db.select('dry_goods_categories', '?order=sort_order.asc'),
+      window.db.select('liquid_containers', '?client_id=eq.' + clientId + '&status=eq.active&order=reference.asc').catch(function(){ return []; })
     ]);
 
     var skus    = results[0];
@@ -6309,27 +6400,8 @@ window.editBom = function(bomId) {
 
 window.deleteBom = async function(bomId, productName) {
   if (!confirm('Delete BOM "' + productName + '"?\n\nThis cannot be undone.')) return;
-  var SURL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SKEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
   try {
-    var sessionRes = window._sb ? await window._sb.auth.getSession() : null;
-    var token = (sessionRes && sessionRes.data && sessionRes.data.session && sessionRes.data.session.access_token) || SKEY;
-    var resp = await fetch(SURL + 'boms?id=eq.' + bomId, {
-      method: 'DELETE',
-      headers: { 'apikey': SKEY, 'Authorization': 'Bearer ' + token }
-    });
-    if (!resp.ok && resp.status !== 204) {
-      var errBody = {};
-      try { errBody = await resp.json(); } catch(x) {}
-      if (resp.status === 409) {
-        alert('Cannot delete this BOM — it is linked to one or more jobs.\n\nRemove or reassign those jobs first, then delete the BOM.');
-      } else if (resp.status === 403) {
-        alert('Permission denied. Only Managing Director or Operations Director can delete BOMs.');
-      } else {
-        alert('Delete failed (' + resp.status + '): ' + (errBody.message || errBody.details || resp.statusText));
-      }
-      return;
-    }
+    await window.db.delete('boms', '?id=eq.' + bomId);
     BOMS = BOMS.filter(function(b){ return b.id !== bomId; });
     window.BOMS = BOMS;
     var panel = el('bom-view-panel');
@@ -6337,7 +6409,14 @@ window.deleteBom = async function(bomId, productName) {
     renderBoms();
     if (window.toast) window.toast('BOM deleted: ' + productName);
   } catch(e) {
-    alert('Error deleting BOM: ' + e.message);
+    var msg = e.message || '';
+    if (msg.indexOf('foreign') >= 0 || msg.toLowerCase().indexOf('409') >= 0) {
+      alert('Cannot delete this BOM — it is linked to one or more jobs.\n\nRemove or reassign those jobs first, then delete the BOM.');
+    } else if (msg.toLowerCase().indexOf('permission') >= 0 || msg.toLowerCase().indexOf('denied') >= 0) {
+      alert('Permission denied. Only Managing Director or Operations Director can delete BOMs.');
+    } else {
+      alert('Error deleting BOM: ' + msg);
+    }
   }
 };
 
@@ -6355,16 +6434,10 @@ async function viewBom(bomId) {
   ];
   var needsResolve = SKU_FIELDS.some(function(p){ return b[p[0]] && !b[p[1]]; });
   if (needsResolve) {
-    var SURL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-    var SKEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-    var sessionRes = window._sb ? await window._sb.auth.getSession() : null;
-    var token = (sessionRes && sessionRes.data && sessionRes.data.session && sessionRes.data.session.access_token) || SKEY;
     var allIds = SKU_FIELDS.map(function(p){ return b[p[0]]; }).filter(Boolean);
     var unique = allIds.filter(function(v,i,a){ return a.indexOf(v)===i; });
     try {
-      var sr = await fetch(SURL + 'dry_goods_skus?id=in.(' + unique.join(',') + ')&select=id,description',
-        { headers: { 'apikey': SKEY, 'Authorization': 'Bearer ' + token } });
-      var skuRows = await sr.json();
+      var skuRows = await window.db.select('dry_goods_skus', '?id=in.(' + unique.join(',') + ')&select=id,description');
       if (Array.isArray(skuRows)) {
         var descMap = {};
         skuRows.forEach(function(r){ descMap[r.id] = r.description || r.id; });
@@ -6485,16 +6558,10 @@ window.printBom = async function(bomId) {
   ];
   var needsResolve = SKU_FIELDS.some(function(p){ return b[p[0]] && !b[p[1]]; });
   if (needsResolve) {
-    var SURL2 = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-    var SKEY2 = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-    var sessionRes2 = window._sb ? await window._sb.auth.getSession() : null;
-    var token2 = (sessionRes2 && sessionRes2.data && sessionRes2.data.session && sessionRes2.data.session.access_token) || SKEY2;
     var ids2 = SKU_FIELDS.map(function(p){ return b[p[0]]; }).filter(Boolean);
     var unique2 = ids2.filter(function(v,i,a){ return a.indexOf(v)===i; });
     try {
-      var sr2 = await fetch(SURL2 + 'dry_goods_skus?id=in.(' + unique2.join(',') + ')&select=id,description',
-        { headers: { 'apikey': SKEY2, 'Authorization': 'Bearer ' + token2 } });
-      var rows2 = await sr2.json();
+      var rows2 = await window.db.select('dry_goods_skus', '?id=in.(' + unique2.join(',') + ')&select=id,description');
       if (Array.isArray(rows2)) {
         var map2 = {};
         rows2.forEach(function(r){ map2[r.id] = r.description || r.id; });
@@ -6738,27 +6805,16 @@ async function saveBom() {
   var saveBtn = el('bom-save-btn');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
   try {
-    var SURL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-    var SKEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
     if (editId) {
-      var resp = await fetch(SURL + 'boms?id=eq.' + editId, {
-        method:'PATCH', headers:{'apikey':SKEY,'Authorization':'Bearer '+SKEY,'Content-Type':'application/json','Prefer':'return=minimal'},
-        body:JSON.stringify(dbPayload)
-      });
-      if (!resp.ok) { var e2=await resp.json(); throw new Error(e2.message||resp.statusText); }
+      await window.db.update('boms', '?id=eq.' + editId, dbPayload);
       var idx = BOMS.findIndex(function(b){ return b.id===editId; });
       if (idx>=0) Object.assign(BOMS[idx], localBom(editId));
       window.BOMS = BOMS;
       if (window.toast) window.toast('BOM updated: '+product);
     } else {
       dbPayload.id = 'BOM-'+clientId.replace('CLI-','')+'-'+Date.now().toString(36).toUpperCase();
-      var resp = await fetch(SURL+'boms', {
-        method:'POST', headers:{'apikey':SKEY,'Authorization':'Bearer '+SKEY,'Content-Type':'application/json','Prefer':'return=representation'},
-        body:JSON.stringify(dbPayload)
-      });
-      if (!resp.ok) { var e2=await resp.json(); throw new Error(e2.message||resp.statusText); }
-      var saved = await resp.json();
-      BOMS.unshift(localBom(saved[0].id));
+      var saved = await window.db.insert('boms', dbPayload);
+      BOMS.unshift(localBom(Array.isArray(saved) ? saved[0].id : dbPayload.id));
       window.BOMS = BOMS;
       if (window.toast) window.toast('BOM saved: '+product);
     }
@@ -6789,23 +6845,15 @@ window.BOMS          = BOMS;
 
 // ── Load BOMs from Supabase — inside boms-script so local BOMS array is accessible ──
 window.loadBoms = async function initBoms() {
-  var SURL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SKEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-
   // Reset array each call
   BOMS.length = 0;
-
 
   // Wait for _sb and auth session
   var waited = 0;
   while (!window._sb && waited < 5000) { await new Promise(function(r){setTimeout(r,200);}); waited+=200; }
-  var sessionRes = window._sb ? await window._sb.auth.getSession() : null;
-  var token = (sessionRes && sessionRes.data && sessionRes.data.session && sessionRes.data.session.access_token) || SKEY;
-  var H = { 'apikey': SKEY, 'Authorization': 'Bearer ' + token };
 
   try {
-    var resp = await fetch(SURL + 'boms?order=created_at.desc&select=*', { headers: H });
-    var rows = await resp.json();
+    var rows = await window.db.select('boms', '?order=created_at.desc&select=*');
 
     if (!Array.isArray(rows) || !rows.length) { renderBoms(); return; }
 
@@ -7454,28 +7502,36 @@ window.loadBoms = async function initBoms() {
       tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">No clients match your search.</td></tr>';
       return;
     }
+    var esc = window.escapeHtml;
     tbody.innerHTML = list.map(function(c){
-      var emailLink = c.email ? '<a href="mailto:'+c.email+'" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">'+c.email+'</a>' : '—';
+      var company   = esc(c.company  || '—');
+      var contact   = esc(c.contact  || '—');
+      var phone     = esc(c.phone    || '—');
+      var notes     = esc(c.notes    || '—');
+      var emailEsc  = esc(c.email    || '');
+      var emailLink = c.email
+        ? '<a href="mailto:' + emailEsc + '" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">' + emailEsc + '</a>'
+        : '—';
+      var cid = esc(c.id);
       return '<tr class="mob-data-row">'
-        +'<td style="color:var(--white);font-weight:700;">'+c.company+'</td>'
-        +'<td class="mob-hide">'+c.contact+'</td>'
-        +'<td class="mob-hide">'+emailLink+'</td>'
-        +'<td class="mob-hide" style="color:var(--muted);font-size:12px;">'+(c.phone||'—')+'</td>'
-        +'<td class="mob-hide" style="color:var(--muted);font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(c.notes||'—')+'</td>'
-        +'<td><button data-editclient="'+c.id+'" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
-        +'<button class="client-delete-btn mob-hide" data-deleteclient="'+c.id+'" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button></td>'
-        +'</tr>'
-        // Detail drawer
-        +'<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="6">'
-        +'<div class="mob-detail-inner">'
-        +(c.contact ? '<div class="mob-d-item"><span class="mob-d-label">Contact</span><span class="mob-d-value">'+c.contact+'</span></div>' : '')
-        +'<div class="mob-d-item"><span class="mob-d-label">Email</span><span class="mob-d-value">'+emailLink+'</span></div>'
-        +(c.phone ? '<div class="mob-d-item"><span class="mob-d-label">Phone</span><span class="mob-d-value">'+c.phone+'</span></div>' : '')
-        +(c.notes ? '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Notes</span><span class="mob-d-value">'+c.notes+'</span></div>' : '')
-        +'<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
-        +'<button data-editclient="'+c.id+'" class="mob-detail-edit-btn" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;">Edit Client</button>'
-        +'</div>'
-        +'</div></td></tr>';
+        + '<td style="color:var(--white);font-weight:700;">' + company + '</td>'
+        + '<td class="mob-hide">' + contact + '</td>'
+        + '<td class="mob-hide">' + emailLink + '</td>'
+        + '<td class="mob-hide" style="color:var(--muted);font-size:12px;">' + phone + '</td>'
+        + '<td class="mob-hide" style="color:var(--muted);font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + notes + '</td>'
+        + '<td><button data-editclient="' + cid + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
+        + '<button class="client-delete-btn mob-hide" data-deleteclient="' + cid + '" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button></td>'
+        + '</tr>'
+        + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="6">'
+        + '<div class="mob-detail-inner">'
+        + (c.contact ? '<div class="mob-d-item"><span class="mob-d-label">Contact</span><span class="mob-d-value">' + contact + '</span></div>' : '')
+        + '<div class="mob-d-item"><span class="mob-d-label">Email</span><span class="mob-d-value">' + emailLink + '</span></div>'
+        + (c.phone ? '<div class="mob-d-item"><span class="mob-d-label">Phone</span><span class="mob-d-value">' + phone + '</span></div>' : '')
+        + (c.notes ? '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Notes</span><span class="mob-d-value">' + notes + '</span></div>' : '')
+        + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
+        + '<button data-editclient="' + cid + '" class="mob-detail-edit-btn" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;">Edit Client</button>'
+        + '</div>'
+        + '</div></td></tr>';
     }).join('');
     tbody.querySelectorAll('[data-editclient]').forEach(function(btn){
       btn.addEventListener('click', function(e){
@@ -10690,43 +10746,19 @@ window.loadBoms = async function initBoms() {
 (function () {
 'use strict';
 
-var SUPA  = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-var KEY   = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+// Uses window.db (canonical API client defined in SUPABASE CONFIG block)
 var _liquid   = [];
 var _dryGoods = [];
 var _goodsIn  = [];
 var _clients  = [];
 var _cats     = [];
 
-// ── Simple fetch — no dependency on APP or db helpers ────────────────────────
-async function supa(table, qs) {
-  var url = SUPA + table + (qs || '');
-  var res = await fetch(url, {
-    headers: {
-      'apikey':        KEY,
-      'Authorization': 'Bearer ' + KEY,
-      'Content-Type':  'application/json'
-    }
-  });
-  if (!res.ok) throw new Error(table + ' fetch failed: ' + res.status);
-  return res.json();
-}
-
-async function supaMut(method, table, qs, body) {
-  var url = SUPA + table + (qs || '');
-  var res = await fetch(url, {
-    method:  method,
-    headers: {
-      'apikey':        KEY,
-      'Authorization': 'Bearer ' + KEY,
-      'Content-Type':  'application/json',
-      'Prefer':        'return=representation'
-    },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) { var t = await res.text(); throw new Error(t); }
-  var text = await res.text();
-  return text ? JSON.parse(text) : [];
+function supa(table, qs)                  { return window.db.select(table, qs || ''); }
+function supaMut(method, table, qs, body) {
+  if (method === 'POST')   return window.db.insert(table, body);
+  if (method === 'PATCH')  return window.db.update(table, qs || '', body);
+  if (method === 'DELETE') return window.db.delete(table, qs || '');
+  return Promise.reject(new Error('Unknown method: ' + method));
 }
 
 function clientName(id) {
@@ -10823,54 +10855,70 @@ window.renderLiquid = function() {
 
   if (!list.length) { tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:32px;">No containers found.</td></tr>'; return; }
 
+  var esc = window.escapeHtml;
   tbody.innerHTML = list.map(function(c) {
-    var litres  = parseFloat(c.current_litres||0);
-    var cap     = parseFloat(c.capacity_litres||0);
-    var pct     = cap > 0 ? Math.min(100, Math.round(litres/cap*100)) : 0;
-    var bar     = cap > 0 ? '<span class="fill-bar-wrap"><span class="fill-bar" style="width:' + pct + '%"></span></span>' : '';
-    var spirit  = c.spirit_type ? '<span class="spirit-badge">' + (SPIRIT_LABELS[c.spirit_type]||c.spirit_type) + '</span>' : '<span style="color:var(--muted)">—</span>';
-    var lpa     = parseFloat(c.current_lpa||0).toFixed(2);
-    var abv     = c.abv ? c.abv + '%' : '—';
-    var fill    = c.fill_date ? fmtDate(c.fill_date) : '—';
-    var age     = ageStr(c.distillation_date);
-    var sc      = 'status-' + (c.status||'empty');
-    var typ     = c.type.charAt(0).toUpperCase() + c.type.slice(1);
-    var id      = escId(c.id);
-    var spiritLabel = c.spirit_type ? (SPIRIT_LABELS[c.spirit_type]||c.spirit_type) : '—';
-    return '<tr class="mob-data-row">'
-      + '<td style="font-weight:700;color:var(--white);">' + c.reference + '</td>'
+    var litres      = parseFloat(c.current_litres||0);
+    var cap         = parseFloat(c.capacity_litres||0);
+    var pct         = cap > 0 ? Math.min(100, Math.round(litres/cap*100)) : 0;
+    var bar         = cap > 0 ? '<span class="fill-bar-wrap"><span class="fill-bar" style="width:' + pct + '%"></span></span>' : '';
+    var spiritLabel = esc(c.spirit_type ? (SPIRIT_LABELS[c.spirit_type] || c.spirit_type) : '—');
+    var spirit      = c.spirit_type ? '<span class="spirit-badge">' + spiritLabel + '</span>' : '<span style="color:var(--muted)">—</span>';
+    var lpa         = parseFloat(c.current_lpa||0).toFixed(2);
+    var abv         = c.abv ? esc(String(c.abv)) + '%' : '—';
+    var fill        = c.fill_date ? fmtDate(c.fill_date) : '—';
+    var age         = ageStr(c.distillation_date); // returns HTML spans — do not escape
+    var sc          = 'status-' + esc(c.status || 'empty');
+    var typ         = esc(c.type ? c.type.charAt(0).toUpperCase() + c.type.slice(1) : '—');
+    var cid         = esc(c.id);
+    var ref         = esc(c.reference || '—');
+    var cname       = esc(clientName(c.client_id));
+    var loc         = esc(c.location || '');
+    var status      = esc(c.status || 'empty');
+    return '<tr class="mob-data-row liq-row" data-cid="' + cid + '">'
+      + '<td style="font-weight:700;color:var(--white);">' + ref + '</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + typ + '</td>'
-      + '<td class="mob-hide" style="font-size:12px;">' + clientName(c.client_id) + '</td>'
+      + '<td class="mob-hide" style="font-size:12px;">' + cname + '</td>'
       + '<td class="mob-hide">' + spirit + '</td>'
       + '<td>' + litres.toLocaleString('en-IE',{maximumFractionDigits:1}) + ' L' + bar + '</td>'
       + '<td class="mob-hide" style="color:var(--gold-light);">' + lpa + '</td>'
       + '<td class="mob-hide">' + abv + '</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + fill + '</td>'
       + '<td class="mob-hide" style="font-size:12px;font-weight:600;">' + age + '</td>'
-      + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + (c.location||'—') + '</td>'
-      + '<td><span class="pill ' + sc + '">' + (c.status||'empty') + '</span></td>'
+      + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + (loc || '—') + '</td>'
+      + '<td><span class="pill ' + sc + '">' + status + '</span></td>'
       + '<td style="white-space:nowrap;">'
-      + '<button onclick="editContainer(\'' + id + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
-      + '<span class="mob-hide"><button onclick="showContainerQR(\'' + id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">QR</button>'
-      + '<button onclick="deleteContainer(\'' + id + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Del</button></span>'
+      + '<button class="liq-edit-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
+      + '<span class="mob-hide"><button class="liq-qr-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">QR</button>'
+      + '<button class="liq-del-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Del</button></span>'
       + '</td></tr>'
-      // Detail drawer
       + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="12">'
       + '<div class="mob-detail-inner">'
       + '<div class="mob-d-item"><span class="mob-d-label">Type</span><span class="mob-d-value">' + typ + '</span></div>'
-      + '<div class="mob-d-item"><span class="mob-d-label">Client</span><span class="mob-d-value">' + clientName(c.client_id) + '</span></div>'
+      + '<div class="mob-d-item"><span class="mob-d-label">Client</span><span class="mob-d-value">' + cname + '</span></div>'
       + '<div class="mob-d-item"><span class="mob-d-label">Spirit</span><span class="mob-d-value">' + spiritLabel + '</span></div>'
       + '<div class="mob-d-item"><span class="mob-d-label">ABV</span><span class="mob-d-value">' + abv + '</span></div>'
       + '<div class="mob-d-item"><span class="mob-d-label">LPA</span><span class="mob-d-value" style="color:var(--gold-light);">' + lpa + '</span></div>'
       + '<div class="mob-d-item"><span class="mob-d-label">Fill Date</span><span class="mob-d-value">' + fill + '</span></div>'
       + '<div class="mob-d-item"><span class="mob-d-label">Age</span><span class="mob-d-value">' + age + '</span></div>'
-      + (c.location ? '<div class="mob-d-item"><span class="mob-d-label">Location</span><span class="mob-d-value">' + c.location + '</span></div>' : '')
+      + (loc ? '<div class="mob-d-item"><span class="mob-d-label">Location</span><span class="mob-d-value">' + loc + '</span></div>' : '')
       + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
-      + '<button onclick="event.stopPropagation();editContainer(\'' + id + '\')" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">Edit</button>'
-      + '<button onclick="event.stopPropagation();showContainerQR(\'' + id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">QR</button>'
+      + '<button class="liq-edit-btn" data-cid="' + cid + '" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">Edit</button>'
+      + '<button class="liq-qr-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">QR</button>'
       + '</div>'
       + '</div></td></tr>';
   }).join('');
+
+  // Wire button events — no inline onclick needed
+  tbody.querySelectorAll('.liq-edit-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); editContainer(this.getAttribute('data-cid')); });
+  });
+  tbody.querySelectorAll('.liq-qr-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); showContainerQR(this.getAttribute('data-cid')); });
+  });
+  tbody.querySelectorAll('.liq-del-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); deleteContainer(this.getAttribute('data-cid')); });
+  });
+
   // Wire tap-to-expand on mobile
   var liqTbl = tbody.closest('table');
   if (liqTbl && window.mobExpandInit) window.mobExpandInit(liqTbl);
@@ -10978,11 +11026,7 @@ window.deleteContainer = async function(id) {
   if (!c) return;
   if (!confirm('Delete container ' + c.reference + '? This cannot be undone.')) return;
   try {
-    var res = await fetch('https://anhawgzgxoywophqbmji.supabase.co/rest/v1/liquid_containers?id=eq.' + id, {
-      method: 'DELETE',
-      headers: { 'apikey': 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs', 'Authorization': 'Bearer sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs' }
-    });
-    if (!res.ok) throw new Error('Delete failed: ' + res.status);
+    await window.db.delete('liquid_containers', '?id=eq.' + id);
     toastMsg('Container deleted.');
     await loadLiquid();
   } catch(e) { toastMsg('Error: ' + e.message, 'error'); }
@@ -11020,14 +11064,7 @@ window.openTransferModal = async function() {
     if (!sel) return;
     sel.innerHTML = '<option value="">— Select user —</option>';
     try {
-      var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co';
-      var SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-      var sessionRes = await window._sb.auth.getSession();
-      var token = (sessionRes.data && sessionRes.data.session && sessionRes.data.session.access_token) || SUPA_KEY;
-      var res  = await fetch(SUPA_URL + '/rest/v1/app_users?select=auth_user_id,display_name,role&order=display_name.asc', {
-        headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token }
-      });
-      var users = await res.json();
+      var users = await window.db.select('app_users', '?select=auth_user_id,display_name,role&order=display_name.asc');
       users.forEach(function(u) {
         var opt = document.createElement('option');
         // display_name is stored as email on registration
@@ -11458,30 +11495,13 @@ var _cats     = [];
 var _clients  = [];
 var _currentSKUId = null;
 
-var SUPA = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-var KEY  = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
-
-function supaFetch(table, qs) {
-  return fetch(SUPA + table + (qs||''), {
-    headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY }
-  }).then(function(r) { return r.json(); });
-}
-
+// Uses window.db (canonical API client defined in SUPABASE CONFIG block)
+function supaFetch(table, qs)             { return window.db.select(table, qs||''); }
 function supaMutate(method, table, qs, body) {
-  return fetch(SUPA + table + (qs||''), {
-    method: method,
-    headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-    body: JSON.stringify(body)
-  }).then(function(r) {
-    return r.text().then(function(t) {
-      if (!r.ok) {
-        var msg = t;
-        try { var j = JSON.parse(t); msg = j.message || j.error || t; } catch(e){}
-        throw new Error(msg);
-      }
-      return t ? JSON.parse(t) : [];
-    });
-  });
+  if (method === 'POST')   return window.db.insert(table, body);
+  if (method === 'PATCH')  return window.db.update(table, qs||'', body);
+  if (method === 'DELETE') return window.db.delete(table, qs||'');
+  return Promise.reject(new Error('Unknown method: ' + method));
 }
 
 function clientName(id) {
@@ -12341,21 +12361,9 @@ window.saveAdjModal = async function() {
 <!-- ══ SUPPLIERS SCRIPT ═══════════════════════════════════════════════════════════════════ -->
 <script>
 (function() {
-  var SURL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SKEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+  // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
   var SUPPLIERS = [];
   var _currentFilter = 'all';
-
-  function getHeaders() {
-    var token = SKEY;
-    if (window._sb) {
-      try {
-        var s = window._sb.auth.getSession();
-        if (s && s.data && s.data.session) token = s.data.session.access_token || SKEY;
-      } catch(e) {}
-    }
-    return { 'apikey': SKEY, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
-  }
 
   // Status pill styling
   var STATUS_STYLE = {
@@ -12368,8 +12376,7 @@ window.saveAdjModal = async function() {
   // Load suppliers from Supabase
   async function loadSuppliers() {
     try {
-      var res = await fetch(SURL + 'suppliers?order=name.asc', { headers: getHeaders() });
-      var rows = await res.json();
+      var rows = await window.db.select('suppliers', '?order=name.asc');
       if (Array.isArray(rows)) {
         SUPPLIERS = rows;
         window.SUPPLIERS = rows;
@@ -12599,26 +12606,11 @@ window.saveAdjModal = async function() {
     btn.disabled = true; btn.textContent = 'Saving…';
 
     try {
-      var sessionRes = window._sb ? await window._sb.auth.getSession() : null;
-      var token = (sessionRes && sessionRes.data && sessionRes.data.session && sessionRes.data.session.access_token) || SKEY;
-      var H = { 'apikey': SKEY, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
-
-      var resp, respData;
       if (editId) {
-        resp = await fetch(SURL + 'suppliers?id=eq.' + editId, {
-          method: 'PATCH',
-          headers: Object.assign({}, H, { 'Prefer': 'return=minimal' }),
-          body: JSON.stringify(payload)
-        });
-        if (!resp.ok) { respData = await resp.json(); throw new Error(respData.message || resp.statusText); }
+        await window.db.update('suppliers', '?id=eq.' + editId, payload);
         window.toast && window.toast('Supplier updated.', 'success');
       } else {
-        resp = await fetch(SURL + 'suppliers', {
-          method: 'POST',
-          headers: Object.assign({}, H, { 'Prefer': 'return=representation' }),
-          body: JSON.stringify(payload)
-        });
-        if (!resp.ok) { respData = await resp.json(); throw new Error(respData.message || resp.statusText); }
+        await window.db.insert('suppliers', payload);
         window.toast && window.toast('Supplier added.', 'success');
       }
 
@@ -12664,8 +12656,7 @@ window.saveAdjModal = async function() {
 <!-- ══ JOBS SCRIPT ═══════════════════════════════════════════════════════════ -->
 <script>
 (function() {
-  var SURL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SKEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+  // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
   var _jobs = [];
   var _jobBoms = [];
   var _currentJobId = null;
@@ -12690,33 +12681,13 @@ window.saveAdjModal = async function() {
     'Scheduled':'Scheduled', 'Complete':'Complete', 'Pre-Production Signoff':'Scheduled'
   };
 
-  // ── Auth helper ─────────────────────────────────────────────────────────────
-  async function getToken() {
-    try {
-      var s = await window._sb.auth.getSession();
-      return (s.data && s.data.session && s.data.session.access_token) || SKEY;
-    } catch(e) { return SKEY; }
-  }
-  async function supaGet(path) {
-    var t = await getToken();
-    var r = await fetch(SURL + path, { headers: { apikey:SKEY, Authorization:'Bearer '+t }});
-    return r.json();
-  }
-  async function supaMut(method, table, query, body) {
-    var t = await getToken();
-    var isDelete = method === 'DELETE';
-    var opts = {
-      method: method,
-      headers: { apikey:SKEY, Authorization:'Bearer '+t, 'Content-Type':'application/json' }
-    };
-    if (!isDelete) {
-      opts.headers['Prefer'] = 'return=representation';
-      opts.body = JSON.stringify(body);
-    }
-    var r = await fetch(SURL + table + query, opts);
-    if (!r.ok) { var e = await r.json().catch(function(){return {};}); throw new Error(e.message||r.statusText); }
-    if (isDelete) return {};
-    return r.json();
+  // ── Supabase helpers — thin wrappers over window.db ─────────────────────────
+  function supaGet(path)                     { var i=path.indexOf('?'); return window.db.select(i>=0?path.slice(0,i):path, i>=0?path.slice(i):''); }
+  function supaMut(method, table, query, body) {
+    if (method === 'POST')   return window.db.insert(table, body);
+    if (method === 'PATCH')  return window.db.update(table, query, body);
+    if (method === 'DELETE') return window.db.delete(table, query);
+    return Promise.reject(new Error('Unknown method: ' + method));
   }
 
   // ── Load jobs ────────────────────────────────────────────────────────────────
@@ -12726,7 +12697,7 @@ window.saveAdjModal = async function() {
       try {
         var staff = await supaGet('app_users?select=auth_user_id,display_name');
         staff.forEach(function(u){ _staffMap[u.auth_user_id] = u.display_name || u.auth_user_id.substring(0,8); });
-      } catch(e) {}
+      } catch(e) { window.logError('load staff map', e); }
     }
     try {
       var rows = await supaGet('jobs?order=created_at.desc&select=*,clients(name)');
@@ -15370,9 +15341,7 @@ window.saveAdjModal = async function() {
 (function() {
   'use strict';
 
-  // ── Constants ────────────────────────────────────────────────────────────────
-  var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+  // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
 
   // Production windows per day [start_minutes_from_midnight, end_minutes]
   var PROD_WINDOWS = [
@@ -15407,29 +15376,9 @@ window.saveAdjModal = async function() {
   var _ctxJobId    = null;   // job ID for context menu
   var _modalJobId  = null;   // job ID in modal
 
-  // ── Supabase helpers ─────────────────────────────────────────────────────────
-  async function getToken() {
-    try {
-      var s = await window._sb.auth.getSession();
-      return (s.data && s.data.session && s.data.session.access_token) || SUPA_KEY;
-    } catch(e) { return SUPA_KEY; }
-  }
-  async function sbGet(path) {
-    var t = await getToken();
-    var r = await fetch(SUPA_URL + path, { headers: { apikey: SUPA_KEY, Authorization: 'Bearer ' + t } });
-    var d = await r.json();
-    return Array.isArray(d) ? d : [];
-  }
-  async function sbPatch(table, query, body) {
-    var t = await getToken();
-    var r = await fetch(SUPA_URL + table + query, {
-      method: 'PATCH',
-      headers: { apikey: SUPA_KEY, Authorization: 'Bearer ' + t, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-      body: JSON.stringify(body)
-    });
-    if (!r.ok) { var e = await r.json(); throw new Error(e.message || r.statusText); }
-    return r.json();
-  }
+  // ── Supabase helpers — thin wrappers over window.db ─────────────────────────
+  function sbGet(path)                    { var i=path.indexOf('?'); return window.db.select(i>=0?path.slice(0,i):path, i>=0?path.slice(i):''); }
+  function sbPatch(table, query, body)    { return window.db.update(table, query, body); }
 
   // ── Week utilities ───────────────────────────────────────────────────────────
   function getWeekDays(offset) {
@@ -15833,8 +15782,7 @@ window.saveAdjModal = async function() {
 (function() {
   'use strict';
 
-  var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+  // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
 
   // ── Permission definitions ───────────────────────────────────────────────────
   // Each entry: { key, label, category }
@@ -15881,28 +15829,15 @@ window.saveAdjModal = async function() {
 
   var _permissions = JSON.parse(JSON.stringify(DEFAULT_PERMISSIONS));
 
-  // ── Supabase helpers ─────────────────────────────────────────────────────────
-  async function getToken() {
-    try { var s=await window._sb.auth.getSession(); return (s.data&&s.data.session&&s.data.session.access_token)||SUPA_KEY; }
-    catch(e){ return SUPA_KEY; }
+  // ── Supabase helpers — thin wrappers over window.db ─────────────────────────
+  function sbGet(path) {
+    var idx = path.indexOf('?');
+    var table = idx >= 0 ? path.substring(0, idx) : path;
+    var qs    = idx >= 0 ? path.substring(idx) : '';
+    return window.db.select(table, qs);
   }
-  async function sbGet(path) {
-    var t=await getToken();
-    var r=await fetch(SUPA_URL+path,{headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t}});
-    var d=await r.json(); return Array.isArray(d)?d:[];
-  }
-  async function sbPatch(table,query,body) {
-    var t=await getToken();
-    var r=await fetch(SUPA_URL+table+query,{method:'PATCH',headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t,'Content-Type':'application/json',Prefer:'return=representation'},body:JSON.stringify(body)});
-    if(!r.ok){var e=await r.json();throw new Error(e.message||r.statusText);}
-    return r.json();
-  }
-  async function sbPost(table,body) {
-    var t=await getToken();
-    var r=await fetch(SUPA_URL+table,{method:'POST',headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t,'Content-Type':'application/json',Prefer:'return=representation'},body:JSON.stringify(body)});
-    if(!r.ok){var e=await r.json();throw new Error(e.message||r.statusText);}
-    return r.json();
-  }
+  function sbPatch(table, query, body) { return window.db.update(table, query, body); }
+  function sbPost(table, body)         { return window.db.insert(table, body); }
 
   // ── Load permissions from Supabase ───────────────────────────────────────────
   async function loadPermissions() {
@@ -16027,30 +15962,44 @@ window.saveAdjModal = async function() {
         +'<th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th style="text-align:center;">Actions</th>'
         +'</tr></thead><tbody>';
 
+      var esc = window.escapeHtml;
       users.forEach(function(u) {
-        var name = u.display_name || ((u.first_name||'')+(u.last_name?' '+u.last_name:'')).trim() || u.email || '—';
-        var email = u.email || '—';
+        var name   = esc(u.display_name || ((u.first_name||'')+(u.last_name?' '+u.last_name:'')).trim() || u.email || '—');
+        var email  = esc(u.email || '—');
+        var uid    = esc(u.id || '');
+        var authId = esc(u.auth_user_id || '');
         var joined = u.created_at ? new Date(u.created_at).toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'}) : '—';
 
-        var roleSelect = '<select data-uid="'+u.id+'" onchange="window.updateUserRole(this)" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;padding:3px 6px;border-radius:3px;font-family:Lato,sans-serif;cursor:pointer;color-scheme:dark;">';
+        var roleSelect = '<select data-uid="' + uid + '" class="settings-role-select" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;padding:3px 6px;border-radius:3px;font-family:Lato,sans-serif;cursor:pointer;color-scheme:dark;">';
         roleKeys.forEach(function(rk) {
-          roleSelect += '<option value="'+rk+'"'+(u.role===rk?' selected':'')+'>'+roleLabels[rk]+'</option>';
+          roleSelect += '<option value="' + rk + '"' + (u.role === rk ? ' selected' : '') + '>' + roleLabels[rk] + '</option>';
         });
         roleSelect += '</select>';
 
         html += '<tr>'
-          +'<td style="font-size:12px;font-weight:600;padding:10px 8px;">'+name+'</td>'
-          +'<td style="font-size:11px;color:var(--muted);padding:10px 8px;">'+email+'</td>'
-          +'<td style="padding:10px 8px;">'+roleSelect+'</td>'
-          +'<td style="font-size:11px;color:var(--muted);padding:10px 8px;">'+joined+'</td>'
-          +'<td style="text-align:center;padding:10px 8px;">'
-          +'<button data-email="'+email+'" onclick="window.sendPasswordReset(this.getAttribute(String.fromCharCode(100,97,116,97,45,101,109,97,105,108)))" style="font-size:10px;padding:4px 10px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Reset Password</button>'
-          +'<button data-uid="'+u.id+'" data-auth="'+(u.auth_user_id||'')+'" data-name="'+name+'" onclick="window.deleteUser(this.dataset.uid, this.dataset.name, this.dataset.auth)" style="font-size:10px;padding:4px 10px;background:transparent;border:1px solid var(--red);color:var(--red);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;margin-left:6px;">Delete</button>'
-          +'</td></tr>';
+          + '<td style="font-size:12px;font-weight:600;padding:10px 8px;">' + name + '</td>'
+          + '<td style="font-size:11px;color:var(--muted);padding:10px 8px;">' + email + '</td>'
+          + '<td style="padding:10px 8px;">' + roleSelect + '</td>'
+          + '<td style="font-size:11px;color:var(--muted);padding:10px 8px;">' + joined + '</td>'
+          + '<td style="text-align:center;padding:10px 8px;">'
+          + '<button class="settings-reset-btn" data-email="' + email + '" style="font-size:10px;padding:4px 10px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Reset Password</button>'
+          + '<button class="settings-delete-btn" data-uid="' + uid + '" data-auth="' + authId + '" data-name="' + name + '" style="font-size:10px;padding:4px 10px;background:transparent;border:1px solid var(--red);color:var(--red);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;margin-left:6px;">Delete</button>'
+          + '</td></tr>';
       });
       html += '</tbody></table>';
       el.innerHTML = html;
-    } catch(e) { el.innerHTML='<div style="color:var(--red);font-size:12px;">Error: '+e.message+'</div>'; }
+
+      // Wire buttons via event listeners — no inline onclick
+      el.querySelectorAll('.settings-role-select').forEach(function(sel) {
+        sel.addEventListener('change', function() { window.updateUserRole(this); });
+      });
+      el.querySelectorAll('.settings-reset-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() { window.sendPasswordReset(this.getAttribute('data-email')); });
+      });
+      el.querySelectorAll('.settings-delete-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() { window.deleteUser(this.dataset.uid, this.dataset.name, this.dataset.auth); });
+      });
+    } catch(e) { window.logError('renderUsersList', e); el.innerHTML='<div style="color:var(--red);font-size:12px;">Error loading users.</div>'; }
   }
 
   window.updateUserRole = async function(sel) {
@@ -16265,23 +16214,15 @@ window.saveAdjModal = async function() {
 (function() {
   'use strict';
 
-  var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-  var SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+  // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
   var _hClockState = 'clocked_out';
   var _hClockSince = null;
   var _hTicker     = null;
 
-  async function getToken() {
-    try { var s=await window._sb.auth.getSession(); return (s.data&&s.data.session&&s.data.session.access_token)||SUPA_KEY; }
-    catch(e){ return SUPA_KEY; }
-  }
-
   async function loadHeaderClockState() {
     if (!window.CURRENT_USER) return;
     try {
-      var t = await getToken();
-      var r = await fetch(SUPA_URL+'clock_events?order=timestamp.desc&limit=100',{headers:{apikey:SUPA_KEY,Authorization:'Bearer '+t}});
-      var rows = await r.json();
+      var rows = await window.db.select('clock_events', '?order=timestamp.desc&limit=100');
       if (!Array.isArray(rows)) rows = [];
       var uid = window.CURRENT_USER.id || '';
       var mine = rows.filter(function(x){ return x.user_id === uid; });
@@ -16449,14 +16390,8 @@ window.saveAdjModal = async function() {
     renderHeaderClockBtn();
     var labels = { clock_in:'Clocked in \u2713', clock_out:'Clocked out \u2713', break_start:'Break started \u2713', break_end:'Break ended \u2713' };
     try {
-      var t = await getToken();
       var withinFence = (typeof geo !== 'undefined') ? !!(geo.within) : false;
-      var r = await fetch(SUPA_URL+'clock_events', {
-        method: 'POST',
-        headers: {apikey:SUPA_KEY, Authorization:'Bearer '+t, 'Content-Type':'application/json', Prefer:'return=minimal'},
-        body: JSON.stringify({ user_id: window.CURRENT_USER.id, event_type: eventType, within_geofence: withinFence })
-      });
-      if (!r.ok) { var e=await r.json(); throw new Error(e.message||r.statusText); }
+      await window.db.insert('clock_events', { user_id: window.CURRENT_USER.id, event_type: eventType, within_geofence: withinFence });
       window.toast && window.toast(labels[eventType]||'Done','success');
       /* Refresh timesheet if the clock-in tab is currently visible */
       try {
@@ -16498,20 +16433,12 @@ window.saveAdjModal = async function() {
    ═══════════════════════════════════════════════════════ */
 (function(){
 'use strict';
-var SU='https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-var SK='sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+// Uses window.db (canonical API client defined in SUPABASE CONFIG block)
 var _lvProfile=null, _lvUser=null, _lvRequests=[];
 
-async function tok(){
-  // Wait for _sb to be ready
-  var tries=0;
-  while(!window._sb && tries<20){await new Promise(function(r){setTimeout(r,100);});tries++;}
-  try{var s=await window._sb.auth.getSession();return(s.data&&s.data.session&&s.data.session.access_token)||SK;}
-  catch(e){return SK;}
-}
-async function get(p){var t=await tok();var r=await fetch(SU+p,{headers:{apikey:SK,Authorization:'Bearer '+t}});var d=await r.json();return Array.isArray(d)?d:[];}
-async function post(p,b){var t=await tok();return fetch(SU+p,{method:'POST',headers:{apikey:SK,Authorization:'Bearer '+t,'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify(b)});}
-async function patch(p,b){var t=await tok();return fetch(SU+p,{method:'PATCH',headers:{apikey:SK,Authorization:'Bearer '+t,'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify(b)});}
+function get(p)    { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
+function post(p,b) { return window.db.insert(p, b); }
+function patch(p,b){ var i=p.indexOf('?'); return window.db.update(i>=0?p.slice(0,i):p, i>=0?p.slice(i):'', b); }
 
 function isLvAdmin(){
   var role=window.CURRENT_USER&&window.CURRENT_USER.role;
@@ -17002,13 +16929,8 @@ window.mgmtScheduleReview = async function(userId, name){
   if(!confirmed) return;
   try {
     var existing = await get('hr_profiles?user_id=eq.'+userId+'&limit=1&select=id');
-    var t = await tok();
     if(existing&&existing.length){
-      await fetch('https://anhawgzgxoywophqbmji.supabase.co/rest/v1/hr_profiles?id=eq.'+existing[0].id,{
-        method:'PATCH',
-        headers:{apikey:'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs',Authorization:'Bearer '+t,'Content-Type':'application/json','Prefer':'return=minimal'},
-        body:JSON.stringify({next_review_date:confirmed})
-      });
+      await window.db.update('hr_profiles', '?id=eq.'+existing[0].id, {next_review_date:confirmed});
       window.toast && window.toast('Review date saved for '+name,'success');
       window.mgmtLoadReports();
     }
@@ -17069,21 +16991,13 @@ window.lvApproveReq = async function(id, approve){
 <script>
 (function(){
 'use strict';
-var SU='https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-var SK='sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+// Uses window.db (canonical API client defined in SUPABASE CONFIG block)
 var _wo=0,_roster={},_emps=[],_leaveMap={},_pt=null;
 var DN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-async function tok(){
-  // Wait for _sb to be ready
-  var tries=0;
-  while(!window._sb && tries<20){await new Promise(function(r){setTimeout(r,100);});tries++;}
-  try{var s=await window._sb.auth.getSession();return(s.data&&s.data.session&&s.data.session.access_token)||SK;}
-  catch(e){return SK;}
-}
-async function get(p){var t=await tok();var r=await fetch(SU+p,{headers:{apikey:SK,Authorization:'Bearer '+t}});var d=await r.json();return Array.isArray(d)?d:[];}
-async function post(tb,b){var t=await tok();var r=await fetch(SU+tb,{method:'POST',headers:{apikey:SK,Authorization:'Bearer '+t,'Content-Type':'application/json',Prefer:'return=representation'},body:JSON.stringify(b)});if(!r.ok){var e=await r.json();throw new Error(e.message||r.statusText);}return r.json();}
-async function patch(tb,q,b){var t=await tok();var r=await fetch(SU+tb+q,{method:'PATCH',headers:{apikey:SK,Authorization:'Bearer '+t,'Content-Type':'application/json',Prefer:'return=representation'},body:JSON.stringify(b)});if(!r.ok){var e=await r.json();throw new Error(e.message||r.statusText);}return r.json();}
-async function del(tb,q){var t=await tok();await fetch(SU+tb+q,{method:'DELETE',headers:{apikey:SK,Authorization:'Bearer '+t}});}
+function get(p)        { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
+function post(tb,b)    { return window.db.insert(tb, b); }
+function patch(tb,q,b) { return window.db.update(tb, q, b); }
+function del(tb,q)     { return window.db.delete(tb, q); }
 function wdays(off){var n=new Date(),dw=n.getDay(),m=new Date(n);m.setDate(n.getDate()-(dw===0?6:dw-1)+(off*7));m.setHours(0,0,0,0);var r=[];for(var i=0;i<7;i++){var d=new Date(m);d.setDate(m.getDate()+i);r.push(d);}return r;}
 function ds(d){return d.toISOString().slice(0,10);}
 function rk(u,d){return u+'__'+d;}
@@ -17418,21 +17332,13 @@ window.loadRoster=loadRoster;
 <script>
 (function(){
 'use strict';
-var SU='https://anhawgzgxoywophqbmji.supabase.co/rest/v1/';
-var SK='sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+// Uses window.db (canonical API client defined in SUPABASE CONFIG block)
 var _wo=0,_emps=[],_built=false,_sel=null,_selAuth=null,_selName='',_selRole='',_evts=[],_live={};
 
-async function tok(){
-  // Wait for _sb to be ready
-  var tries=0;
-  while(!window._sb && tries<20){await new Promise(function(r){setTimeout(r,100);});tries++;}
-  try{var s=await window._sb.auth.getSession();return(s.data&&s.data.session&&s.data.session.access_token)||SK;}
-  catch(e){return SK;}
-}
-async function get(p){var t=await tok();var r=await fetch(SU+p,{headers:{apikey:SK,Authorization:'Bearer '+t}});var d=await r.json();return Array.isArray(d)?d:[];}
-async function post(p,b){var t=await tok();var r=await fetch(SU+p,{method:'POST',headers:{apikey:SK,Authorization:'Bearer '+t,'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify(b)});return r;}
-async function patch(p,b){var t=await tok();var r=await fetch(SU+p,{method:'PATCH',headers:{apikey:SK,Authorization:'Bearer '+t,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify(b)});return r;}
-async function del(p){var t=await tok();var r=await fetch(SU+p,{method:'DELETE',headers:{apikey:SK,Authorization:'Bearer '+t}});if(!r.ok){var e=await r.text();throw new Error('Delete failed ('+r.status+'): '+e.slice(0,120));}return r;}
+function get(p)    { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
+function post(p,b) { return window.db.insert(p, b); }
+function patch(p,b){ var i=p.indexOf('?'); return window.db.update(i>=0?p.slice(0,i):p, i>=0?p.slice(i):'', b); }
+function del(p)    { var i=p.indexOf('?'); return window.db.delete(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
 
 function isAdm(){
   var role=window.CURRENT_USER&&window.CURRENT_USER.role;
