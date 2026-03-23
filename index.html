@@ -4425,38 +4425,37 @@ window.copyInviteLink = function() {
       });
       // Create HR profile setup task for the manager (fire and forget)
       try {
-        // _INVITE_TOKEN is cleared by now — read reports_to_id from app_users
-        var newUsersRow = await sbGet('app_users?id=eq.'+newUserId+'&select=reports_to_id&limit=1');
-        var reportsToId = (newUsersRow[0] && newUsersRow[0].reports_to_id) || null;
+        // Declare newUserId first, then fetch reports_to_id
         var newUserId = window.CURRENT_USER.app_user_id || window.CURRENT_USER.id;
         var fullName = payload.first_name + ' ' + payload.last_name;
+        console.log('[TASK] newUserId:', newUserId, 'name:', fullName);
+        var newUsersRow = await sbGet('app_users?id=eq.'+newUserId+'&select=reports_to_id&limit=1');
+        var reportsToId = (newUsersRow[0] && newUsersRow[0].reports_to_id) || null;
+        console.log('[TASK] reportsToId:', reportsToId);
         if(reportsToId) {
-          // Assign to the specific manager
-          await sbPost('job_tasks', {
-            job_id: null,
-            task_type: 'hr_profile_setup',
-            title: 'Complete HR profile for ' + fullName,
-            assigned_to: reportsToId,
-            status: 'pending',
-            notes: 'New employee ' + fullName + ' has registered. Please complete their Employment, Pay & Leave details in Employee Details.',
-            target_user_id: newUserId
-          });
-        } else {
-          // No manager specified — assign to all admins
-          var admins = await sbGet('app_users?role=in.(managing_director,operations_director,business_analyst)&select=id');
-          for(var ai=0; ai<admins.length; ai++){
-            await sbPost('job_tasks', {
+          var mgrRow = await sbGet('app_users?id=eq.'+reportsToId+'&select=auth_user_id,role&limit=1');
+          var mgrAuthId = mgrRow[0] && mgrRow[0].auth_user_id;
+          var mgrRole  = (mgrRow[0] && mgrRow[0].role) || 'managing_director';
+          console.log('[TASK] mgrAuthId:', mgrAuthId, 'mgrRole:', mgrRole);
+          if(mgrAuthId) {
+            var taskResult = await sbPost('job_tasks', {
               job_id: null,
               task_type: 'hr_profile_setup',
               title: 'Complete HR profile for ' + fullName,
-              assigned_to: admins[ai].id,
+              assigned_to: mgrAuthId,
+              assigned_role: mgrRole,
               status: 'pending',
-              notes: 'New employee ' + fullName + ' has registered. Please complete their Employment, Pay & Leave details in Employee Details.',
+              notes: 'New employee ' + fullName + ' has registered.',
               target_user_id: newUserId
             });
+            console.log('[TASK] created:', taskResult);
+          } else {
+            console.error('[TASK] no mgrAuthId found for reportsToId:', reportsToId);
           }
+        } else {
+          console.warn('[TASK] no reports_to_id set for user:', newUserId);
         }
-      } catch(e) { console.warn('HR task creation failed (non-critical):', e.message); }
+      } catch(e) { console.error('[TASK] failed:', e.message, e); }
 
       // Remove lockout screen and show dashboard
       var screen=document.getElementById('hr-first-login-screen');
