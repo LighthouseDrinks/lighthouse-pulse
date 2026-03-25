@@ -2852,8 +2852,11 @@ window.copyInviteLink = function() {
   <!-- Supply Chain -->
   <div class="sb-section">
     <div class="sb-group-label">Supply Chain</div>
-    <div class="sb-item" id="sbnav-inventory" onclick="showPage('inventory',this)">
+    <div class="sb-item" id="sbnav-inventory" onclick="window.navToInvTab('liquid',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 2.5A.5.5 0 0 1 .5 2H2a.5.5 0 0 1 .485.379L2.89 4H14.5a.5.5 0 0 1 .485.621l-1.5 6A.5.5 0 0 1 13 11H4a.5.5 0 0 1-.485-.379L1.61 3H.5a.5.5 0 0 1-.5-.5z"/></svg>Liquid Inventory
+    </div>
+    <div class="sb-item" id="sbnav-drygoods" onclick="window.navToInvTab('drygoods',this)">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.186 1.113a.5.5 0 0 0-.372 0L1.846 3.5 8 5.961 14.154 3.5 8.186 1.113zM15 4.239l-6.5 2.6v7.922l6.5-2.6V4.24zm-7.5 10.522V6.838L1 4.239v7.923l6.5 2.6z"/></svg>Dry Goods
     </div>
     <div class="sb-item" id="sbnav-suppliers" onclick="showPage('suppliers',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 3.5A1.5 1.5 0 0 1 1.5 2h9A1.5 1.5 0 0 1 12 3.5V5h1.02a1.5 1.5 0 0 1 1.17.563l1.481 1.85a1.5 1.5 0 0 1 .329.938V10.5a1.5 1.5 0 0 1-1.5 1.5H14a2 2 0 1 1-4 0H5a2 2 0 1 1-3.998-.085A1.5 1.5 0 0 1 0 10.5v-7z"/></svg>Suppliers
@@ -8124,10 +8127,14 @@ window.loadBoms = async function initBoms() {
     var pg = document.getElementById('page-' + name);
     if (pg) pg.classList.add('active');
     // navEl may be passed directly or resolve to sidebar item by page name
-    var activeNav = navEl || document.getElementById('sbnav-' + name);
-    if (activeNav) activeNav.classList.add('active');
+    // If null is passed explicitly (e.g. from navToInvTab), skip — caller manages active state
+    if (navEl !== null) {
+      var activeNav = navEl || document.getElementById('sbnav-' + name);
+      if (activeNav) activeNav.classList.add('active');
+    }
     document.querySelectorAll('.mob-nav-item[data-page="' + name + '"]').forEach(function(n) { n.classList.add('active'); });
-    if (name === 'inventory') {
+    if (name === 'inventory' && navEl !== null) {
+      // Default to liquid tab when navigating directly (not via navToInvTab)
       var liquidBtn = document.querySelector('.inv-tab[onclick*="liquid"]');
       if (window.showInvTab) window.showInvTab('liquid', liquidBtn);
     }
@@ -11310,6 +11317,20 @@ window.showInvTab = function(tab, btn) {
   if (tab === 'goodsin')  loadGoodsIn().catch(function(e){ showErr('gin-tbody',  8,  e); });
 };
 
+// Navigate from sidebar to inventory page and activate the correct sub-tab
+window.navToInvTab = function(tab, navEl) {
+  // Set sidebar active state (clear all, mark this item)
+  document.querySelectorAll('.sb-item').forEach(function(n){ n.classList.remove('active'); });
+  if (navEl) navEl.classList.add('active');
+  // Show the inventory page
+  showPage('inventory', null); // null so showPage doesn't override active state we just set
+  // Wait one tick for the page to be visible, then switch sub-tab
+  setTimeout(function() {
+    var tabBtn = document.querySelector('.inv-tab[onclick*="' + tab + '"]');
+    window.showInvTab(tab, tabBtn);
+  }, 0);
+};
+
 function showErr(tbodyId, cols, e) {
   var el = document.getElementById(tbodyId);
   if (el) el.innerHTML = '<tr><td colspan="' + cols + '" style="color:var(--red);padding:24px;text-align:center;">⚠ ' + e.message + '</td></tr>';
@@ -14169,11 +14190,11 @@ window.saveAdjModal = async function() {
     if (j.stage === 'planning') {
       advBtn.textContent = 'Move to Scheduled →';
       advBtn.style.display = '';
-      stageInfo.textContent = 'All planning documents must be complete before scheduling.';
+      stageInfo.textContent = 'Requires: Bill of Materials confirmed.';
     } else if (j.stage === 'scheduled') {
       advBtn.textContent = 'Complete Job →';
       advBtn.style.display = '';
-      stageInfo.textContent = 'Mark complete when bottling is finished and all paperwork is done.';
+      stageInfo.textContent = 'Requires: Liquid sign-off · Supply chain sign-off · Weights & Measures · Results tab filled.';
     } else {
       advBtn.style.display = 'none';
       stageInfo.textContent = 'Job complete.';
@@ -14510,24 +14531,59 @@ window.saveAdjModal = async function() {
     var nextStage = j.stage === 'planning' ? 'scheduled' : j.stage === 'scheduled' ? 'complete' : null;
     if (!nextStage) return;
 
-    if (nextStage === 'complete') {
-      // Gate: Results tab must be fully completed
-      var missing = [];
-      if (!j.lot_number)              missing.push('Batch / Lot No');
-      if (!j.actual_bottles_produced) missing.push('Total Bottles Produced');
-      if (!j.actual_cases)            missing.push('Total Cases');
-      if (!j.date_commenced)          missing.push('Date / Time Commenced');
-      if (!j.date_completed)          missing.push('Date / Time Ended');
-      if (!j.line_clearance_complete) missing.push('Line Clearance');
-      if (!j.delivery_cleared)        missing.push('Delivery Cleared');
-      if (!j.results_signed_by)       missing.push('Production Manager Sign-Off');
-      if (missing.length) {
-        window.toast && window.toast('Complete the Results tab first: ' + missing.join(', '), 'error');
-        var tb = document.querySelector('[data-tab="results"]');
-        if (tb) window.showJobTab('results', tb);
+    // ── Gate 1: Planning → Scheduled ─────────────────────────────────────────
+    if (nextStage === 'scheduled') {
+      var tasks1 = await supaGet('job_tasks?job_id=eq.' + _currentJobId + '&select=task_type,status');
+      var bomTask = tasks1.find(function(t){ return t.task_type === 'bom_link'; });
+      if (!bomTask || bomTask.status !== 'completed') {
+        _showGateBlockModal('Cannot Move to Scheduled', [
+          { label: 'Bill of Materials', hint: 'Must be confirmed before scheduling.' }
+        ]);
         return;
       }
-      if (!confirm('Mark this job as Complete? This will trigger inventory depletion.')) return;
+    }
+
+    // ── Gate 2: Scheduled → Complete ─────────────────────────────────────────
+    if (nextStage === 'complete') {
+      // 2a. Task sign-offs
+      var tasks2 = await supaGet('job_tasks?job_id=eq.' + _currentJobId + '&select=task_type,status,title');
+      var taskMap = {};
+      tasks2.forEach(function(t){ taskMap[t.task_type] = t; });
+
+      var taskBlocking = [];
+      if (!taskMap['liquid_signoff'] || taskMap['liquid_signoff'].status !== 'completed')
+        taskBlocking.push({ label: 'Liquid Sign-Off', hint: 'Must be signed off in the Liquid tab.' });
+      if (!taskMap['components'] || taskMap['components'].status !== 'completed')
+        taskBlocking.push({ label: 'Supply Chain', hint: 'Coordinator must confirm all items ordered.' });
+      if (!taskMap['weights_measures'] || taskMap['weights_measures'].status !== 'completed')
+        taskBlocking.push({ label: 'Weights & Measures', hint: 'At least one batch must be recorded.' });
+
+      // 2b. Results tab fields
+      var resultsMissing = [];
+      if (!j.lot_number)              resultsMissing.push('Batch / Lot No');
+      if (!j.actual_bottles_produced) resultsMissing.push('Total Bottles Produced');
+      if (!j.actual_cases)            resultsMissing.push('Total Cases');
+      if (!j.date_commenced)          resultsMissing.push('Date / Time Commenced');
+      if (!j.date_completed)          resultsMissing.push('Date / Time Ended');
+      if (!j.line_clearance_complete) resultsMissing.push('Line Clearance');
+      if (!j.delivery_cleared)        resultsMissing.push('Delivery Cleared');
+      if (!j.results_signed_by)       resultsMissing.push('Production Manager Sign-Off');
+      resultsMissing.forEach(function(m){
+        taskBlocking.push({ label: m, hint: 'Required in the Results tab.' });
+      });
+
+      if (taskBlocking.length) {
+        _showGateBlockModal('Cannot Complete Job', taskBlocking);
+        return;
+      }
+
+      // All gates clear — confirm
+      var confirmed = await _showConfirmAdvanceModal(
+        'Complete Job',
+        'All sign-offs are complete. Mark this job as Complete?',
+        'Complete Job'
+      );
+      if (!confirmed) return;
     }
 
     try {
@@ -14537,6 +14593,48 @@ window.saveAdjModal = async function() {
       window.closeJobDetail();
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
+
+  // Styled "blocked" modal listing unmet requirements
+  function _showGateBlockModal(title, items) {
+    var ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+    var rows = items.map(function(it){
+      return '<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.05);">'
+        + '<span style="color:var(--red);font-size:14px;line-height:1.2;flex-shrink:0;">✕</span>'
+        + '<div><div style="font-size:12px;font-weight:600;color:var(--white);">' + window.escapeHtml(it.label) + '</div>'
+        + '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + window.escapeHtml(it.hint) + '</div></div></div>';
+    }).join('');
+    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--amber);border-radius:8px;padding:26px 28px 22px;max-width:420px;width:100%;">'
+      + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--amber);font-weight:700;margin-bottom:6px;">Action Required</div>'
+      + '<div style="font-size:15px;font-weight:700;color:var(--white);margin-bottom:16px;">' + window.escapeHtml(title) + '</div>'
+      + '<div style="margin-bottom:18px;">' + rows + '</div>'
+      + '<div style="display:flex;justify-content:flex-end;">'
+      + '<button id="_gbOK" style="padding:8px 22px;background:var(--gold);border:none;border-radius:4px;color:#000;cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">Got it</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('#_gbOK').onclick = function(){ ov.remove(); };
+    ov.onclick = function(e){ if (e.target === ov) ov.remove(); };
+  }
+
+  // Styled confirmation modal for advancing stage
+  function _showConfirmAdvanceModal(title, message, confirmLabel) {
+    return new Promise(function(resolve){
+      var ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+      ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--green);border-radius:8px;padding:26px 28px 22px;max-width:400px;width:100%;">'
+        + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--green);font-weight:700;margin-bottom:6px;">Confirm</div>'
+        + '<div style="font-size:15px;font-weight:700;color:var(--white);margin-bottom:10px;">' + window.escapeHtml(title) + '</div>'
+        + '<div style="font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:22px;">' + window.escapeHtml(message) + '</div>'
+        + '<div style="display:flex;gap:10px;justify-content:flex-end;">'
+        + '<button id="_caX"  style="padding:8px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">Cancel</button>'
+        + '<button id="_caOK" style="padding:8px 20px;background:var(--green);border:none;border-radius:4px;color:#000;cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">' + window.escapeHtml(confirmLabel) + '</button>'
+        + '</div></div>';
+      document.body.appendChild(ov);
+      ov.querySelector('#_caX').onclick  = function(){ ov.remove(); resolve(false); };
+      ov.querySelector('#_caOK').onclick = function(){ ov.remove(); resolve(true);  };
+      ov.onclick = function(e){ if (e.target === ov){ ov.remove(); resolve(false); } };
+    });
+  }
 
   window.editJobFromDetail = function() {
     if (!_currentJobId) return;
