@@ -7927,6 +7927,10 @@ window.loadBoms = async function initBoms() {
         style="padding:8px 12px;background:var(--navy-card);border:1px solid var(--navy-border);color:var(--text);font-family:Lato,sans-serif;font-size:12px;outline:none;">
         <option value="">All Clients</option>
       </select>
+      <button id="liq-archived-toggle" onclick="window.toggleArchivedContainers()"
+        style="padding:8px 12px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-family:Lato,sans-serif;font-size:12px;cursor:pointer;border-radius:3px;white-space:nowrap;">
+        Show Archived
+      </button>
     </div>
 
     <!-- Table -->
@@ -11333,7 +11337,8 @@ window.loadBoms = async function initBoms() {
 'use strict';
 
 // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
-var _liquid   = [];
+var _liquid       = [];
+var _showArchived = false;
 var _dryGoods = [];
 var _goodsIn  = [];
 var _clients  = [];
@@ -11402,15 +11407,16 @@ async function loadLiquid() {
   _clients = await supa('clients', '?order=name.asc&limit=1000');
   _liquid  = await supa('liquid_containers', '?order=type.asc,reference.asc&limit=5000');
 
-  // KPIs — active = any container with liquid (partial or full)
-  var active   = _liquid.filter(function(c){ return parseFloat(c.current_litres||0) > 0; });
+  // KPIs — always calculated from non-archived containers only
+  var live     = _liquid.filter(function(c){ return !c.archived; });
+  var active   = live.filter(function(c){ return parseFloat(c.current_litres||0) > 0; });
   var totalL   = active.reduce(function(s,c){ return s + parseFloat(c.current_litres||0); }, 0);
   var totalLPA = active.reduce(function(s,c){ return s + parseFloat(c.current_lpa||0); }, 0);
   var totalVal = active.reduce(function(s,c){ return s + parseFloat(c.current_lpa||0) * parseFloat(c.lpa_price||0); }, 0);
   setText('liq-kpi-litres', totalL.toLocaleString('en-IE',{maximumFractionDigits:0}) + ' L');
   setText('liq-kpi-lpa',    totalLPA.toLocaleString('en-IE',{maximumFractionDigits:2}) + ' LPA');
-  setText('liq-kpi-count',  _liquid.length);
-  setText('liq-kpi-sub',    active.length + ' with liquid, ' + (_liquid.length - active.length) + ' empty');
+  setText('liq-kpi-count',  live.length);
+  setText('liq-kpi-sub',    active.length + ' with liquid, ' + (live.length - active.length) + ' empty');
   setText('liq-kpi-value',  totalVal > 0 ? '€' + totalVal.toLocaleString('en-IE',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—');
 
   // Client filter — populated from full client list, not just containers
@@ -11450,6 +11456,8 @@ window.renderLiquid = function() {
   if (!tbody) return;
 
   var list = _liquid.filter(function(c){
+    // Show archived or active based on toggle
+    if (_showArchived ? !c.archived : c.archived) return false;
     if (typef && c.type      !== typef) return false;
     if (statf && c.status    !== statf) return false;
     if (clif  && c.client_id !== clif)  return false;
@@ -11512,7 +11520,9 @@ window.renderLiquid = function() {
       + '<td style="white-space:nowrap;text-align:center;">'
       + '<button class="liq-view-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">View</button>'
       + '<button class="liq-qr-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">QR</button>'
-      + '<button class="liq-del-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Del</button>'
+      + (c.archived
+          ? '<button class="liq-unarchive-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--green);color:var(--green);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Restore</button>'
+          : '<button class="liq-archive-btn" data-cid="' + cid + '" style="background:transparent;border:1px solid var(--muted);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Archive</button>')
       + '</td></tr>'
       + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="12">'
       + '<div class="mob-detail-inner">'
@@ -11538,8 +11548,11 @@ window.renderLiquid = function() {
   tbody.querySelectorAll('.liq-qr-btn').forEach(function(btn) {
     btn.addEventListener('click', function(e) { e.stopPropagation(); showContainerQR(this.getAttribute('data-cid')); });
   });
-  tbody.querySelectorAll('.liq-del-btn').forEach(function(btn) {
-    btn.addEventListener('click', function(e) { e.stopPropagation(); deleteContainer(this.getAttribute('data-cid')); });
+  tbody.querySelectorAll('.liq-archive-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); window.archiveContainer(this.getAttribute('data-cid')); });
+  });
+  tbody.querySelectorAll('.liq-unarchive-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); window.unarchiveContainer(this.getAttribute('data-cid')); });
   });
 
   // Wire tap-to-expand on mobile
@@ -11878,15 +11891,37 @@ window.saveContainer = async function() {
   finally { btn.disabled = false; btn.textContent = editId ? 'Save Changes' : 'Save Container'; }
 };
 
-window.deleteContainer = async function(id) {
+window.archiveContainer = async function(id) {
   var c = _liquid.find(function(x){ return x.id === id; });
   if (!c) return;
-  if (!confirm('Delete container ' + c.reference + '? This cannot be undone.')) return;
+  if (!confirm('Archive container ' + c.reference + '? It will be hidden from inventory but all history is preserved. You can restore it at any time.')) return;
   try {
-    await window.db.delete('liquid_containers', '?id=eq.' + id);
-    toastMsg('Container deleted.');
+    var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'unknown';
+    await window.db.update('liquid_containers', '?id=eq.' + id, { archived: true, archived_at: new Date().toISOString(), archived_by: who });
+    toastMsg('Container archived.');
     await loadLiquid();
-  } catch(e) { toastMsg('Error: ' + e.message, 'error'); }
+  } catch(e) { logError('archiveContainer', e); toastMsg('Error archiving container: ' + e.message, 'error'); }
+};
+
+window.unarchiveContainer = async function(id) {
+  var c = _liquid.find(function(x){ return x.id === id; });
+  if (!c) return;
+  try {
+    await window.db.update('liquid_containers', '?id=eq.' + id, { archived: false, archived_at: null, archived_by: null });
+    toastMsg('Container restored to active inventory.');
+    await loadLiquid();
+  } catch(e) { logError('unarchiveContainer', e); toastMsg('Error restoring container: ' + e.message, 'error'); }
+};
+
+window.toggleArchivedContainers = function() {
+  _showArchived = !_showArchived;
+  var btn = document.getElementById('liq-archived-toggle');
+  if (btn) {
+    btn.textContent = _showArchived ? 'Show Active' : 'Show Archived';
+    btn.style.color = _showArchived ? 'var(--gold)' : 'var(--muted)';
+    btn.style.borderColor = _showArchived ? 'var(--gold)' : 'var(--navy-border)';
+  }
+  renderLiquid();
 };
 
 window.showContainerQR = function(id) {
