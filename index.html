@@ -14389,7 +14389,7 @@ window.saveAdjModal = async function() {
     var taskDefs = [
       { task_type:'bom_link',         title:'Confirm Bill of Materials',                             assigned_role:'client_coordinator',  due_date:dueDateStr },
       { task_type:'components',       title:'Dry Goods / Components Tracker — confirm all items ordered', assigned_role:'client_coordinator',  due_date:null },
-      { task_type:'liquid_signoff',   title:liquidTitle,                                               assigned_role:'warehouse_liquid',     due_date:null },
+      { task_type:'liquid_signoff',   title:liquidTitle,                                               assigned_role:'warehouse_liquid',     due_date:dueDateStr },
       { task_type:'quality',          title:'Quality Sign-Off',                                        assigned_role:'quality_compliance',   due_date:null },
       { task_type:'weights_measures', title:'Weights & Measures',                                      assigned_role:'production_manager',   due_date:null }
     ];
@@ -15973,6 +15973,18 @@ window.saveAdjModal = async function() {
         _activeConts = _allConts.filter(function(c){ return parseFloat(c.current_litres||0) > 0; });
       } catch(e2) { /* non-critical */ }
 
+      // Fetch BOM liquid SKU description for display (non-critical)
+      var _lsoLiquidSkuDesc = null;
+      if (j && j.bom_id) {
+        try {
+          var _bomR = await supaGet('boms?id=eq.' + j.bom_id + '&select=liquid_sku_id');
+          if (_bomR && _bomR[0] && _bomR[0].liquid_sku_id) {
+            var _skuR = await supaGet('dry_goods_skus?id=eq.' + _bomR[0].liquid_sku_id + '&select=description');
+            if (_skuR && _skuR[0]) _lsoLiquidSkuDesc = _skuR[0].description || null;
+          }
+        } catch(e3) { /* non-critical */ }
+      }
+
       var lsoBtnId    = d.id || '';
       var alreadySigned = !!(d.signed_by && d.signed_at);
       var isLocked    = alreadySigned;
@@ -16029,13 +16041,20 @@ window.saveAdjModal = async function() {
       var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">'
         + '<div style="font-size:14px;font-weight:700;color:var(--white);">Liquid Sign-Off</div>'
         + '<div style="display:flex;gap:8px;align-items:center;">'
-        + '<button data-job="' + jobId + '" onclick="window.printLiquidSignoff(this.dataset.job)" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#128424; Print</button>'
+        + '<button data-job="' + jobId + '" onclick="window.printLiquidSignoff(this.dataset.job)" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#128424; Print Spec Sheet</button>'
         + signedBlock
         + '</div></div>'
         + lockedBanner;
 
       // Pre-filled from job
       html += sec('From Job — Reference Values');
+      if (_lsoLiquidSkuDesc) {
+        html += frow('BOM Liquid Specification',
+          '<span style="font-size:13px;font-weight:700;color:var(--gold);">'
+          + window.escapeHtml(_lsoLiquidSkuDesc)
+          + '</span>'
+          + '<span style="font-size:10px;color:var(--muted);margin-left:8px;">(from BOM)</span>');
+      }
       html += frow('Target bottles', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j && j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—') + '</span>');
       html += frow('Litres sent in', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j && j.liquid_litres ? j.liquid_litres + ' L' : '—') + '</span>');
       html += frow('ABV of liquid sent in', '<span style="font-size:13px;color:var(--amber);font-weight:700;">' + (abvIn || '—') + '</span>');
@@ -16096,7 +16115,8 @@ window.saveAdjModal = async function() {
         html += '<select id="lso-container-sel" onchange="window.lsoContainerSelChange()" style="width:100%;padding:8px 10px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);font-family:Lato,sans-serif;font-size:12px;border-radius:4px;margin-bottom:10px;">'
           + _conOptH + '</select>';
         html += '<div id="lso-cont-preview" style="display:none;margin-bottom:10px;"></div>';
-        html += '<div id="lso-abv-warn" style="display:none;margin-bottom:10px;"></div>';
+        html += '<div id="lso-abv-warn" style="display:none;margin-bottom:6px;"></div>';
+        html += '<div id="lso-spirit-warn" style="display:none;margin-bottom:10px;"></div>';
         html += '<div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">'
           + '<button id="lso-link-btn" onclick="window.lsoLinkContainer(\'' + jobId + '\')" class="btn btn-gold" style="font-size:12px;padding:7px 18px;" '+(d.linked_container_id?'':'disabled')+'>&#10003; Link Container to Job</button>'
           + '<button onclick="window.lsoGoToBlending(\'' + jobId + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:12px;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">&#9658; Complete via Blending tab</button>'
@@ -16192,6 +16212,7 @@ window.saveAdjModal = async function() {
       window._lsoContainers       = _allConts;
       window._lsoActiveContainers = _activeConts;
       window._lsoBomAbv           = bomAbvNum;
+      window._lsoLiquidSkuDesc    = _lsoLiquidSkuDesc;
       window._lsoInlineBlendIdx   = 0;
       window._lsoCurrentJobId     = jobId;
 
@@ -16294,74 +16315,318 @@ window.saveAdjModal = async function() {
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
 
-  window.printLiquidSignoff = function(jobId) {
+  window.printLiquidSignoff = async function(jobId) {
     var j = _jobs.find(function(x){ return x.id === jobId; });
-    var el = document.getElementById('jd-liquid-content');
-    if (!el || !j) return;
-    var inner = el.innerHTML;
-    // Remove buttons
-    inner = inner.replace(/<button[^>]*>[\s\S]*?<\/button>/g, '');
-    var win = window.open('','_blank','width=860,height=1100');
-    win.document.write('<!DOCTYPE html><html><head><title>Liquid Sign-Off — ' + jobId + '</title>'
-      + '<style>body{font-family:Arial,sans-serif;padding:32px;color:#111;font-size:13px;}'
-      + 'input,select,textarea{border:1px solid #999!important;background:#f9f9f9!important;color:#111!important;}'
-      + 'input[type=checkbox]{width:14px;height:14px;}'
-      + '@media print{body{padding:16px;}}</style></head>'
-      + '<body><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;padding-bottom:12px;border-bottom:3px solid #c9a84c;">'
-      + '<div><div style="font-size:20px;font-weight:700;color:#0d3349;">Liquid Sign-Off</div>'
-      + '<div style="font-size:11px;color:#666;margin-top:2px;">Lighthouse Drinks Ltd · ' + (j.product_name||'') + '</div></div>'
-      + '<div style="border:2px solid #c9a84c;padding:8px 16px;border-radius:4px;text-align:right;">'
-      + '<div style="font-size:10px;color:#666;">Job No</div>'
-      + '<div style="font-size:18px;font-weight:700;color:#c9a84c;font-family:monospace;">' + jobId + '</div></div></div>'
-      + inner
-      + '<script>window.onload=function(){window.print();}<\/script></body></html>');
+    if (!j) { window.toast && window.toast('Job data not loaded.', 'error'); return; }
+
+    var clientName = (j.clients && j.clients.name) || j.client_id || '—';
+    var schedDate  = j.scheduled_start
+      ? new Date(j.scheduled_start).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'})
+      : '—';
+    var printedAt  = new Date().toLocaleString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+
+    // ── Fetch BOM + Liquid SKU description ───────────────────────────────────
+    var bom = null, liquidSkuDesc = '—';
+    if (j.bom_id) {
+      try {
+        var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=*');
+        bom = bomRows && bomRows[0];
+        if (bom && bom.liquid_sku_id) {
+          var skuRows = await supaGet('dry_goods_skus?id=eq.' + bom.liquid_sku_id + '&select=id,description');
+          if (skuRows && skuRows[0]) liquidSkuDesc = skuRows[0].description || '—';
+        }
+      } catch(e) { /* non-critical */ }
+    }
+
+    // ── Fetch sign-off record + linked container ──────────────────────────────
+    var signoff = null, container = null;
+    try {
+      var soRows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1');
+      signoff = soRows && soRows[0];
+      if (signoff && signoff.linked_container_id) {
+        var cRows = await supaGet('liquid_containers?id=eq.' + signoff.linked_container_id + '&select=*');
+        container = cRows && cRows[0];
+      }
+    } catch(e) { /* non-critical */ }
+
+    // ── Calculations ──────────────────────────────────────────────────────────
+    var reqLitres   = parseFloat(j.liquid_litres || 0);
+    var reqAbv      = parseFloat(j.abv_in || 0);
+    var reqLpa      = (reqLitres && reqAbv) ? (reqLitres * reqAbv / 100) : null;
+    var finalLitres = parseFloat(j.final_litres || 0);
+    var waterReq    = parseFloat(j.water_required || 0);
+    var availLpa    = container ? parseFloat(container.current_lpa || 0) : null;
+    var availLitres = container ? parseFloat(container.current_litres || 0) : null;
+    var availAbv    = container ? parseFloat(container.abv || 0) : null;
+    var lpaVariance = (reqLpa != null && availLpa != null) ? (availLpa - reqLpa) : null;
+    var abvMismatch = (reqAbv && availAbv) ? Math.abs(availAbv - reqAbv) > 0.1 : false;
+    var contCap     = container ? parseFloat(container.capacity_litres || 0) : 0;
+    var contPct     = (contCap > 0 && availLitres != null) ? Math.min(100, Math.round(availLitres / contCap * 100)) : null;
+
+    // ── CSS & helper builders ─────────────────────────────────────────────────
+    var S = {
+      page: 'font-family:Arial,sans-serif;color:#111;font-size:12px;padding:28px 32px;max-width:780px;margin:0 auto;',
+      h1:   'font-size:22px;font-weight:700;color:#0d3349;letter-spacing:-0.02em;',
+      sub:  'font-size:11px;color:#666;margin-top:2px;',
+      jobBox: 'border:2px solid #c9a84c;padding:8px 16px;border-radius:4px;text-align:right;',
+      sectionHd: 'font-size:9px;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;color:#c9a84c;margin:20px 0 8px;padding-bottom:5px;border-bottom:2px solid #c9a84c;',
+      grid2: 'display:grid;grid-template-columns:1fr 1fr;gap:0 32px;',
+      label: 'font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;',
+      value: 'font-size:13px;font-weight:700;color:#111;',
+      frow:  'padding:7px 0;border-bottom:1px solid #e8e8e8;display:flex;justify-content:space-between;align-items:baseline;',
+      fl:    'font-size:11px;color:#666;font-weight:600;',
+      fv:    'font-size:13px;font-weight:700;color:#111;',
+      pill:  function(txt, colour) { return '<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;padding:3px 10px;border-radius:3px;background:' + colour + ';text-transform:uppercase;">' + txt + '</span>'; },
+      warn:  'background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px 12px;font-size:11px;color:#856404;margin:10px 0;',
+      ok:    'background:#d4edda;border:1px solid #28a745;border-radius:4px;padding:8px 12px;font-size:11px;color:#155724;margin:10px 0;',
+      err:   'background:#f8d7da;border:1px solid #dc3545;border-radius:4px;padding:8px 12px;font-size:11px;color:#721c24;margin:10px 0;',
+      sigBox: 'border:1px solid #999;border-radius:4px;padding:14px 16px;margin-top:10px;',
+      sigLine: 'border-bottom:1px solid #999;height:32px;margin-bottom:6px;',
+    };
+
+    function frow(label, val) {
+      return '<div style="' + S.frow + '"><span style="' + S.fl + '">' + label + '</span><span style="' + S.fv + '">' + val + '</span></div>';
+    }
+    function kpi(label, val, colour) {
+      return '<div style="text-align:center;padding:12px 8px;border:1px solid #e0e0e0;border-radius:4px;background:#fafafa;">'
+        + '<div style="' + S.label + '">' + label + '</div>'
+        + '<div style="font-size:20px;font-weight:800;color:' + (colour||'#0d3349') + ';">' + val + '</div></div>';
+    }
+    function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+    // ── Build HTML ────────────────────────────────────────────────────────────
+    var h = '';
+
+    // Header
+    h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;padding-bottom:14px;border-bottom:3px solid #c9a84c;">';
+    h += '<div><div style="' + S.h1 + '">Liquid Spec Sheet</div>';
+    h += '<div style="' + S.sub + '">Lighthouse Drinks Ltd &nbsp;·&nbsp; Printed: ' + esc(printedAt) + '</div></div>';
+    h += '<div style="' + S.jobBox + '">';
+    h += '<div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;">Job No</div>';
+    h += '<div style="font-size:20px;font-weight:800;color:#c9a84c;font-family:monospace;letter-spacing:0.04em;">' + esc(jobId) + '</div></div></div>';
+
+    // Job Summary
+    h += '<div style="' + S.sectionHd + '">Job Summary</div>';
+    h += '<div style="' + S.grid2 + '"><div>';
+    h += frow('Product', esc(j.product_name || '—'));
+    h += frow('Client', esc(clientName));
+    h += frow('PO Number', esc(j.po_number || '—'));
+    h += '</div><div>';
+    h += frow('Scheduled Date', esc(schedDate));
+    h += frow('Bottle Target', j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—');
+    h += frow('Liquid Target', reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—');
+    h += '</div></div>';
+
+    // BOM Liquid Specification
+    h += '<div style="' + S.sectionHd + '">BOM Liquid Specification</div>';
+    h += '<div style="padding:12px 16px;background:#f8f8f0;border:1px solid #d8d0a0;border-radius:4px;margin-bottom:10px;">';
+    h += '<div style="' + S.label + '">Specified Liquid (from BOM)</div>';
+    h += '<div style="font-size:15px;font-weight:700;color:#0d3349;margin-top:4px;">' + esc(liquidSkuDesc) + '</div>';
+    if (bom && bom.product_name) h += '<div style="font-size:11px;color:#666;margin-top:2px;">BOM: ' + esc(bom.product_name || '') + '</div>';
+    h += '</div>';
+
+    // Volume & LPA Requirements
+    h += '<div style="' + S.sectionHd + '">Volume &amp; LPA Requirements</div>';
+    h += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">';
+    h += kpi('Litres Required', reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—', '#0d3349');
+    h += kpi('Target ABV', reqAbv > 0 ? reqAbv.toFixed(1) + '%' : '—', '#c9a84c');
+    h += kpi('Required LPA', reqLpa != null ? reqLpa.toFixed(3) : '—', '#0d3349');
+    h += kpi('Final Litres', finalLitres > 0 ? finalLitres.toFixed(1) + ' L' : (reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—'), '#555');
+    h += '</div>';
+    if (reqLpa != null) {
+      h += '<div style="font-size:10px;color:#888;text-align:right;margin-bottom:10px;">LPA = Litres × ABV ÷ 100 &nbsp;=&nbsp; ' + reqLitres.toFixed(1) + ' × ' + reqAbv.toFixed(1) + ' ÷ 100 = <strong>' + reqLpa.toFixed(3) + ' LPA</strong></div>';
+    }
+
+    // Preparation Instructions
+    h += '<div style="' + S.sectionHd + '">Preparation Instructions</div>';
+    var dilution = !!(j.dilution);
+    h += frow('Dilution required', dilution ? S.pill('YES — DILUTION REQUIRED','#fff3cd') + ' &nbsp; <span style="font-size:11px;color:#856404;">Add ' + (waterReq > 0 ? waterReq.toFixed(1) + ' L water' : '— L water') + ' → final ' + (finalLitres > 0 ? finalLitres.toFixed(1) + ' L' : '—') + '</span>' : S.pill('No','#e8f5e9'));
+    h += frow('Chill filtration', j.chill_filtration ? S.pill('YES — REQUIRED','#fff3cd') : S.pill('No','#e8f5e9'));
+    var colourSpec = bom && bom.colour_spec ? bom.colour_spec : null;
+    h += frow('Colouring', j.colouring ? S.pill('YES — REQUIRED','#fff3cd') + (colourSpec ? ' &nbsp;<span style="font-size:11px;color:#666;">Spec: ' + esc(colourSpec) + '</span>' : '') : S.pill('No','#e8f5e9'));
+    if (j.notes) h += frow('Job Notes', '<span style="font-size:11px;color:#555;">' + esc(j.notes) + '</span>');
+
+    // Linked Container
+    h += '<div style="' + S.sectionHd + '">Source Container</div>';
+    if (container) {
+      var contTypeMap = {cask:'Cask',ibc:'IBC',blue_drum:'Blue Drum',tank:'Tank',tanker:'Tanker'};
+      var contType    = contTypeMap[container.type] || container.type || '—';
+      var spiritDisp  = availLitres > 0 && container.spirit_type
+        ? container.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();})
+        : 'EMPTY';
+      h += '<div style="padding:12px 16px;background:#f0f8f0;border:1px solid #90c090;border-radius:4px;margin-bottom:10px;">';
+      h += '<div style="font-size:11px;color:#155724;font-weight:700;margin-bottom:8px;">&#10003; Container Linked</div>';
+      h += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px;">';
+      h += kpi('Reference', esc(container.reference || '—'), '#0d3349');
+      h += kpi('Type', esc(contType), '#555');
+      h += kpi('Spirit / Product', esc(spiritDisp), availLitres > 0 ? '#c9a84c' : '#999');
+      h += kpi('CBW Rotation', esc(container.cbw_rotation || '—'), '#555');
+      h += '</div>';
+      h += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;">';
+      h += kpi('Current Litres', availLitres != null ? availLitres.toFixed(1) + ' L' : '—', '#0d3349');
+      h += kpi('ABV', availAbv ? availAbv.toFixed(1) + '%' : '—', '#c9a84c');
+      h += kpi('LPA (stored)', availLpa != null ? availLpa.toFixed(3) : '—', '#0d3349');
+      h += kpi('Capacity', contCap > 0 ? contCap.toFixed(0) + 'L (' + (contPct != null ? contPct + '%' : '—') + ' full)' : '—', '#555');
+      h += '</div></div>';
+
+      // Variance check
+      h += '<div style="' + S.sectionHd + '">Variance Check</div>';
+      h += '<div style="border:1px solid #e0e0e0;border-radius:4px;overflow:hidden;margin-bottom:10px;">';
+      h += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
+      h += '<thead><tr style="background:#f0f0f0;"><th style="padding:7px 12px;text-align:left;font-weight:600;color:#333;border-bottom:1px solid #e0e0e0;">Metric</th><th style="padding:7px 12px;text-align:right;font-weight:600;color:#333;border-bottom:1px solid #e0e0e0;">Required</th><th style="padding:7px 12px;text-align:right;font-weight:600;color:#333;border-bottom:1px solid #e0e0e0;">Available in Container</th><th style="padding:7px 12px;text-align:right;font-weight:600;color:#333;border-bottom:1px solid #e0e0e0;">Variance</th></tr></thead>';
+      h += '<tbody>';
+      // LPA row
+      var lpaVar = lpaVariance != null ? lpaVariance.toFixed(3) : '—';
+      var lpaVarCol = lpaVariance == null ? '#111' : lpaVariance >= 0 ? '#155724' : '#721c24';
+      h += '<tr style="border-bottom:1px solid #f0f0f0;">';
+      h += '<td style="padding:7px 12px;font-weight:600;">LPA</td>';
+      h += '<td style="padding:7px 12px;text-align:right;">' + (reqLpa != null ? reqLpa.toFixed(3) : '—') + '</td>';
+      h += '<td style="padding:7px 12px;text-align:right;">' + (availLpa != null ? availLpa.toFixed(3) : '—') + '</td>';
+      h += '<td style="padding:7px 12px;text-align:right;font-weight:700;color:' + lpaVarCol + ';">' + (lpaVariance != null ? (lpaVariance >= 0 ? '+' : '') + lpaVar : '—') + '</td></tr>';
+      // Litres row
+      var litresDiff = (reqLitres && availLitres != null) ? availLitres - reqLitres : null;
+      var litresDiffCol = litresDiff == null ? '#111' : litresDiff >= 0 ? '#155724' : '#721c24';
+      h += '<tr>';
+      h += '<td style="padding:7px 12px;font-weight:600;">Litres</td>';
+      h += '<td style="padding:7px 12px;text-align:right;">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—') + '</td>';
+      h += '<td style="padding:7px 12px;text-align:right;">' + (availLitres != null ? availLitres.toFixed(1) + ' L' : '—') + '</td>';
+      h += '<td style="padding:7px 12px;text-align:right;font-weight:700;color:' + litresDiffCol + ';">' + (litresDiff != null ? (litresDiff >= 0 ? '+' : '') + litresDiff.toFixed(1) + ' L' : '—') + '</td></tr>';
+      h += '</tbody></table></div>';
+      // ABV check
+      if (abvMismatch) {
+        h += '<div style="' + S.err + '">&#9888; ABV Mismatch: Container is <strong>' + (availAbv||'?') + '%</strong> but job specifies <strong>' + (reqAbv||'?') + '%</strong>. Proceed only if intentional (e.g. liquid not yet diluted to target ABV).</div>';
+      } else if (reqAbv && availAbv) {
+        h += '<div style="' + S.ok + '">&#10003; ABV confirmed: Container (' + availAbv.toFixed(1) + '%) matches job target (' + reqAbv.toFixed(1) + '%) within tolerance.</div>';
+      }
+    } else {
+      // No container linked yet — blank form for operator
+      h += '<div style="border:1px solid #ccc;border-radius:4px;padding:14px 16px;background:#fafafa;margin-bottom:10px;">';
+      h += '<div style="font-size:11px;color:#856404;font-weight:700;margin-bottom:12px;">&#9888; No container linked in system — complete below on floor</div>';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      var blank = '<div style="border-bottom:1px solid #999;height:24px;margin-top:4px;"></div>';
+      h += '<div><div style="' + S.label + '">Container Reference</div>' + blank + '</div>';
+      h += '<div><div style="' + S.label + '">Container Type</div>' + blank + '</div>';
+      h += '<div><div style="' + S.label + '">Current Litres</div>' + blank + '</div>';
+      h += '<div><div style="' + S.label + '">ABV %</div>' + blank + '</div>';
+      h += '<div><div style="' + S.label + '">LPA</div>' + blank + '</div>';
+      h += '<div><div style="' + S.label + '">CBW Rotation</div>' + blank + '</div>';
+      h += '</div></div>';
+    }
+
+    // Sign-Off Block
+    h += '<div style="' + S.sectionHd + '">Operator Sign-Off</div>';
+    if (signoff && signoff.signed_by && signoff.signed_at) {
+      var soDate = new Date(signoff.signed_at).toLocaleString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+      h += '<div style="' + S.ok + '">&#10003; Signed off by <strong>' + esc(signoff.signed_by) + '</strong> &nbsp;·&nbsp; ' + esc(soDate) + '</div>';
+    }
+    h += '<div style="' + S.sigBox + '">';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;">';
+    h += '<div><div style="' + S.label + '">Operator Name</div><div style="' + S.sigLine + '"></div><div style="font-size:9px;color:#888;">Print name</div></div>';
+    h += '<div><div style="' + S.label + '">Signature</div><div style="' + S.sigLine + '"></div></div>';
+    h += '<div><div style="' + S.label + '">Date &amp; Time</div><div style="' + S.sigLine + '"></div></div>';
+    h += '</div>';
+    h += '<div style="margin-top:14px;padding-top:10px;border-top:1px solid #eee;">';
+    h += '<div style="' + S.label + '" style="margin-bottom:6px;">Notes / Observations</div>';
+    h += '<div style="border:1px solid #ccc;border-radius:3px;height:64px;background:#fafafa;"></div>';
+    h += '</div></div>';
+
+    // Footer
+    h += '<div style="margin-top:24px;padding-top:10px;border-top:1px solid #e0e0e0;display:flex;justify-content:space-between;font-size:9px;color:#aaa;">';
+    h += '<span>Lighthouse Drinks Ltd &nbsp;·&nbsp; Liquid Spec Sheet &nbsp;·&nbsp; ' + esc(printedAt) + '</span>';
+    h += '<span>Job: ' + esc(jobId) + ' &nbsp;·&nbsp; ' + esc(j.product_name||'') + '</span></div>';
+
+    // ── Open print window ─────────────────────────────────────────────────────
+    var win = window.open('', '_blank', 'width=900,height=1100');
+    if (!win) { window.toast && window.toast('Pop-up blocked — allow pop-ups for this site.', 'error'); return; }
+    win.document.write('<!DOCTYPE html><html><head>'
+      + '<title>Liquid Spec Sheet — ' + esc(jobId) + '</title>'
+      + '<style>'
+      + 'body{margin:0;padding:0;background:#fff;}'
+      + '@media screen{body{background:#e8e8e8;}.page{box-shadow:0 2px 12px rgba(0,0,0,0.18);}}'
+      + '.page{' + S.page + 'background:#fff;}'
+      + '@media print{@page{margin:16mm;size:A4;}body{background:#fff;}.page{padding:0;max-width:none;box-shadow:none;}}'
+      + 'table{border-collapse:collapse;}'
+      + '</style></head>'
+      + '<body><div class="page">' + h + '</div>'
+      + '<script>window.onload=function(){window.print();};<\/script>'
+      + '</body></html>');
     win.document.close();
   };
 
   // ── LIQUID SOURCE (LSO) HELPER FUNCTIONS ───────────────────────────────────
 
   window.lsoContainerSelChange = function() {
-    var sel     = document.getElementById('lso-container-sel');
-    var preview = document.getElementById('lso-cont-preview');
-    var warn    = document.getElementById('lso-abv-warn');
-    var linkBtn = document.getElementById('lso-link-btn');
+    var sel         = document.getElementById('lso-container-sel');
+    var preview     = document.getElementById('lso-cont-preview');
+    var warn        = document.getElementById('lso-abv-warn');
+    var spiritWarn  = document.getElementById('lso-spirit-warn');
+    var linkBtn     = document.getElementById('lso-link-btn');
     if (!sel) return;
     var cid = sel.value;
     if (!cid) {
-      if (preview) preview.style.display = 'none';
-      if (warn)    warn.style.display    = 'none';
-      if (linkBtn) linkBtn.disabled = true;
+      if (preview)    preview.style.display    = 'none';
+      if (warn)       warn.style.display       = 'none';
+      if (spiritWarn) spiritWarn.style.display = 'none';
+      if (linkBtn)    linkBtn.disabled = true;
       return;
     }
     var c = (window._lsoActiveContainers||[]).find(function(x){ return x.id === cid; });
     if (!c) return;
-    // Info card
+
+    // ── Info card — spirit type coloured using _spiritColour ─────────────────
+    var spiritColour = window._spiritColour ? window._spiritColour(c.spirit_type) : '#c9a84c';
+    var spiritDisp   = c.spirit_type
+      ? c.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();})
+      : '—';
     if (preview) {
       preview.style.display = '';
       preview.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;padding:12px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:4px;">'
-        + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:3px;">Spirit / Product</div><div style="font-size:13px;font-weight:600;color:var(--white);">'+window.escapeHtml(c.spirit_type||'—')+'</div></div>'
+        + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:3px;">Spirit / Product</div>'
+        + '<div style="font-size:13px;font-weight:700;color:' + spiritColour + ';">' + window.escapeHtml(spiritDisp) + '</div></div>'
         + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:3px;">ABV</div><div style="font-size:16px;font-weight:800;color:var(--amber);">'+(c.abv||'?')+'%</div></div>'
         + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:3px;">Litres</div><div style="font-size:16px;font-weight:800;color:var(--white);">'+parseFloat(c.current_litres||0).toFixed(1)+'L</div></div>'
         + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:3px;">LPA</div><div style="font-size:13px;font-weight:600;color:var(--gold-light);">'+parseFloat(c.current_lpa||0).toFixed(2)+'</div></div>'
         + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:3px;">CBW Rotation</div><div style="font-size:12px;color:var(--gold);">'+window.escapeHtml(c.cbw_rotation||'—')+'</div></div>'
         + '</div>';
     }
-    // ABV warning vs BOM
+
+    // ── ABV warning vs BOM ────────────────────────────────────────────────────
     var bomAbv = window._lsoBomAbv;
     if (warn) {
       if (bomAbv && c.abv) {
         var diff = Math.abs(parseFloat(c.abv) - bomAbv);
+        warn.style.display = '';
         if (diff > 0.1) {
-          warn.style.display = '';
           warn.innerHTML = '<div style="padding:8px 12px;background:rgba(224,87,87,0.1);border:1px solid rgba(224,87,87,0.4);border-radius:4px;font-size:11px;color:var(--red);">&#9888; ABV mismatch: container is <strong>'+c.abv+'%</strong> but the BOM specifies <strong>'+bomAbv+'%</strong>. Proceed only if intentional (e.g. liquid not yet diluted).</div>';
         } else {
-          warn.style.display = '';
           warn.innerHTML = '<div style="padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;font-size:11px;color:var(--green);">&#10003; ABV matches BOM target of '+bomAbv+'%.</div>';
         }
       } else {
         warn.style.display = 'none';
       }
     }
+
+    // ── Spirit type confirmation ──────────────────────────────────────────────
+    // The BOM has no machine-readable spirit_type, so we show a manual confirmation
+    // prompt whenever the container has a spirit type set, surfacing what was found
+    // against the BOM liquid description for the operator to verify visually.
+    if (spiritWarn) {
+      var liqDesc = window._lsoLiquidSkuDesc;
+      if (c.spirit_type) {
+        spiritWarn.style.display = '';
+        var descNote = liqDesc
+          ? ' BOM specifies: <strong style="color:var(--gold);">' + window.escapeHtml(liqDesc) + '</strong>.'
+          : '';
+        spiritWarn.innerHTML = '<div style="padding:8px 12px;background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.3);border-radius:4px;font-size:11px;color:var(--amber);">'
+          + '&#9432; Container spirit type: <strong style="color:' + spiritColour + ';">' + window.escapeHtml(spiritDisp) + '</strong>.' + descNote
+          + ' <label style="display:inline-flex;align-items:center;gap:6px;margin-left:10px;cursor:pointer;">'
+          + '<input type="checkbox" id="lso-spirit-confirm" style="accent-color:var(--green);width:14px;height:14px;">'
+          + '<span style="color:var(--white);font-weight:600;">Spirit type confirmed &#10003;</span></label></div>';
+      } else {
+        spiritWarn.style.display = 'none';
+      }
+    }
+
     if (linkBtn) linkBtn.disabled = false;
   };
 
