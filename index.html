@@ -8085,7 +8085,7 @@ window.loadBoms = async function initBoms() {
   <!-- ── LPA RECONCILIATION ──────────────────────────────────────────────── -->
   <div id="inv-reconciliation" class="inv-panel" style="display:none;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
-      <div style="font-size:13px;color:var(--text);">LPA ledger by client and spirit type — reconcile stock against liquid history.</div>
+      <div style="font-size:13px;color:var(--text);">Per-container LPA ledger — opening balance + movements = closing balance, verified against stored value.</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <input type="date" id="recon-from" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">
         <span style="color:var(--muted);font-size:11px;">to</span>
@@ -8536,14 +8536,14 @@ window.loadBoms = async function initBoms() {
         <textarea id="blac-notes" rows="2" placeholder="Any notes about this container…"></textarea>
       </div>
 
-      <!-- Bulk cask section -->
+      <!-- Bulk addition section (cask + IBC) -->
       <div id="blac-bulk-wrap" style="display:none;margin-top:20px;padding-top:16px;border-top:1px solid var(--navy-border);">
-        <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:14px;font-weight:700;">Bulk Cask Addition</div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Adding more than 1 cask? Enter a prefix and start number — each cask gets a unique sequential reference and QR code.</div>
+        <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:6px;font-weight:700;" id="blac-bulk-heading">Bulk Addition</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;" id="blac-bulk-desc">Adding more than 1? Enter a prefix and start number — each container gets a unique sequential reference.</div>
         <div style="display:grid;grid-template-columns:1fr 120px 120px;gap:12px;">
           <div class="mfield">
             <label>Reference Prefix</label>
-            <input type="text" id="blac-prefix" placeholder="e.g. LH-BOND-2503-">
+            <input type="text" id="blac-prefix" placeholder="e.g. IBC-, LH-BOND-2503-">
           </div>
           <div class="mfield">
             <label>Start Number</label>
@@ -8554,7 +8554,7 @@ window.loadBoms = async function initBoms() {
             <input type="number" id="blac-quantity" value="1" min="1" max="500">
           </div>
         </div>
-        <div style="font-size:11px;color:var(--amber);margin-top:4px;">&#9432; The Reference / ID above is used when Quantity = 1. For bulk, the prefix + sequence number is used.</div>
+        <div style="font-size:11px;color:var(--amber);margin-top:4px;">&#9432; The Reference / ID above is used when Quantity = 1. For bulk, the prefix + sequence number is used instead.</div>
       </div>
 
       <div style="margin-top:20px;display:flex;justify-content:flex-end;">
@@ -11471,100 +11471,203 @@ window.loadReconciliation = async function() {
   var toDate   = (document.getElementById('recon-to')||{}).value   || null;
 
   try {
-    // Fetch all containers (active, non-archived) for closing balances
-    var containers = await supa('liquid_containers', '?archived=is.false&order=client_id.asc,spirit_type.asc');
+    // All non-archived containers
+    var containers = await supa('liquid_containers', '?archived=is.false&order=client_id.asc,reference.asc');
 
-    // Fetch history in date range
-    var histQs = '?order=created_at.asc';
-    if (fromDate) histQs += '&created_at=gte.' + fromDate + 'T00:00:00Z';
-    if (toDate)   histQs += '&created_at=lte.' + toDate   + 'T23:59:59Z';
-    var history = await supa('liquid_history', histQs);
+    // All history (we need pre-range rows to derive opening balance)
+    var allHistory = await supa('liquid_history', '?order=created_at.asc&limit=10000');
 
-    // Build ledger keyed by client_id × spirit_type
-    var ledger = {};
-    function ledgerKey(clientId, spiritType) {
-      return (clientId || 'unknown') + '|' + (spiritType || 'unknown');
-    }
-
-    // Opening balances: from containers (first history row per container before range)
-    containers.forEach(function(c) {
-      var key = ledgerKey(c.client_id, c.spirit_type);
-      if (!ledger[key]) ledger[key] = { client_id: c.client_id, spirit_type: c.spirit_type, opening_lpa: 0, lpa_in: 0, lpa_out: 0, closing_lpa: 0 };
-      ledger[key].closing_lpa += parseFloat(c.current_lpa || 0);
-    });
-
-    // Movement from history
-    history.forEach(function(h) {
-      if (h.lpa_before == null || h.lpa_after == null) return;
-      // Find the container's client/spirit via the containers list
-      var c = containers.find(function(cc){ return cc.id === h.container_id; });
-      var clientId   = c ? c.client_id   : null;
-      var spiritType = c ? c.spirit_type : (h.product_name || null);
-      var key = ledgerKey(clientId, spiritType);
-      if (!ledger[key]) ledger[key] = { client_id: clientId, spirit_type: spiritType, opening_lpa: 0, lpa_in: 0, lpa_out: 0, closing_lpa: 0 };
-      var delta = parseFloat(h.lpa_after) - parseFloat(h.lpa_before);
-      if (delta > 0)  ledger[key].lpa_in  += delta;
-      if (delta < 0)  ledger[key].lpa_out += Math.abs(delta);
-    });
-
-    // Fetch client names
+    // Client names
     var clients = await supa('clients', '?select=id,name');
     var clientMap = {};
     clients.forEach(function(c){ clientMap[c.id] = c.name; });
 
-    var rows = Object.values(ledger).sort(function(a,b){
-      var ca = clientMap[a.client_id] || a.client_id || '';
-      var cb = clientMap[b.client_id] || b.client_id || '';
-      return ca.localeCompare(cb) || (a.spirit_type||'').localeCompare(b.spirit_type||'');
+    var fmtSt = function(s) {
+      return s ? s.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();}) : '—';
+    };
+    var esc = window.escapeHtml;
+
+    // Build per-container rows
+    var rows = containers.map(function(c) {
+      var conHistory = allHistory.filter(function(h){ return h.container_id === c.id; });
+
+      // Opening balance = sum of lpa_after for all history entries BEFORE the from date
+      // If no from date, opening = 0 (report covers all time)
+      var openingLPA = 0;
+      if (fromDate) {
+        var preRange = conHistory.filter(function(h){
+          return h.created_at && h.created_at < fromDate + 'T00:00:00Z';
+        });
+        if (preRange.length) {
+          // Take the last lpa_after before the range starts as the opening balance
+          var lastPre = preRange[preRange.length - 1];
+          openingLPA = parseFloat(lastPre.lpa_after != null ? lastPre.lpa_after : 0);
+        }
+        // If no history before range, opening = 0 (container didn't exist yet or no records)
+      }
+
+      // Movements within range
+      var inRange = conHistory.filter(function(h){
+        if (!h.created_at) return false;
+        if (fromDate && h.created_at < fromDate + 'T00:00:00Z') return false;
+        if (toDate   && h.created_at > toDate   + 'T23:59:59Z') return false;
+        return true;
+      });
+
+      var lpaIn = 0, lpaOut = 0;
+      inRange.forEach(function(h){
+        if (h.lpa_before == null || h.lpa_after == null) return;
+        var delta = parseFloat(h.lpa_after) - parseFloat(h.lpa_before);
+        if (delta > 0) lpaIn  += delta;
+        if (delta < 0) lpaOut += Math.abs(delta);
+      });
+
+      var calcClosing  = openingLPA + lpaIn - lpaOut;
+      var storedClosing = parseFloat(c.current_lpa || 0);
+      // If no from date, closing = stored (all-time report — opening was 0, movements should reconcile)
+      var variance = parseFloat((calcClosing - storedClosing).toFixed(4));
+
+      return {
+        container_id:  c.id,
+        reference:     c.reference || '—',
+        type:          c.type || '—',
+        client_id:     c.client_id,
+        spirit_type:   c.spirit_type,
+        openingLPA:    openingLPA,
+        lpaIn:         lpaIn,
+        lpaOut:        lpaOut,
+        calcClosing:   calcClosing,
+        storedClosing: storedClosing,
+        variance:      variance,
+        hasVariance:   Math.abs(variance) > 0.001
+      };
+    });
+
+    // Sort: client name → reference
+    rows.sort(function(a,b){
+      var ca = clientMap[a.client_id] || '';
+      var cb = clientMap[b.client_id] || '';
+      return ca.localeCompare(cb) || a.reference.localeCompare(b.reference);
     });
 
     if (!rows.length) {
-      contentEl.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">No data found for the selected date range.</div>';
+      contentEl.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">No containers found.</div>';
       return;
     }
 
-    var fmtSt = function(s){ return s ? s.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();}) : '—'; };
+    var TYPEMAP = { cask:'Cask', ibc:'IBC', blue_drum:'Blue Drum', tank:'Tank', tanker:'Tanker' };
+
     var html = '<div style="overflow-x:auto;">'
-      + '<table class="data-table" style="min-width:680px;">'
+      + '<table class="data-table" style="min-width:900px;">'
       + '<thead><tr>'
-      + '<th>Client</th><th>Spirit Type</th>'
-      + '<th style="text-align:right;">LPA In</th>'
-      + '<th style="text-align:right;">LPA Out</th>'
-      + '<th style="text-align:right;">Net Movement</th>'
-      + '<th style="text-align:right;">Closing Balance (stored)</th>'
+      + '<th style="min-width:90px;">Container</th>'
+      + '<th class="mob-hide" style="min-width:60px;">Type</th>'
+      + '<th style="min-width:110px;">Client</th>'
+      + '<th class="mob-hide" style="min-width:130px;">Spirit / Product</th>'
+      + '<th style="text-align:right;min-width:85px;">Opening LPA</th>'
+      + '<th style="text-align:right;min-width:75px;color:var(--green);">LPA In</th>'
+      + '<th style="text-align:right;min-width:75px;color:var(--red);">LPA Out</th>'
+      + '<th style="text-align:right;min-width:85px;">Calc. Closing</th>'
+      + '<th style="text-align:right;min-width:85px;">Stored LPA</th>'
+      + '<th style="text-align:right;min-width:75px;">Variance</th>'
       + '</tr></thead><tbody>';
 
-    rows.forEach(function(r) {
-      var net = r.lpa_in - r.lpa_out;
-      var netCol = net >= 0 ? 'var(--green)' : 'var(--red)';
-      html += '<tr>'
-        + '<td>' + window.escapeHtml(clientMap[r.client_id] || r.client_id || '—') + '</td>'
-        + '<td>' + window.escapeHtml(fmtSt(r.spirit_type)) + '</td>'
-        + '<td style="text-align:right;color:var(--green);">' + r.lpa_in.toFixed(3) + '</td>'
-        + '<td style="text-align:right;color:var(--red);">' + r.lpa_out.toFixed(3) + '</td>'
-        + '<td style="text-align:right;color:' + netCol + ';font-weight:700;">' + (net >= 0 ? '+' : '') + net.toFixed(3) + '</td>'
-        + '<td style="text-align:right;font-weight:700;color:var(--gold-light);">' + r.closing_lpa.toFixed(3) + '</td>'
-        + '</tr>';
+    // Group rows by client for subtotals
+    var clientGroups = {};
+    rows.forEach(function(r){
+      var k = r.client_id || 'unknown';
+      if (!clientGroups[k]) clientGroups[k] = [];
+      clientGroups[k].push(r);
     });
 
-    var totIn  = rows.reduce(function(s,r){ return s+r.lpa_in; }, 0);
-    var totOut = rows.reduce(function(s,r){ return s+r.lpa_out; }, 0);
-    var totNet = totIn - totOut;
-    var totCl  = rows.reduce(function(s,r){ return s+r.closing_lpa; }, 0);
+    var grandOpen = 0, grandIn = 0, grandOut = 0, grandCalc = 0, grandStored = 0;
+
+    Object.keys(clientGroups).forEach(function(clientId){
+      var group = clientGroups[clientId];
+      var clientName = esc(clientMap[clientId] || clientId || '—');
+      var subOpen = 0, subIn = 0, subOut = 0, subCalc = 0, subStored = 0;
+
+      group.forEach(function(r){
+        var varCol   = r.hasVariance ? 'var(--red)' : 'var(--green)';
+        var varLabel = (r.variance >= 0 ? '+' : '') + r.variance.toFixed(3);
+        var rowStyle = r.hasVariance ? 'background:rgba(220,53,69,0.06);' : '';
+
+        html += '<tr style="' + rowStyle + '">'
+          + '<td style="font-weight:700;color:var(--white);">' + esc(r.reference) + '</td>'
+          + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + esc(TYPEMAP[r.type] || r.type) + '</td>'
+          + '<td style="font-size:12px;">' + clientName + '</td>'
+          + '<td class="mob-hide" style="font-size:12px;">' + esc(fmtSt(r.spirit_type)) + '</td>'
+          + '<td style="text-align:right;color:var(--muted);">' + r.openingLPA.toFixed(3) + '</td>'
+          + '<td style="text-align:right;color:var(--green);">' + r.lpaIn.toFixed(3) + '</td>'
+          + '<td style="text-align:right;color:var(--red);">' + r.lpaOut.toFixed(3) + '</td>'
+          + '<td style="text-align:right;font-weight:600;color:var(--gold-light);">' + r.calcClosing.toFixed(3) + '</td>'
+          + '<td style="text-align:right;color:var(--muted);">' + r.storedClosing.toFixed(3) + '</td>'
+          + '<td style="text-align:right;font-weight:700;color:' + varCol + ';">' + (r.hasVariance ? varLabel : '✓') + '</td>'
+          + '</tr>';
+
+        subOpen   += r.openingLPA;
+        subIn     += r.lpaIn;
+        subOut    += r.lpaOut;
+        subCalc   += r.calcClosing;
+        subStored += r.storedClosing;
+      });
+
+      // Client subtotal row (only show if more than one container for this client)
+      if (group.length > 1) {
+        var subVar    = parseFloat((subCalc - subStored).toFixed(4));
+        var subVarCol = Math.abs(subVar) > 0.001 ? 'var(--red)' : 'var(--green)';
+        html += '<tr style="background:rgba(201,168,76,0.05);border-top:1px solid var(--navy-border);">'
+          + '<td colspan="4" style="font-size:11px;color:var(--muted);font-style:italic;padding-left:12px;">Subtotal — ' + clientName + '</td>'
+          + '<td style="text-align:right;font-weight:600;color:var(--muted);">' + subOpen.toFixed(3) + '</td>'
+          + '<td style="text-align:right;font-weight:600;color:var(--green);">' + subIn.toFixed(3) + '</td>'
+          + '<td style="text-align:right;font-weight:600;color:var(--red);">' + subOut.toFixed(3) + '</td>'
+          + '<td style="text-align:right;font-weight:700;color:var(--gold-light);">' + subCalc.toFixed(3) + '</td>'
+          + '<td style="text-align:right;font-weight:600;color:var(--muted);">' + subStored.toFixed(3) + '</td>'
+          + '<td style="text-align:right;font-weight:700;color:' + subVarCol + ';">' + (Math.abs(subVar)>0.001 ? (subVar>=0?'+':'')+subVar.toFixed(3) : '✓') + '</td>'
+          + '</tr>';
+      }
+
+      grandOpen   += subOpen;
+      grandIn     += subIn;
+      grandOut    += subOut;
+      grandCalc   += subCalc;
+      grandStored += subStored;
+    });
+
+    // Grand total
+    var grandVar    = parseFloat((grandCalc - grandStored).toFixed(4));
+    var grandVarCol = Math.abs(grandVar) > 0.001 ? 'var(--red)' : 'var(--green)';
     html += '<tr style="border-top:2px solid var(--navy-border);font-weight:700;">'
-      + '<td colspan="2" style="color:var(--muted);">Total</td>'
-      + '<td style="text-align:right;color:var(--green);">' + totIn.toFixed(3) + '</td>'
-      + '<td style="text-align:right;color:var(--red);">' + totOut.toFixed(3) + '</td>'
-      + '<td style="text-align:right;color:' + (totNet>=0?'var(--green)':'var(--red)') + ';">' + (totNet>=0?'+':'') + totNet.toFixed(3) + '</td>'
-      + '<td style="text-align:right;color:var(--gold-light);">' + totCl.toFixed(3) + '</td>'
+      + '<td colspan="4" style="color:var(--muted);">Grand Total</td>'
+      + '<td style="text-align:right;color:var(--muted);">' + grandOpen.toFixed(3) + '</td>'
+      + '<td style="text-align:right;color:var(--green);">' + grandIn.toFixed(3) + '</td>'
+      + '<td style="text-align:right;color:var(--red);">' + grandOut.toFixed(3) + '</td>'
+      + '<td style="text-align:right;color:var(--gold-light);">' + grandCalc.toFixed(3) + '</td>'
+      + '<td style="text-align:right;color:var(--muted);">' + grandStored.toFixed(3) + '</td>'
+      + '<td style="text-align:right;color:' + grandVarCol + ';font-size:13px;">' + (Math.abs(grandVar)>0.001 ? (grandVar>=0?'+':'')+grandVar.toFixed(3) : '✓') + '</td>'
       + '</tr>';
 
-    html += '</tbody></table></div>'
-      + (fromDate || toDate
-          ? '<div style="font-size:11px;color:var(--muted);margin-top:10px;text-align:right;">Date range: '+(fromDate||'all time')+' → '+(toDate||'today')+'</div>'
-          : '');
+    html += '</tbody></table></div>';
+
+    // Variance legend + date info
+    var varCount = rows.filter(function(r){ return r.hasVariance; }).length;
+    html += '<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:12px;flex-wrap:wrap;gap:8px;">'
+      + '<div style="font-size:11px;color:var(--muted);">'
+      + '<span style="color:var(--green);font-weight:700;">✓</span> = Calculated closing matches stored LPA &nbsp;·&nbsp; '
+      + '<span style="color:var(--red);font-weight:700;">± value</span> = Discrepancy — history may be incomplete'
+      + (varCount > 0 ? ' &nbsp;<span style="color:var(--red);font-weight:700;">(' + varCount + ' container' + (varCount>1?'s':'')+' with variance)</span>' : '')
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);text-align:right;">'
+      + 'Date range: ' + (fromDate || 'all time') + ' → ' + (toDate || 'today')
+      + '</div></div>'
+      + '<div style="margin-top:10px;padding:10px 14px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.2);border-radius:4px;font-size:11px;color:var(--muted);">'
+      + '<strong style="color:var(--gold);">How to read this:</strong> '
+      + 'Opening LPA (balance at start of period) + LPA In − LPA Out = Calc. Closing. '
+      + 'Stored LPA is the live value in the container record. A variance means history records are missing for that container in this period.'
+      + '</div>';
 
     contentEl.innerHTML = html;
+
   } catch(e) {
     logError('loadReconciliation', e);
     contentEl.innerHTML = '<div style="color:var(--red);padding:24px;text-align:center;">Error loading reconciliation: ' + e.message + '</div>';
@@ -18921,6 +19024,7 @@ window.saveAdjModal = async function() {
     if (!typeEl) return;
     var type    = typeEl.value;
     var isCask  = type === 'cask';
+    var isIBC   = type === 'ibc';
     var capEl   = document.getElementById('blac-capacity');
     var CAPS    = { ibc: 1000, blue_drum: 200, tank: 12500 };
     if (CAPS[type] !== undefined) {
@@ -18931,9 +19035,21 @@ window.saveAdjModal = async function() {
     var nonCaskPanel = document.getElementById('blac-noncask-panel');
     var caskPanel    = document.getElementById('blac-cask-panel');
     var bulkWrap     = document.getElementById('blac-bulk-wrap');
+    var bulkHeading  = document.getElementById('blac-bulk-heading');
+    var bulkDesc     = document.getElementById('blac-bulk-desc');
+    var prefixInput  = document.getElementById('blac-prefix');
     if (nonCaskPanel) nonCaskPanel.style.display = isCask ? 'none' : 'grid';
     if (caskPanel)    caskPanel.style.display    = isCask ? '' : 'none';
-    if (bulkWrap)     bulkWrap.style.display     = isCask ? '' : 'none';
+    // Show bulk section for casks and IBCs
+    var showBulk = isCask || isIBC;
+    if (bulkWrap) bulkWrap.style.display = showBulk ? '' : 'none';
+    if (showBulk) {
+      if (bulkHeading) bulkHeading.textContent = isCask ? 'Bulk Cask Addition' : 'Bulk IBC Addition';
+      if (bulkDesc)    bulkDesc.textContent    = isCask
+        ? 'Adding more than 1 cask? Enter a prefix and start number — each cask gets a unique sequential reference.'
+        : 'Adding more than 1 IBC? Enter a prefix and start number — each IBC gets a unique sequential reference (e.g. IBC-001, IBC-002…).';
+      if (prefixInput && !prefixInput.value) prefixInput.placeholder = isCask ? 'e.g. LH-BOND-2503-' : 'e.g. IBC-';
+    }
   };
 
   // Shared angel share calc helper — new model:
@@ -19063,7 +19179,7 @@ window.saveAdjModal = async function() {
     var btn = document.getElementById('blac-save-btn');
     try {
       if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
-      var total = (type === 'cask' && qty > 1) ? qty : 1;
+      var total = ((type === 'cask' || type === 'ibc') && qty > 1) ? qty : 1;
       for (var i = 0; i < total; i++) {
         var rowPayload = Object.assign({}, payload);
         if (total > 1) rowPayload.reference = prefix + String(startN + i).padStart(3, '0');
@@ -19073,11 +19189,12 @@ window.saveAdjModal = async function() {
             container_ref: ins[0].reference || rowPayload.reference,
             litres_after: litres, abv_after: abv, lpa_after: lpa,
             cbw_rotation_after: payload.cbw_rotation,
-            notes: total > 1 ? 'Bulk add ' + (i+1) + ' of ' + total : 'Container added',
+            notes: total > 1 ? 'Bulk add ' + (i+1) + ' of ' + total + ' ' + (type==='cask'?'casks':type==='ibc'?'IBCs':'containers') : 'Container added',
             performed_by_id: pById, performed_by_name: pByName });
         }
       }
-      var msg = total > 1 ? total + ' casks added successfully.' : 'Container added successfully.';
+      var _typeLabel = type === 'cask' ? 'cask' : type === 'ibc' ? 'IBC' : 'container';
+      var msg = total > 1 ? total + ' ' + _typeLabel + 's added successfully.' : 'Container added successfully.';
       window.toast && window.toast(msg, 'success');
       // Show inline success banner + QR print button
       var banner = document.createElement('div');
