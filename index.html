@@ -8465,20 +8465,37 @@ window.loadBoms = async function initBoms() {
         </div>
         <div class="mfield">
           <label>ABV (%)</label>
-          <input type="number" id="blac-abv" placeholder="e.g. 63.5" min="0" max="100" step="0.1" oninput="window.calcBLACLPA();window.calcBLACCaskLPA();">
+          <input type="number" id="blac-abv" placeholder="e.g. 63.5" min="0" max="100" step="0.1" oninput="window.onBLACABVChange();">
         </div>
       </div>
 
       <!-- ── Non-Cask Volume Panel ───────────────── -->
-      <div id="blac-noncask-panel" style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px;">
-        <div class="mfield">
-          <label>Bulk Litres</label>
-          <input type="number" id="blac-litres" placeholder="e.g. 1000" min="0" step="0.1" oninput="window.calcBLACLPA()">
+      <div id="blac-noncask-panel" style="margin-top:14px;">
+        <!-- Primary inputs: LPA + Bulk Litres (bidirectional) -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+          <div class="mfield">
+            <label>LPA *</label>
+            <input type="number" id="blac-lpa" placeholder="e.g. 615.00" step="0.01" style="color:var(--gold);" oninput="window.calcBLACLitresFromLPA()">
+            <div class="field-hint">Enter LPA → Bulk Litres auto-calculated ↓</div>
+          </div>
+          <div class="mfield">
+            <label>Bulk Litres (auto — editable)</label>
+            <input type="number" id="blac-litres" placeholder="e.g. 1025.0" min="0" step="0.1" oninput="window.calcBLACLPA()">
+            <div class="field-hint">LPA × 100 ÷ ABV — or enter directly to update LPA</div>
+          </div>
         </div>
-        <div class="mfield">
-          <label>LPA (auto-calculated)</label>
-          <input type="number" id="blac-lpa" placeholder="0.00" step="0.01" style="color:var(--gold);" readonly>
-          <div class="field-hint">Litres × ABV% ÷ 100</div>
+        <!-- Delivery ref + live calc summary -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <div class="mfield">
+            <label>Delivery Ref / Meter No.</label>
+            <input type="text" id="blac-delivery-ref" placeholder="e.g. DM-2025-047, Meter 00142">
+            <div class="field-hint">Delivery manifest number or flow meter reference</div>
+          </div>
+          <div id="blac-lpa-preview" style="display:none;padding:12px 14px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.25);border-radius:4px;align-self:end;">
+            <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;font-weight:700;">Calculation</div>
+            <div id="blac-lpa-preview-line" style="font-size:12px;color:var(--white);font-weight:600;"></div>
+            <div style="font-size:10px;color:var(--muted);margin-top:3px;">LPA = Litres × ABV ÷ 100</div>
+          </div>
         </div>
       </div>
 
@@ -18971,11 +18988,50 @@ window.saveAdjModal = async function() {
     }
   };
 
+  // Litres changed → update LPA (forward: Litres × ABV ÷ 100)
   window.calcBLACLPA = function() {
     var l = parseFloat((document.getElementById('blac-litres')||{}).value) || 0;
     var a = parseFloat((document.getElementById('blac-abv')||{}).value) || 0;
     var lpaEl = document.getElementById('blac-lpa');
     if (lpaEl) lpaEl.value = (l && a) ? (l * a / 100).toFixed(2) : '';
+    window._updateBLACPreview();
+  };
+
+  // LPA changed → update Litres (reverse: LPA × 100 ÷ ABV)
+  window.calcBLACLitresFromLPA = function() {
+    var lpa = parseFloat((document.getElementById('blac-lpa')||{}).value) || 0;
+    var a   = parseFloat((document.getElementById('blac-abv')||{}).value) || 0;
+    var litresEl = document.getElementById('blac-litres');
+    if (litresEl) litresEl.value = (lpa && a) ? (lpa * 100 / a).toFixed(1) : '';
+    window._updateBLACPreview();
+  };
+
+  // ABV changed → recalculate whichever is more complete: prefer LPA→Litres if LPA filled
+  window.onBLACABVChange = function() {
+    var lpa    = parseFloat((document.getElementById('blac-lpa')||{}).value) || 0;
+    var litres = parseFloat((document.getElementById('blac-litres')||{}).value) || 0;
+    if (lpa > 0) {
+      window.calcBLACLitresFromLPA();
+    } else if (litres > 0) {
+      window.calcBLACLPA();
+    }
+    window.calcBLACCaskLPA();
+  };
+
+  // Live calculation summary panel
+  window._updateBLACPreview = function() {
+    var l   = parseFloat((document.getElementById('blac-litres')||{}).value) || 0;
+    var a   = parseFloat((document.getElementById('blac-abv')||{}).value) || 0;
+    var lpa = parseFloat((document.getElementById('blac-lpa')||{}).value) || 0;
+    var preview = document.getElementById('blac-lpa-preview');
+    var line    = document.getElementById('blac-lpa-preview-line');
+    if (!preview || !line) return;
+    if (l && a && lpa) {
+      preview.style.display = '';
+      line.textContent = l.toFixed(1) + ' L  @  ' + a.toFixed(1) + '%  =  ' + lpa.toFixed(2) + ' LPA';
+    } else {
+      preview.style.display = 'none';
+    }
   };
 
   window.saveBLACContainers = async function() {
@@ -19003,7 +19059,12 @@ window.saveAdjModal = async function() {
       abv: abv, current_litres: litres, current_lpa: lpa,
       fill_date: isCask ? (gv('blac-filldate') || null) : null,
       ola: ola,
-      notes: gv('blac-notes') || null
+      notes: (function(){
+        var n = gv('blac-notes') || '';
+        var dr = !isCask ? (gv('blac-delivery-ref') || '') : '';
+        if (dr) n = ('Delivery Ref: ' + dr + (n ? '  |  ' + n : ''));
+        return n || null;
+      })()
     };
     var qty     = parseInt(gv('blac-quantity')) || 1;
     var prefix  = gv('blac-prefix') || ref;
@@ -19036,7 +19097,8 @@ window.saveAdjModal = async function() {
       var saveBtn = document.getElementById('blac-save-btn');
       if (saveBtn && saveBtn.parentNode) saveBtn.parentNode.insertBefore(banner, saveBtn);
       setTimeout(function(){ if (banner.parentNode) banner.parentNode.removeChild(banner); }, 4000);
-      ['blac-reference','blac-location','blac-spirit','blac-cbw','blac-abv','blac-litres','blac-lpa','blac-filldate','blac-ola','blac-cask-litres','blac-cask-lpa','blac-notes','blac-prefix'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
+      ['blac-reference','blac-location','blac-spirit','blac-cbw','blac-abv','blac-litres','blac-lpa','blac-filldate','blac-ola','blac-cask-litres','blac-cask-lpa','blac-notes','blac-prefix','blac-delivery-ref'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
+      var lpaPreview = document.getElementById('blac-lpa-preview'); if(lpaPreview) lpaPreview.style.display='none';
       var ap = document.getElementById('blac-angel-panel'); if(ap) ap.style.display='none';
       var qe=document.getElementById('blac-quantity'); if(qe) qe.value='1';
       var se=document.getElementById('blac-start-num'); if(se) se.value='1';
