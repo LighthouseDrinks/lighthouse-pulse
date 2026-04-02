@@ -7873,6 +7873,7 @@ window.loadBoms = async function initBoms() {
     <button class="inv-tab active" onclick="showInvTab('liquid',this)">Liquid Inventory</button>
     <button class="inv-tab" onclick="showInvTab('drygoods',this)">Dry Goods</button>
     <button class="inv-tab" onclick="showInvTab('goodsin',this)">Client ASN</button>
+    <button class="inv-tab" onclick="showInvTab('reconciliation',this)">LPA Reconciliation</button>
   </div>
 
   <!-- ── LIQUID INVENTORY ───────────────────────────────────────────────────── -->
@@ -7886,7 +7887,7 @@ window.loadBoms = async function initBoms() {
         <div class="kpi-sub">Bulk litres across all vessels</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Total LPA</div>
+        <div class="kpi-label">Total LPA <span style="font-size:9px;font-weight:400;letter-spacing:0.08em;color:var(--muted);text-transform:uppercase;">(stored)</span></div>
         <div class="kpi-value" id="liq-kpi-lpa">—</div>
         <div class="kpi-sub">Litres of Pure Alcohol</div>
       </div>
@@ -7943,7 +7944,7 @@ window.loadBoms = async function initBoms() {
             <th class="mob-hide" style="min-width:90px;">Client</th>
             <th class="mob-hide" style="min-width:100px;">Spirit / Product</th>
             <th style="min-width:130px;">Litres</th>
-            <th class="mob-hide" style="min-width:52px;text-align:center;">LPA</th>
+            <th class="mob-hide" style="min-width:52px;text-align:center;">LPA <span style="font-size:8px;font-weight:400;color:var(--muted);">(stored)</span></th>
             <th class="mob-hide" style="min-width:46px;text-align:center;">ABV</th>
             <th class="mob-hide" style="min-width:90px;">CBW Rotation</th>
             <th class="mob-hide" style="min-width:78px;text-align:center;">Fill Date</th>
@@ -8075,6 +8076,22 @@ window.loadBoms = async function initBoms() {
           <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:32px;">Loading notifications…</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- ── LPA RECONCILIATION ──────────────────────────────────────────────── -->
+  <div id="inv-reconciliation" class="inv-panel" style="display:none;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+      <div style="font-size:13px;color:var(--text);">LPA ledger by client and spirit type — reconcile stock against liquid history.</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <input type="date" id="recon-from" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">
+        <span style="color:var(--muted);font-size:11px;">to</span>
+        <input type="date" id="recon-to" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">
+        <button onclick="window.loadReconciliation()" class="btn btn-gold" style="font-size:12px;padding:7px 16px;">Run Report</button>
+      </div>
+    </div>
+    <div id="recon-content">
+      <div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Select a date range and click Run Report to generate the LPA reconciliation.</div>
     </div>
   </div>
 
@@ -8374,6 +8391,17 @@ window.loadBoms = async function initBoms() {
   <div class="page-label">Operations</div>
   <div class="page-heading">Blending</div>
 
+  <!-- Job context banner (shown when blending is opened from a job) -->
+  <div id="bl-job-banner" style="display:none;margin-bottom:16px;padding:12px 16px;background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.35);border-radius:4px;display:none;align-items:center;justify-content:space-between;gap:12px;">
+    <span style="font-size:12px;color:var(--text);">
+      <span style="color:var(--gold);font-weight:700;">Job context:</span>
+      <span id="bl-job-label" style="margin-left:6px;"></span>
+    </span>
+    <button onclick="window.clearBLJobContext()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:4px 10px;border-radius:3px;cursor:pointer;">✕ Clear job</button>
+  </div>
+  <input type="hidden" id="bl-job-id" value="">
+  <input type="hidden" id="bl-job-ref" value="">
+
   <!-- Sub-tabs -->
   <div style="display:flex;gap:0;margin-bottom:24px;border-bottom:2px solid var(--navy-border);overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;">
     <button class="blend-stab active" onclick="window.showBlendTab('add-container',this)">Add Container</button>
@@ -8541,9 +8569,10 @@ window.loadBoms = async function initBoms() {
       <!-- Destination Vessels -->
       <div class="card" style="padding:24px;">
         <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:6px;font-weight:700;">Destination Vessels</div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:14px;">IBC, Drum, Tank or Tanker only. Volume distributes equally across multiple destinations.</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:14px;">IBC, Drum, Tank or Tanker only. Enter the volume to fill into each destination.</div>
         <div id="dg-dests-wrap"></div>
-        <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;flex-wrap:wrap;gap:8px;">
+          <div id="dg-dest-alloc-summary" style="display:none;font-size:11px;color:var(--text);padding:6px 10px;background:rgba(0,0,0,0.2);border:1px solid var(--navy-border);border-radius:4px;"></div>
           <button onclick="window.addDGDest()" class="btn btn-outline" style="font-size:11px;padding:5px 12px;">+ Add Destination</button>
         </div>
       </div>
@@ -8704,6 +8733,25 @@ window.loadBoms = async function initBoms() {
           ⚑ Diluting in-place — liquid stays in source container.
         </div>
         <div id="dl-dests-section" style="display:none;">
+          <div id="dl-spirit-type-wrap" style="margin-bottom:14px;">
+            <label style="font-size:10px;text-transform:uppercase;letter-spacing:0.12em;color:var(--muted);font-weight:700;display:block;margin-bottom:6px;">Output Spirit Type</label>
+            <select id="dl-spirit-type" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:12px;border-radius:3px;">
+              <option value="">— same as source —</option>
+              <option value="single_malt">Single Malt</option>
+              <option value="single_grain">Single Grain</option>
+              <option value="blended_malt">Blended Malt</option>
+              <option value="blended_whiskey">Blended Whiskey</option>
+              <option value="pot_still">Pot Still</option>
+              <option value="gin">Gin</option>
+              <option value="vodka">Vodka</option>
+              <option value="rum">Rum</option>
+              <option value="brandy">Brandy</option>
+              <option value="other">Other</option>
+            </select>
+            <div id="dl-spirit-mismatch-note" style="display:none;margin-top:6px;font-size:11px;color:var(--amber);padding:6px 10px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.3);border-radius:3px;">
+              ⚠ Sources have mixed spirit types — select the output type above.
+            </div>
+          </div>
           <div id="dl-dests-wrap"></div>
           <div style="display:flex;justify-content:flex-end;margin-top:6px;">
             <button onclick="window.addDLDest()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">+ Add Destination Container</button>
@@ -11375,9 +11423,10 @@ window.showInvTab = function(tab, btn) {
   var panel = document.getElementById('inv-' + tab);
   if (panel) panel.style.display = '';
   if (btn)   btn.classList.add('active');
-  if (tab === 'liquid')   loadLiquid().catch(function(e){ showErr('liq-tbody',  11, e); });
-  if (tab === 'drygoods') loadDryGoods().catch(function(e){ showErr('dg-tbody',  11, e); });
-  if (tab === 'goodsin')  loadGoodsIn().catch(function(e){ showErr('gin-tbody',  8,  e); });
+  if (tab === 'liquid')          loadLiquid().catch(function(e){ showErr('liq-tbody',  11, e); });
+  if (tab === 'drygoods')        loadDryGoods().catch(function(e){ showErr('dg-tbody',  11, e); });
+  if (tab === 'goodsin')         loadGoodsIn().catch(function(e){ showErr('gin-tbody',  8,  e); });
+  if (tab === 'reconciliation')  { /* user clicks Run Report to load */ }
 };
 
 // Navigate from sidebar to inventory page and activate the correct sub-tab
@@ -11398,6 +11447,116 @@ function showErr(tbodyId, cols, e) {
   var el = document.getElementById(tbodyId);
   if (el) el.innerHTML = '<tr><td colspan="' + cols + '" style="color:var(--red);padding:24px;text-align:center;">⚠ ' + e.message + '</td></tr>';
 }
+
+// ── LPA RECONCILIATION ────────────────────────────────────────────────────────
+window.loadReconciliation = async function() {
+  var contentEl = document.getElementById('recon-content');
+  if (!contentEl) return;
+  contentEl.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Loading…</div>';
+
+  var fromDate = (document.getElementById('recon-from')||{}).value || null;
+  var toDate   = (document.getElementById('recon-to')||{}).value   || null;
+
+  try {
+    // Fetch all containers (active, non-archived) for closing balances
+    var containers = await supa('liquid_containers', '?archived=is.false&order=client_id.asc,spirit_type.asc');
+
+    // Fetch history in date range
+    var histQs = '?order=created_at.asc';
+    if (fromDate) histQs += '&created_at=gte.' + fromDate + 'T00:00:00Z';
+    if (toDate)   histQs += '&created_at=lte.' + toDate   + 'T23:59:59Z';
+    var history = await supa('liquid_history', histQs);
+
+    // Build ledger keyed by client_id × spirit_type
+    var ledger = {};
+    function ledgerKey(clientId, spiritType) {
+      return (clientId || 'unknown') + '|' + (spiritType || 'unknown');
+    }
+
+    // Opening balances: from containers (first history row per container before range)
+    containers.forEach(function(c) {
+      var key = ledgerKey(c.client_id, c.spirit_type);
+      if (!ledger[key]) ledger[key] = { client_id: c.client_id, spirit_type: c.spirit_type, opening_lpa: 0, lpa_in: 0, lpa_out: 0, closing_lpa: 0 };
+      ledger[key].closing_lpa += parseFloat(c.current_lpa || 0);
+    });
+
+    // Movement from history
+    history.forEach(function(h) {
+      if (h.lpa_before == null || h.lpa_after == null) return;
+      // Find the container's client/spirit via the containers list
+      var c = containers.find(function(cc){ return cc.id === h.container_id; });
+      var clientId   = c ? c.client_id   : null;
+      var spiritType = c ? c.spirit_type : (h.product_name || null);
+      var key = ledgerKey(clientId, spiritType);
+      if (!ledger[key]) ledger[key] = { client_id: clientId, spirit_type: spiritType, opening_lpa: 0, lpa_in: 0, lpa_out: 0, closing_lpa: 0 };
+      var delta = parseFloat(h.lpa_after) - parseFloat(h.lpa_before);
+      if (delta > 0)  ledger[key].lpa_in  += delta;
+      if (delta < 0)  ledger[key].lpa_out += Math.abs(delta);
+    });
+
+    // Fetch client names
+    var clients = await supa('clients', '?select=id,name');
+    var clientMap = {};
+    clients.forEach(function(c){ clientMap[c.id] = c.name; });
+
+    var rows = Object.values(ledger).sort(function(a,b){
+      var ca = clientMap[a.client_id] || a.client_id || '';
+      var cb = clientMap[b.client_id] || b.client_id || '';
+      return ca.localeCompare(cb) || (a.spirit_type||'').localeCompare(b.spirit_type||'');
+    });
+
+    if (!rows.length) {
+      contentEl.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">No data found for the selected date range.</div>';
+      return;
+    }
+
+    var fmtSt = function(s){ return s ? s.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();}) : '—'; };
+    var html = '<div style="overflow-x:auto;">'
+      + '<table class="data-table" style="min-width:680px;">'
+      + '<thead><tr>'
+      + '<th>Client</th><th>Spirit Type</th>'
+      + '<th style="text-align:right;">LPA In</th>'
+      + '<th style="text-align:right;">LPA Out</th>'
+      + '<th style="text-align:right;">Net Movement</th>'
+      + '<th style="text-align:right;">Closing Balance (stored)</th>'
+      + '</tr></thead><tbody>';
+
+    rows.forEach(function(r) {
+      var net = r.lpa_in - r.lpa_out;
+      var netCol = net >= 0 ? 'var(--green)' : 'var(--red)';
+      html += '<tr>'
+        + '<td>' + window.escapeHtml(clientMap[r.client_id] || r.client_id || '—') + '</td>'
+        + '<td>' + window.escapeHtml(fmtSt(r.spirit_type)) + '</td>'
+        + '<td style="text-align:right;color:var(--green);">' + r.lpa_in.toFixed(3) + '</td>'
+        + '<td style="text-align:right;color:var(--red);">' + r.lpa_out.toFixed(3) + '</td>'
+        + '<td style="text-align:right;color:' + netCol + ';font-weight:700;">' + (net >= 0 ? '+' : '') + net.toFixed(3) + '</td>'
+        + '<td style="text-align:right;font-weight:700;color:var(--gold-light);">' + r.closing_lpa.toFixed(3) + '</td>'
+        + '</tr>';
+    });
+
+    var totIn  = rows.reduce(function(s,r){ return s+r.lpa_in; }, 0);
+    var totOut = rows.reduce(function(s,r){ return s+r.lpa_out; }, 0);
+    var totNet = totIn - totOut;
+    var totCl  = rows.reduce(function(s,r){ return s+r.closing_lpa; }, 0);
+    html += '<tr style="border-top:2px solid var(--navy-border);font-weight:700;">'
+      + '<td colspan="2" style="color:var(--muted);">Total</td>'
+      + '<td style="text-align:right;color:var(--green);">' + totIn.toFixed(3) + '</td>'
+      + '<td style="text-align:right;color:var(--red);">' + totOut.toFixed(3) + '</td>'
+      + '<td style="text-align:right;color:' + (totNet>=0?'var(--green)':'var(--red)') + ';">' + (totNet>=0?'+':'') + totNet.toFixed(3) + '</td>'
+      + '<td style="text-align:right;color:var(--gold-light);">' + totCl.toFixed(3) + '</td>'
+      + '</tr>';
+
+    html += '</tbody></table></div>'
+      + (fromDate || toDate
+          ? '<div style="font-size:11px;color:var(--muted);margin-top:10px;text-align:right;">Date range: '+(fromDate||'all time')+' → '+(toDate||'today')+'</div>'
+          : '');
+
+    contentEl.innerHTML = html;
+  } catch(e) {
+    logError('loadReconciliation', e);
+    contentEl.innerHTML = '<div style="color:var(--red);padding:24px;text-align:center;">Error loading reconciliation: ' + e.message + '</div>';
+  }
+};
 
 // ══ LIQUID ════════════════════════════════════════════════════════════════════
 async function loadLiquid() {
@@ -11486,9 +11645,11 @@ window.renderLiquid = function() {
     if (c.type === 'cask' && c.ola && c.fill_date && c.abv) {
       var _origL = parseFloat(c.current_litres||0) || (parseFloat(c.ola) * 100 / parseFloat(c.abv));
       var _r = window._calcAngelShare && window._calcAngelShare(_origL, parseFloat(c.abv), parseFloat(c.ola), c.fill_date);
-      lpaCell = _r ? _r.estLPA.toFixed(2) : parseFloat(c.current_lpa||0).toFixed(2);
+      lpaCell = _r
+        ? _r.estLPA.toFixed(2) + '<span style="font-size:8px;color:var(--muted);display:block;text-align:center;">(est.)</span>'
+        : parseFloat(c.current_lpa||0).toFixed(2) + '<span style="font-size:8px;color:var(--muted);display:block;text-align:center;">(stored)</span>';
     } else {
-      lpaCell = parseFloat(c.current_lpa||0).toFixed(2);
+      lpaCell = parseFloat(c.current_lpa||0).toFixed(2) + '<span style="font-size:8px;color:var(--muted);display:block;text-align:center;">(stored)</span>';
     }
     var abv         = c.abv ? esc(String(c.abv)) + '%' : '—';
     var cbwRot      = c.cbw_rotation ? esc(c.cbw_rotation) : '<span style="color:var(--muted)">—</span>';
@@ -11883,9 +12044,42 @@ window.saveContainer = async function() {
   };
   var btn = document.getElementById('container-save-btn');
   btn.disabled = true; btn.textContent = 'Saving…';
+  var oldCont = editId ? _liquid.find(function(c){ return c.id === editId; }) : null;
+  var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
+  var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
   try {
-    if (editId) { await supaMut('PATCH', 'liquid_containers', '?id=eq.' + editId, payload); toastMsg('Container updated.'); }
-    else        { await supaMut('POST',  'liquid_containers', '', payload); toastMsg('Container added.'); }
+    if (editId) {
+      await supaMut('PATCH', 'liquid_containers', '?id=eq.' + editId, payload);
+      toastMsg('Container updated.');
+      if (window._writeBlendHistory) {
+        await window._writeBlendHistory({
+          container_id: editId, event_type: 'container_adjusted',
+          container_ref: payload.reference,
+          litres_before: oldCont ? parseFloat(oldCont.current_litres||0) : null,
+          litres_after:  cmLitres,
+          lpa_before:    oldCont ? parseFloat(oldCont.current_lpa||0) : null,
+          lpa_after:     parseFloat(gv('cm-lpa'))||0,
+          abv_before:    oldCont ? parseFloat(oldCont.abv||0) : null,
+          abv_after:     parseFloat(gv('cm-abv'))||null,
+          notes: 'Container record updated manually',
+          performed_by_id: pById, performed_by_name: pByName
+        });
+      }
+    } else {
+      var newRow = await supaMut('POST', 'liquid_containers', '', payload);
+      toastMsg('Container added.');
+      if (window._writeBlendHistory && newRow && newRow[0]) {
+        await window._writeBlendHistory({
+          container_id: newRow[0].id, event_type: 'container_created',
+          container_ref: payload.reference,
+          litres_before: 0, litres_after: cmLitres,
+          lpa_before: 0, lpa_after: parseFloat(gv('cm-lpa'))||0,
+          abv_after: parseFloat(gv('cm-abv'))||null,
+          notes: 'Container created',
+          performed_by_id: pById, performed_by_name: pByName
+        });
+      }
+    }
     closeContainerModal(); await loadLiquid();
   } catch(e) { toastMsg('Error: ' + e.message, 'error'); }
   finally { btn.disabled = false; btn.textContent = editId ? 'Save Changes' : 'Save Container'; }
@@ -12191,15 +12385,21 @@ window.saveTransfer = async function() {
     await supaMut('POST','liquid_transfer_sources','', sources.map(function(s){ return Object.assign({transfer_id:tfId},s); }));
     await supaMut('POST','liquid_transfer_destinations','', dests.map(function(d){ return Object.assign({transfer_id:tfId},d); }));
 
+    var tfPById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
+    var tfPByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
+    var tfEgid    = crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36));
+
     // Update source containers — decrement litres AND LPA
     for (var i=0; i<sources.length; i++) {
       var s = sources[i];
       var cont = _liquid.find(function(c){ return c.id===s.container_id; });
       if (!cont || !s.litres_actual) continue;
-      var newL = Math.max(0, parseFloat(cont.current_litres||0) - s.litres_actual);
-      // Always subtract the LPA that left — don't re-derive from ABV
-      var newP = Math.max(0, parseFloat(cont.current_lpa||0) - (s.lpa_actual||0));
-      // Recalc ABV from remaining litres/LPA for accuracy
+      var rawL = parseFloat(cont.current_litres||0) - s.litres_actual;
+      if (rawL < -0.01) toastMsg('Warning: ' + cont.reference + ' has less stock than requested — transfer clamped to available.', 'error');
+      var newL = Math.max(0, rawL);
+      // LPA subtraction: use litres × abv/100 (standardised method)
+      var lpaDeduct = s.litres_actual * parseFloat(cont.abv||0) / 100;
+      var newP = Math.max(0, parseFloat(cont.current_lpa||0) - lpaDeduct);
       var newAbvSrc = newL > 0 && newP > 0 ? (newP / newL * 100) : (cont.abv || null);
       await supaMut('PATCH','liquid_containers','?id=eq.'+s.container_id,{
         current_litres: Math.round(newL * 10000) / 10000,
@@ -12207,12 +12407,25 @@ window.saveTransfer = async function() {
         abv:            newL > 0 ? Math.round(newAbvSrc * 100) / 100 : null,
         status:         newL <= 0 ? 'empty' : cont.status
       });
+      if (window._writeBlendHistory) {
+        await window._writeBlendHistory({
+          container_id: s.container_id, event_type: 'transfer_from', event_group_id: tfEgid,
+          container_ref: cont.reference, product_name: cont.spirit_type,
+          litres_before: parseFloat(cont.current_litres||0), litres_after: newL, litres_changed: -s.litres_actual,
+          lpa_before: parseFloat(cont.current_lpa||0), lpa_after: newP,
+          abv_before: parseFloat(cont.abv||0), abv_after: newAbvSrc,
+          notes: s.litres_actual.toFixed(1) + 'L transferred out',
+          performed_by_id: tfPById, performed_by_name: tfPByName
+        });
+      }
     }
 
     // Update dest containers
-    // Total LPA leaving all sources
-    var totalSrcLPA = sources.reduce(function(s,x){ return s+(x.lpa_actual||0); }, 0);
-    // If multiple dests, split LPA proportionally by litres received
+    // LPA — standardised: litres × abv/100 for each source, split proportionally to dests
+    var totalSrcLPA    = sources.reduce(function(s,x){
+      var c = _liquid.find(function(cc){ return cc.id===x.container_id; });
+      return s + (x.litres_actual||0) * parseFloat(c&&c.abv||0) / 100;
+    }, 0);
     var totalDstLitres = dests.reduce(function(s,x){ return s+(x.litres_received||0); }, 0);
 
     for (var j=0; j<dests.length; j++) {
@@ -12223,14 +12436,10 @@ window.saveTransfer = async function() {
       var existingL   = parseFloat(cont2.current_litres||0);
       var existingLPA = parseFloat(cont2.current_lpa||0);
       var newL2       = existingL + d.litres_received;
-
-      // LPA transferred in = proportional share of total source LPA
       var proportion  = totalDstLitres > 0 ? (d.litres_received / totalDstLitres) : 1;
       var lpaIn       = totalSrcLPA * proportion;
       var newP2       = existingLPA + lpaIn;
-
-      // Also update ABV on dest to reflect blended ABV if it had none before
-      var newAbv = newL2 > 0 ? (newP2 / newL2 * 100) : (cont2.abv || null);
+      var newAbv      = newL2 > 0 ? (newP2 / newL2 * 100) : (cont2.abv || null);
 
       await supaMut('PATCH','liquid_containers','?id=eq.'+d.container_id,{
         current_litres: Math.round(newL2 * 10000) / 10000,
@@ -12238,6 +12447,17 @@ window.saveTransfer = async function() {
         abv:            Math.round(newAbv * 100) / 100,
         status:         'active'
       });
+      if (window._writeBlendHistory) {
+        await window._writeBlendHistory({
+          container_id: d.container_id, event_type: 'transfer_to', event_group_id: tfEgid,
+          container_ref: cont2.reference, product_name: cont2.spirit_type,
+          litres_before: existingL, litres_after: newL2, litres_changed: d.litres_received,
+          lpa_before: existingLPA, lpa_after: newP2,
+          abv_before: parseFloat(cont2.abv||0), abv_after: newAbv,
+          notes: d.litres_received.toFixed(1) + 'L transferred in',
+          performed_by_id: tfPById, performed_by_name: tfPByName
+        });
+      }
     }
 
     toastMsg('Transfer saved.'); closeTransferModal(); await loadLiquid();
@@ -14523,8 +14743,9 @@ window.saveAdjModal = async function() {
     try {
       if (type === 'liquid_signoff') {
         var rows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1');
-        if (!rows.length || !rows[0].signed_by) {
-          window.toast && window.toast('Complete and save the Liquid Sign-Off tab first.', 'error');
+        // Accept completion if either a blending operation is linked OR the legacy form is signed
+        if (!rows.length || (!rows[0].signed_by && !rows[0].blend_event_group_id)) {
+          window.toast && window.toast('Complete the liquid operation in the Blending tab first.', 'error');
           openTaskInJob(jobId, type);
           return false;
         }
@@ -15768,6 +15989,32 @@ window.saveAdjModal = async function() {
       html += frow('Chill filtration required', '<span style="font-size:13px;font-weight:600;color:' + (j&&j.chill_filtration?'var(--amber)':'var(--muted)') + ';">' + (j&&j.chill_filtration?'Yes':'No') + '</span>');
       if (j && j.colouring) html += frow('Colouring required', '<span style="font-size:13px;font-weight:600;color:var(--amber);">Yes</span>');
 
+      // ── Blending record summary (when linked via Blending tab) ────────────────
+      if (d.blend_event_group_id) {
+        try {
+          var blendEvents = await supaGet('liquid_history?event_group_id=eq.' + d.blend_event_group_id + '&order=created_at.asc&limit=20');
+          if (blendEvents.length) {
+            var firstEv = blendEvents[0];
+            var lastEv  = blendEvents[blendEvents.length - 1];
+            var evDate  = new Date(firstEv.created_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+            var lpaOut  = blendEvents.filter(function(e){ return e.litres_changed > 0; }).reduce(function(s,e){ return s + parseFloat(e.lpa_after||0) - parseFloat(e.lpa_before||0); }, 0);
+            var litresOut = blendEvents.filter(function(e){ return e.litres_changed > 0; }).reduce(function(s,e){ return s + parseFloat(e.litres_changed||0); }, 0);
+            html += '<div style="margin-bottom:16px;padding:14px 16px;background:rgba(61,186,120,0.07);border:1px solid rgba(61,186,120,0.3);border-radius:5px;">'
+              + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:var(--green);font-weight:700;margin-bottom:8px;">&#10003; Linked Blending Record</div>'
+              + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:11px;">'
+              + '<div><div style="color:var(--muted);font-size:10px;margin-bottom:2px;">Event Type</div><div style="color:var(--white);font-weight:700;">' + window.escapeHtml(firstEv.event_type||'—') + '</div></div>'
+              + '<div><div style="color:var(--muted);font-size:10px;margin-bottom:2px;">Output Volume</div><div style="color:var(--green);font-weight:700;">' + litresOut.toFixed(1) + ' L</div></div>'
+              + '<div><div style="color:var(--muted);font-size:10px;margin-bottom:2px;">LPA Change</div><div style="color:var(--gold-light);font-weight:700;">' + lpaOut.toFixed(3) + '</div></div>'
+              + '<div><div style="color:var(--muted);font-size:10px;margin-bottom:2px;">Performed</div><div style="color:var(--muted);">' + window.escapeHtml(evDate) + (firstEv.performed_by_name ? ' · ' + window.escapeHtml(firstEv.performed_by_name) : '') + '</div></div>'
+              + '</div></div>';
+          }
+        } catch(e3) { /* non-critical — blending record display */ }
+      } else if (!alreadySigned) {
+        html += '<div style="margin-bottom:16px;padding:10px 14px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.25);border-radius:4px;font-size:11px;color:var(--amber);">'
+          + '&#9888; No blending operation linked yet. Use the <strong>Complete via Blending tab</strong> button above to perform and record the liquid preparation.'
+          + '</div>';
+      }
+
       // ── Liquid Source section ──────────────────────────────────────────────
       var bomAbvNum = j && j.abv_in ? parseFloat(j.abv_in) : null;
       html += sec('Liquid Source');
@@ -15797,59 +16044,11 @@ window.saveAdjModal = async function() {
         html += '<div id="lso-abv-warn" style="display:none;margin-bottom:10px;"></div>';
         html += '<div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">'
           + '<button id="lso-link-btn" onclick="window.lsoLinkContainer(\'' + jobId + '\')" class="btn btn-gold" style="font-size:12px;padding:7px 18px;" '+(d.linked_container_id?'':'disabled')+'>&#10003; Link Container to Job</button>'
-          + '<button id="lso-prep-toggle-btn" onclick="window.lsoToggleInlinePrep()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">Or prepare liquid first &#9660;</button>'
+          + '<button onclick="window.lsoGoToBlending(\'' + jobId + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:12px;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">&#9658; Complete via Blending tab</button>'
+          + '</div>'
+          + '<div style="font-size:11px;color:var(--muted);padding:8px 12px;background:rgba(0,0,0,0.2);border:1px solid var(--navy-border);border-radius:3px;">'
+          + 'To dilute or blend the liquid for this job, use the <strong style="color:var(--gold);">Blending tab</strong>. The job will be pre-filled and the sign-off task will auto-complete when you save.'
           + '</div>';
-
-        // Inline prep accordion
-        var _dlSrcOpts = '<option value="">— Select container —</option>'
-          + _activeConts.map(function(c){
-              var s = d.linked_container_id === c.id ? ' selected' : '';
-              return '<option value="'+c.id+'"'+s+'>'+window.escapeHtml(c.reference+' — '+parseFloat(c.current_litres||0).toFixed(0)+'L @ '+(c.abv||'?')+'%')+'</option>';
-            }).join('');
-        var _dlDestOpts = '<option value="">— Select destination —</option>'
-          + _allConts.map(function(c){
-              return '<option value="'+c.id+'">'+window.escapeHtml(c.reference+' ['+c.type+'] — '+parseFloat(c.current_litres||0).toFixed(0)+'L')+'</option>';
-            }).join('');
-        var _blDestOpts = '<option value="">— Select destination container —</option>'
-          + _allConts.map(function(c){
-              return '<option value="'+c.id+'">'+window.escapeHtml(c.reference+' ['+c.type+'] — '+parseFloat(c.current_litres||0).toFixed(0)+'L')+'</option>';
-            }).join('');
-        var _prodNames = {};
-        var _fmt = window._fmtSpiritType || function(s){ return s ? s.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();}) : ''; };
-        _allConts.forEach(function(c){ if(c.spirit_type) _prodNames[_fmt(c.spirit_type)]=1; });
-        var _prodDl = Object.keys(_prodNames).sort().map(function(n){ return '<option value="'+window.escapeHtml(n)+'">'; }).join('');
-
-        html += '<div id="lso-inline-prep" style="display:none;padding:16px;background:rgba(13,27,42,0.5);border:1px solid var(--navy-border);border-radius:6px;margin-bottom:12px;">'
-          + '<div style="display:flex;gap:0;border-bottom:1px solid var(--navy-border);margin-bottom:16px;">'
-          + '<button class="lso-itab active" onclick="window.lsoShowInlineTab(\'dilute\',this)" style="padding:7px 18px;background:transparent;border:none;border-bottom:2px solid var(--gold);color:var(--gold);font-family:Lato,sans-serif;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;cursor:pointer;margin-bottom:-1px;">Dilute</button>'
-          + '<button class="lso-itab" onclick="window.lsoShowInlineTab(\'blend\',this)" style="padding:7px 18px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-family:Lato,sans-serif;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;cursor:pointer;margin-bottom:-1px;">Blend</button>'
-          + '</div>'
-          // ── Dilute panel ─────────────────
-          + '<div id="lso-inline-dilute">'
-          + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
-          + '<div class="mfield"><label>Source Container *</label><select id="lso-dl-src" onchange="window.lsoCalcInlineDilute()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;width:100%;">'+_dlSrcOpts+'</select></div>'
-          + '<div class="mfield" style="padding-top:22px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="lso-dl-inplace" checked onchange="var dw=document.getElementById(\'lso-dl-dest-wrap\');if(dw)dw.style.display=this.checked?\'none\':\'\';window.lsoCalcInlineDilute();" style="accent-color:var(--gold);"> Dilute in-place (same vessel)</label></div>'
-          + '<div id="lso-dl-dest-wrap" style="display:none;" class="mfield"><label>Destination Container</label><select id="lso-dl-dest" onchange="window.lsoCalcInlineDilute()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;width:100%;">'+_dlDestOpts+'</select></div>'
-          + '<div class="mfield"><label>RO Water to Add (L) *</label><input type="number" id="lso-dl-water" min="0" step="0.1" placeholder="e.g. 45.2" oninput="window.lsoCalcInlineDilute()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;width:100%;box-sizing:border-box;"></div>'
-          + '<div class="mfield"><label>New CBW Rotation *</label><input type="text" id="lso-dl-cbw" placeholder="e.g. R-2025-043" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;width:100%;box-sizing:border-box;"><div class="field-hint">Rotation changes when water is added</div></div>'
-          + '</div>'
-          + '<div id="lso-dl-preview" style="display:none;margin:10px 0;padding:12px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.2);border-radius:4px;font-size:12px;"></div>'
-          + '<button id="lso-dl-save-btn" onclick="window.lsoSaveInlineDilute(\''+jobId+'\')" style="background:var(--gold);border:none;color:var(--navy-dark);font-size:12px;padding:8px 20px;border-radius:4px;cursor:pointer;font-weight:700;font-family:Lato,sans-serif;margin-top:8px;">Complete Dilution &amp; Link to Job &#10003;</button>'
-          + '</div>'
-          // ── Blend panel ───────────────────
-          + '<div id="lso-inline-blend" style="display:none;">'
-          + '<div id="lso-bl-sources-wrap" style="margin-bottom:8px;"></div>'
-          + '<button onclick="window.lsoAddInlineBlendSrc()" class="btn btn-outline" style="font-size:11px;padding:5px 12px;margin-bottom:14px;">+ Add Source Container</button>'
-          + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
-          + '<div class="mfield"><label>Product Name *</label><input type="text" id="lso-bl-product" list="lso-bl-product-list" placeholder="e.g. Fox\'s Bowl Blend" oninput="window.lsoCalcInlineBlend()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;width:100%;box-sizing:border-box;"><datalist id="lso-bl-product-list">'+_prodDl+'</datalist></div>'
-          + '<div class="mfield"><label>New CBW Rotation *</label><input type="text" id="lso-bl-cbw" placeholder="e.g. R-2025-044" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;width:100%;box-sizing:border-box;"></div>'
-          + '<div class="mfield"><label>Destination Container *</label><select id="lso-bl-dest" onchange="window.lsoCalcInlineBlend()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;width:100%;">'+_blDestOpts+'</select><div id="lso-bl-dest-warn" style="display:none;margin-top:4px;font-size:11px;color:var(--amber);"></div></div>'
-          + '<div class="mfield" style="padding-top:18px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="lso-bl-water-cb" onchange="var ww=document.getElementById(\'lso-bl-water-wrap\');if(ww)ww.style.display=this.checked?\'\':\'none\';window.lsoCalcInlineBlend();" style="accent-color:#3b82f6;"> Add RO Water</label><div id="lso-bl-water-wrap" style="display:none;margin-top:8px;"><input type="number" id="lso-bl-water" placeholder="Litres" min="0" step="0.1" oninput="window.lsoCalcInlineBlend()" style="background:var(--navy-dark);border:1px solid rgba(59,130,246,0.4);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;width:120px;box-sizing:border-box;"></div></div>'
-          + '</div>'
-          + '<div id="lso-bl-preview" style="display:none;margin:10px 0;padding:12px;background:rgba(61,186,120,0.06);border:1px solid rgba(61,186,120,0.2);border-radius:4px;"></div>'
-          + '<button id="lso-bl-save-btn" onclick="window.lsoSaveInlineBlend(\''+jobId+'\')" style="background:var(--gold);border:none;color:var(--navy-dark);font-size:12px;padding:8px 20px;border-radius:4px;cursor:pointer;font-weight:700;font-family:Lato,sans-serif;margin-top:8px;">Complete Blend &amp; Link to Job &#10003;</button>'
-          + '</div>'
-          + '</div>'; // end inline-prep
 
       } else {
         // Locked: just show info about linked container
@@ -15877,12 +16076,16 @@ window.saveAdjModal = async function() {
 
       if (j && j.dilution) {
         html += sec('Dilution');
-        html += frow('Litres started with', inp('litres-start', d.litres_in || j.liquid_litres, 'e.g. 500', 'number'));
-        html += frow('Actual water added (L)', inp('water-actual', d.water_required, 'e.g. 145.2', 'number'));
-        html += frow('Final batch litres (after dilution)',
-          inp('final-batch', d.final_litres || j.final_litres, 'e.g. 645.2', 'number'),
-          'Should be: ' + (j.final_litres ? j.final_litres + ' L' : '—'));
-        html += cbRow('dilution-done', 'Dilution complete', d.dilution_complete === 'yes');
+        if (d.blend_event_group_id) {
+          html += frow('Dilution', '<span style="color:var(--green);font-weight:700;">&#10003; Recorded via Blending tab (event group: ' + window.escapeHtml(d.blend_event_group_id.slice(0,8)) + '…)</span>');
+        } else {
+          html += frow('Litres started with', inp('litres-start', d.litres_in || j.liquid_litres, 'e.g. 500', 'number'));
+          html += frow('Actual water added (L)', inp('water-actual', d.water_required, 'e.g. 145.2', 'number'));
+          html += frow('Final batch litres (after dilution)',
+            inp('final-batch', d.final_litres || j.final_litres, 'e.g. 645.2', 'number'),
+            'Should be: ' + (j.final_litres ? j.final_litres + ' L' : '—'));
+          html += cbRow('dilution-done', 'Dilution complete', d.dilution_complete === 'yes');
+        }
       }
 
       if (j && j.chill_filtration) {
@@ -16154,6 +16357,23 @@ window.saveAdjModal = async function() {
     window.lsoContainerSelChange();
   };
 
+  window.lsoGoToBlending = function(jobId) {
+    // Navigate to Blending tab with this job pre-filled
+    var blNav = document.getElementById('sbnav-blending') || document.querySelector('[onclick*="blending"]');
+    if (window.showPage) window.showPage('blending', blNav);
+    setTimeout(function() {
+      if (window.setBLJobContext) {
+        // Try to get job reference from currently open job detail
+        var jobRef = jobId;
+        var refEl = document.querySelector('[data-jobid="' + jobId + '"]');
+        if (window._currentJobData && window._currentJobData.id === jobId) {
+          jobRef = window._currentJobData.job_number || jobId;
+        }
+        window.setBLJobContext(jobId, jobRef);
+      }
+    }, 400);
+  };
+
   window.lsoToggleInlinePrep = function() {
     var prep = document.getElementById('lso-inline-prep');
     var btn  = document.getElementById('lso-prep-toggle-btn');
@@ -16182,6 +16402,8 @@ window.saveAdjModal = async function() {
   };
 
   // ── Inline Dilute ────────────────────────────────────────────────────────────
+  // lsoCalcInlineDilute kept as a stub — the inline dilute form has been replaced
+  // by the Blending tab integration. This function is no longer called.
   window.lsoCalcInlineDilute = function() {
     var srcSel = document.getElementById('lso-dl-src');
     var waterEl = document.getElementById('lso-dl-water');
@@ -16205,7 +16427,13 @@ window.saveAdjModal = async function() {
       + '</div>';
   };
 
+  // lsoSaveInlineDilute kept as a no-op stub — liquid operations for jobs are
+  // now performed in the dedicated Blending tab via lsoGoToBlending.
   window.lsoSaveInlineDilute = async function(jobId) {
+    window.toast && window.toast('Please use the Blending tab to complete liquid preparation for this job.', 'error');
+    if (window.lsoGoToBlending) window.lsoGoToBlending(jobId);
+    return;
+    // --- legacy body below (unreachable, kept for reference) ---
     var gv  = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
     var srcId  = gv('lso-dl-src');
     var waterL = parseFloat(gv('lso-dl-water')) || 0;
@@ -16376,7 +16604,12 @@ window.saveAdjModal = async function() {
     }
   };
 
+  // lsoSaveInlineBlend kept as a no-op stub — see lsoGoToBlending.
   window.lsoSaveInlineBlend = async function(jobId) {
+    window.toast && window.toast('Please use the Blending tab to complete liquid preparation for this job.', 'error');
+    if (window.lsoGoToBlending) window.lsoGoToBlending(jobId);
+    return;
+    // --- legacy body below (unreachable, kept for reference) ---
     var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
     var productName = gv('lso-bl-product');
     var newRot      = gv('lso-bl-cbw');
@@ -17288,6 +17521,23 @@ window.saveAdjModal = async function() {
     var TAB_FOR_TASK = { bom_link:'tasks', components:'components', liquid_signoff:'liquid', drygoods_prep:'components', weights_measures:'weights', quality:'quality' };
 
   function openTaskInJob(jobId, taskType, task) {
+    // liquid_signoff: route to Blending tab with job pre-filled
+    if (taskType === 'liquid_signoff') {
+      // Get the job reference for the banner label
+      var jobRef = '';
+      if (window._currentJobData && window._currentJobData.id === jobId) {
+        jobRef = window._currentJobData.job_number || jobId;
+      } else {
+        jobRef = jobId;
+      }
+      // Navigate to Blending page
+      var blNav = document.getElementById('sbnav-blending') || document.querySelector('[onclick*="blending"]');
+      if (window.showPage) window.showPage('blending', blNav);
+      setTimeout(function() {
+        if (window.setBLJobContext) window.setBLJobContext(jobId, jobRef);
+      }, 400);
+      return;
+    }
     // Special handling for HR profile setup tasks
     if(taskType === 'hr_profile_setup') {
       // Navigate to Workforce > Employee Details and open the target user
@@ -18120,6 +18370,15 @@ window.saveAdjModal = async function() {
     return 'partially_full';
   }
 
+  // ── LPA METHODOLOGY STANDARD ─────────────────────────────────────────────────
+  // All LPA movement calculations in this module use: LPA = litres × ABV / 100
+  // This applies to sources, destinations, and balance checks across blend, dilute,
+  // disgorge, and transfer operations. The stored current_lpa on a container is the
+  // authoritative closing balance after each operation — it is not used to derive
+  // movement LPA mid-operation. This ensures consistency and prevents compounding
+  // rounding drift from stored values.
+  // ─────────────────────────────────────────────────────────────────────────────
+
   async function writeHistory(data) {
     var lc = data.litres_changed != null ? data.litres_changed
            : (data.litres_after != null && data.litres_before != null ? data.litres_after - data.litres_before : null);
@@ -18177,6 +18436,66 @@ window.saveAdjModal = async function() {
     if (tab === 'transfer')      initBLTransfer();
     if (tab === 'history')       window.loadBLHistory();
   };
+
+  // ── Job context helpers ───────────────────────────────────────────────────
+  window.setBLJobContext = function(jobId, jobRef) {
+    var idEl  = document.getElementById('bl-job-id');
+    var refEl = document.getElementById('bl-job-ref');
+    var ban   = document.getElementById('bl-job-banner');
+    var lbl   = document.getElementById('bl-job-label');
+    if (idEl)  idEl.value  = jobId  || '';
+    if (refEl) refEl.value = jobRef || '';
+    if (ban)   { ban.style.display = jobId ? 'flex' : 'none'; }
+    if (lbl)   lbl.textContent = jobRef || jobId || '';
+    // Switch to the dilute tab by default when opened from a job
+    if (jobId) {
+      var dilBtn = document.querySelector('.blend-stab[onclick*="dilute"]');
+      window.showBlendTab('dilute', dilBtn);
+    }
+  };
+
+  window.clearBLJobContext = function() {
+    window.setBLJobContext('', '');
+  };
+
+  function _blJobId() {
+    var el = document.getElementById('bl-job-id');
+    return el ? el.value.trim() : '';
+  }
+
+  async function _blAutoCompleteSignoff(jobId, egid) {
+    // Auto-complete the liquid_signoff task on the linked job and store the event_group_id
+    try {
+      var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
+      var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
+      // Store event_group_id on the job_liquid_signoff record so it can be displayed back in the job
+      var existing = await window.db.select('job_liquid_signoff', '?job_id=eq.' + jobId + '&limit=1');
+      if (existing && existing[0]) {
+        await window.db.update('job_liquid_signoff', '?job_id=eq.' + jobId,
+          { blend_event_group_id: egid });
+      } else {
+        await window.db.insert('job_liquid_signoff',
+          { job_id: jobId, blend_event_group_id: egid });
+      }
+      // Auto-complete the liquid_signoff task
+      if (window.autoCompleteTask) {
+        await window.autoCompleteTask(jobId, 'liquid_signoff');
+      } else {
+        // Fallback: direct PATCH if autoCompleteTask is not accessible from this scope
+        var tasks = await window.db.select('job_tasks', '?job_id=eq.' + jobId + '&task_type=eq.liquid_signoff&limit=1');
+        if (tasks && tasks[0] && tasks[0].status !== 'completed') {
+          await window.db.update('job_tasks', '?id=eq.' + tasks[0].id, {
+            status: 'completed',
+            completed_by: pById,
+            completed_at: new Date().toISOString()
+          });
+        }
+      }
+      window.toast && window.toast('Liquid sign-off task completed on job.', 'success');
+    } catch(e) {
+      logError('_blAutoCompleteSignoff', e);
+    }
+  }
 
   window._initBlendingPage = function() {
     var firstBtn = document.querySelector('.blend-stab');
@@ -18502,6 +18821,7 @@ window.saveAdjModal = async function() {
       if (l > 0 && estAbv > 0) lpaEl.value = (l * estAbv / 100).toFixed(2);
     }
     window.calcDisgorgePreview();
+    window.calcDGDestAlloc();
   };
 
   window.addDGDest = function() {
@@ -18509,14 +18829,35 @@ window.saveAdjModal = async function() {
     var wrap = document.getElementById('dg-dests-wrap'); if (!wrap) return;
     var row  = document.createElement('div');
     row.id   = 'dg-dr-' + idx;
-    row.style.cssText = 'margin-bottom:8px;display:flex;gap:8px;align-items:center;';
+    row.style.cssText = 'margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;';
     row.innerHTML =
-      '<select id="dg-dc-' + idx + '" onchange="window.onDGDestChange(' + idx + ')" style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">'
+      '<select id="dg-dc-' + idx + '" onchange="window.onDGDestChange(' + idx + ');window.calcDGDestAlloc();" style="flex:1;min-width:160px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">'
       + conOptHtml(_bl, null, null, ['cask'])
       + '</select>'
+      + '<input id="dg-dl-' + idx + '" type="number" min="0" step="0.1" placeholder="Litres to fill" oninput="window.calcDGDestAlloc()" style="width:130px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">'
       + '<div id="dg-davail-' + idx + '" style="font-size:11px;padding:6px 8px;background:rgba(0,0,0,0.2);border:1px solid var(--navy-border);border-radius:3px;color:var(--muted);white-space:nowrap;min-width:80px;text-align:center;">—</div>'
-      + '<button onclick="document.getElementById(\'dg-dr-' + idx + '\').remove();" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 9px;border-radius:3px;cursor:pointer;">✕</button>';
+      + '<button onclick="document.getElementById(\'dg-dr-' + idx + '\').remove();window.calcDGDestAlloc();" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 9px;border-radius:3px;cursor:pointer;">✕</button>';
     wrap.appendChild(row);
+  };
+
+  window.calcDGDestAlloc = function() {
+    var totalSrc = 0;
+    document.querySelectorAll('[id^="dg-sc-"]').forEach(function(sel) {
+      var idx = sel.id.replace('dg-sc-','');
+      if (!sel.value) return;
+      var l = parseFloat((document.getElementById('dg-sl-'+idx)||{}).value)||0;
+      if (l > 0) totalSrc += l;
+    });
+    var totalDest = 0;
+    document.querySelectorAll('[id^="dg-dl-"]').forEach(function(inp){
+      totalDest += parseFloat(inp.value)||0;
+    });
+    var rem = Math.round((totalSrc - totalDest) * 100) / 100;
+    var sumEl = document.getElementById('dg-dest-alloc-summary');
+    if (!sumEl) return;
+    sumEl.style.display = totalSrc > 0 ? '' : 'none';
+    var remCol = Math.abs(rem) <= 0.1 ? 'var(--green)' : 'var(--amber)';
+    sumEl.innerHTML = 'Total output: <strong>' + totalSrc.toFixed(1) + 'L</strong> &nbsp;·&nbsp; Allocated: <strong>' + totalDest.toFixed(1) + 'L</strong> &nbsp;·&nbsp; Remaining: <strong style="color:' + remCol + ';">' + rem.toFixed(1) + 'L</strong>';
   };
 
   window.onDGDestChange = function(idx) {
@@ -18659,6 +19000,9 @@ window.saveAdjModal = async function() {
   }
 
   window.saveDisgorge = async function() {
+    if (window.canDo && !window.canDo('blending_write') && !window.canDo('jobs_signoff_liquid')) {
+      window.toast && window.toast('You do not have permission to save blending operations.', 'error'); return;
+    }
     var gv       = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
     var newProd  = gv('dg-product');
     var newCBW   = gv('dg-cbw');
@@ -18683,27 +19027,52 @@ window.saveAdjModal = async function() {
     if (hasErr)          { window.toast && window.toast('A source amount exceeds estimated available litres.', 'error'); return; }
     if (!sources.length) { window.toast && window.toast('Add at least one source cask with litres to disgorge.', 'error'); return; }
 
+    // LPA cross-validation: warn if entered LPA differs from ABV-derived LPA by more than 10%
+    var lpaWarnings = [];
+    sources.forEach(function(s) {
+      var derivedLPA = s.litres * s.estAbv / 100;
+      if (derivedLPA > 0) {
+        var pctDiff = Math.abs(s.lpa - derivedLPA) / derivedLPA * 100;
+        if (pctDiff > 10) {
+          lpaWarnings.push(s.cont.reference + ': entered ' + s.lpa.toFixed(2) + ' LPA vs. ABV-derived ' + derivedLPA.toFixed(2) + ' (' + pctDiff.toFixed(0) + '% difference)');
+        }
+      }
+    });
+    if (lpaWarnings.length) {
+      var msg = 'LPA discrepancy detected on the following casks:\n\n' + lpaWarnings.join('\n') + '\n\nEntered LPA differs from ABV-derived LPA by more than 10%. Confirm this is correct before saving.';
+      if (!confirm(msg)) return;
+    }
+
     var dests = [];
     document.querySelectorAll('[id^="dg-dc-"]').forEach(function(sel){
+      var idx  = sel.id.replace('dg-dc-','');
       if (!sel.value) return;
       var cont = _bl.find(function(c){ return c.id === sel.value; });
-      if (cont) dests.push(cont);
+      var l    = parseFloat((document.getElementById('dg-dl-'+idx)||{}).value)||0;
+      if (cont && l > 0) dests.push({ cont: cont, litres: l });
     });
-    if (!dests.length) { window.toast && window.toast('Select at least one destination vessel.', 'error'); return; }
+    if (!dests.length) { window.toast && window.toast('Add at least one destination vessel with a volume.', 'error'); return; }
 
     var totalL   = sources.reduce(function(s,x){ return s+x.litres; }, 0);
     var totalLPA = sources.reduce(function(s,x){ return s+x.lpa; }, 0);
     var newABV   = totalL > 0 ? totalLPA / totalL * 100 : 0;
-    var litresPer= totalL / dests.length;
-    var lpaPer   = totalLPA / dests.length;
+
+    // Validate allocation balance
+    var totalAllocated = dests.reduce(function(s,d){ return s+d.litres; }, 0);
+    if (Math.abs(totalAllocated - totalL) > 0.1) {
+      window.toast && window.toast('Allocated ' + totalAllocated.toFixed(1) + 'L but total disgorge output is ' + totalL.toFixed(1) + 'L — they must balance within 0.1L.', 'error'); return;
+    }
+
+    // LPA per litre for proportional distribution
+    var lpaPerLitre = totalL > 0 ? totalLPA / totalL : 0;
 
     var capErr = false;
     dests.forEach(function(d){
-      var cap = parseFloat(d.capacity_litres||0);
-      var inC = parseFloat(d.current_litres||0);
-      if (cap > 0 && inC + litresPer > cap) capErr = true;
+      var cap = parseFloat(d.cont.capacity_litres||0);
+      var inC = parseFloat(d.cont.current_litres||0);
+      if (cap > 0 && inC + d.litres > cap) capErr = true;
     });
-    if (capErr) { window.toast && window.toast('Disgorge total would exceed a destination vessel capacity.', 'error'); return; }
+    if (capErr) { window.toast && window.toast('Disgorge volume would exceed a destination vessel capacity.', 'error'); return; }
 
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
@@ -18726,10 +19095,11 @@ window.saveAdjModal = async function() {
         if (newL <= 0) {
           upd.spirit_type=null; upd.cbw_rotation=null; upd.ola=null; upd.fill_date=null;
         } else {
-          // reset the fill date to today and abv to est ABV so future calcs start fresh
-          upd.fill_date = today;
-          upd.abv       = Math.round(s.estAbv*100)/100;
-          upd.ola       = Math.round(newLP*1e4)/1e4;
+          // fill_date is intentionally NOT reset — the original fill date must be preserved
+          // for maturation age tracking and Revenue compliance. The disgorge date is
+          // recorded in liquid_history. Only ABV and OLA are updated for remaining volume.
+          upd.abv = Math.round(s.estAbv*100)/100;
+          upd.ola = Math.round(newLP*1e4)/1e4;
         }
         await window.db.update('liquid_containers', '?id=eq.' + s.cont.id, upd);
         await writeHistory({ container_id:s.cont.id, event_type:'disgorge_out', event_group_id:egid,
@@ -18742,31 +19112,32 @@ window.saveAdjModal = async function() {
           performed_by_id:pById, performed_by_name:pByName });
       }
 
-      // Update destination vessels — apply new product name / ABV / LPA
+      // Update destination vessels — volume-proportional LPA distribution
       var destSpirit = newProd || (sources[0].cont.spirit_type) || null;
       for (var j=0; j<dests.length; j++) {
         var d     = dests[j];
-        var dInL  = parseFloat(d.current_litres||0);
-        var dInLP = parseFloat(d.current_lpa||0);
-        var newDL = dInL + litresPer;
-        var newDP = dInLP + lpaPer;
+        var dInL  = parseFloat(d.cont.current_litres||0);
+        var dInLP = parseFloat(d.cont.current_lpa||0);
+        var lpaDest = d.litres * lpaPerLitre;
+        var newDL   = dInL + d.litres;
+        var newDP   = dInLP + lpaDest;
         var newDABV = newDL > 0 ? newDP / newDL * 100 : 0;
         var destUpd = {
           current_litres: Math.round(newDL*1e4)/1e4,
           current_lpa:    Math.round(newDP*1e4)/1e4,
           abv:            Math.round(newDABV*100)/100,
-          status:         autoStatus(newDL, parseFloat(d.capacity_litres||0)),
-          spirit_type:    destSpirit || d.spirit_type
+          status:         autoStatus(newDL, parseFloat(d.cont.capacity_litres||0)),
+          spirit_type:    destSpirit || d.cont.spirit_type
         };
         if (newCBW) destUpd.cbw_rotation = newCBW;
-        await window.db.update('liquid_containers', '?id=eq.' + d.id, destUpd);
-        await writeHistory({ container_id:d.id, event_type:'disgorge_in', event_group_id:egid,
-          container_ref:d.reference,
-          litres_before:dInL, litres_after:newDL, litres_changed:litresPer,
-          abv_before:parseFloat(d.abv||0), abv_after:newDABV,
+        await window.db.update('liquid_containers', '?id=eq.' + d.cont.id, destUpd);
+        await writeHistory({ container_id:d.cont.id, event_type:'disgorge_in', event_group_id:egid,
+          container_ref:d.cont.reference,
+          litres_before:dInL, litres_after:newDL, litres_changed:d.litres,
+          abv_before:parseFloat(d.cont.abv||0), abv_after:newDABV,
           lpa_before:dInLP, lpa_after:newDP,
           product_name:destSpirit,
-          notes:'Received ' + litresPer.toFixed(1) + 'L from disgorge' + (newProd?' ('+newProd+')':'') + (notes?' — '+notes:''),
+          notes:'Received ' + d.litres.toFixed(1) + 'L from disgorge' + (newProd?' ('+newProd+')':'') + (notes?' — '+notes:''),
           performed_by_id:pById, performed_by_name:pByName });
       }
 
@@ -18919,6 +19290,17 @@ window.saveAdjModal = async function() {
     }
     _refreshDLSelects();
     window.calcDilutePreview();
+    // Show mismatch warning if sources have different spirit types
+    (function() {
+      var types = [];
+      document.querySelectorAll('[id^="dl-sc-"]').forEach(function(sel) {
+        if (!sel.value) return;
+        var c = _bl.find(function(x){ return x.id === sel.value; });
+        if (c && c.spirit_type && types.indexOf(c.spirit_type) < 0) types.push(c.spirit_type);
+      });
+      var noteEl = document.getElementById('dl-spirit-mismatch-note');
+      if (noteEl) noteEl.style.display = types.length > 1 ? '' : 'none';
+    })();
   };
 
   function _countDLSrcRows() {
@@ -19284,6 +19666,9 @@ window.saveAdjModal = async function() {
   }
 
   window.saveBlend = async function() {
+    if (window.canDo && !window.canDo('blending_write') && !window.canDo('jobs_signoff_liquid')) {
+      window.toast && window.toast('You do not have permission to save blending operations.', 'error'); return;
+    }
     var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
     var productName = gv('bl-product-name');
     var newRot      = gv('bl-cbw');
@@ -19323,6 +19708,7 @@ window.saveAdjModal = async function() {
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
     var egid    = crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36));
+    var blJobId = _blJobId();
     var btn     = document.getElementById('bl-save-btn');
 
     // ── In-place mode: single base destination ──
@@ -19358,6 +19744,7 @@ window.saveAdjModal = async function() {
           fill_date: new Date().toISOString().slice(0,10)
         });
         await writeHistory({ container_id: base.id, event_type: 'blend_inplace', event_group_id: egid,
+          job_id: blJobId || null,
           container_ref: destCont.reference,
           litres_before: parseFloat(destCont.current_litres||0), litres_after: totalL,
           litres_changed: totalL - parseFloat(destCont.current_litres||0),
@@ -19367,6 +19754,7 @@ window.saveAdjModal = async function() {
           product_name: productName,
           notes: normalSources.length + ' container(s) blended in-place into ' + destCont.reference + (waterL ? ' + ' + waterL + 'L water' : '') + (blNotes ? ' — ' + blNotes : ''),
           performed_by_id: pById, performed_by_name: pByName });
+        if (blJobId) await _blAutoCompleteSignoff(blJobId, egid);
         window.toast && window.toast('Blend saved.', 'success');
         ['bl-product-name','bl-cbw','bl-notes','bl-water-litres'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
         var wc=document.getElementById('bl-water-check'); if(wc) wc.checked=false;
@@ -19443,6 +19831,7 @@ window.saveAdjModal = async function() {
           fill_date: new Date().toISOString().slice(0,10)
         });
         await writeHistory({ container_id: d.cont.id, event_type: 'blend_output', event_group_id: egid,
+          job_id: blJobId || null,
           container_ref: d.cont.reference,
           litres_before: dOrigL, litres_after: dNewL, litres_changed: d.litres,
           abv_before: parseFloat(d.cont.abv||0), abv_after: dNewABV,
@@ -19452,6 +19841,7 @@ window.saveAdjModal = async function() {
           notes: d.litres.toFixed(1) + 'L blend "' + productName + '" → ' + d.cont.reference + (blNotes ? ' — ' + blNotes : ''),
           performed_by_id: pById, performed_by_name: pByName });
       }
+      if (blJobId) await _blAutoCompleteSignoff(blJobId, egid);
       window.toast && window.toast('Blend saved.', 'success');
       ['bl-product-name','bl-cbw','bl-notes','bl-water-litres'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
       var wc=document.getElementById('bl-water-check'); if(wc) wc.checked=false;
@@ -19476,6 +19866,8 @@ window.saveAdjModal = async function() {
     var wl = document.getElementById('dl-water-litres'); if (wl) wl.value = '';
     var cb = document.getElementById('dl-cbw');          if (cb) cb.value = '';
     var ip = document.getElementById('dl-in-place');     if (ip) ip.checked = true;
+    var st = document.getElementById('dl-spirit-type');  if (st) st.value = '';
+    var mn = document.getElementById('dl-spirit-mismatch-note'); if (mn) mn.style.display = 'none';
     _updateDLInplaceVisibility();
     hideDilutePreview();
     window.addDLSource();
@@ -19584,6 +19976,9 @@ window.saveAdjModal = async function() {
   }
 
   window.saveDilution = async function() {
+    if (window.canDo && !window.canDo('blending_write') && !window.canDo('jobs_signoff_liquid')) {
+      window.toast && window.toast('You do not have permission to save blending operations.', 'error'); return;
+    }
     var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
     var waterL  = parseFloat(gv('dl-water-litres')) || 0;
     var newRot  = gv('dl-cbw');
@@ -19605,6 +20000,7 @@ window.saveAdjModal = async function() {
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
     var egid    = crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36));
+    var dlJobId = _blJobId();
     var btn     = document.getElementById('dl-save-btn');
 
     // ── Collect and validate destinations ──
@@ -19652,6 +20048,7 @@ window.saveAdjModal = async function() {
           status: autoStatus(newTL, parseFloat(src.cont.capacity_litres||0))
         });
         await writeHistory({ container_id: src.cont.id, event_type: 'dilution', event_group_id: egid,
+          job_id: dlJobId || null,
           container_ref: src.cont.reference,
           litres_before: origL, litres_after: newTL, litres_changed: waterL,
           abv_before: origABV2, abv_after: newABV2,
@@ -19671,6 +20068,7 @@ window.saveAdjModal = async function() {
           if (sNewL <= 0) { sUpd.spirit_type = null; sUpd.cbw_rotation = null; }
           await window.db.update('liquid_containers', '?id=eq.' + s.cont.id, sUpd);
           await writeHistory({ container_id: s.cont.id, event_type: 'dilution', event_group_id: egid,
+            job_id: dlJobId || null,
             container_ref: s.cont.reference,
             litres_before: sOrigL, litres_after: sNewL, litres_changed: -s.litres,
             abv_before: parseFloat(s.cont.abv||0), lpa_before: sOrigLP, lpa_after: sNewLP,
@@ -19688,13 +20086,17 @@ window.saveAdjModal = async function() {
           var dAddLP  = d.litres * lpaPerLitre;
           var dNewLP  = dOrigLP + dAddLP;
           var dNewABV = dNewL > 0 ? dNewLP / dNewL * 100 : 0;
+          // Spirit type: use user override if set (mixed sources), else take from first source
+          var dlSpiritSel = document.getElementById('dl-spirit-type');
+          var dlSpirit = (dlSpiritSel && dlSpiritSel.value) ? dlSpiritSel.value : sources[0].cont.spirit_type;
           await window.db.update('liquid_containers', '?id=eq.' + d.cont.id, {
             current_litres: Math.round(dNewL*1e4)/1e4, current_lpa: Math.round(dNewLP*1e4)/1e4,
             abv: Math.round(dNewABV*100)/100, cbw_rotation: newRot,
-            spirit_type: sources[0].cont.spirit_type,
+            spirit_type: dlSpirit,
             status: autoStatus(dNewL, parseFloat(d.cont.capacity_litres||0))
           });
           await writeHistory({ container_id: d.cont.id, event_type: 'dilution', event_group_id: egid,
+            job_id: dlJobId || null,
             container_ref: d.cont.reference,
             litres_before: dOrigL, litres_after: dNewL, litres_changed: d.litres,
             abv_before: parseFloat(d.cont.abv||0), abv_after: dNewABV,
@@ -19704,6 +20106,7 @@ window.saveAdjModal = async function() {
             performed_by_id: pById, performed_by_name: pByName });
         }
       }
+      if (dlJobId) await _blAutoCompleteSignoff(dlJobId, egid);
       window.toast && window.toast('Dilution saved.', 'success');
       hideDilutePreview();
       await loadBlData(); initBLDilute();
@@ -19809,6 +20212,9 @@ window.saveAdjModal = async function() {
   };
 
   window.saveBlendTransfer = async function() {
+    if (window.canDo && !window.canDo('blending_write') && !window.canDo('jobs_signoff_liquid')) {
+      window.toast && window.toast('You do not have permission to save blending operations.', 'error'); return;
+    }
     var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
     if (!gv('btf-date')) { window.toast && window.toast('Transfer date is required.', 'error'); return; }
     var sources = [];
@@ -19994,6 +20400,7 @@ window.saveAdjModal = async function() {
     { key:'jobs_signoff_components',label:'Sign off components',     category:'Jobs' },
     { key:'boms_edit',          label:'Create & edit BOMs',          category:'BOMs' },
     { key:'schedule_edit',      label:'Edit schedule',               category:'Schedule' },
+    { key:'blending_write',     label:'Save blending operations',    category:'Inventory' },
     { key:'drygoods_edit',      label:'Edit dry goods stock',        category:'Inventory' },
     { key:'clients_edit',       label:'Edit clients',                category:'Clients' },
     { key:'roster_view',        label:'View roster & hours',         category:'People' },
@@ -20018,15 +20425,15 @@ window.saveAdjModal = async function() {
 
   // Default permissions (MD and Ops Dir always get everything)
   var DEFAULT_PERMISSIONS = {
-    managing_director:   { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,boms_edit:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
-    operations_director: { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,boms_edit:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
-    business_analyst:    { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,boms_edit:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_all:1,reports_view:1,settings_access:1 },
-    commercial_manager:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,boms_edit:0,schedule_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
-    production_manager:  { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,boms_edit:0,schedule_edit:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:1,reports_view:1,settings_access:0 },
-    quality_compliance:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:0,boms_edit:1,schedule_edit:0,drygoods_edit:0,clients_edit:0,roster_view:0,roster_edit:0,timesheet_edit:0,reports_view:1,settings_access:0 },
-    warehouse_liquid:    { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:0,jobs_signoff_components:1,boms_edit:0,schedule_edit:0,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
-    client_coordinator:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,boms_edit:0,schedule_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
-    production_operator: { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,boms_edit:0,schedule_edit:0,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
+    managing_director:   { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,boms_edit:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
+    operations_director: { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,boms_edit:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
+    business_analyst:    { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,boms_edit:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_all:1,reports_view:1,settings_access:1 },
+    commercial_manager:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,schedule_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
+    production_manager:  { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,boms_edit:0,schedule_edit:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:1,reports_view:1,settings_access:0 },
+    quality_compliance:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:0,blending_write:0,boms_edit:1,schedule_edit:0,drygoods_edit:0,clients_edit:0,roster_view:0,roster_edit:0,timesheet_edit:0,reports_view:1,settings_access:0 },
+    warehouse_liquid:    { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:0,jobs_signoff_components:1,blending_write:1,boms_edit:0,schedule_edit:0,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
+    client_coordinator:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,schedule_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
+    production_operator: { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,schedule_edit:0,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
   };
 
   var _permissions = JSON.parse(JSON.stringify(DEFAULT_PERMISSIONS));
