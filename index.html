@@ -17757,6 +17757,35 @@ window.saveAdjModal = async function() {
 
   // Called when the spirit-confirm checkbox changes — enables/disables the Add button
   // Confirmation before printing the work order — shows the operator which dilution scope will be used
+  // ── Reusable styled confirm modal ────────────────────────────────────────────
+  // opts: { title, body (HTML), confirmLabel, confirmDanger, onConfirm }
+  window._pulseConfirm = function(opts) {
+    var existing = document.getElementById('_pulse-confirm-overlay');
+    if (existing) existing.remove();
+
+    var danger  = opts.confirmDanger ? 'background:rgba(220,53,69,0.15);border:1px solid rgba(220,53,69,0.5);color:#f8d7da;' : 'background:var(--gold);border:1px solid var(--gold);color:var(--navy-dark);';
+    var overlay = document.createElement('div');
+    overlay.id  = '_pulse-confirm-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(5,12,20,0.82);display:flex;align-items:center;justify-content:center;padding:24px;';
+    overlay.innerHTML =
+      '<div style="background:var(--navy-mid,#0d1b2a);border:1px solid var(--gold);border-radius:8px;max-width:480px;width:100%;box-shadow:0 24px 64px rgba(0,0,0,0.6);">'
+      + '<div style="padding:18px 22px 14px;border-bottom:1px solid var(--navy-border);">'
+      + '<div style="font-size:13px;font-weight:700;color:var(--gold);letter-spacing:0.04em;">' + (opts.title || 'Confirm') + '</div>'
+      + '</div>'
+      + '<div style="padding:18px 22px;font-size:12px;color:var(--white);line-height:1.7;">' + opts.body + '</div>'
+      + '<div style="padding:12px 22px 18px;display:flex;justify-content:flex-end;gap:10px;">'
+      + '<button id="_pcc-cancel" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;font-weight:600;padding:8px 20px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">Cancel</button>'
+      + '<button id="_pcc-confirm" style="' + danger + 'font-size:12px;font-weight:700;padding:8px 22px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">' + (opts.confirmLabel || 'Confirm') + '</button>'
+      + '</div></div>';
+
+    document.body.appendChild(overlay);
+
+    var close = function() { overlay.remove(); };
+    overlay.querySelector('#_pcc-cancel').onclick  = close;
+    overlay.querySelector('#_pcc-confirm').onclick = function() { close(); if (opts.onConfirm) opts.onConfirm(); };
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
+  };
+
   window.lsoConfirmPrintWorkOrder = function(jobId) {
     var modeEl  = document.querySelector('input[name="lso-dil-mode"]:checked');
     var mode    = modeEl ? modeEl.value : (window._lsoDilutionMode || 'requirement');
@@ -17765,15 +17794,23 @@ window.saveAdjModal = async function() {
     var final_l = isReq ? (window._lsoDilReqFinal || 0) : (window._lsoDilAllFinal || 0);
     var abv     = window._lsoBottlingAbv || 0;
 
-    var scopeLine = isReq
-      ? 'Dilution scope: REQUIREMENT ONLY\n~' + water.toFixed(1) + ' L water added → ' + final_l.toFixed(1) + ' L at ' + abv.toFixed(1) + '% ABV\nRemainder of containers stays at cask strength.'
-      : 'Dilution scope: FULL CONTAINERS\n~' + water.toFixed(1) + ' L water added → ' + final_l.toFixed(1) + ' L at ' + abv.toFixed(1) + '% ABV\nAll linked container contents are diluted.';
+    var bodyHtml = isReq
+      ? '<p style="margin:0 0 10px;">Work Order will be printed to calculate the dilution of <strong style="color:var(--gold);">required liquid only</strong>. The remainder of the liquid will stay at cask strength.</p>'
+        + '<div style="background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.25);border-radius:4px;padding:10px 14px;font-size:11px;color:var(--amber);">'
+        + '~<strong>' + water.toFixed(1) + ' L</strong> RO water &nbsp;&rarr;&nbsp; <strong>' + final_l.toFixed(1) + ' L</strong> at <strong>' + abv.toFixed(1) + '% ABV</strong></div>'
+      : '<p style="margin:0 0 10px;">Work Order will be printed to calculate the dilution of <strong style="color:var(--amber);">all linked containers</strong>. Any extra liquid to requirement will be at bottling strength.</p>'
+        + '<div style="background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.25);border-radius:4px;padding:10px 14px;font-size:11px;color:var(--amber);">'
+        + '~<strong>' + water.toFixed(1) + ' L</strong> RO water &nbsp;&rarr;&nbsp; <strong>' + final_l.toFixed(1) + ' L</strong> at <strong>' + abv.toFixed(1) + '% ABV</strong></div>';
 
-    var msg = 'Work Order will be printed with the following dilution instructions:\n\n' + scopeLine + '\n\nProceed?';
-    if (confirm(msg)) {
-      window._lsoDilutionMode = mode; // lock in the mode before printing
-      window.printLiquidSignoff(jobId);
-    }
+    window._pulseConfirm({
+      title:        'Print Work Order',
+      body:         bodyHtml,
+      confirmLabel: '&#128424; Print',
+      onConfirm:    function() {
+        window._lsoDilutionMode = mode;
+        window.printLiquidSignoff(jobId);
+      }
+    });
   };
 
   // Live-update the dilution fields when the scope radio changes
@@ -17870,24 +17907,20 @@ window.saveAdjModal = async function() {
     var allConts = window._lsoContainers || [];
     var c = cont && allConts.find(function(x){ return x.id === cont.id; });
     var label = c ? c.reference : (cont && cont.id ? cont.id.slice(0,8) + '…' : 'this container');
-    if (!confirm('Delink ' + label + ' from this job?\n\nThis removes it from the liquid sign-off. No liquid will be moved — the container remains in inventory unchanged.')) return;
-    window._lsoAllLinkedConts.splice(idx, 1);
-    // Refresh first container hidden field
-    var hiddenEl = document.getElementById('lso-linked-container-id');
-    if (hiddenEl) hiddenEl.value = window._lsoAllLinkedConts.length ? window._lsoAllLinkedConts[0].id : '';
-    window._lsoRenderLinkedList();
-    _lsoAutoSaveContainers(window._lsoCurrentJobId);
-    // Refresh the dropdown to include the removed container
-    var sel = document.getElementById('lso-container-sel');
-    if (sel) {
-      var alreadyIds = window._lsoAllLinkedConts.map(function(lc){ return lc.id; });
-      var activeConts = window._lsoActiveContainers || [];
-      sel.innerHTML = '<option value="">— Add a container —</option>'
-        + activeConts.filter(function(c){ return alreadyIds.indexOf(c.id) === -1; }).map(function(c){
-            var lbl = c.reference + ' [' + (c.type==='ibc'?'IBC':c.type) + '] — ' + (c.spirit_type||'—') + ' — ' + parseFloat(c.current_litres||0).toFixed(0) + 'L @ ' + (c.abv||'?') + '%';
-            return '<option value="' + c.id + '">' + window.escapeHtml(lbl) + '</option>';
-          }).join('');
-    }
+    window._pulseConfirm({
+      title:        'Delink Container',
+      body:         '<p style="margin:0 0 8px;">Remove <strong style="color:var(--white);">' + window.escapeHtml(label) + '</strong> from this job?</p>'
+                  + '<p style="margin:0;color:var(--muted);font-size:11px;">This removes it from the liquid sign-off only. No liquid will be moved — the container remains in inventory unchanged.</p>',
+      confirmLabel: '&#10005; Delink',
+      confirmDanger: true,
+      onConfirm: function() {
+        window._lsoAllLinkedConts.splice(idx, 1);
+        var hiddenEl = document.getElementById('lso-linked-container-id');
+        if (hiddenEl) hiddenEl.value = window._lsoAllLinkedConts.length ? window._lsoAllLinkedConts[0].id : '';
+        window._lsoRenderLinkedList();
+        _lsoAutoSaveContainers(window._lsoCurrentJobId);
+      }
+    });
   };
 
   window._lsoRenderLinkedList = function() {
