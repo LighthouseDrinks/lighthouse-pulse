@@ -3886,13 +3886,12 @@ window.copyInviteLink = function() {
 
     <div class="inv-section-title">Liquid Content</div>
     <div class="modal-grid">
-      <div class="mfield" style="position:relative;">
+      <div class="mfield">
         <label>Spirit / Product Name</label>
-        <input type="text" id="cm-spirit" autocomplete="new-password" placeholder="e.g. Single Malt, Fox's Bowl Blend"
-          oninput="window.cmSpiritSuggest(this)"
-          onfocus="window.cmSpiritSuggest(this)"
-          onblur="setTimeout(function(){var d=document.getElementById('cm-spirit-suggestions');if(d)d.style.display='none';},200)">
-        <div id="cm-spirit-suggestions" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:300;background:#0d1b2a;border:1px solid var(--gold);border-top:none;border-radius:0 0 4px 4px;max-height:200px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.5);"></div>
+        <select id="cm-spirit" class="lp-select">
+          <option value="">— Select liquid product —</option>
+        </select>
+        <div class="field-hint">Names managed in Inventory → Liquid Products</div>
       </div>
       <div class="mfield">
         <label>ABV (%)</label>
@@ -4075,11 +4074,11 @@ window.copyInviteLink = function() {
     <div class="modal-section-title">Liquid</div>
     <div class="modal-grid">
       <div class="mfield span2">
-        <label>Liquid Record</label>
-        <select id="bm-liquid-sku" style="font-family:Lato,sans-serif;" disabled>
-          <option value="">— Select client first —</option>
+        <label>Liquid Specification</label>
+        <select id="bm-liquid-sku" class="lp-select">
+          <option value="">— Select liquid product —</option>
         </select>
-        <div class="field-hint">Only bottling strength liquid shown. Can be linked later once liquid is ready.</div>
+        <div class="field-hint">Select from the Liquid Products Register. The actual container is assigned at job sign-off time.</div>
       </div>
     </div>
 
@@ -6334,9 +6333,9 @@ window.onBomClientChange = async function() {
     var s = el(d.id);
     if (s) { s.innerHTML = '<option value="">— None / N/A —</option>'; s.disabled = !clientId; }
   });
-  // Reset liquid dropdown
+  // Liquid product dropdown is not client-specific — keep as is
   var liqSel = el('bm-liquid-sku');
-  if (liqSel) { liqSel.innerHTML = '<option value="">— None / not yet assigned —</option>'; liqSel.disabled = !clientId; }
+  if (liqSel && !liqSel.options.length) { await window.populateLiquidProductSelect(liqSel, null, true); }
 
   if (!clientId) return Promise.resolve();
 
@@ -6345,7 +6344,7 @@ window.onBomClientChange = async function() {
       window.db.select('dry_goods_skus', '?client_id=eq.' + clientId + '&is_active=eq.true&order=description.asc'),
       window.db.select('dry_goods_batches', '?order=delivery_date.asc&select=sku_id,quantity_remaining'),
       window.db.select('dry_goods_categories', '?order=sort_order.asc'),
-      window.db.select('liquid_containers', '?client_id=eq.' + clientId + '&status=eq.active&order=reference.asc').catch(function(){ return []; })
+      window.db.select('liquid_containers', '?client_id=eq.' + clientId + '&archived=is.false&order=reference.asc').catch(function(){ return []; })
     ]);
 
     var skus    = results[0];
@@ -6403,16 +6402,32 @@ window.onBomClientChange = async function() {
       sel.disabled = false;
     });
 
-    // Populate liquid dropdown
+    // Populate liquid dropdown — show physical containers for this client
     if (liqSel) {
-      var liqOptions = liquids
-        .filter(function(l) { return !l.strength || l.strength === 'bottling_strength'; })
-        .map(function(l) {
-          var label = (l.batch_name || l.id) + (l.abv ? ' — ' + l.abv + '% ABV' : '') + (l.strength === 'bottling_strength' ? ' ✓' : '');
-          return '<option value="' + l.id + '">' + label + '</option>';
-        });
-      liqSel.innerHTML = '<option value="">— None / not yet assigned —</option>' + liqOptions.join('');
       liqSel.disabled = false;
+      if (liquids.length === 0) {
+        liqSel.innerHTML = '<option value="">— No containers on file for this client —</option>';
+      } else {
+        var activeLiquids  = liquids.filter(function(l){ return parseFloat(l.current_litres||0) > 0; });
+        var emptyLiquids   = liquids.filter(function(l){ return !(parseFloat(l.current_litres||0) > 0); });
+        var makeOpt = function(l) {
+          var typeMap = { ibc:'IBC', cask:'Cask', blue_drum:'Blue Drum', tank:'Tank', tanker:'Tanker' };
+          var tLbl    = typeMap[l.type] || l.type || '';
+          var spirit  = l.spirit_type ? l.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();}) : '';
+          var abvStr  = l.abv ? ' @ ' + parseFloat(l.abv).toFixed(1) + '%' : '';
+          var lpaStr  = l.current_lpa ? ' — ' + parseFloat(l.current_lpa).toFixed(2) + ' LPA' : '';
+          var label   = l.reference + '  [' + tLbl + ']' + (spirit ? '  ' + spirit : '') + abvStr + lpaStr;
+          return '<option value="' + l.id + '">' + label + '</option>';
+        };
+        var html = '<option value="">— None / not yet assigned —</option>';
+        if (activeLiquids.length) {
+          html += '<optgroup label="— Containers with liquid —">' + activeLiquids.map(makeOpt).join('') + '</optgroup>';
+        }
+        if (emptyLiquids.length) {
+          html += '<optgroup label="— Empty containers —">' + emptyLiquids.map(makeOpt).join('') + '</optgroup>';
+        }
+        liqSel.innerHTML = html;
+      }
     }
 
   } catch(e) {
@@ -6450,8 +6465,9 @@ async function openBomModal(editId) {
     var s = el(d.id);
     if (s) { s.innerHTML = '<option value="">— Select client first —</option>'; s.disabled = true; }
   });
+  // Populate liquid product select from register (not client-specific)
   var liqSel = el('bm-liquid-sku');
-  if (liqSel) { liqSel.innerHTML = '<option value="">— Select client first —</option>'; liqSel.disabled = true; }
+  if (liqSel) { await window.populateLiquidProductSelect(liqSel, null, true); liqSel.disabled = false; }
 
   // Reset all text/number fields
   ['bm-product','bm-volume','bm-abv','bm-bottles-per-shipper','bm-bph','bm-colour-spec-bom',
@@ -6498,10 +6514,14 @@ async function openBomModal(editId) {
         if (specRow) specRow.style.display = colourBomEl.value === 'yes' ? '' : 'none';
       }
 
+      // Pre-fill liquid spec select
+      var liqSpecEl = el('bm-liquid-sku');
+      if (liqSpecEl) await window.populateLiquidProductSelect(liqSpecEl, b.liquid || '', true);
+
       // Load client inventory, then restore dropdown selections by SKU ID
       window.onBomClientChange().then(function() {
         var restoreMap = {
-          'bm-liquid-sku':      b.liquidSkuId,
+          'bm-liquid-sku':      null, // handled above via populateLiquidProductSelect
           'bm-bottle':          b.bottleSkuId,
           'bm-cork':            b.corkSkuId,
           'bm-ropp':            b.roppSkuId,
@@ -6878,7 +6898,8 @@ async function saveBom() {
   var dbPayload = {
     client_id: clientId, product_name: product,
     volume_cl: parseFloat(volume)||null, abv: parseFloat(abv)||null,
-    liquid_sku_id:       skuId('bm-liquid-sku'),
+    liquid_sku_id:       null,  // replaced by liquid_spec text field
+    liquid_spec:         gv('bm-liquid-sku') || null,
     bottle_sku_id:       skuId('bm-bottle'),
     cork_sku_id:         skuId('bm-cork'),
     ropp_sku_id:         skuId('bm-ropp'),
@@ -6906,7 +6927,7 @@ async function saveBom() {
   function localBom(id) {
     return {
       id: id, product: product, clientId: clientId, volume: volume, abv: abv,
-      liquidSkuId: skuId('bm-liquid-sku'),        liquid:     skuDesc('bm-liquid-sku'),
+      liquidSkuId: null,                           liquid:     gv('bm-liquid-sku') || null,
       bottleSkuId: skuId('bm-bottle'),             bottle:     skuDesc('bm-bottle'),
       corkSkuId:   skuId('bm-cork'),               cork:       skuDesc('bm-cork'),
       roppSkuId:   skuId('bm-ropp'),               ropp:       skuDesc('bm-ropp'),
@@ -7026,7 +7047,7 @@ window.loadBoms = async function initBoms() {
         volume:           r.volume_cl || '',
         abv:              r.abv || '',
         gi:               r.gi_verified ? 'Y' : 'N',
-        liquidSkuId:      r.liquid_sku_id || '',       liquid:     desc(r.liquid_sku_id),
+        liquidSkuId:      r.liquid_sku_id || '',       liquid:     r.liquid_spec || desc(r.liquid_sku_id),
         bottleSkuId:      r.bottle_sku_id || '',       bottle:     desc(r.bottle_sku_id),
         corkSkuId:        r.cork_sku_id || '',         cork:       desc(r.cork_sku_id),
         roppSkuId:        r.ropp_sku_id || '',         ropp:       desc(r.ropp_sku_id),
@@ -7890,6 +7911,7 @@ window.loadBoms = async function initBoms() {
   <!-- Sub-nav tabs -->
   <div id="inv-tabs" style="display:flex;gap:0;margin-bottom:24px;border-bottom:2px solid var(--navy-border);">
     <button class="inv-tab active" onclick="showInvTab('liquid',this)">Liquid Inventory</button>
+    <button class="inv-tab" onclick="showInvTab('liquidproducts',this)">Liquid Products</button>
     <button class="inv-tab" onclick="showInvTab('drygoods',this)">Dry Goods</button>
     <button class="inv-tab" onclick="showInvTab('goodsin',this)">Client ASN</button>
     <button class="inv-tab" onclick="showInvTab('reconciliation',this)">LPA Reconciliation</button>
@@ -8142,6 +8164,68 @@ window.loadBoms = async function initBoms() {
     </div>
     <div id="recon-content">
       <div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Select a date range and click Run Report to generate the LPA reconciliation.</div>
+    </div>
+  </div>
+
+  <!-- ── LIQUID PRODUCTS REGISTER ────────────────────────────────────────── -->
+  <div id="inv-liquidproducts" class="inv-panel" style="display:none;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <div style="font-size:13px;color:var(--text);margin-bottom:4px;">Standardised liquid product names used across the system — BOMs, containers, and sign-off all draw from this list.</div>
+        <div style="font-size:11px;color:var(--muted);">All staff must select from this register. Add new products here before using them elsewhere.</div>
+      </div>
+      <button id="lp-add-btn" onclick="window.openLPModal()" class="btn btn-gold" style="font-size:12px;padding:8px 18px;">+ Add Liquid Product</button>
+    </div>
+
+    <!-- Add / Edit modal -->
+    <div id="lp-modal" style="display:none;position:fixed;inset:0;z-index:600;background:rgba(5,12,20,0.88);align-items:center;justify-content:center;" onclick="if(event.target===this)window.closeLPModal()">
+      <div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:6px;padding:28px 32px;width:440px;max-width:94vw;">
+        <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;font-weight:700;">Liquid Products Register</div>
+        <div id="lp-modal-title" style="font-size:17px;font-weight:800;color:var(--white);margin-bottom:20px;">Add Product</div>
+        <input type="hidden" id="lp-edit-id">
+        <div class="mfield" style="margin-bottom:16px;">
+          <label>Product Name *</label>
+          <input type="text" id="lp-name" placeholder="e.g. 3 YO Single Malt Ex Sherry" style="font-size:14px;">
+          <div class="field-hint">Use a consistent, agreed format — this name appears everywhere in the system</div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">
+          <button onclick="window.closeLPModal()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;padding:8px 18px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Cancel</button>
+          <button onclick="window.saveLiquidProduct()" class="btn btn-gold" style="font-size:12px;padding:8px 20px;">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Product list -->
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Product Name</th>
+            <th class="mob-hide" style="min-width:120px;">Added</th>
+            <th style="min-width:80px;"></th>
+          </tr>
+        </thead>
+        <tbody id="lp-tbody">
+          <tr><td colspan="3" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Containers needing retagging -->
+    <div id="lp-retag-wrap" style="margin-top:28px;display:none;">
+      <div style="font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">Containers Needing Retag</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">These containers have a spirit type that doesn't match any entry in the register. Open each container and update the Spirit / Product Name.</div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead><tr>
+            <th>Reference</th>
+            <th class="mob-hide">Client</th>
+            <th>Current Spirit Type</th>
+            <th style="min-width:80px;"></th>
+          </tr></thead>
+          <tbody id="lp-retag-tbody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -8502,13 +8586,12 @@ window.loadBoms = async function initBoms() {
       <!-- ── Common Liquid Content ─────────────────── -->
       <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin:20px 0 14px;font-weight:700;">Liquid Content</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
-        <div class="mfield" style="position:relative;">
+        <div class="mfield">
           <label>Spirit / Product Name</label>
-          <input type="text" id="blac-spirit" autocomplete="new-password" placeholder="e.g. Single Malt, Fox's Bowl Blend"
-            oninput="window.blacSpiritSuggest(this)"
-            onfocus="window.blacSpiritSuggest(this)"
-            onblur="setTimeout(function(){var d=document.getElementById('blac-spirit-suggestions');if(d)d.style.display='none';},200)">
-          <div id="blac-spirit-suggestions" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:300;background:#0d1b2a;border:1px solid var(--gold);border-top:none;border-radius:0 0 4px 4px;max-height:200px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.5);"></div>
+          <select id="blac-spirit" class="lp-select">
+            <option value="">— Select liquid product —</option>
+          </select>
+          <div class="field-hint">Names managed in Inventory → Liquid Products</div>
         </div>
         <div class="mfield">
           <label>ABV (%)</label>
@@ -11498,6 +11581,7 @@ window.showInvTab = function(tab, btn) {
   if (tab === 'drygoods')        loadDryGoods().catch(function(e){ showErr('dg-tbody',  11, e); });
   if (tab === 'goodsin')         loadGoodsIn().catch(function(e){ showErr('gin-tbody',  8,  e); });
   if (tab === 'reconciliation')  { /* user clicks Run Report to load */ }
+  if (tab === 'liquidproducts')  { window.loadLiquidProducts().catch(function(e){ console.error(e); }); }
 };
 
 // Navigate from sidebar to inventory page and activate the correct sub-tab
@@ -11741,6 +11825,217 @@ window.loadReconciliation = async function() {
     logError('loadReconciliation', e);
     contentEl.innerHTML = '<div style="color:var(--red);padding:24px;text-align:center;">Error loading reconciliation: ' + e.message + '</div>';
   }
+};
+
+// ══ LIQUID PRODUCTS REGISTER ══════════════════════════════════════════════════
+
+// Cached product list — refreshed whenever the register is loaded
+window._liquidProducts = [];
+
+window.loadLiquidProducts = async function() {
+  var tbody = document.getElementById('lp-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr>';
+  try {
+    var rows = await window.db.select('liquid_products', '?order=sort_order.asc,name.asc&limit=500');
+    window._liquidProducts = rows;
+    renderLiquidProducts(rows);
+
+    // Role-based visibility of add button
+    var addBtn = document.getElementById('lp-add-btn');
+    if (addBtn) {
+      var canEdit = window._canManageLiquidProducts && window._canManageLiquidProducts();
+      addBtn.style.display = canEdit ? '' : 'none';
+    }
+
+    // Check for containers needing retag
+    var containers = await window.db.select('liquid_containers', '?archived=is.false&order=reference.asc&limit=5000').catch(function(){ return []; });
+    var clients = await window.db.select('clients', '?order=name.asc&limit=500').catch(function(){ return []; });
+    var activeNames = new Set(rows.filter(function(r){ return r.is_active !== false; }).map(function(r){ return r.name; }));
+    var unmatched = containers.filter(function(c){ return c.spirit_type && !activeNames.has(c.spirit_type); });
+    var retagWrap = document.getElementById('lp-retag-wrap');
+    var retagTbody = document.getElementById('lp-retag-tbody');
+    if (retagWrap && retagTbody) {
+      if (unmatched.length) {
+        var retagHtml = unmatched.map(function(c) {
+          var cl = clients.find(function(x){ return x.id === c.client_id; });
+          var cName = cl ? cl.name : (c.client_id || '—');
+          return '<tr>'
+            + '<td style="font-weight:600;color:var(--white);">' + escapeHtml(c.reference) + '</td>'
+            + '<td class="mob-hide" style="font-size:12px;">' + escapeHtml(cName) + '</td>'
+            + '<td style="font-size:12px;color:var(--gold);">' + escapeHtml(c.spirit_type) + '</td>'
+            + '<td><button onclick="window.editContainer(\'' + c.id + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:10px;padding:3px 10px;cursor:pointer;border-radius:2px;font-family:Lato,sans-serif;">Update</button></td>'
+            + '</tr>';
+        }).join('');
+        retagTbody.innerHTML = retagHtml;
+        retagWrap.style.display = '';
+      } else {
+        retagWrap.style.display = 'none';
+      }
+    }
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--red);padding:24px;text-align:center;">Error: ' + e.message + '</td></tr>';
+  }
+};
+
+function renderLiquidProducts(rows) {
+  var tbody = document.getElementById('lp-tbody');
+  if (!tbody) return;
+  var active = rows.filter(function(r){ return r.is_active !== false; });
+  var archived = rows.filter(function(r){ return r.is_active === false; });
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:32px;">No liquid products yet — click <strong>+ Add Liquid Product</strong> to create the first entry.</td></tr>';
+    return;
+  }
+  var canEdit = window._canManageLiquidProducts && window._canManageLiquidProducts();
+  var html = '';
+  active.forEach(function(r) {
+    html += '<tr>'
+      + '<td style="font-weight:600;color:var(--white);">' + escapeHtml(r.name) + '</td>'
+      + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + (r.created_at ? fmtDate(r.created_at) : '—') + '</td>'
+      + '<td style="text-align:right;">';
+    if (canEdit) {
+      html += '<button onclick="window.openLPModal(\'' + r.id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;padding:3px 10px;cursor:pointer;border-radius:2px;font-family:Lato,sans-serif;margin-right:6px;">Edit</button>'
+           + '<button onclick="window.archiveLiquidProduct(\'' + r.id + '\',\'' + escapeHtml(r.name).replace(/'/g,'\\\'') + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--red);font-size:10px;padding:3px 10px;cursor:pointer;border-radius:2px;font-family:Lato,sans-serif;">Archive</button>';
+    }
+    html += '</td></tr>';
+  });
+  if (archived.length) {
+    html += '<tr><td colspan="3" style="padding:12px 0 4px;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);border-top:1px solid var(--navy-border);">Archived</td></tr>';
+    archived.forEach(function(r) {
+      html += '<tr style="opacity:0.45;">'
+        + '<td style="font-style:italic;color:var(--muted);">' + escapeHtml(r.name) + '</td>'
+        + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + (r.created_at ? fmtDate(r.created_at) : '—') + '</td>'
+        + '<td style="text-align:right;">';
+      if (canEdit) {
+        html += '<button onclick="window.restoreLiquidProduct(\'' + r.id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:10px;padding:3px 10px;cursor:pointer;border-radius:2px;font-family:Lato,sans-serif;">Restore</button>';
+      }
+      html += '</td></tr>';
+    });
+  }
+  tbody.innerHTML = html;
+}
+
+window.openLPModal = function(editId) {
+  var modal = document.getElementById('lp-modal');
+  var title = document.getElementById('lp-modal-title');
+  var nameIn = document.getElementById('lp-name');
+  var idIn = document.getElementById('lp-edit-id');
+  if (!modal) return;
+  idIn.value = editId || '';
+  nameIn.value = '';
+  title.textContent = editId ? 'Edit Product' : 'Add Product';
+  if (editId) {
+    var existing = (window._liquidProducts || []).find(function(r){ return r.id === editId; });
+    if (existing) nameIn.value = existing.name;
+  }
+  modal.style.display = 'flex';
+  setTimeout(function(){ nameIn.focus(); }, 80);
+};
+
+window.closeLPModal = function() {
+  var modal = document.getElementById('lp-modal');
+  if (modal) modal.style.display = 'none';
+};
+
+window.saveLiquidProduct = async function() {
+  var name = (document.getElementById('lp-name')||{}).value.trim();
+  var editId = (document.getElementById('lp-edit-id')||{}).value.trim();
+  if (!name) { toast('Product name is required', 'warn'); return; }
+  try {
+    if (editId) {
+      await window.db.update('liquid_products', { id: 'eq.' + editId }, { name: name });
+      toast('Product updated');
+    } else {
+      await window.db.insert('liquid_products', { name: name });
+      toast('Product added');
+    }
+    window.closeLPModal();
+    await window.loadLiquidProducts();
+    // Refresh any open dropdowns elsewhere
+    window._refreshLiquidProductDropdowns && window._refreshLiquidProductDropdowns();
+  } catch(e) {
+    if (e.message && e.message.indexOf('23505') > -1) {
+      toast('A product with that name already exists', 'warn');
+    } else {
+      logError('saveLiquidProduct', e);
+      toast('Error saving product: ' + e.message, 'error');
+    }
+  }
+};
+
+window.archiveLiquidProduct = async function(id, name) {
+  if (!confirm('Archive "' + name + '"? It will no longer appear in dropdowns but existing records are preserved.')) return;
+  try {
+    await window.db.update('liquid_products', { id: 'eq.' + id }, { is_active: false });
+    toast('"' + name + '" archived');
+    await window.loadLiquidProducts();
+    window._refreshLiquidProductDropdowns && window._refreshLiquidProductDropdowns();
+  } catch(e) {
+    logError('archiveLiquidProduct', e);
+    toast('Error archiving: ' + e.message, 'error');
+  }
+};
+
+window.restoreLiquidProduct = async function(id) {
+  try {
+    await window.db.update('liquid_products', { id: 'eq.' + id }, { is_active: true });
+    toast('Product restored');
+    await window.loadLiquidProducts();
+    window._refreshLiquidProductDropdowns && window._refreshLiquidProductDropdowns();
+  } catch(e) {
+    logError('restoreLiquidProduct', e);
+    toast('Error restoring: ' + e.message, 'error');
+  }
+};
+
+// Returns a promise resolving to the active product list (uses cache if warm)
+window.getLiquidProducts = async function(forceRefresh) {
+  if (!forceRefresh && window._liquidProducts && window._liquidProducts.length) {
+    return window._liquidProducts.filter(function(r){ return r.is_active !== false; });
+  }
+  var rows = await window.db.select('liquid_products', '?is_active=eq.true&order=sort_order.asc,name.asc&limit=500');
+  window._liquidProducts = rows;
+  return rows;
+};
+
+// Populate any <select> element with active liquid products
+// Pass currentValue to pre-select; pass allowBlank to include empty option
+// If currentValue doesn't match any product (legacy free-text), adds it as a
+// highlighted option so the user can see it and migrate to the standard name.
+window.populateLiquidProductSelect = async function(selectEl, currentValue, allowBlank) {
+  if (!selectEl) return;
+  var products = await window.getLiquidProducts();
+  var html = allowBlank ? '<option value="">— Select liquid product —</option>' : '';
+  var matched = false;
+  products.forEach(function(p) {
+    var sel = (currentValue && currentValue === p.name) ? ' selected' : '';
+    if (sel) matched = true;
+    html += '<option value="' + escapeHtml(p.name) + '"' + sel + '>' + escapeHtml(p.name) + '</option>';
+  });
+  // Legacy value not in register — show as a warning option so user knows to update
+  if (currentValue && !matched) {
+    html += '<option value="' + escapeHtml(currentValue) + '" selected style="color:#e57c00;">⚠ ' + escapeHtml(currentValue) + ' (not in register — please update)</option>';
+  }
+  selectEl.innerHTML = html;
+};
+
+// Refresh all open liquid-product selects across the page
+window._refreshLiquidProductDropdowns = function() {
+  document.querySelectorAll('select.lp-select').forEach(function(sel) {
+    var cur = sel.value;
+    window.populateLiquidProductSelect(sel, cur, true);
+  });
+};
+
+// ── Role guard for managing the register ──────────────────────────────────────
+// Roles allowed: warehouse manager, liquid manager, ops director, managing director,
+//               quality and compliance manager, client coordinator
+var LP_MANAGER_ROLES = ['warehouse', 'liquid', 'ops director', 'managing director', 'quality', 'compliance', 'client coordinator', 'admin'];
+window._canManageLiquidProducts = function() {
+  var role = (window._userRole || '').toLowerCase();
+  if (!role) return true; // no role system loaded — allow access
+  return LP_MANAGER_ROLES.some(function(r){ return role.indexOf(r) > -1; });
 };
 
 // ══ LIQUID ════════════════════════════════════════════════════════════════════
@@ -12002,11 +12297,11 @@ window.openContainerModal = async function(editId) {
       + approvedSups.map(function(s) { return '<option value="' + s.id + '">' + s.name + '</option>'; }).join('');
   }
 
-  // Build in-memory suggestion list for custom spirit autocomplete
-  var _cmSpiritSeen = {};
-  window._cmSpiritNames = [];
-  _liquid.forEach(function(lc){ if(lc.spirit_type){ var f=_fmtSpiritType(lc.spirit_type); if(!_cmSpiritSeen[f]){_cmSpiritSeen[f]=1;window._cmSpiritNames.push(f);} } });
-  window._cmSpiritNames.sort();
+  // Populate liquid product dropdown
+  var spiritSel = gid('cm-spirit');
+  if (spiritSel) {
+    await window.populateLiquidProductSelect(spiritSel, null, true);
+  }
 
   if (editId) {
     var c = _liquid.find(function(x){ return x.id === editId; });
@@ -12014,7 +12309,9 @@ window.openContainerModal = async function(editId) {
       var sv = function(id, v){ var e = gid(id); if(e) e.value = (v == null ? '' : String(v)); };
       sv('cm-type', c.type); sv('cm-reference', c.reference); sv('cm-client', c.client_id);
       sv('cm-capacity', c.capacity_litres); sv('cm-location', c.location);
-      sv('cm-spirit', c.spirit_type||''); sv('cm-cbw', c.cbw_rotation||'');
+      sv('cm-cbw', c.cbw_rotation||'');
+      // Set spirit dropdown — re-populate with current value pre-selected
+      if (spiritSel) await window.populateLiquidProductSelect(spiritSel, c.spirit_type||'', true);
       sv('cm-abv', c.abv); sv('cm-litres', c.current_litres);
       sv('cm-lpa', c.current_lpa); sv('cm-lpa-price', c.lpa_price||'');
       sv('cm-lpa-value', c.lpa_price && c.current_lpa ? (parseFloat(c.current_lpa)*parseFloat(c.lpa_price)).toFixed(2) : '');
@@ -16243,14 +16540,18 @@ window.saveAdjModal = async function() {
         _activeConts = _allConts.filter(function(c){ return parseFloat(c.current_litres||0) > 0; });
       } catch(e2) { /* non-critical */ }
 
-      // Fetch BOM liquid SKU description for display (non-critical)
+      // Fetch BOM liquid specification for display (non-critical)
       var _lsoLiquidSkuDesc = null;
       if (j && j.bom_id) {
         try {
-          var _bomR = await supaGet('boms?id=eq.' + j.bom_id + '&select=liquid_sku_id');
-          if (_bomR && _bomR[0] && _bomR[0].liquid_sku_id) {
-            var _skuR = await supaGet('dry_goods_skus?id=eq.' + _bomR[0].liquid_sku_id + '&select=description');
-            if (_skuR && _skuR[0]) _lsoLiquidSkuDesc = _skuR[0].description || null;
+          var _bomR = await supaGet('boms?id=eq.' + j.bom_id + '&select=liquid_spec,liquid_sku_id');
+          if (_bomR && _bomR[0]) {
+            if (_bomR[0].liquid_spec) {
+              _lsoLiquidSkuDesc = _bomR[0].liquid_spec;
+            } else if (_bomR[0].liquid_sku_id) {
+              var _skuR = await supaGet('dry_goods_skus?id=eq.' + _bomR[0].liquid_sku_id + '&select=description');
+              if (_skuR && _skuR[0]) _lsoLiquidSkuDesc = _skuR[0].description || null;
+            }
           }
         } catch(e3) { /* non-critical */ }
       }
@@ -16595,15 +16896,22 @@ window.saveAdjModal = async function() {
       : '—';
     var printedAt  = new Date().toLocaleString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
 
-    // ── Fetch BOM + Liquid SKU description ───────────────────────────────────
+    // ── Fetch BOM + Liquid Specification ─────────────────────────────────────
     var bom = null, liquidSkuDesc = '—';
     if (j.bom_id) {
       try {
         var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=*');
         bom = bomRows && bomRows[0];
-        if (bom && bom.liquid_sku_id) {
-          var skuRows = await supaGet('dry_goods_skus?id=eq.' + bom.liquid_sku_id + '&select=id,description');
-          if (skuRows && skuRows[0]) liquidSkuDesc = skuRows[0].description || '—';
+        if (bom) {
+          // Prefer new liquid_spec text field; fall back to dry_goods_skus lookup for old records
+          if (bom.liquid_spec) {
+            liquidSkuDesc = bom.liquid_spec;
+          } else if (bom.liquid_sku_id) {
+            try {
+              var skuRows = await supaGet('dry_goods_skus?id=eq.' + bom.liquid_sku_id + '&select=id,description');
+              if (skuRows && skuRows[0]) liquidSkuDesc = skuRows[0].description || '—';
+            } catch(e) { /* non-critical */ }
+          }
         }
       } catch(e) { /* non-critical */ }
     }
@@ -19154,24 +19462,14 @@ window.saveAdjModal = async function() {
       csel.innerHTML = _blClients.map(function(c){ return '<option value="' + c.id + '">' + window.escapeHtml(c.name) + '</option>'; }).join('');
       Array.from(csel.options).forEach(function(o){ if (o.text.toLowerCase().indexOf('lighthouse') >= 0) { csel.value = o.value; } });
     }
-    // Build in-memory suggestion list for custom autocomplete
-    var names = {};
-    _bl.forEach(function(c){ if (c.spirit_type) names[_fmtSpirit(c.spirit_type)] = 1; });
-    window._blacSpiritNames = Object.keys(names).sort();
+    // Populate spirit/product dropdown from liquid products register
+    var blacSpiritSel = document.getElementById('blac-spirit');
+    if (blacSpiritSel) {
+      window.populateLiquidProductSelect(blacSpiritSel, null, true);
+    }
     handleBLACTypeChange();
   }
 
-  window.blacSpiritSuggest = function(inp) {
-    var box = document.getElementById('blac-spirit-suggestions');
-    if (!box) return;
-    var q = (inp.value || '').toLowerCase().trim();
-    var list = (window._blacSpiritNames || []).filter(function(n){ return !q || n.toLowerCase().indexOf(q) >= 0; });
-    if (!list.length) { box.style.display = 'none'; return; }
-    box.innerHTML = list.map(function(n){
-      return '<div class="ac-suggestion" onmousedown="document.getElementById(\'blac-spirit\').value=\'' + window.escapeHtml(n.replace(/'/g,"\\'")) + '\';document.getElementById(\'blac-spirit-suggestions\').style.display=\'none\';">' + window.escapeHtml(n) + '</div>';
-    }).join('');
-    box.style.display = '';
-  };
 
   window.handleBLACTypeChange = function() {
     var typeEl = document.getElementById('blac-type');
@@ -20246,17 +20544,6 @@ window.saveAdjModal = async function() {
     box.style.display = '';
   };
 
-  window.cmSpiritSuggest = function(inp) {
-    var box = document.getElementById('cm-spirit-suggestions');
-    if (!box) return;
-    var q = (inp.value || '').toLowerCase().trim();
-    var list = (window._cmSpiritNames || []).filter(function(n){ return !q || n.toLowerCase().indexOf(q) >= 0; });
-    if (!list.length) { box.style.display = 'none'; return; }
-    box.innerHTML = list.map(function(n){
-      return '<div class="ac-suggestion" onmousedown="document.getElementById(\'cm-spirit\').value=\'' + window.escapeHtml(n.replace(/'/g,"\\'")) + '\';document.getElementById(\'cm-spirit-suggestions\').style.display=\'none\';">' + window.escapeHtml(n) + '</div>';
-    }).join('');
-    box.style.display = '';
-  };
 
   window.addBLBlendSource = function() {
     var idx = _blendSrcIdx++;
