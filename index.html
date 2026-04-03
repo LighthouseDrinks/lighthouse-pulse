@@ -16899,7 +16899,7 @@ window.saveAdjModal = async function() {
       var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">'
         + '<div style="font-size:14px;font-weight:700;color:var(--white);">Liquid Sign-Off</div>'
         + '<div style="display:flex;gap:8px;align-items:center;">'
-        + '<button data-job="' + jobId + '" onclick="window.printLiquidSignoff(this.dataset.job)" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#128424; Print Spec Sheet</button>'
+        + '<button data-job="' + jobId + '" onclick="window.printLiquidSignoff(this.dataset.job)" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#128424; Print Work Order</button>'
         + signedBlock
         + '</div></div>'
         + lockedBanner;
@@ -17236,6 +17236,7 @@ window.saveAdjModal = async function() {
       ? new Date(j.scheduled_start).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'})
       : '—';
     var printedAt  = new Date().toLocaleString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+    var jobRef     = j.job_number || j.reference || jobId;
 
     // ── Fetch BOM + Liquid Specification ─────────────────────────────────────
     var bom = null, liquidSkuDesc = '—';
@@ -17257,74 +17258,95 @@ window.saveAdjModal = async function() {
       } catch(e) { /* non-critical */ }
     }
 
-    // ── Fetch sign-off record + linked container ──────────────────────────────
-    var signoff = null, container = null;
+    // ── Fetch sign-off record + all linked containers ─────────────────────────
+    var signoff = null, linkedContainers = [];
     try {
       var soRows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1');
       signoff = soRows && soRows[0];
-      if (signoff && signoff.linked_container_id) {
-        var cRows = await supaGet('liquid_containers?id=eq.' + signoff.linked_container_id + '&select=*');
-        container = cRows && cRows[0];
+      if (signoff) {
+        // Prefer multi-container JSON; fall back to single linked_container_id
+        var lcParsed = [];
+        try { lcParsed = JSON.parse(signoff.linked_containers_json || '[]'); } catch(e4) {}
+        if (!lcParsed.length && signoff.linked_container_id) {
+          lcParsed = [{ id: signoff.linked_container_id }];
+        }
+        if (lcParsed.length) {
+          var lcIds = lcParsed.map(function(lc){ return lc.id; }).filter(Boolean);
+          var cRows = await supaGet('liquid_containers?id=in.(' + lcIds.join(',') + ')&select=*');
+          linkedContainers = cRows || [];
+        }
       }
     } catch(e) { /* non-critical */ }
 
     // ── Calculations ──────────────────────────────────────────────────────────
     var reqLitres   = parseFloat(j.liquid_litres || 0);
-    var reqAbv      = parseFloat(j.abv_in || 0);
+    var reqAbv      = parseFloat(j.abv_in || (bom && bom.bottling_abv) || 0);
+    // Calculate from bottle_target + BOM volume if liquid_litres not set
+    if (!reqLitres && j.bottle_target && bom && bom.volume_cl) {
+      reqLitres = (j.bottle_target * parseFloat(bom.volume_cl)) / 100;
+    }
     var reqLpa      = (reqLitres && reqAbv) ? (reqLitres * reqAbv / 100) : null;
     var finalLitres = parseFloat(j.final_litres || 0);
     var waterReq    = parseFloat(j.water_required || 0);
-    var availLpa    = container ? parseFloat(container.current_lpa || 0) : null;
-    var availLitres = container ? parseFloat(container.current_litres || 0) : null;
-    var availAbv    = container ? parseFloat(container.abv || 0) : null;
-    var lpaVariance = (reqLpa != null && availLpa != null) ? (availLpa - reqLpa) : null;
-    var abvMismatch = (reqAbv && availAbv) ? Math.abs(availAbv - reqAbv) > 0.1 : false;
-    var contCap     = container ? parseFloat(container.capacity_litres || 0) : 0;
-    var contPct     = (contCap > 0 && availLitres != null) ? Math.min(100, Math.round(availLitres / contCap * 100)) : null;
 
-    // ── CSS & helper builders ─────────────────────────────────────────────────
+    // Totals across all linked containers
+    var totalLinkedLitres = linkedContainers.reduce(function(s, c){ return s + parseFloat(c.current_litres||0); }, 0);
+    var totalLinkedLPA    = linkedContainers.reduce(function(s, c){ return s + parseFloat(c.current_lpa||0); }, 0);
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
     var S = {
-      page: 'font-family:Arial,sans-serif;color:#111;font-size:12px;padding:28px 32px;max-width:780px;margin:0 auto;',
-      h1:   'font-size:22px;font-weight:700;color:#0d3349;letter-spacing:-0.02em;',
-      sub:  'font-size:11px;color:#666;margin-top:2px;',
-      jobBox: 'border:2px solid #c9a84c;padding:8px 16px;border-radius:4px;text-align:right;',
+      page:      'font-family:Arial,sans-serif;color:#111;font-size:12px;padding:28px 32px;max-width:800px;margin:0 auto;',
+      h1:        'font-size:22px;font-weight:700;color:#0d3349;letter-spacing:-0.02em;',
+      sub:       'font-size:11px;color:#666;margin-top:2px;',
+      jobBox:    'border:2px solid #c9a84c;padding:8px 16px;border-radius:4px;text-align:right;',
       sectionHd: 'font-size:9px;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;color:#c9a84c;margin:20px 0 8px;padding-bottom:5px;border-bottom:2px solid #c9a84c;',
-      grid2: 'display:grid;grid-template-columns:1fr 1fr;gap:0 32px;',
-      label: 'font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;',
-      value: 'font-size:13px;font-weight:700;color:#111;',
-      frow:  'padding:7px 0;border-bottom:1px solid #e8e8e8;display:flex;justify-content:space-between;align-items:baseline;',
-      fl:    'font-size:11px;color:#666;font-weight:600;',
-      fv:    'font-size:13px;font-weight:700;color:#111;',
-      pill:  function(txt, colour) { return '<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;padding:3px 10px;border-radius:3px;background:' + colour + ';text-transform:uppercase;">' + txt + '</span>'; },
-      warn:  'background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px 12px;font-size:11px;color:#856404;margin:10px 0;',
-      ok:    'background:#d4edda;border:1px solid #28a745;border-radius:4px;padding:8px 12px;font-size:11px;color:#155724;margin:10px 0;',
-      err:   'background:#f8d7da;border:1px solid #dc3545;border-radius:4px;padding:8px 12px;font-size:11px;color:#721c24;margin:10px 0;',
-      sigBox: 'border:1px solid #999;border-radius:4px;padding:14px 16px;margin-top:10px;',
-      sigLine: 'border-bottom:1px solid #999;height:32px;margin-bottom:6px;',
+      grid2:     'display:grid;grid-template-columns:1fr 1fr;gap:0 32px;',
+      label:     'font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;',
+      frow:      'padding:7px 0;border-bottom:1px solid #e8e8e8;display:flex;justify-content:space-between;align-items:baseline;',
+      fl:        'font-size:11px;color:#555;font-weight:600;',
+      fv:        'font-size:13px;font-weight:700;color:#111;',
+      pill:      function(txt, bg, col) { return '<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;padding:3px 10px;border-radius:3px;background:' + bg + ';color:' + (col||'#333') + ';text-transform:uppercase;">' + txt + '</span>'; },
+      pillYes:   function(txt) { return '<span style="display:inline-block;font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;background:#fff3cd;color:#856404;text-transform:uppercase;border:1px solid #ffc107;">' + txt + '</span>'; },
+      pillNo:    function()    { return '<span style="display:inline-block;font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;background:#e8f5e9;color:#2e7d32;text-transform:uppercase;border:1px solid #a5d6a7;">No</span>'; },
+      warn:      'background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px 12px;font-size:11px;color:#856404;margin:8px 0;',
+      ok:        'background:#d4edda;border:1px solid #28a745;border-radius:4px;padding:8px 12px;font-size:11px;color:#155724;margin:8px 0;',
+      err:       'background:#f8d7da;border:1px solid #dc3545;border-radius:4px;padding:8px 12px;font-size:11px;color:#721c24;margin:8px 0;',
+      sigBox:    'border:1px solid #bbb;border-radius:4px;padding:14px 18px;margin-top:8px;background:#fafafa;',
+      sigLine:   'border-bottom:1.5px solid #999;height:32px;margin-bottom:4px;',
+      stepBox:   'border-left:3px solid #c9a84c;padding:10px 14px;background:#fffdf0;margin-bottom:8px;border-radius:0 4px 4px 0;',
+      stepNo:    'display:inline-block;width:22px;height:22px;background:#0d3349;color:#fff;border-radius:50%;font-weight:700;font-size:11px;text-align:center;line-height:22px;margin-right:8px;flex-shrink:0;',
     };
-
     function frow(label, val) {
       return '<div style="' + S.frow + '"><span style="' + S.fl + '">' + label + '</span><span style="' + S.fv + '">' + val + '</span></div>';
     }
     function kpi(label, val, colour) {
       return '<div style="text-align:center;padding:12px 8px;border:1px solid #e0e0e0;border-radius:4px;background:#fafafa;">'
         + '<div style="' + S.label + '">' + label + '</div>'
-        + '<div style="font-size:20px;font-weight:800;color:' + (colour||'#0d3349') + ';">' + val + '</div></div>';
+        + '<div style="font-size:20px;font-weight:800;color:' + (colour||'#0d3349') + ';margin-top:4px;">' + val + '</div></div>';
+    }
+    function step(num, title, body) {
+      return '<div style="' + S.stepBox + 'display:flex;align-items:flex-start;gap:10px;">'
+        + '<div><span style="' + S.stepNo + '">' + num + '</span></div>'
+        + '<div style="flex:1;"><div style="font-size:12px;font-weight:700;color:#0d3349;margin-bottom:4px;">' + title + '</div>'
+        + '<div style="font-size:11px;color:#333;">' + body + '</div></div></div>';
     }
     function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-    // ── Build HTML ────────────────────────────────────────────────────────────
+    var dilution = !!(j.dilution);
     var h = '';
 
-    // Header
-    h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;padding-bottom:14px;border-bottom:3px solid #c9a84c;">';
-    h += '<div><div style="' + S.h1 + '">Liquid Spec Sheet</div>';
-    h += '<div style="' + S.sub + '">Lighthouse Drinks Ltd &nbsp;·&nbsp; Printed: ' + esc(printedAt) + '</div></div>';
+    // ── Header ────────────────────────────────────────────────────────────────
+    h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;padding-bottom:14px;border-bottom:3px solid #c9a84c;">';
+    h += '<div>';
+    h += '<div style="' + S.h1 + '">Liquid Manager Work Order</div>';
+    h += '<div style="' + S.sub + '">Lighthouse Drinks Ltd &nbsp;·&nbsp; Printed: ' + esc(printedAt) + '</div>';
+    h += '</div>';
     h += '<div style="' + S.jobBox + '">';
-    h += '<div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;">Job No</div>';
-    h += '<div style="font-size:20px;font-weight:800;color:#c9a84c;font-family:monospace;letter-spacing:0.04em;">' + esc(jobId) + '</div></div></div>';
+    h += '<div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;">Job Reference</div>';
+    h += '<div style="font-size:22px;font-weight:800;color:#c9a84c;font-family:monospace;letter-spacing:0.04em;">' + esc(jobRef) + '</div>';
+    h += '</div></div>';
 
-    // Job Summary
+    // ── Job Summary ───────────────────────────────────────────────────────────
     h += '<div style="' + S.sectionHd + '">Job Summary</div>';
     h += '<div style="' + S.grid2 + '"><div>';
     h += frow('Product', esc(j.product_name || '—'));
@@ -17333,98 +17355,63 @@ window.saveAdjModal = async function() {
     h += '</div><div>';
     h += frow('Scheduled Date', esc(schedDate));
     h += frow('Bottle Target', j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—');
-    h += frow('Liquid Target', reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—');
+    h += frow('BOM Liquid Spec', esc(liquidSkuDesc));
     h += '</div></div>';
 
-    // BOM Liquid Specification
-    h += '<div style="' + S.sectionHd + '">BOM Liquid Specification</div>';
-    h += '<div style="padding:12px 16px;background:#f8f8f0;border:1px solid #d8d0a0;border-radius:4px;margin-bottom:10px;">';
-    h += '<div style="' + S.label + '">Specified Liquid (from BOM)</div>';
-    h += '<div style="font-size:15px;font-weight:700;color:#0d3349;margin-top:4px;">' + esc(liquidSkuDesc) + '</div>';
-    if (bom && bom.product_name) h += '<div style="font-size:11px;color:#666;margin-top:2px;">BOM: ' + esc(bom.product_name || '') + '</div>';
-    h += '</div>';
-
-    // Volume & LPA Requirements
-    h += '<div style="' + S.sectionHd + '">Volume &amp; LPA Requirements</div>';
-    h += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">';
+    // ── Liquid Requirement ────────────────────────────────────────────────────
+    h += '<div style="' + S.sectionHd + '">Liquid Requirement</div>';
+    var cols = dilution ? 4 : 3;
+    h += '<div style="display:grid;grid-template-columns:repeat(' + cols + ',1fr);gap:10px;margin-bottom:10px;">';
     h += kpi('Litres Required', reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—', '#0d3349');
-    h += kpi('Target ABV', reqAbv > 0 ? reqAbv.toFixed(1) + '%' : '—', '#c9a84c');
+    h += kpi('Bottling ABV', reqAbv > 0 ? reqAbv.toFixed(1) + '%' : '—', '#c9a84c');
     h += kpi('Required LPA', reqLpa != null ? reqLpa.toFixed(3) : '—', '#0d3349');
-    h += kpi('Final Litres', finalLitres > 0 ? finalLitres.toFixed(1) + ' L' : (reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—'), '#555');
-    h += '</div>';
-    if (reqLpa != null) {
-      h += '<div style="font-size:10px;color:#888;text-align:right;margin-bottom:10px;">LPA = Litres × ABV ÷ 100 &nbsp;=&nbsp; ' + reqLitres.toFixed(1) + ' × ' + reqAbv.toFixed(1) + ' ÷ 100 = <strong>' + reqLpa.toFixed(3) + ' LPA</strong></div>';
+    if (dilution) {
+      h += kpi('Final Litres (after dilution)', finalLitres > 0 ? finalLitres.toFixed(1) + ' L' : '—', '#555');
     }
+    h += '</div>';
 
-    // Preparation Instructions
-    h += '<div style="' + S.sectionHd + '">Preparation Instructions</div>';
-    var dilution = !!(j.dilution);
-    h += frow('Dilution required', dilution ? S.pill('YES — DILUTION REQUIRED','#fff3cd') + ' &nbsp; <span style="font-size:11px;color:#856404;">Add ' + (waterReq > 0 ? waterReq.toFixed(1) + ' L water' : '— L water') + ' → final ' + (finalLitres > 0 ? finalLitres.toFixed(1) + ' L' : '—') + '</span>' : S.pill('No','#e8f5e9'));
-    h += frow('Chill filtration', j.chill_filtration ? S.pill('YES — REQUIRED','#fff3cd') : S.pill('No','#e8f5e9'));
-    var colourSpec = bom && bom.colour_spec ? bom.colour_spec : null;
-    h += frow('Colouring', j.colouring ? S.pill('YES — REQUIRED','#fff3cd') + (colourSpec ? ' &nbsp;<span style="font-size:11px;color:#666;">Spec: ' + esc(colourSpec) + '</span>' : '') : S.pill('No','#e8f5e9'));
-    if (j.notes) h += frow('Job Notes', '<span style="font-size:11px;color:#555;">' + esc(j.notes) + '</span>');
-
-    // Linked Container
-    h += '<div style="' + S.sectionHd + '">Source Container</div>';
-    if (container) {
+    // ── Source Containers ─────────────────────────────────────────────────────
+    h += '<div style="' + S.sectionHd + '">Source Container' + (linkedContainers.length > 1 ? 's' : '') + '</div>';
+    if (linkedContainers.length) {
       var contTypeMap = {cask:'Cask',ibc:'IBC',blue_drum:'Blue Drum',tank:'Tank',tanker:'Tanker'};
-      var contType    = contTypeMap[container.type] || container.type || '—';
-      var spiritDisp  = availLitres > 0 && container.spirit_type
-        ? container.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();})
-        : 'EMPTY';
-      h += '<div style="padding:12px 16px;background:#f0f8f0;border:1px solid #90c090;border-radius:4px;margin-bottom:10px;">';
-      h += '<div style="font-size:11px;color:#155724;font-weight:700;margin-bottom:8px;">&#10003; Container Linked</div>';
-      h += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px;">';
-      h += kpi('Reference', esc(container.reference || '—'), '#0d3349');
-      h += kpi('Type', esc(contType), '#555');
-      h += kpi('Spirit / Product', esc(spiritDisp), availLitres > 0 ? '#c9a84c' : '#999');
-      h += kpi('CBW Rotation', esc(container.cbw_rotation || '—'), '#555');
-      h += '</div>';
-      h += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;">';
-      h += kpi('Current Litres', availLitres != null ? availLitres.toFixed(1) + ' L' : '—', '#0d3349');
-      h += kpi('ABV', availAbv ? availAbv.toFixed(1) + '%' : '—', '#c9a84c');
-      h += kpi('LPA (stored)', availLpa != null ? availLpa.toFixed(3) : '—', '#0d3349');
-      h += kpi('Capacity', contCap > 0 ? contCap.toFixed(0) + 'L (' + (contPct != null ? contPct + '%' : '—') + ' full)' : '—', '#555');
-      h += '</div></div>';
-
-      // Variance check
-      h += '<div style="' + S.sectionHd + '">Variance Check</div>';
-      h += '<div style="border:1px solid #e0e0e0;border-radius:4px;overflow:hidden;margin-bottom:10px;">';
-      h += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
-      h += '<thead><tr style="background:#f0f0f0;"><th style="padding:7px 12px;text-align:left;font-weight:600;color:#333;border-bottom:1px solid #e0e0e0;">Metric</th><th style="padding:7px 12px;text-align:right;font-weight:600;color:#333;border-bottom:1px solid #e0e0e0;">Required</th><th style="padding:7px 12px;text-align:right;font-weight:600;color:#333;border-bottom:1px solid #e0e0e0;">Available in Container</th><th style="padding:7px 12px;text-align:right;font-weight:600;color:#333;border-bottom:1px solid #e0e0e0;">Variance</th></tr></thead>';
-      h += '<tbody>';
-      // LPA row
-      var lpaVar = lpaVariance != null ? lpaVariance.toFixed(3) : '—';
-      var lpaVarCol = lpaVariance == null ? '#111' : lpaVariance >= 0 ? '#155724' : '#721c24';
-      h += '<tr style="border-bottom:1px solid #f0f0f0;">';
-      h += '<td style="padding:7px 12px;font-weight:600;">LPA</td>';
-      h += '<td style="padding:7px 12px;text-align:right;">' + (reqLpa != null ? reqLpa.toFixed(3) : '—') + '</td>';
-      h += '<td style="padding:7px 12px;text-align:right;">' + (availLpa != null ? availLpa.toFixed(3) : '—') + '</td>';
-      h += '<td style="padding:7px 12px;text-align:right;font-weight:700;color:' + lpaVarCol + ';">' + (lpaVariance != null ? (lpaVariance >= 0 ? '+' : '') + lpaVar : '—') + '</td></tr>';
-      // Litres row
-      var litresDiff = (reqLitres && availLitres != null) ? availLitres - reqLitres : null;
-      var litresDiffCol = litresDiff == null ? '#111' : litresDiff >= 0 ? '#155724' : '#721c24';
-      h += '<tr>';
-      h += '<td style="padding:7px 12px;font-weight:600;">Litres</td>';
-      h += '<td style="padding:7px 12px;text-align:right;">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—') + '</td>';
-      h += '<td style="padding:7px 12px;text-align:right;">' + (availLitres != null ? availLitres.toFixed(1) + ' L' : '—') + '</td>';
-      h += '<td style="padding:7px 12px;text-align:right;font-weight:700;color:' + litresDiffCol + ';">' + (litresDiff != null ? (litresDiff >= 0 ? '+' : '') + litresDiff.toFixed(1) + ' L' : '—') + '</td></tr>';
-      h += '</tbody></table></div>';
-      // ABV check
-      if (abvMismatch) {
-        h += '<div style="' + S.err + '">&#9888; ABV Mismatch: Container is <strong>' + (availAbv||'?') + '%</strong> but job specifies <strong>' + (reqAbv||'?') + '%</strong>. Proceed only if intentional (e.g. liquid not yet diluted to target ABV).</div>';
-      } else if (reqAbv && availAbv) {
-        h += '<div style="' + S.ok + '">&#10003; ABV confirmed: Container (' + availAbv.toFixed(1) + '%) matches job target (' + reqAbv.toFixed(1) + '%) within tolerance.</div>';
+      linkedContainers.forEach(function(c, ci) {
+        var cType     = contTypeMap[c.type] || c.type || '—';
+        var cLitres   = parseFloat(c.current_litres||0);
+        var cLPA      = parseFloat(c.current_lpa||0);
+        var cAbv      = parseFloat(c.abv||0);
+        var spiritDisp = c.spirit_type
+          ? c.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();})
+          : '—';
+        h += '<div style="padding:12px 16px;background:#f0f8f0;border:1px solid #90c090;border-radius:4px;margin-bottom:8px;">';
+        if (linkedContainers.length > 1) h += '<div style="font-size:10px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Container ' + (ci+1) + '</div>';
+        h += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;">';
+        h += kpi('Reference', esc(c.reference||'—'), '#0d3349');
+        h += kpi('Type', esc(cType), '#555');
+        h += kpi('Spirit / Product', esc(spiritDisp), '#c9a84c');
+        h += kpi('Litres Available', cLitres.toFixed(1) + ' L', '#0d3349');
+        h += kpi('ABV', cAbv > 0 ? cAbv.toFixed(1) + '%' : '—', '#c9a84c');
+        h += '</div>';
+        if (c.cbw_rotation) {
+          h += '<div style="font-size:11px;color:#555;margin-top:8px;"><strong>CBW Rotation:</strong> ' + esc(c.cbw_rotation) + '</div>';
+        }
+        h += '</div>';
+      });
+      // Combined totals if multiple containers
+      if (linkedContainers.length > 1) {
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:6px;">';
+        h += kpi('Total Litres Linked', totalLinkedLitres.toFixed(1) + ' L', reqLitres > 0 && totalLinkedLitres >= reqLitres * 0.99 ? '#155724' : '#721c24');
+        h += kpi('Total LPA Linked', totalLinkedLPA.toFixed(3), '#0d3349');
+        var surplusL = reqLitres > 0 ? totalLinkedLitres - reqLitres : null;
+        h += kpi('Surplus / Shortfall', surplusL != null ? (surplusL >= 0 ? '+' : '') + surplusL.toFixed(1) + ' L' : '—', surplusL == null ? '#555' : surplusL >= 0 ? '#155724' : '#721c24');
+        h += '</div>';
       }
     } else {
-      // No container linked yet — blank form for operator
-      h += '<div style="border:1px solid #ccc;border-radius:4px;padding:14px 16px;background:#fafafa;margin-bottom:10px;">';
-      h += '<div style="font-size:11px;color:#856404;font-weight:700;margin-bottom:12px;">&#9888; No container linked in system — complete below on floor</div>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      h += '<div style="border:1px solid #ccc;border-radius:4px;padding:14px 16px;background:#fafafa;margin-bottom:8px;">';
+      h += '<div style="font-size:11px;color:#856404;font-weight:700;margin-bottom:12px;">&#9888; No containers linked in system — complete manually on floor</div>';
       var blank = '<div style="border-bottom:1px solid #999;height:24px;margin-top:4px;"></div>';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">';
       h += '<div><div style="' + S.label + '">Container Reference</div>' + blank + '</div>';
-      h += '<div><div style="' + S.label + '">Container Type</div>' + blank + '</div>';
+      h += '<div><div style="' + S.label + '">Type</div>' + blank + '</div>';
       h += '<div><div style="' + S.label + '">Current Litres</div>' + blank + '</div>';
       h += '<div><div style="' + S.label + '">ABV %</div>' + blank + '</div>';
       h += '<div><div style="' + S.label + '">LPA</div>' + blank + '</div>';
@@ -17432,38 +17419,102 @@ window.saveAdjModal = async function() {
       h += '</div></div>';
     }
 
-    // Sign-Off Block
-    h += '<div style="' + S.sectionHd + '">Operator Sign-Off</div>';
+    // ── Step-by-step Process Instructions ─────────────────────────────────────
+    h += '<div style="' + S.sectionHd + '">Process Instructions</div>';
+    var stepNum = 1;
+
+    // Step 1: Verify containers
+    var contRefs = linkedContainers.map(function(c){ return esc(c.reference); }).join(', ') || '___________';
+    h += step(stepNum++, 'Verify Source Container(s)',
+      'Confirm container(s) <strong>' + contRefs + '</strong> are correctly identified. Check reference number, spirit type, and CBW rotation match this work order.');
+
+    // Step 2: Dilution
+    if (dilution) {
+      var waterToAdd = waterReq > 0 ? waterReq.toFixed(1) + ' L' : '_________ L';
+      var targetFinal = finalLitres > 0 ? finalLitres.toFixed(1) + ' L' : '_________ L';
+      h += step(stepNum++, 'Dilution — RO Water Addition <span style="display:inline-block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIRED</span>',
+        'Add <strong>' + waterToAdd + '</strong> of RO water to reach a final volume of <strong>' + targetFinal + '</strong>. '
+        + (reqAbv > 0 ? 'Target bottling ABV: <strong>' + reqAbv.toFixed(1) + '%</strong>. ' : '')
+        + 'Record actual water added and actual final litres below.<br>'
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">'
+        + '<div><div style="' + S.label + '">Actual Water Added (L)</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
+        + '<div><div style="' + S.label + '">Actual Final Litres</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
+        + '</div>');
+    } else {
+      h += step(stepNum++, 'No Dilution Required',
+        'This job does not require dilution. Proceed to next step.');
+    }
+
+    // Step 3: Chill Filtration
+    if (j.chill_filtration) {
+      h += step(stepNum++, 'Chill Filtration <span style="display:inline-block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIRED</span>',
+        'Perform chill filtration on the liquid prior to bottling. Confirm completion by initialling below.<br>'
+        + '<div style="margin-top:8px;"><div style="' + S.label + '">Chill Filtration Complete — Initials</div><div style="border-bottom:1px solid #999;height:24px;width:120px;"></div></div>');
+    } else {
+      h += step(stepNum++, 'Chill Filtration — Not Required',
+        'No chill filtration is specified for this product.');
+    }
+
+    // Step 4: Colouring
+    var colourSpec = bom && bom.colour_spec ? bom.colour_spec : null;
+    if (j.colouring) {
+      h += step(stepNum++, 'Colouring / E150a Addition <span style="display:inline-block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIRED</span>',
+        (colourSpec ? 'Colour specification: <strong>' + esc(colourSpec) + '</strong>. ' : 'See BOM for colour specification. ')
+        + 'Add colouring AFTER dilution. Record quantity added and 430nm colour reading.<br>'
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">'
+        + '<div><div style="' + S.label + '">Caramel / Colour Added</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
+        + '<div><div style="' + S.label + '">430nm Reading</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
+        + '</div>');
+    } else {
+      h += step(stepNum++, 'Colouring — Not Required',
+        'No colouring is specified for this product.');
+    }
+
+    // Step 5: ABV Check
+    h += step(stepNum++, 'ABV Verification',
+      (reqAbv > 0 ? 'Target ABV for this job: <strong>' + reqAbv.toFixed(1) + '%</strong>. ' : '')
+      + 'Measure the ABV of the liquid and record below. If there is a discrepancy, escalate before proceeding.<br>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">'
+      + '<div><div style="' + S.label + '">Measured ABV (%)</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
+      + '<div><div style="' + S.label + '">ABV Matches Warrant?</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
+      + '</div>');
+
+    // Step 6: Sign off in Pulse
+    h += step(stepNum++, 'Record in Pulse &amp; Sign Off',
+      'Open job <strong>' + esc(jobRef) + '</strong> in Lighthouse Pulse → Liquid Sign-Off tab. Enter measured ABV, confirm checklist items, enter your name and click <strong>Sign Off</strong> to lock this work order.');
+
+    // ── Sign-Off Block ────────────────────────────────────────────────────────
+    h += '<div style="' + S.sectionHd + '">Liquid Manager Sign-Off</div>';
     if (signoff && signoff.signed_by && signoff.signed_at) {
       var soDate = new Date(signoff.signed_at).toLocaleString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
-      h += '<div style="' + S.ok + '">&#10003; Signed off by <strong>' + esc(signoff.signed_by) + '</strong> &nbsp;·&nbsp; ' + esc(soDate) + '</div>';
+      h += '<div style="' + S.ok + '">&#10003; Signed off in Pulse by <strong>' + esc(signoff.signed_by) + '</strong> &nbsp;·&nbsp; ' + esc(soDate) + '</div>';
     }
     h += '<div style="' + S.sigBox + '">';
-    h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;">';
-    h += '<div><div style="' + S.label + '">Operator Name</div><div style="' + S.sigLine + '"></div><div style="font-size:9px;color:#888;">Print name</div></div>';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;">';
+    h += '<div><div style="' + S.label + '">Liquid Manager Name</div><div style="' + S.sigLine + '"></div><div style="font-size:9px;color:#888;">Print name</div></div>';
     h += '<div><div style="' + S.label + '">Signature</div><div style="' + S.sigLine + '"></div></div>';
     h += '<div><div style="' + S.label + '">Date &amp; Time</div><div style="' + S.sigLine + '"></div></div>';
     h += '</div>';
-    h += '<div style="margin-top:14px;padding-top:10px;border-top:1px solid #eee;">';
-    h += '<div style="' + S.label + '" style="margin-bottom:6px;">Notes / Observations</div>';
-    h += '<div style="border:1px solid #ccc;border-radius:3px;height:64px;background:#fafafa;"></div>';
+    h += '<div style="margin-top:14px;padding-top:10px;border-top:1px solid #e8e8e8;">';
+    h += '<div style="' + S.label + ' margin-bottom:4px;">Notes / Observations</div>';
+    h += '<div style="border:1px solid #ccc;border-radius:3px;height:72px;background:#fff;"></div>';
     h += '</div></div>';
 
-    // Footer
+    // ── Footer ────────────────────────────────────────────────────────────────
     h += '<div style="margin-top:24px;padding-top:10px;border-top:1px solid #e0e0e0;display:flex;justify-content:space-between;font-size:9px;color:#aaa;">';
-    h += '<span>Lighthouse Drinks Ltd &nbsp;·&nbsp; Liquid Spec Sheet &nbsp;·&nbsp; ' + esc(printedAt) + '</span>';
-    h += '<span>Job: ' + esc(jobId) + ' &nbsp;·&nbsp; ' + esc(j.product_name||'') + '</span></div>';
+    h += '<span>Lighthouse Drinks Ltd &nbsp;·&nbsp; Liquid Manager Work Order &nbsp;·&nbsp; ' + esc(printedAt) + '</span>';
+    h += '<span>Job: ' + esc(jobRef) + ' &nbsp;·&nbsp; ' + esc(j.product_name||'') + '</span></div>';
 
     // ── Open print window ─────────────────────────────────────────────────────
-    var win = window.open('', '_blank', 'width=900,height=1100');
+    var win = window.open('', '_blank', 'width=900,height=1200');
     if (!win) { window.toast && window.toast('Pop-up blocked — allow pop-ups for this site.', 'error'); return; }
     win.document.write('<!DOCTYPE html><html><head>'
-      + '<title>Liquid Spec Sheet — ' + esc(jobId) + '</title>'
+      + '<title>Liquid Manager Work Order — ' + esc(jobRef) + '</title>'
       + '<style>'
       + 'body{margin:0;padding:0;background:#fff;}'
-      + '@media screen{body{background:#e8e8e8;}.page{box-shadow:0 2px 12px rgba(0,0,0,0.18);}}'
+      + '@media screen{body{background:#e0e0e0;}.page{box-shadow:0 2px 16px rgba(0,0,0,0.2);}}'
       + '.page{' + S.page + 'background:#fff;}'
-      + '@media print{@page{margin:16mm;size:A4;}body{background:#fff;}.page{padding:0;max-width:none;box-shadow:none;}}'
+      + '@media print{@page{margin:14mm;size:A4;}body{background:#fff;}.page{padding:0;max-width:none;box-shadow:none;}}'
       + 'table{border-collapse:collapse;}'
       + '</style></head>'
       + '<body><div class="page">' + h + '</div>'
@@ -17578,8 +17629,9 @@ window.saveAdjModal = async function() {
       if (hiddenEl) hiddenEl.value = cid;
     }
 
-    // Re-render linked list and requirement bar
+    // Re-render linked list, requirement bar, and silently persist to DB
     window._lsoRenderLinkedList();
+    _lsoAutoSaveContainers(window._lsoCurrentJobId);
     // Reset selector
     sel.value = '';
     var linkBtn = document.getElementById('lso-link-btn');
@@ -17590,7 +17642,7 @@ window.saveAdjModal = async function() {
     if (abvWarn) abvWarn.style.display = 'none';
     var spWarn = document.getElementById('lso-spirit-warn');
     if (spWarn) spWarn.style.display = 'none';
-    window.toast && window.toast('Container added. Keep adding until the requirement is met.', 'success');
+    window.toast && window.toast('Container saved. Keep adding until the requirement is met.', 'success');
   };
 
   window.lsoRemoveContainer = function(idx) {
@@ -17600,6 +17652,7 @@ window.saveAdjModal = async function() {
     var hiddenEl = document.getElementById('lso-linked-container-id');
     if (hiddenEl) hiddenEl.value = window._lsoAllLinkedConts.length ? window._lsoAllLinkedConts[0].id : '';
     window._lsoRenderLinkedList();
+    _lsoAutoSaveContainers(window._lsoCurrentJobId);
     // Refresh the dropdown to include the removed container
     var sel = document.getElementById('lso-container-sel');
     if (sel) {
@@ -17674,14 +17727,41 @@ window.saveAdjModal = async function() {
     var hidden = document.getElementById('lso-linked-container-id');
     if (hidden) hidden.value = '';
     window._lsoRenderLinkedList();
+    _lsoAutoSaveContainers(window._lsoCurrentJobId);
     var linkBtn = document.getElementById('lso-link-btn');
     if (linkBtn) linkBtn.disabled = true;
     window.lsoContainerSelChange();
   };
 
+  // ── Silent upsert: persist linked containers to DB whenever they change ──────
+  async function _lsoAutoSaveContainers(jobId) {
+    if (!jobId) return;
+    var linked  = window._lsoAllLinkedConts || [];
+    var lcJson  = JSON.stringify(linked);
+    var firstId = linked.length ? linked[0].id : null;
+    try {
+      var existing = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=id&limit=1');
+      if (existing && existing[0]) {
+        await supaMut('PATCH', 'job_liquid_signoff', '?id=eq.' + existing[0].id, {
+          linked_container_id:    firstId,
+          linked_containers_json: lcJson
+        });
+      } else {
+        await supaMut('POST', 'job_liquid_signoff', '', {
+          job_id:                 jobId,
+          linked_container_id:    firstId,
+          linked_containers_json: lcJson
+        });
+      }
+    } catch(e) { console.warn('LSO auto-save containers failed:', e.message); }
+  }
+
   window.lsoGoToBlending = function(jobId) {
     // Close the job detail panel first so the Liquid page is visible
     if (window.closeJobDetail) window.closeJobDetail();
+
+    // Store linked containers so the Dilute tab can pre-fill source selectors
+    window._blPreloadContainerIds = (window._lsoAllLinkedConts || []).map(function(lc){ return lc.id; });
 
     // Navigate to the global Liquid (Blending) page with this job pre-filled
     var blNav = document.getElementById('sbnav-blending') || document.querySelector('[onclick*="blending"]');
@@ -21345,7 +21425,36 @@ window.saveAdjModal = async function() {
     var mn = document.getElementById('dl-spirit-mismatch-note'); if (mn) mn.style.display = 'none';
     _updateDLInplaceVisibility();
     hideDilutePreview();
-    window.addDLSource();
+
+    // Pre-fill source containers if navigated here from a job's Liquid Sign-Off
+    var preload = window._blPreloadContainerIds;
+    window._blPreloadContainerIds = null; // consume it — only fires once
+    if (preload && preload.length) {
+      preload.forEach(function(cid) {
+        window.addDLSource();
+        // After the row is created, select the container
+        var idx = _dlSrcIdx - 1;
+        var sel = document.getElementById('dl-sc-' + idx);
+        if (sel) {
+          sel.value = cid;
+          window.onDLSrcChange(idx);
+          // Auto-fill litres with the full available volume
+          var cont = (_bl||[]).find(function(c){ return c.id === cid; });
+          if (cont) {
+            var litEl = document.getElementById('dl-sl-' + idx);
+            if (litEl && !litEl.value) litEl.value = parseFloat(cont.current_litres||0).toFixed(1);
+          }
+        }
+      });
+      // Switch to transfer (not in-place) if multiple containers selected
+      if (preload.length > 1) {
+        var ipEl = document.getElementById('dl-in-place');
+        if (ipEl) { ipEl.checked = false; window.handleDLInPlaceChange(); }
+      }
+      window.calcDilutePreview();
+    } else {
+      window.addDLSource();
+    }
   }
 
   window.handleDLInPlaceChange = function() {
