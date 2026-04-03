@@ -8819,11 +8819,9 @@ window.loadBoms = async function initBoms() {
             <th>Job No.</th>
             <th>Product</th>
             <th class="mob-hide">Client</th>
-            <th class="mob-hide">PO Number</th>
             <th class="mob-hide">Target</th>
-            <th class="mob-hide">Scheduled</th>
+            <th class="mob-hide">Sign-offs</th>
             <th>Stage</th>
-            <th class="mob-hide">Tasks</th>
             <th></th>
           </tr>
         </thead>
@@ -15270,6 +15268,9 @@ window.saveAdjModal = async function() {
   var _currentJobId = null;
   var _jobStageFilter = 'all';
   var _staffMap = {}; // uuid -> display_name
+  var _scDone  = {}; // job_id -> true if supply-chain signed off
+  var _lsDone  = {}; // job_id -> true if liquid signed off
+  var _qaDone  = {}; // job_id -> true if quality check exists
 
   var STAGE_STYLE = {
     planning:  'background:rgba(232,156,58,0.15);color:var(--amber);border:1px solid rgba(232,156,58,0.3);',
@@ -15310,13 +15311,26 @@ window.saveAdjModal = async function() {
       } catch(e) { window.logError('load staff map', e); }
     }
     try {
-      var rows = await supaGet('jobs?order=created_at.desc&select=*,clients(name)');
-      if (Array.isArray(rows)) {
-        _jobs = rows;
-        renderJobsTable();
-        updateJobKPIs();
-        loadMyTasks();
-      }
+      var results = await Promise.all([
+        supaGet('jobs?order=created_at.desc&select=*,clients(name)'),
+        supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null'),
+        supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
+        supaGet('job_quality_checks?select=job_id')
+      ]);
+      var rows   = results[0];
+      var scRows = results[1];
+      var lsRows = results[2];
+      var qaRows = results[3];
+      if (Array.isArray(rows)) _jobs = rows;
+      _scDone = {};
+      (scRows||[]).forEach(function(r){ if (r.job_id) _scDone[r.job_id] = true; });
+      _lsDone = {};
+      (lsRows||[]).forEach(function(r){ if (r.job_id) _lsDone[r.job_id] = true; });
+      _qaDone = {};
+      (qaRows||[]).forEach(function(r){ if (r.job_id) _qaDone[r.job_id] = true; });
+      renderJobsTable();
+      updateJobKPIs();
+      loadMyTasks();
     } catch(e) { console.warn('Jobs load error:', e); }
   }
 
@@ -15349,8 +15363,14 @@ window.saveAdjModal = async function() {
     });
 
     if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:48px;color:var(--muted);font-size:12px;">No jobs found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:48px;color:var(--muted);font-size:12px;">No jobs found.</td></tr>';
       return;
+    }
+
+    // Sign-off tick helper
+    function soTick(done, label, title) {
+      if (done) return '<span title="' + title + ': complete" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 7px;border-radius:10px;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.3);">&#10003; ' + label + '</span>';
+      return '<span title="' + title + ': pending" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 7px;border-radius:10px;background:rgba(255,255,255,0.05);color:var(--muted);border:1px solid rgba(255,255,255,0.08);">&#x2013; ' + label + '</span>';
     }
 
     tbody.innerHTML = list.map(function(j) {
@@ -15360,29 +15380,33 @@ window.saveAdjModal = async function() {
       var target = j.job_target_type === 'liquid'
         ? (j.liquid_litres||'—') + ' L'
         : (j.bottle_target||'—') + ' btls';
-      var schedDate = j.scheduled_start
-        ? new Date(j.scheduled_start).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'})
-        : '—';
       var jid = String(j.id).replace(/'/g, "\\'");
+
+      var signoffs = '<div style="display:flex;flex-direction:column;gap:3px;">'
+        + soTick(_scDone[j.id], 'Supply Chain', 'Supply Chain Sign-Off')
+        + soTick(_lsDone[j.id], 'Liquid',        'Liquid Sign-Off')
+        + soTick(_qaDone[j.id], 'Quality',        'Quality Sign-Off')
+        + '</div>';
+
       var row = '<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openJobDetail(\'' + jid + '\')">';
       row += '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + j.id + '</td>';
-      row += '<td style="font-weight:600;color:var(--white);">' + (j.product_name||'—') + '</td>';
+      row += '<td style="font-weight:600;color:var(--white);">' + (j.product_name||'—') + '<span class="mob-tap-hint">' + j.id + ' · ' + clientName + '</span></td>';
       row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + clientName + '</td>';
-      row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + (j.po_number||'—') + '</td>';
       row += '<td class="mob-hide" style="font-size:12px;">' + target + '</td>';
-      row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + schedDate + '</td>';
+      row += '<td class="mob-hide">' + signoffs + '</td>';
       row += '<td><span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:3px 8px;' + stageStyle + '">' + stageLabel + '</span></td>';
-      row += '<td id="task-pills-' + j.id + '" style="font-size:11px;"></td>';
       row += '<td class="job-row-actions" data-id="' + j.id + '" style="white-space:nowrap;"></td>';
       row += '</tr>';
-      // Detail drawer row (shown on mobile tap)
-      row += '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="9">';
+      // Mobile detail drawer
+      row += '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="7">';
       row += '<div class="mob-detail-inner">';
       row += '<div class="mob-d-item"><span class="mob-d-label">Client</span><span class="mob-d-value">' + clientName + '</span></div>';
-      row += '<div class="mob-d-item"><span class="mob-d-label">PO Number</span><span class="mob-d-value">' + (j.po_number||'—') + '</span></div>';
       row += '<div class="mob-d-item"><span class="mob-d-label">Target</span><span class="mob-d-value">' + target + '</span></div>';
-      row += '<div class="mob-d-item"><span class="mob-d-label">Scheduled</span><span class="mob-d-value">' + schedDate + '</span></div>';
-      row += '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Tasks</span><span class="mob-d-value" id="mob-task-pills-' + j.id + '" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:2px;"></span></div>';
+      row += '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Sign-offs</span><span class="mob-d-value" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:2px;">'
+        + soTick(_scDone[j.id], 'Supply Chain', 'Supply Chain Sign-Off')
+        + soTick(_lsDone[j.id], 'Liquid',        'Liquid Sign-Off')
+        + soTick(_qaDone[j.id], 'Quality',        'Quality Sign-Off')
+        + '</span></div>';
       row += '</div></td></tr>';
       return row;
     }).join('');
@@ -15404,8 +15428,6 @@ window.saveAdjModal = async function() {
       cell.appendChild(delBtn);
     });
 
-    // Load task counts per job
-    loadTaskPills(list.map(function(j){return j.id;}));
     // Wire tap-to-expand on mobile
     var tbl = document.getElementById('jobs-main-table');
     if (tbl && window.mobExpandInit) window.mobExpandInit(tbl);
