@@ -17208,6 +17208,50 @@ window.saveAdjModal = async function() {
         html += '</div>';
       }
 
+      // ── Liquid Operations History (all events on linked containers) ────────────
+      if (_linkedConts.length) {
+        try {
+          var _lcHistIds = _linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
+          var _lcHist = await supaGet(
+            'liquid_history?container_id=in.(' + _lcHistIds.join(',') + ')&order=created_at.desc&limit=20'
+          );
+          if (_lcHist && _lcHist.length) {
+            var _evTypeLabel = {
+              add:'Added', edit:'Edited', disgorge_out:'Disgorged out', disgorge_in:'Disgorged in',
+              blend_out:'Blended out', blend_in:'Blended in', dilute:'Diluted',
+              transfer_out:'Transferred out', transfer_in:'Transferred in',
+              dilute_in_place:'Diluted in-place', price_change:'Price updated', regauge:'Regauged'
+            };
+            var _defEgid = d.blend_event_group_id || null;
+            html += sec('Liquid Operations History');
+            html += '<div style="font-size:11px;">';
+            _lcHist.forEach(function(ev) {
+              var isJobEv = _defEgid && ev.event_group_id === _defEgid;
+              var evLabel = _evTypeLabel[ev.event_type] || ev.event_type || '—';
+              var lc = _allConts.find(function(c){ return c.id === ev.container_id; });
+              var ref = (lc && lc.reference) || ev.container_ref || ev.container_id || '—';
+              var lChange = ev.litres_changed != null ? (ev.litres_changed >= 0 ? '+' : '') + parseFloat(ev.litres_changed).toFixed(1) + ' L' : null;
+              var evDate = new Date(ev.created_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+              html += '<div style="display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:baseline;padding:7px 0;border-bottom:1px solid var(--navy-border);">'
+                + '<span style="font-size:11px;padding:2px 8px;border-radius:3px;font-weight:700;white-space:nowrap;'
+                + (isJobEv ? 'background:rgba(61,186,120,0.12);color:var(--green);border:1px solid rgba(61,186,120,0.3);' : 'background:rgba(255,255,255,0.04);color:var(--muted);border:1px solid var(--navy-border);')
+                + '">' + window.escapeHtml(evLabel) + (isJobEv ? ' &#10003;' : '') + '</span>'
+                + '<div><span style="color:var(--white);font-weight:600;">' + window.escapeHtml(ref) + '</span>'
+                + (lChange ? ' <span style="color:' + (ev.litres_changed >= 0 ? 'var(--green)' : 'var(--amber)') + ';font-weight:700;margin-left:6px;">' + lChange + '</span>' : '')
+                + (ev.performed_by_name ? ' <span style="color:var(--muted);">· ' + window.escapeHtml(ev.performed_by_name) + '</span>' : '')
+                + (ev.notes ? '<div style="color:var(--muted);font-size:10px;margin-top:2px;">' + window.escapeHtml(ev.notes.slice(0,80)) + (ev.notes.length > 80 ? '…' : '') + '</div>' : '')
+                + '</div>'
+                + '<span style="color:var(--muted);white-space:nowrap;">' + window.escapeHtml(evDate) + '</span>'
+                + '</div>';
+            });
+            html += '</div>';
+            if (_lcHist.length === 20) {
+              html += '<div style="font-size:10px;color:var(--muted);padding:6px 0;">Showing last 20 events — view full history in the Liquid tab.</div>';
+            }
+          }
+        } catch(eHist) { /* non-critical */ }
+      }
+
       el.innerHTML = html;
 
       // Expose container data and BOM ABV for LSO functions
@@ -20575,6 +20619,26 @@ window.saveAdjModal = async function() {
   // ════════════════════════════════════════════════════
   var _dgSrcIdx = 0, _dgDestIdx = 0;
 
+  function _blShowJobContextWarning(wrapperId) {
+    var wrap = document.getElementById(wrapperId);
+    if (!wrap) return;
+    var jobId  = _blJobId();
+    var refEl  = document.getElementById('bl-job-ref');
+    var jobRef = refEl ? refEl.value.trim() : jobId;
+    var existing = document.getElementById('bl-job-ctx-warn-' + wrapperId);
+    if (existing) existing.remove();
+    if (!jobId) return;
+    var warn = document.createElement('div');
+    warn.id = 'bl-job-ctx-warn-' + wrapperId;
+    warn.style.cssText = 'margin-bottom:14px;padding:12px 16px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.35);border-radius:5px;font-size:11px;color:var(--amber);display:flex;align-items:flex-start;gap:10px;';
+    warn.innerHTML = '<span style="font-size:14px;flex-shrink:0;">&#9432;</span>'
+      + '<div><strong style="color:var(--gold);">Job context active: ' + window.escapeHtml(jobRef) + '</strong>'
+      + '<br>Operations performed here will be recorded in the container\'s liquid history but will <strong>not</strong> automatically complete the job\'s liquid sign-off.'
+      + ' Use the <strong>Dilute</strong> or <strong>Blend</strong> tab for the step that finalises this job. '
+      + 'All operations on linked containers will be visible in the Liquid Sign-Off history.</div>';
+    wrap.insertBefore(warn, wrap.firstChild);
+  }
+
   function initBLDisgorge() {
     _dgSrcIdx = 0; _dgDestIdx = 0;
     var sw   = document.getElementById('dg-sources-wrap'); if (sw) sw.innerHTML = '';
@@ -20583,6 +20647,7 @@ window.saveAdjModal = async function() {
     ['dg-product','dg-cbw','dg-notes'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
     var sugg = document.getElementById('dg-product-sugg'); if (sugg) sugg.style.display='none';
     var det  = document.getElementById('dg-details');      if (det)  det.style.display='none';
+    _blShowJobContextWarning('blend-tab-disgorge');
     // populate product name suggestions from existing containers
     window._dgProductNames = [];
     var seen = {};
@@ -22049,6 +22114,7 @@ window.saveAdjModal = async function() {
     var sw = document.getElementById('btf-sources-wrap'); if (sw) sw.innerHTML = '';
     var dw = document.getElementById('btf-dests-wrap');   if (dw) dw.innerHTML = '';
     window.addBTFSource(); window.addBTFDest();
+    _blShowJobContextWarning('blend-tab-transfer');
   }
 
   function _btfCalcTotal() {
