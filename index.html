@@ -20913,7 +20913,7 @@ window.saveAdjModal = async function() {
 
   async function loadBlData() {
     _blClients = await window.db.select('clients', '?order=name.asc');
-    _bl = await window.db.select('liquid_containers', '?order=type.asc,reference.asc');
+    _bl = await window.db.select('liquid_containers', '?archived=is.false&order=type.asc,reference.asc');
     // Also keep vessel register data fresh so vessel dropdowns work everywhere
     try { window._vrVessels = await window.db.select('vessels', '?order=id.asc&select=*'); } catch(e) { window._vrVessels = window._vrVessels || []; }
     try { window._vrAllContainers = _bl.map(function(c){ return { id:c.id, reference:c.reference, type:c.type, spirit_type:c.spirit_type, current_litres:c.current_litres, current_lpa:c.current_lpa, status:c.status, vessel_id:c.vessel_id }; }); } catch(e) {}
@@ -20999,26 +20999,37 @@ window.saveAdjModal = async function() {
       html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Empty containers ────</option>';
       empty.forEach(function(c) { html += makeOpt(c, context === 'source'); });
     }
-    // For destination context: also show registered vessels with no active liquid batch
-    if (context === 'dest' && window._vrVessels && window._vrVessels.length) {
+    // Show registered vessels that don't yet have an active liquid batch
+    if (window._vrVessels && window._vrVessels.length) {
       var activeBatchVesselIds = (window._vrAllContainers || [])
         .filter(function(c){ return c.vessel_id; })
         .map(function(c){ return c.vessel_id; });
-      var vestDests = window._vrVessels.filter(function(v){
+      var vestItems = window._vrVessels.filter(function(v){
         if (v.status === 'decommissioned') return false;
         if (excludeTypes && excludeTypes.indexOf(v.vessel_type) >= 0) return false;
         if (onlyTypes    && onlyTypes.indexOf(v.vessel_type)    < 0) return false;
-        if (activeBatchVesselIds.indexOf(v.id) >= 0) return false; // already has a batch in the dropdown above
+        if (activeBatchVesselIds.indexOf(v.id) >= 0) return false; // already appears above as an active container
         return true;
       });
-      if (vestDests.length) {
-        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (empty) ────</option>';
-        vestDests.forEach(function(v){
-          var lbl = v.id + ' — ' + (_vrTypeLabel[v.vessel_type]||v.vessel_type);
-          if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
-          if (v.location) lbl += ' · ' + v.location;
-          html += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
-        });
+      if (vestItems.length) {
+        if (context === 'dest') {
+          html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (empty) ────</option>';
+          vestItems.forEach(function(v){
+            var lbl = v.id + ' — ' + (_vrTypeLabel[v.vessel_type]||v.vessel_type);
+            if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+            if (v.location) lbl += ' · ' + v.location;
+            html += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
+          });
+        } else {
+          // Source context: vessels with no liquid batch are shown disabled so users can see they exist
+          html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (no liquid — add via Liquid page first) ────</option>';
+          vestItems.forEach(function(v){
+            var lbl = v.id + ' — ' + (_vrTypeLabel[v.vessel_type]||v.vessel_type);
+            if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+            if (v.location) lbl += ' · ' + v.location;
+            html += '<option value="" disabled style="background:#0d1b2a;color:#666;">' + window.escapeHtml(lbl) + '</option>';
+          });
+        }
       }
     }
     return html;
@@ -22070,12 +22081,31 @@ window.saveAdjModal = async function() {
   // ─────────────────────────────────────────────────────────────────────
 
   function _dlSrcOptHtml() {
-    // Dilute sources: non-cask, must have liquid, empty containers not shown
+    // Dilute sources: non-cask, must have liquid
     var containers = _bl.filter(function(c) { return c.type !== 'cask' && parseFloat(c.current_litres || 0) > 0; });
     var html = '<option value="">— Select container —</option>';
     containers.forEach(function(c) {
       html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(_containerLabel(c, 'source')) + '</option>';
     });
+    // Show registered vessels that have no active liquid batch as disabled informational entries
+    if (window._vrVessels && window._vrVessels.length) {
+      var activeBatchVesselIds = _bl.filter(function(c){ return c.vessel_id; }).map(function(c){ return c.vessel_id; });
+      var emptyVessels = window._vrVessels.filter(function(v){
+        if (v.vessel_type === 'cask') return false;
+        if (v.status === 'decommissioned') return false;
+        if (activeBatchVesselIds.indexOf(v.id) >= 0) return false;
+        return true;
+      });
+      if (emptyVessels.length) {
+        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (no liquid — add via Liquid page first) ────</option>';
+        emptyVessels.forEach(function(v){
+          var lbl = v.id + ' — ' + (_TYPE_LABELS[v.vessel_type]||v.vessel_type);
+          if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+          if (v.location) lbl += ' · ' + v.location;
+          html += '<option value="" disabled style="background:#0d1b2a;color:#666;">' + window.escapeHtml(lbl) + '</option>';
+        });
+      }
+    }
     return html;
   }
 
