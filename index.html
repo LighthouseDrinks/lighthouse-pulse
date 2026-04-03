@@ -12107,9 +12107,14 @@ window._vrApplyFilter = function() {
 };
 
 window._vrPopulateVesselDropdown = function(typeFilter) {
+  // Use window._vrVessels (populated by loadBlData) when local cache is empty
+  // so the dropdown works even if the user has never visited the Vessel Register tab
+  var allVessels = (window._vrVessels && window._vrVessels.length) ? window._vrVessels : _vrVessels;
+  // Keep local cache in sync so code-generation logic also sees the data
+  if (allVessels.length && !_vrVessels.length) _vrVessels = allVessels;
   var sel = document.getElementById('blac-vessel-select');
   if (!sel) return;
-  var vessels = _vrVessels.filter(function(v){
+  var vessels = allVessels.filter(function(v){
     if (typeFilter && v.vessel_type !== typeFilter) return false;
     if (v.status === 'decommissioned') return false;
     return true;
@@ -12151,6 +12156,9 @@ window._vrPopulateVesselDropdown = function(typeFilter) {
 };
 
 window._blacVesselSelectChange = function() {
+  // Keep local cache in sync with global (populated by loadBlData on blending page)
+  if (window._vrVessels && window._vrVessels.length && !_vrVessels.length) _vrVessels = window._vrVessels;
+  var allVessels = _vrVessels;
   var sel      = document.getElementById('blac-vessel-select');
   var hidRef   = document.getElementById('blac-reference');
   var newRow   = document.getElementById('blac-vessel-new-row');
@@ -12163,7 +12171,7 @@ window._blacVesselSelectChange = function() {
     // Auto-generate next code based on type
     var type = (document.getElementById('blac-type')||{}).value || '';
     var prefix = _vrTypePrefix[type] || 'VES-';
-    var existing = _vrVessels.filter(function(v){ return v.id.startsWith(prefix); });
+    var existing = allVessels.filter(function(v){ return v.id.startsWith(prefix); });
     var maxN = 0;
     existing.forEach(function(v){
       var n = parseInt(v.id.replace(prefix,'')) || 0;
@@ -12178,7 +12186,7 @@ window._blacVesselSelectChange = function() {
     // Existing vessel selected
     if (newRow) newRow.style.display = 'none';
     if (hidRef) hidRef.value = val;
-    var vessel = _vrVessels && _vrVessels.find(function(v){ return v.id === val; });
+    var vessel = allVessels.find(function(v){ return v.id === val; });
     if (vessel && statusEl) {
       var stLbl = _vrStatusLabel[vessel.status] || vessel.status;
       var stCol = _vrStatusColour[vessel.status] || 'var(--muted)';
@@ -12200,6 +12208,8 @@ window._blacVesselSelectChange = function() {
 // ── Vessel Modal (Add / Edit) ─────────────────────────────────────────────────
 
 window._vmUpdateCodePreview = function() {
+  // Keep local cache in sync with global (populated by loadBlData on blending page)
+  if (window._vrVessels && window._vrVessels.length && !_vrVessels.length) _vrVessels = window._vrVessels;
   var type  = (document.getElementById('vm-type')||{}).value || '';
   var over  = ((document.getElementById('vm-code-override')||{}).value||'').trim();
   var el    = document.getElementById('vm-code-preview');
@@ -22084,6 +22094,26 @@ window.saveAdjModal = async function() {
         html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(_containerLabel(c, 'dest')) + '</option>';
       });
     }
+    // Include registered vessels that don't yet have an active liquid batch
+    if (window._vrVessels && window._vrVessels.length) {
+      var activeBatchVesselIds = _bl.filter(function(c){ return c.vessel_id; }).map(function(c){ return c.vessel_id; });
+      var vesselDests = window._vrVessels.filter(function(v){
+        if (v.status === 'decommissioned') return false;
+        if (v.vessel_type === 'cask') return false;
+        if (excludeIds.indexOf('__vessel__' + v.id) >= 0) return false;
+        if (activeBatchVesselIds.indexOf(v.id) >= 0) return false;
+        return true;
+      });
+      if (vesselDests.length) {
+        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (empty) ────</option>';
+        vesselDests.forEach(function(v){
+          var lbl = v.id + ' — ' + (_TYPE_LABELS[v.vessel_type] || v.vessel_type);
+          if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+          if (v.location) lbl += ' · ' + v.location;
+          html += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
+        });
+      }
+    }
     return html;
   }
 
@@ -22253,6 +22283,25 @@ window.saveAdjModal = async function() {
       empty.forEach(function(c) {
         html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(_containerLabel(c, 'dest')) + '</option>';
       });
+    }
+    // Include registered vessels that don't yet have an active liquid batch
+    if (window._vrVessels && window._vrVessels.length) {
+      var activeBatchVesselIds = _bl.filter(function(c){ return c.vessel_id; }).map(function(c){ return c.vessel_id; });
+      var vesselDests = window._vrVessels.filter(function(v){
+        if (v.status === 'decommissioned') return false;
+        if (v.vessel_type === 'cask') return false;
+        if (activeBatchVesselIds.indexOf(v.id) >= 0) return false;
+        return true;
+      });
+      if (vesselDests.length) {
+        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (empty) ────</option>';
+        vesselDests.forEach(function(v){
+          var lbl = v.id + ' — ' + (_TYPE_LABELS[v.vessel_type] || v.vessel_type);
+          if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+          if (v.location) lbl += ' · ' + v.location;
+          html += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
+        });
+      }
     }
     return html;
   }
@@ -22916,6 +22965,18 @@ window.saveAdjModal = async function() {
     // ── Collect and validate destinations ──
     var dests = [];
     if (!inPlace) {
+      // Pre-resolve any __vessel__ destination values into real liquid_containers IDs
+      var _dlDestSels = document.querySelectorAll('[id^="dl-dc-"]');
+      for (var _dvi = 0; _dvi < _dlDestSels.length; _dvi++) {
+        if (_dlDestSels[_dvi].value && _dlDestSels[_dvi].value.indexOf('__vessel__') === 0) {
+          var _dlResolved = await _resolveDestId(_dlDestSels[_dvi].value, null);
+          if (_dlResolved) _dlDestSels[_dvi].value = _dlResolved;
+        }
+      }
+      // Reload _bl so newly-created vessel containers are findable
+      if (document.querySelectorAll('[id^="dl-dc-"]').length) {
+        _bl = await window.db.select('liquid_containers', '?order=type.asc,reference.asc').catch(function(){ return _bl; });
+      }
       document.querySelectorAll('[id^="dl-dr-"]').forEach(function(row) {
         var idx   = row.id.replace('dl-dr-','');
         var sel   = document.getElementById('dl-dc-' + idx);
