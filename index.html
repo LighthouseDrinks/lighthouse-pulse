@@ -16898,7 +16898,58 @@ window.saveAdjModal = async function() {
         return '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:20px 0 10px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">' + t + '</div>';
       };
 
-      var abvIn = j && j.abv_in ? j.abv_in + '%' : null;
+      // ── Pre-computation: linked containers + BOM data (must happen before HTML) ─
+      var _linkedConts = [];
+      try { _linkedConts = JSON.parse(d.linked_containers_json || '[]'); } catch(e4) {}
+      if (!_linkedConts.length && d.linked_container_id) {
+        _linkedConts = [{ id: d.linked_container_id, litres: null }];
+      }
+
+      var _bomVolCl = 0, _reqLitres = 0, _reqLPA = 0, _bottlingAbv = 0;
+      if (j) {
+        try {
+          var _bomFull = await supaGet('boms?id=eq.' + j.bom_id + '&select=volume_cl,abv,bottling_abv&limit=1');
+          if (_bomFull && _bomFull[0]) {
+            _bomVolCl    = parseFloat(_bomFull[0].volume_cl || 0);
+            _bottlingAbv = parseFloat(_bomFull[0].bottling_abv || _bomFull[0].abv || 0);
+            if (j.bottle_target && _bomVolCl) {
+              _reqLitres = (j.bottle_target * _bomVolCl) / 100;
+              _reqLPA    = _reqLitres * (_bottlingAbv / 100);
+            } else if (j.liquid_litres) {
+              _reqLitres = parseFloat(j.liquid_litres);
+              _reqLPA    = _reqLitres * (_bottlingAbv / 100);
+            }
+          }
+        } catch(e5) { /* non-critical */ }
+      }
+
+      var _linkedTotalLitres = _linkedConts.reduce(function(s, lc) {
+        var cont = _allConts.find(function(c){ return c.id === lc.id; });
+        return s + parseFloat((cont && cont.current_litres) || lc.litres || 0);
+      }, 0);
+      var _reqMet = _reqLitres > 0 && _linkedTotalLitres >= _reqLitres * 0.99;
+
+      // Dynamic dilution detection from actual linked container ABVs vs bottling target
+      var _linkedWeightedLPA = _linkedConts.reduce(function(s, lc) {
+        var cont = _allConts.find(function(c){ return c.id === lc.id; });
+        return s + parseFloat((cont && cont.current_litres) || 0) * parseFloat((cont && cont.abv) || 0) / 100;
+      }, 0);
+      var _linkedAvgAbv  = _linkedTotalLitres > 0 ? (_linkedWeightedLPA / _linkedTotalLitres * 100) : 0;
+      var _dilutionNeeded = _bottlingAbv > 0 && _linkedAvgAbv > _bottlingAbv + 0.2;
+      var _dilWater = 0, _dilFinal = 0, _dilSrcNeeded = 0;
+      if (_dilutionNeeded) {
+        if (_reqLitres > 0 && _linkedAvgAbv > 0) {
+          _dilSrcNeeded = _reqLitres * (_bottlingAbv / _linkedAvgAbv);
+          _dilWater     = Math.max(0, _reqLitres - _dilSrcNeeded);
+          _dilFinal     = _reqLitres;
+        } else {
+          _dilFinal     = _linkedWeightedLPA / (_bottlingAbv / 100);
+          _dilWater     = Math.max(0, _dilFinal - _linkedTotalLitres);
+          _dilSrcNeeded = _linkedTotalLitres;
+        }
+      }
+
+      var bomAbvNum = j && j.abv_in ? parseFloat(j.abv_in) : null;
 
       // ── Signed-off block ─────────────────────────────────────────────────────
       var signedBlock;
@@ -16929,7 +16980,7 @@ window.saveAdjModal = async function() {
         + '</div></div>'
         + lockedBanner;
 
-      // Pre-filled from job
+      // ── From Job — Reference Values ───────────────────────────────────────────
       html += sec('From Job — Reference Values');
       if (_lsoLiquidSkuDesc) {
         html += frow('BOM Liquid Specification',
@@ -16939,20 +16990,27 @@ window.saveAdjModal = async function() {
           + '<span style="font-size:10px;color:var(--muted);margin-left:8px;">(from BOM)</span>');
       }
       html += frow('Target bottles', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j && j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—') + '</span>');
-      html += frow('Litres sent in', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j && j.liquid_litres ? j.liquid_litres + ' L' : '—') + '</span>');
-      html += frow('ABV of liquid sent in', '<span style="font-size:13px;color:var(--amber);font-weight:700;">' + (abvIn || '—') + '</span>');
-      html += frow('Dilution required', '<span style="font-size:13px;font-weight:600;color:' + (j&&j.dilution?'var(--amber)':'var(--muted)') + ';">' + (j&&j.dilution?'Yes — water required: ' + (j.water_required||'—') + ' L':'No') + '</span>');
-      if (j && j.dilution) html += frow('Final litres after dilution', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j.final_litres ? j.final_litres + ' L' : '—') + '</span>');
+      // Dilution: compute dynamically from linked containers; fall back to j.dilution if no containers linked yet
+      var _dilDisplay, _dilColour;
+      if (_linkedConts.length && _bottlingAbv > 0) {
+        _dilDisplay = _dilutionNeeded
+          ? 'Yes — ~' + _dilWater.toFixed(1) + ' L water (container avg ' + _linkedAvgAbv.toFixed(1) + '% → ' + _bottlingAbv.toFixed(1) + '%)'
+          : 'No — container avg ABV (' + _linkedAvgAbv.toFixed(1) + '%) ≤ target (' + _bottlingAbv.toFixed(1) + '%)';
+        _dilColour = _dilutionNeeded ? 'var(--amber)' : 'var(--muted)';
+      } else {
+        _dilDisplay = j && j.dilution ? 'Yes (from job setup)' : 'Not yet determined — link containers above';
+        _dilColour  = j && j.dilution ? 'var(--amber)' : 'var(--muted)';
+      }
+      html += frow('Dilution', '<span style="font-size:13px;font-weight:600;color:' + _dilColour + ';">' + _dilDisplay + '</span>');
       html += frow('Chill filtration required', '<span style="font-size:13px;font-weight:600;color:' + (j&&j.chill_filtration?'var(--amber)':'var(--muted)') + ';">' + (j&&j.chill_filtration?'Yes':'No') + '</span>');
       if (j && j.colouring) html += frow('Colouring required', '<span style="font-size:13px;font-weight:600;color:var(--amber);">Yes</span>');
 
-      // ── Blending record summary (when linked via Blending tab) ────────────────
+      // ── Blending record summary (when linked via Liquid tab) ─────────────────
       if (d.blend_event_group_id) {
         try {
           var blendEvents = await supaGet('liquid_history?event_group_id=eq.' + d.blend_event_group_id + '&order=created_at.asc&limit=20');
           if (blendEvents.length) {
             var firstEv = blendEvents[0];
-            var lastEv  = blendEvents[blendEvents.length - 1];
             var evDate  = new Date(firstEv.created_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
             var lpaOut  = blendEvents.filter(function(e){ return e.litres_changed > 0; }).reduce(function(s,e){ return s + parseFloat(e.lpa_after||0) - parseFloat(e.lpa_before||0); }, 0);
             var litresOut = blendEvents.filter(function(e){ return e.litres_changed > 0; }).reduce(function(s,e){ return s + parseFloat(e.litres_changed||0); }, 0);
@@ -16965,7 +17023,7 @@ window.saveAdjModal = async function() {
               + '<div><div style="color:var(--muted);font-size:10px;margin-bottom:2px;">Performed</div><div style="color:var(--muted);">' + window.escapeHtml(evDate) + (firstEv.performed_by_name ? ' · ' + window.escapeHtml(firstEv.performed_by_name) : '') + '</div></div>'
               + '</div></div>';
           }
-        } catch(e3) { /* non-critical — blending record display */ }
+        } catch(e3) { /* non-critical */ }
       } else if (!alreadySigned) {
         html += '<div style="margin-bottom:16px;padding:10px 14px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.25);border-radius:4px;font-size:11px;color:var(--amber);">'
           + '&#9888; No liquid operation linked yet. Use the <strong>Complete via Liquid tab</strong> button above to perform and record the liquid preparation.'
@@ -16973,40 +17031,6 @@ window.saveAdjModal = async function() {
       }
 
       // ── Liquid Source section ──────────────────────────────────────────────
-      // Parse existing linked containers (new multi-container JSON field, falling back to legacy single ID)
-      var _linkedConts = [];
-      try { _linkedConts = JSON.parse(d.linked_containers_json || '[]'); } catch(e4) {}
-      if (!_linkedConts.length && d.linked_container_id) {
-        _linkedConts = [{ id: d.linked_container_id, litres: null }];
-      }
-
-      // Calculate liquid requirement from BOM + job target
-      var _bomVolCl = 0, _reqLitres = 0, _reqLPA = 0, _bottlingAbv = 0;
-      if (j) {
-        try {
-          var _bomFull = await supaGet('boms?id=eq.' + j.bom_id + '&select=volume_cl,abv,bottling_abv&limit=1');
-          if (_bomFull && _bomFull[0]) {
-            _bomVolCl    = parseFloat(_bomFull[0].volume_cl || 0);
-            _bottlingAbv = parseFloat(_bomFull[0].bottling_abv || _bomFull[0].abv || 0);
-            if (j.bottle_target && _bomVolCl) {
-              _reqLitres = (j.bottle_target * _bomVolCl) / 100;
-              _reqLPA    = _reqLitres * (_bottlingAbv / 100);
-            } else if (j.liquid_litres) {
-              _reqLitres = parseFloat(j.liquid_litres);
-              _reqLPA    = _reqLitres * (_bottlingAbv / 100);
-            }
-          }
-        } catch(e5) { /* non-critical */ }
-      }
-
-      // Total litres already linked
-      var _linkedTotalLitres = _linkedConts.reduce(function(s, lc) {
-        var cont = _allConts.find(function(c){ return c.id === lc.id; });
-        return s + parseFloat((cont && cont.current_litres) || lc.litres || 0);
-      }, 0);
-      var _reqMet = _reqLitres > 0 && _linkedTotalLitres >= _reqLitres * 0.99;
-
-      var bomAbvNum = j && j.abv_in ? parseFloat(j.abv_in) : null;
       html += sec('Liquid Source');
 
       // ── Requirement panel ─────────────────────────────────────────────────
@@ -17072,24 +17096,20 @@ window.saveAdjModal = async function() {
       // Keep legacy hidden field for backwards compat
       html += '<input type="hidden" id="lso-linked-container-id" value="' + window.escapeHtml(_linkedConts.length ? _linkedConts[0].id : (d.linked_container_id||'')) + '">';
 
-      // ── Liquid manager fills in ─────────────────────────────────────────────
-      html += sec('Liquid Manager Confirmation');
-      html += frow('LH recorded ABV of liquid received (%)',
-        inp('abv-actual', d.abv_in, 'Enter measured ABV', 'number'),
-        abvIn ? 'Expected: ' + abvIn + ' (as per job)' : null);
-      html += cbRow('abv-match', 'ABV matches warrant', !!d.abv_matches_warrant);
-      html += frow('CBW Rotations', inp('cbw', d.cbw_rotations, 'e.g. 12'));
-
-      if (j && j.dilution) {
+      // ── Dilution (shown whenever dilution is detected from containers, or flagged on job) ─
+      var _showDilution = _dilutionNeeded || (j && j.dilution);
+      if (_showDilution) {
         html += sec('Dilution');
         if (d.blend_event_group_id) {
-          html += frow('Dilution', '<span style="color:var(--green);font-weight:700;">&#10003; Recorded via Liquid tab (event group: ' + window.escapeHtml(d.blend_event_group_id.slice(0,8)) + '…)</span>');
+          html += frow('Dilution', '<span style="color:var(--green);font-weight:700;">&#10003; Recorded via Liquid tab</span>');
         } else {
-          html += frow('Litres started with', inp('litres-start', d.litres_in || j.liquid_litres, 'e.g. 500', 'number'));
+          if (_dilutionNeeded && _dilWater > 0) {
+            html += '<div style="background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.2);border-radius:4px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--amber);">'
+              + '&#9432; Calculated: use ~<strong>' + _dilSrcNeeded.toFixed(1) + ' L</strong> from linked container(s) + add ~<strong>' + _dilWater.toFixed(1) + ' L</strong> RO water → final ~<strong>' + _dilFinal.toFixed(1) + ' L</strong> at ' + _bottlingAbv.toFixed(1) + '% ABV'
+              + '</div>';
+          }
           html += frow('Actual water added (L)', inp('water-actual', d.water_required, 'e.g. 145.2', 'number'));
-          html += frow('Final batch litres (after dilution)',
-            inp('final-batch', d.final_litres || j.final_litres, 'e.g. 645.2', 'number'),
-            'Should be: ' + (j.final_litres ? j.final_litres + ' L' : '—'));
+          html += frow('Final batch litres (after dilution)', inp('final-batch', d.final_litres, 'e.g. 645.2', 'number'));
           html += cbRow('dilution-done', 'Dilution complete', d.dilution_complete === 'yes');
         }
       }
@@ -17197,23 +17217,22 @@ window.saveAdjModal = async function() {
     var _lcJson = JSON.stringify(window._lsoAllLinkedConts || []);
     var _firstLinkedId = (window._lsoAllLinkedConts && window._lsoAllLinkedConts[0]) ? window._lsoAllLinkedConts[0].id : ((document.getElementById('lso-linked-container-id')||{}).value || null);
 
+    var _dilDoneEl   = document.getElementById('lso-dilution-done');
+    var _chillDoneEl = document.getElementById('lso-chill-done');
+    var _colDoneEl   = document.getElementById('lso-colouring-done');
     var payload = {
       job_id:                  jobId,
       linked_container_id:     _firstLinkedId,
       linked_containers_json:  _lcJson,
-      abv_in:                  parseFloat(gv('abv-actual'))||null,
-      abv_matches_warrant:     !!(document.getElementById('lso-abv-match')||{}).checked,
-      cbw_rotations:           gv('cbw')||null,
-      litres_in:               j.dilution ? parseFloat(gv('litres-start'))||null : null,
-      water_required:      j.dilution ? parseFloat(gv('water-actual'))||null : null,
-      final_litres:        j.dilution ? parseFloat(gv('final-batch'))||null : null,
-      dilution_complete:   j.dilution ? ((document.getElementById('lso-dilution-done')||{}).checked ? 'yes' : 'no') : null,
-      chill_filtration_done: j.chill_filtration ? ((document.getElementById('lso-chill-done')||{}).checked ? 'yes' : 'no') : null,
-      colour_spec:         j.colouring ? gv('caramel-actual')||null : null,
-      colour_actual_430nm: j.colouring ? parseFloat(gv('colour-430nm'))||null : null,
-      colouring_complete:  j.colouring ? ((document.getElementById('lso-colouring-done')||{}).checked ? 'yes' : 'no') : null,
-      signed_by:           signedBy,
-      signed_at:           new Date().toISOString(),
+      water_required:          parseFloat(gv('water-actual'))||null,
+      final_litres:            parseFloat(gv('final-batch'))||null,
+      dilution_complete:       _dilDoneEl   ? (_dilDoneEl.checked   ? 'yes' : 'no') : null,
+      chill_filtration_done:   _chillDoneEl ? (_chillDoneEl.checked ? 'yes' : 'no') : null,
+      colour_spec:             j.colouring ? gv('caramel-actual')||null : null,
+      colour_actual_430nm:     j.colouring ? parseFloat(gv('colour-430nm'))||null : null,
+      colouring_complete:      _colDoneEl   ? (_colDoneEl.checked   ? 'yes' : 'no') : null,
+      signed_by:               signedBy,
+      signed_at:               new Date().toISOString(),
       signoff_history:     JSON.stringify(existingHist)
     };
     try {
@@ -17363,10 +17382,27 @@ window.saveAdjModal = async function() {
     var _contWeightedAvgAbv = totalLinkedLitres > 0 ? (_contWeightedLPA / totalLinkedLitres * 100) : 0;
     // Dilution is needed when the container ABV exceeds the bottling target by more than 0.2%
     var dilution = reqAbv > 0 && _contWeightedAvgAbv > reqAbv + 0.2;
-    // Calculate the water needed (LPA is preserved through dilution)
-    var _calcFinalLitres = dilution ? (_contWeightedLPA / (reqAbv / 100)) : totalLinkedLitres;
-    var _calcWater       = dilution ? Math.max(0, _calcFinalLitres - totalLinkedLitres) : 0;
-    // Use stored final-litres/water from the job record if available and plausible, else use calculated
+    // Water calculation — prefer job-requirement-based (dilute only what the job needs).
+    // If reqLitres is known: source litres needed = reqLitres × (reqAbv / containerAvgAbv)
+    //                        water = reqLitres − sourceNeeded
+    // If reqLitres unknown: dilute all linked container contents.
+    var _calcFinalLitres, _calcWater, _calcSourceNeeded;
+    if (dilution) {
+      if (reqLitres > 0 && _contWeightedAvgAbv > 0) {
+        _calcSourceNeeded = reqLitres * (reqAbv / _contWeightedAvgAbv);
+        _calcWater        = Math.max(0, reqLitres - _calcSourceNeeded);
+        _calcFinalLitres  = reqLitres;
+      } else {
+        _calcFinalLitres  = _contWeightedLPA / (reqAbv / 100);
+        _calcWater        = Math.max(0, _calcFinalLitres - totalLinkedLitres);
+        _calcSourceNeeded = totalLinkedLitres;
+      }
+    } else {
+      _calcFinalLitres  = totalLinkedLitres;
+      _calcWater        = 0;
+      _calcSourceNeeded = totalLinkedLitres;
+    }
+    // Use stored values from the job record only if they are more specific (already saved after manual override)
     var waterReq    = (j.water_required && parseFloat(j.water_required) > 0)
                         ? parseFloat(j.water_required)
                         : _calcWater;
@@ -17475,10 +17511,13 @@ window.saveAdjModal = async function() {
       var abvNote     = (reqAbv > 0 && _contWeightedAvgAbv > 0)
                           ? 'Linked container avg ABV: <strong>' + _contWeightedAvgAbv.toFixed(1) + '%</strong> → Target bottling ABV: <strong>' + reqAbv.toFixed(1) + '%</strong>. '
                           : (reqAbv > 0 ? 'Target bottling ABV: <strong>' + reqAbv.toFixed(1) + '%</strong>. ' : '');
+      var srcNote = (_calcSourceNeeded > 0 && reqLitres > 0 && totalLinkedLitres > _calcSourceNeeded + 0.5)
+                      ? '<br><span style="color:#856404;font-size:10px;">&#9432; Use <strong>' + _calcSourceNeeded.toFixed(1) + ' L</strong> from linked container(s) for this job — remaining volume stays in vessel(s).</span>'
+                      : '';
       h += step(stepNum++, 'Dilution — RO Water Addition <span style="display:inline-block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIRED</span>',
         abvNote
         + 'Add <strong>' + waterToAdd + '</strong> of RO water to reach a final volume of approximately <strong>' + targetFinal + '</strong>. '
-        + 'Verify ABV before proceeding. Record actual quantities below.<br>'
+        + 'Verify ABV before proceeding. Record actual quantities below.' + srcNote + '<br>'
         + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">'
         + '<div><div style="' + S.label + '">Actual Water Added (L)</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
         + '<div><div style="' + S.label + '">Actual Final Litres</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
@@ -17826,9 +17865,10 @@ window.saveAdjModal = async function() {
     // Close the job detail panel first so the Liquid page is visible
     if (window.closeJobDetail) window.closeJobDetail();
 
-    // Store linked containers and bottling ABV so the Dilute tab can pre-fill everything
+    // Store linked containers, bottling ABV, and job req litres so the Dilute tab can pre-fill everything
     window._blPreloadContainerIds = (window._lsoAllLinkedConts || []).map(function(lc){ return lc.id; });
     window._blPreloadBottlingAbv  = window._lsoBottlingAbv || 0;
+    window._blPreloadReqLitres    = window._lsoReqLitres   || 0;
 
     // Navigate to the global Liquid (Blending) page with this job pre-filled
     var blNav = document.getElementById('sbnav-blending') || document.querySelector('[onclick*="blending"]');
@@ -21494,10 +21534,12 @@ window.saveAdjModal = async function() {
     hideDilutePreview();
 
     // Pre-fill source containers if navigated here from a job's Liquid Sign-Off
-    var preload       = window._blPreloadContainerIds;
-    var preloadAbv    = window._blPreloadBottlingAbv || 0;
+    var preload        = window._blPreloadContainerIds;
+    var preloadAbv     = window._blPreloadBottlingAbv || 0;
+    var preloadReqLit  = window._blPreloadReqLitres   || 0;
     window._blPreloadContainerIds = null; // consume once
     window._blPreloadBottlingAbv  = null;
+    window._blPreloadReqLitres    = null;
 
     if (preload && preload.length) {
       var totalPreloadLitres = 0;
@@ -21528,19 +21570,22 @@ window.saveAdjModal = async function() {
       }
 
       // Pre-calculate water needed if we have a bottling ABV target
-      // Formula: totalLPA = (totalLitres + water) × (bottlingAbv / 100)
-      // → water = (totalLPA / (bottlingAbv / 100)) - totalLitres
       if (preloadAbv > 0 && totalPreloadLPA > 0) {
         var avgContAbv = totalPreloadLitres > 0 ? (totalPreloadLPA / totalPreloadLitres * 100) : 0;
         if (avgContAbv > preloadAbv + 0.2) {
-          // Dilution required — calculate water
-          var finalLitresCalc = totalPreloadLPA / (preloadAbv / 100);
-          var waterCalc       = finalLitresCalc - totalPreloadLitres;
+          var waterCalc;
+          if (preloadReqLit > 0) {
+            // Dilute only what the job needs: source = reqLitres × (reqAbv / containerAbv), water = reqLitres − source
+            var sourceNeeded = preloadReqLit * (preloadAbv / avgContAbv);
+            waterCalc = Math.max(0, preloadReqLit - sourceNeeded);
+          } else {
+            // No req litres — dilute all container contents
+            waterCalc = Math.max(0, totalPreloadLPA / (preloadAbv / 100) - totalPreloadLitres);
+          }
           var wlEl = document.getElementById('dl-water-litres');
           if (wlEl && waterCalc > 0) {
             wlEl.value = waterCalc.toFixed(1);
-            // Add a note so the operator knows this is a calculated suggestion
-            wlEl.title = 'Pre-calculated from container ABV (' + avgContAbv.toFixed(1) + '%) → target ' + preloadAbv.toFixed(1) + '%. Overridable.';
+            wlEl.title = 'Pre-calculated: ' + avgContAbv.toFixed(1) + '% → ' + preloadAbv.toFixed(1) + '% target' + (preloadReqLit > 0 ? ' for ' + preloadReqLit.toFixed(0) + ' L job requirement' : '') + '. Overridable.';
             wlEl.style.borderColor = 'var(--gold)';
           }
         }
