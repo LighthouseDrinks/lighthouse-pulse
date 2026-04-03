@@ -16946,59 +16946,107 @@ window.saveAdjModal = async function() {
       }
 
       // ── Liquid Source section ──────────────────────────────────────────────
+      // Parse existing linked containers (new multi-container JSON field, falling back to legacy single ID)
+      var _linkedConts = [];
+      try { _linkedConts = JSON.parse(d.linked_containers_json || '[]'); } catch(e4) {}
+      if (!_linkedConts.length && d.linked_container_id) {
+        _linkedConts = [{ id: d.linked_container_id, litres: null }];
+      }
+
+      // Calculate liquid requirement from BOM + job target
+      var _bomVolCl = 0, _reqLitres = 0, _reqLPA = 0;
+      if (j) {
+        try {
+          var _bomFull = await supaGet('boms?id=eq.' + j.bom_id + '&select=volume_cl,abv,bottling_abv&limit=1');
+          if (_bomFull && _bomFull[0]) {
+            _bomVolCl = parseFloat(_bomFull[0].volume_cl || 0);
+            var _bomBottAbv = parseFloat(_bomFull[0].bottling_abv || _bomFull[0].abv || 0);
+            if (j.bottle_target && _bomVolCl) {
+              _reqLitres = (j.bottle_target * _bomVolCl) / 100;
+              _reqLPA    = _reqLitres * (_bomBottAbv / 100);
+            } else if (j.liquid_litres) {
+              _reqLitres = parseFloat(j.liquid_litres);
+              _reqLPA    = _reqLitres * (_bomBottAbv / 100);
+            }
+          }
+        } catch(e5) { /* non-critical */ }
+      }
+
+      // Total litres already linked
+      var _linkedTotalLitres = _linkedConts.reduce(function(s, lc) {
+        var cont = _allConts.find(function(c){ return c.id === lc.id; });
+        return s + parseFloat((cont && cont.current_litres) || lc.litres || 0);
+      }, 0);
+      var _reqMet = _reqLitres > 0 && _linkedTotalLitres >= _reqLitres * 0.99;
+
       var bomAbvNum = j && j.abv_in ? parseFloat(j.abv_in) : null;
       html += sec('Liquid Source');
-      html += '<input type="hidden" id="lso-linked-container-id" value="' + window.escapeHtml(d.linked_container_id||'') + '">';
+
+      // ── Requirement panel ─────────────────────────────────────────────────
+      if (_reqLitres > 0) {
+        var _reqPct = Math.min(100, Math.round(_linkedTotalLitres / _reqLitres * 100));
+        var _barCol = _reqMet ? 'var(--green)' : (_reqPct > 50 ? 'var(--amber)' : 'var(--red)');
+        var _reqStatusTxt = _reqMet
+          ? '<span style="color:var(--green);font-weight:700;">&#10003; Requirement met</span>'
+          : '<span style="color:var(--amber);font-weight:700;">&#9888; ' + _linkedTotalLitres.toFixed(1) + ' L linked of ' + _reqLitres.toFixed(1) + ' L required</span>';
+        html += '<div style="background:rgba(59,130,246,0.07);border:1px solid rgba(59,130,246,0.2);border-radius:5px;padding:14px 18px;margin-bottom:14px;">'
+          + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:#60a5fa;font-weight:700;margin-bottom:10px;">Liquid Requirement</div>'
+          + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:10px;">'
+          + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Litres Required</div><div style="font-size:18px;font-weight:700;color:var(--white);">' + _reqLitres.toFixed(1) + ' L</div></div>'
+          + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">LPA Required</div><div style="font-size:18px;font-weight:700;color:var(--gold-light);">' + _reqLPA.toFixed(2) + '</div></div>'
+          + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Linked So Far</div><div class="lso-req-linked-val" style="font-size:18px;font-weight:700;color:' + _barCol + ';">' + _linkedTotalLitres.toFixed(1) + ' L</div></div>'
+          + '</div>'
+          + '<div style="height:6px;background:rgba(255,255,255,0.07);border-radius:3px;overflow:hidden;margin-bottom:8px;">'
+          + '<div class="lso-req-bar-fill" style="height:100%;width:' + _reqPct + '%;background:' + _barCol + ';border-radius:3px;transition:width 0.4s ease;"></div></div>'
+          + '<div class="lso-req-status" style="font-size:11px;">' + _reqStatusTxt + '</div>'
+          + '</div>';
+      }
+
+      // ── Linked containers list ────────────────────────────────────────────
+      html += '<div id="lso-linked-list" style="margin-bottom:10px;">';
+      _linkedConts.forEach(function(lc, idx) {
+        var cont = _allConts.find(function(c){ return c.id === lc.id; });
+        var label = cont
+          ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + parseFloat(cont.current_litres||0).toFixed(0) + 'L @ ' + (cont.abv||'?') + '%'
+          : lc.id;
+        html += '<div class="lso-linked-row" data-idx="' + idx + '" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
+          + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + '</span>'
+          + (!isLocked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" style="background:transparent;border:1px solid var(--navy-border);color:var(--red);font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">&#10005;</button>' : '')
+          + '</div>';
+      });
+      html += '</div>';
 
       if (!isLocked) {
-        // Show "currently linked" bar if already linked
-        if (d.linked_container_id) {
-          var _lc0 = _activeConts.find(function(c){ return c.id === d.linked_container_id; });
-          html += '<div id="lso-linked-bar" style="padding:8px 14px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
-            + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; Linked: '
-            + window.escapeHtml(_lc0 ? _lc0.reference + ' — ' + (_lc0.spirit_type||'') + ' — ' + parseFloat(_lc0.current_litres||0).toFixed(0) + 'L @ ' + (_lc0.abv||'?') + '%' : d.linked_container_id)
-            + '</span>'
-            + '<button onclick="window.lsoChangeContainer()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Change</button>'
-            + '</div>';
-        }
-        // Container selector
-        var _conOptH = '<option value="">— Select a container —</option>'
-          + _activeConts.map(function(c){
-              var s = d.linked_container_id === c.id ? ' selected' : '';
-              var lbl = c.reference + ' ['+c.type+'] — '+(c.spirit_type||'—')+' — '+parseFloat(c.current_litres||0).toFixed(0)+'L @ '+(c.abv||'?')+'%'+(c.cbw_rotation?' · '+c.cbw_rotation:'');
-              return '<option value="'+c.id+'"'+s+'>'+window.escapeHtml(lbl)+'</option>';
+        // Container selector for adding more
+        var _alreadyLinkedIds = _linkedConts.map(function(lc){ return lc.id; });
+        var _conOptH = '<option value="">— Add a container —</option>'
+          + _activeConts.filter(function(c){ return _alreadyLinkedIds.indexOf(c.id) === -1; }).map(function(c){
+              var lbl = c.reference + ' [' + (c.type==='ibc'?'IBC':c.type) + '] — ' + (c.spirit_type||'—') + ' — ' + parseFloat(c.current_litres||0).toFixed(0) + 'L @ ' + (c.abv||'?') + '%' + (c.cbw_rotation?' · '+c.cbw_rotation:'');
+              return '<option value="' + c.id + '">' + window.escapeHtml(lbl) + '</option>';
             }).join('');
-        html += '<select id="lso-container-sel" onchange="window.lsoContainerSelChange()" style="width:100%;padding:8px 10px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);font-family:Lato,sans-serif;font-size:12px;border-radius:4px;margin-bottom:10px;">'
+        html += '<select id="lso-container-sel" onchange="window.lsoContainerSelChange()" style="width:100%;padding:8px 10px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);font-family:Lato,sans-serif;font-size:12px;border-radius:4px;margin-bottom:8px;">'
           + _conOptH + '</select>';
-        html += '<div id="lso-cont-preview" style="display:none;margin-bottom:10px;"></div>';
+        html += '<div id="lso-cont-preview" style="display:none;margin-bottom:8px;"></div>';
         html += '<div id="lso-abv-warn" style="display:none;margin-bottom:6px;"></div>';
         html += '<div id="lso-spirit-warn" style="display:none;margin-bottom:10px;"></div>';
         html += '<div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">'
-          + '<button id="lso-link-btn" onclick="window.lsoLinkContainer(\'' + jobId + '\')" class="btn btn-gold" style="font-size:12px;padding:7px 18px;" '+(d.linked_container_id?'':'disabled')+'>&#10003; Link Container to Job</button>'
+          + '<button id="lso-link-btn" onclick="window.lsoLinkContainer(\'' + jobId + '\')" class="btn btn-gold" style="font-size:12px;padding:7px 18px;" disabled>+ Add Container to Job</button>'
           + '<button onclick="window.lsoGoToBlending(\'' + jobId + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:12px;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">&#9658; Complete via Blending tab</button>'
           + '</div>'
           + '<div style="font-size:11px;color:var(--muted);padding:8px 12px;background:rgba(0,0,0,0.2);border:1px solid var(--navy-border);border-radius:3px;">'
           + 'To dilute or blend the liquid for this job, use the <strong style="color:var(--gold);">Blending tab</strong>. The job will be pre-filled and the sign-off task will auto-complete when you save.'
           + '</div>';
-
       } else {
-        // Locked: just show info about linked container
-        if (d.linked_container_id) {
-          var _lc1 = _activeConts.find(function(c){ return c.id === d.linked_container_id; });
-          html += '<div style="padding:10px 14px;background:rgba(61,186,120,0.08);border:1px solid rgba(61,186,120,0.25);border-radius:4px;">'
-            + '<span style="color:var(--green);font-weight:700;">&#10003; Linked: ' + window.escapeHtml(_lc1 ? _lc1.reference : d.linked_container_id) + '</span>'
-            + (_lc1 ? '<span style="font-size:11px;color:var(--muted);margin-left:12px;">'
-              + window.escapeHtml((_lc1.spirit_type||'')+'  ·  '+parseFloat(_lc1.current_litres||0).toFixed(1)+'L @ '+(_lc1.abv||'?')+'%  ·  '+(_lc1.cbw_rotation||'—'))
-              + '</span>' : '')
-            + '</div>';
-        } else {
-          html += '<div style="font-size:11px;color:var(--muted);">No liquid container was linked to this sign-off.</div>';
+        if (!_linkedConts.length) {
+          html += '<div style="font-size:11px;color:var(--muted);">No liquid containers were linked to this sign-off.</div>';
         }
       }
 
+      // Keep legacy hidden field for backwards compat
+      html += '<input type="hidden" id="lso-linked-container-id" value="' + window.escapeHtml(_linkedConts.length ? _linkedConts[0].id : (d.linked_container_id||'')) + '">';
+
       // ── Liquid manager fills in ─────────────────────────────────────────────
       html += sec('Liquid Manager Confirmation');
-      html += cbRow('liquid-on-site', 'Liquid on site', !!d.liquid_on_site);
       html += frow('LH recorded ABV of liquid received (%)',
         inp('abv-actual', d.abv_in, 'Enter measured ABV', 'number'),
         abvIn ? 'Expected: ' + abvIn + ' (as per job)' : null);
@@ -17071,6 +17119,8 @@ window.saveAdjModal = async function() {
       window._lsoLiquidSkuDesc    = _lsoLiquidSkuDesc;
       window._lsoInlineBlendIdx   = 0;
       window._lsoCurrentJobId     = jobId;
+      window._lsoReqLitres        = _reqLitres;
+      window._lsoAllLinkedConts   = _linkedConts.slice();
 
       if (!isLocked) {
         // Trigger selector to show info card for already-selected item
@@ -17115,14 +17165,18 @@ window.saveAdjModal = async function() {
     try { existingHist = JSON.parse((histRows[0]&&histRows[0].signoff_history)||'[]'); } catch(e2){}
     existingHist.push({ action:'signed', by: signedBy, at: new Date().toISOString() });
 
+    // Build multi-container JSON from current in-memory list
+    var _lcJson = JSON.stringify(window._lsoAllLinkedConts || []);
+    var _firstLinkedId = (window._lsoAllLinkedConts && window._lsoAllLinkedConts[0]) ? window._lsoAllLinkedConts[0].id : ((document.getElementById('lso-linked-container-id')||{}).value || null);
+
     var payload = {
-      job_id:              jobId,
-      linked_container_id: (document.getElementById('lso-linked-container-id')||{}).value || null,
-      abv_in:              parseFloat(gv('abv-actual'))||null,
-      abv_matches_warrant: !!(document.getElementById('lso-abv-match')||{}).checked,
-      cbw_rotations:       gv('cbw')||null,
-      liquid_on_site:      !!(document.getElementById('lso-liquid-on-site')||{}).checked,
-      litres_in:           j.dilution ? parseFloat(gv('litres-start'))||null : null,
+      job_id:                  jobId,
+      linked_container_id:     _firstLinkedId,
+      linked_containers_json:  _lcJson,
+      abv_in:                  parseFloat(gv('abv-actual'))||null,
+      abv_matches_warrant:     !!(document.getElementById('lso-abv-match')||{}).checked,
+      cbw_rotations:           gv('cbw')||null,
+      litres_in:               j.dilution ? parseFloat(gv('litres-start'))||null : null,
       water_required:      j.dilution ? parseFloat(gv('water-actual'))||null : null,
       final_litres:        j.dilution ? parseFloat(gv('final-batch'))||null : null,
       dilution_complete:   j.dilution ? ((document.getElementById('lso-dilution-done')||{}).checked ? 'yes' : 'no') : null,
@@ -17499,62 +17553,147 @@ window.saveAdjModal = async function() {
     var cid = sel.value;
     var c = (window._lsoActiveContainers||[]).find(function(x){ return x.id === cid; });
     if (!c) return;
-    // Update hidden field
-    var hidden = document.getElementById('lso-linked-container-id');
-    if (hidden) hidden.value = cid;
-    // Auto-fill ABV
-    var abvEl = document.getElementById('lso-abv-actual');
-    if (abvEl && !abvEl.readOnly) abvEl.value = c.abv || '';
-    // Auto-fill CBW rotation
-    var cbwEl = document.getElementById('lso-cbw');
-    if (cbwEl && !cbwEl.readOnly && c.cbw_rotation) cbwEl.value = c.cbw_rotation;
-    // Auto-check ABV match if within tolerance
-    var bomAbv = window._lsoBomAbv;
-    if (bomAbv && c.abv && Math.abs(parseFloat(c.abv) - bomAbv) <= 0.1) {
-      var matchEl = document.getElementById('lso-abv-match');
-      if (matchEl && !matchEl.disabled) matchEl.checked = true;
+
+    // Add to in-memory list
+    if (!window._lsoAllLinkedConts) window._lsoAllLinkedConts = [];
+    if (window._lsoAllLinkedConts.find(function(lc){ return lc.id === cid; })) {
+      window.toast && window.toast('Container already linked.', 'error'); return;
     }
-    // Update linked bar
-    var bar = document.getElementById('lso-linked-bar');
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.id = 'lso-linked-bar';
-      var selectorWrap = sel.parentElement;
-      if (selectorWrap) selectorWrap.insertAdjacentElement('beforebegin', bar);
+    window._lsoAllLinkedConts.push({ id: cid, litres: parseFloat(c.current_litres||0) });
+
+    // Auto-fill ABV from first container only
+    if (window._lsoAllLinkedConts.length === 1) {
+      var abvEl = document.getElementById('lso-abv-actual');
+      if (abvEl && !abvEl.readOnly) abvEl.value = c.abv || '';
+      var cbwEl = document.getElementById('lso-cbw');
+      if (cbwEl && !cbwEl.readOnly && c.cbw_rotation) cbwEl.value = c.cbw_rotation;
+      var bomAbv = window._lsoBomAbv;
+      if (bomAbv && c.abv && Math.abs(parseFloat(c.abv) - bomAbv) <= 0.1) {
+        var matchEl = document.getElementById('lso-abv-match');
+        if (matchEl && !matchEl.disabled) matchEl.checked = true;
+      }
+      var hiddenEl = document.getElementById('lso-linked-container-id');
+      if (hiddenEl) hiddenEl.value = cid;
     }
-    bar.style.cssText = 'padding:8px 14px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;';
-    bar.innerHTML = '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; Linked: '
-      + window.escapeHtml(c.reference+' — '+(c.spirit_type||'')+'  '+parseFloat(c.current_litres||0).toFixed(0)+'L @ '+(c.abv||'?')+'%')
-      + '</span><button onclick="window.lsoChangeContainer()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Change</button>';
-    window.toast && window.toast('Container linked. ABV and CBW rotation auto-filled.', 'success');
+
+    // Re-render linked list and requirement bar
+    window._lsoRenderLinkedList();
+    // Reset selector
+    sel.value = '';
+    var linkBtn = document.getElementById('lso-link-btn');
+    if (linkBtn) linkBtn.disabled = true;
+    var prev = document.getElementById('lso-cont-preview');
+    if (prev) prev.style.display = 'none';
+    var abvWarn = document.getElementById('lso-abv-warn');
+    if (abvWarn) abvWarn.style.display = 'none';
+    var spWarn = document.getElementById('lso-spirit-warn');
+    if (spWarn) spWarn.style.display = 'none';
+    window.toast && window.toast('Container added. Keep adding until the requirement is met.', 'success');
+  };
+
+  window.lsoRemoveContainer = function(idx) {
+    if (!window._lsoAllLinkedConts) return;
+    window._lsoAllLinkedConts.splice(idx, 1);
+    // Refresh first container hidden field
+    var hiddenEl = document.getElementById('lso-linked-container-id');
+    if (hiddenEl) hiddenEl.value = window._lsoAllLinkedConts.length ? window._lsoAllLinkedConts[0].id : '';
+    window._lsoRenderLinkedList();
+    // Refresh the dropdown to include the removed container
+    var sel = document.getElementById('lso-container-sel');
+    if (sel) {
+      var alreadyIds = window._lsoAllLinkedConts.map(function(lc){ return lc.id; });
+      var activeConts = window._lsoActiveContainers || [];
+      sel.innerHTML = '<option value="">— Add a container —</option>'
+        + activeConts.filter(function(c){ return alreadyIds.indexOf(c.id) === -1; }).map(function(c){
+            var lbl = c.reference + ' [' + (c.type==='ibc'?'IBC':c.type) + '] — ' + (c.spirit_type||'—') + ' — ' + parseFloat(c.current_litres||0).toFixed(0) + 'L @ ' + (c.abv||'?') + '%';
+            return '<option value="' + c.id + '">' + window.escapeHtml(lbl) + '</option>';
+          }).join('');
+    }
+  };
+
+  window._lsoRenderLinkedList = function() {
+    var list = document.getElementById('lso-linked-list');
+    if (!list) return;
+    var linked = window._lsoAllLinkedConts || [];
+    var allConts = window._lsoContainers || [];
+
+    list.innerHTML = linked.map(function(lc, idx) {
+      var cont = allConts.find(function(c){ return c.id === lc.id; });
+      var label = cont
+        ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + parseFloat(cont.current_litres||0).toFixed(0) + 'L @ ' + (cont.abv||'?') + '%'
+        : lc.id;
+      return '<div class="lso-linked-row" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
+        + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + '</span>'
+        + '<button onclick="window.lsoRemoveContainer(' + idx + ')" style="background:transparent;border:1px solid var(--navy-border);color:var(--red);font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">&#10005;</button>'
+        + '</div>';
+    }).join('');
+
+    // Update requirement progress bar
+    var reqLitres = window._lsoReqLitres || 0;
+    var totalLinked = linked.reduce(function(s, lc) {
+      var cont = allConts.find(function(c){ return c.id === lc.id; });
+      return s + parseFloat((cont && cont.current_litres) || lc.litres || 0);
+    }, 0);
+
+    if (reqLitres > 0) {
+      var pct = Math.min(100, Math.round(totalLinked / reqLitres * 100));
+      var met = totalLinked >= reqLitres * 0.99;
+      var barCol = met ? 'var(--green)' : (pct > 50 ? 'var(--amber)' : 'var(--red)');
+      var barEl = document.querySelector('#jd-liquid-content .lso-req-bar-fill');
+      if (barEl) { barEl.style.width = pct + '%'; barEl.style.background = barCol; }
+      var statusEl = document.querySelector('#jd-liquid-content .lso-req-status');
+      if (statusEl) {
+        statusEl.innerHTML = met
+          ? '<span style="color:var(--green);font-weight:700;">&#10003; Requirement met</span>'
+          : '<span style="color:var(--amber);font-weight:700;">&#9888; ' + totalLinked.toFixed(1) + ' L linked of ' + reqLitres.toFixed(1) + ' L required</span>';
+      }
+      var linkedCell = document.querySelector('#jd-liquid-content .lso-req-linked-val');
+      if (linkedCell) { linkedCell.textContent = totalLinked.toFixed(1) + ' L'; linkedCell.style.color = barCol; }
+    }
+
+    // Refresh selector to exclude already-linked
+    var alreadyIds = linked.map(function(lc){ return lc.id; });
+    var sel = document.getElementById('lso-container-sel');
+    if (sel) {
+      var currentVal = sel.value;
+      var activeConts = window._lsoActiveContainers || [];
+      sel.innerHTML = '<option value="">— Add a container —</option>'
+        + activeConts.filter(function(c){ return alreadyIds.indexOf(c.id) === -1; }).map(function(c){
+            var lbl = c.reference + ' [' + (c.type==='ibc'?'IBC':c.type) + '] — ' + (c.spirit_type||'—') + ' — ' + parseFloat(c.current_litres||0).toFixed(0) + 'L @ ' + (c.abv||'?') + '%';
+            return '<option value="' + c.id + '">' + window.escapeHtml(lbl) + '</option>';
+          }).join('');
+      if (currentVal && alreadyIds.indexOf(currentVal) === -1) sel.value = currentVal;
+    }
   };
 
   window.lsoChangeContainer = function() {
+    // Legacy single-container change — now just clears the list
+    window._lsoAllLinkedConts = [];
     var hidden = document.getElementById('lso-linked-container-id');
     if (hidden) hidden.value = '';
-    var bar = document.getElementById('lso-linked-bar');
-    if (bar) bar.remove();
+    window._lsoRenderLinkedList();
     var linkBtn = document.getElementById('lso-link-btn');
     if (linkBtn) linkBtn.disabled = true;
-    // Re-trigger selector
     window.lsoContainerSelChange();
   };
 
   window.lsoGoToBlending = function(jobId) {
-    // Navigate to Blending tab with this job pre-filled
+    // Navigate to the global Blending page with this job pre-filled
     var blNav = document.getElementById('sbnav-blending') || document.querySelector('[onclick*="blending"]');
-    if (window.showPage) window.showPage('blending', blNav);
+    // showPage is a plain function in this scope
+    if (typeof showPage === 'function') {
+      showPage('blending', blNav);
+    } else if (blNav) {
+      blNav.click();
+    }
     setTimeout(function() {
       if (window.setBLJobContext) {
-        // Try to get job reference from currently open job detail
         var jobRef = jobId;
-        var refEl = document.querySelector('[data-jobid="' + jobId + '"]');
-        if (window._currentJobData && window._currentJobData.id === jobId) {
-          jobRef = window._currentJobData.job_number || jobId;
-        }
+        var j = (_jobs||[]).find(function(x){ return x.id === jobId; });
+        if (j) jobRef = j.job_number || j.reference || jobId;
         window.setBLJobContext(jobId, jobRef);
       }
-    }, 400);
+    }, 450);
   };
 
   window.lsoToggleInlinePrep = function() {
