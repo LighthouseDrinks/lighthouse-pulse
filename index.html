@@ -15223,13 +15223,10 @@ window.saveAdjModal = async function() {
     // Auto-init components from BOM
     try { await window.initComponentsFromBOM(jobId, true); } catch(e) { window.logError('initComponentsFromBOM', e); }
 
-    // Fetch staff for assignment popup
+    // Fetch all staff for assignment popup — show everyone with an account
     var staffList = [];
     try {
-      var staffRows = await supaGet('app_users?select=auth_user_id,display_name,role&order=display_name.asc');
-      staffList = staffRows.filter(function(u) {
-        return TASK_ASSIGNABLE_ROLES.indexOf(u.role) > -1;
-      });
+      staffList = await supaGet('app_users?select=auth_user_id,display_name,role&order=display_name.asc');
     } catch(e) { window.logError('load staff for task assignment', e); }
 
     // Show task assignment popup
@@ -15310,8 +15307,7 @@ window.saveAdjModal = async function() {
   window.openReassignTasks = async function(jobId) {
     try {
       var tasks = await supaGet('job_tasks?job_id=eq.' + jobId + '&order=created_at.asc');
-      var staffRows = await supaGet('app_users?select=auth_user_id,display_name,role&order=display_name.asc');
-      var staffList = staffRows.filter(function(u){ return TASK_ASSIGNABLE_ROLES.indexOf(u.role) > -1; });
+      var staffList = await supaGet('app_users?select=auth_user_id,display_name,role&order=display_name.asc');
 
       var staffOptions = '<option value="" style="background:#0d1b2a;color:#fff;">— Unassigned —</option>'
         + staffList.map(function(u){
@@ -16094,20 +16090,35 @@ window.saveAdjModal = async function() {
         return;
       }
 
-      // Fetch stock by summing dry_goods_batches per sku_id, and location from dry_goods_skus
+      // Fetch stock, unit costs, and location per SKU
       var skuIds = comps.filter(function(c){return c.sku_id;}).map(function(c){return c.sku_id;});
-      var stockMap = {}, locationMap = {};
+      var stockMap = {}, locationMap = {}, latestCostMap = {};
       if (skuIds.length) {
         try {
-          var batchRows = await supaGet('dry_goods_batches?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,quantity_remaining');
+          var batchRows = await supaGet('dry_goods_batches?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,quantity_remaining,unit_cost&order=delivery_date.desc');
           batchRows.forEach(function(r){
             stockMap[r.sku_id] = (stockMap[r.sku_id]||0) + (r.quantity_remaining||0);
+            // Keep only the most-recent (first) unit_cost per SKU
+            if (r.unit_cost != null && latestCostMap[r.sku_id] == null) {
+              latestCostMap[r.sku_id] = parseFloat(r.unit_cost);
+            }
           });
         } catch(e) { console.warn('Stock fetch failed:', e); }
         try {
           var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,location');
           skuRows.forEach(function(r){ if (r.location) locationMap[r.id] = r.location; });
         } catch(e) { console.warn('Location fetch failed:', e); }
+
+        // Backfill unit_price on any component that is missing it
+        var backfillNeeded = comps.filter(function(c){ return c.sku_id && c.unit_price == null && latestCostMap[c.sku_id] != null; });
+        for (var bi = 0; bi < backfillNeeded.length; bi++) {
+          var bc = backfillNeeded[bi];
+          var bPrice = latestCostMap[bc.sku_id];
+          try {
+            await supaMut('PATCH','job_components','?id=eq.'+bc.id, { unit_price: bPrice });
+            bc.unit_price = bPrice; // update in-memory
+          } catch(e) { console.warn('Backfill price failed for', bc.id, e); }
+        }
       }
       // Attach location to each comp so printPickingList can read it
       comps.forEach(function(c){ c._location = locationMap[c.sku_id] || ''; });
@@ -16373,20 +16384,34 @@ window.saveAdjModal = async function() {
         { col: 'tube_lid_sku_id',     label: 'Tube Lid' }
       ];
 
-      // Collect non-null SKU IDs and look up their descriptions
+      // Collect non-null SKU IDs and look up descriptions + latest batch unit cost
       var skuIds = skuCols.map(function(s){ return bom[s.col]; }).filter(Boolean);
       var descMap = {};
+      var priceMap = {};
       if (skuIds.length) {
         try {
           var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,description');
           skuRows.forEach(function(r){ descMap[r.id] = r.description; });
         } catch(e) { window.logError('load SKU descriptions', e); }
+
+        // Pull the most recent batch per SKU to get the latest unit cost
+        try {
+          var batchRows = await supaGet('dry_goods_batches?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,unit_cost&order=delivery_date.desc');
+          batchRows.forEach(function(b){
+            // Only store the first (most recent) entry per SKU
+            if (b.unit_cost != null && priceMap[b.sku_id] == null) {
+              priceMap[b.sku_id] = parseFloat(b.unit_cost);
+            }
+          });
+        } catch(e) { window.logError('load SKU batch prices', e); }
       }
 
       for (var i=0;i<skuCols.length;i++) {
         var skuId = bom[skuCols[i].col];
         if (!skuId) continue;
         var itemName = descMap[skuId] || skuCols[i].label;
+        var unitPrice = priceMap[skuId] != null ? priceMap[skuId] : null;
+
         // Qty logic: shippers and dividers = ceil(bottles / case_size), others = bottle target
         var isCaseItem = skuCols[i].col === 'shipper_sku_id' || skuCols[i].col === 'divider_sku_id';
         var qty;
@@ -16399,10 +16424,11 @@ window.saveAdjModal = async function() {
         }
 
         await supaMut('POST','job_components','', {
-          job_id: jobId,
-          sku_id: skuId,
-          item_name: itemName,
-          qty_required: qty
+          job_id:       jobId,
+          sku_id:       skuId,
+          item_name:    itemName,
+          qty_required: qty,
+          unit_price:   unitPrice
         });
       }
 
