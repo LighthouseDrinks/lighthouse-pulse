@@ -8872,11 +8872,18 @@ window.loadBoms = async function initBoms() {
           </select>
         </div>
         <div class="mfield">
-          <label>Vessel Code *</label>
-          <input type="text" id="blac-reference" placeholder="e.g. IBC-001, CSK-042" list="blac-vessel-datalist" oninput="window._blacVesselInputChange()" autocomplete="off">
-          <datalist id="blac-vessel-datalist"></datalist>
+          <label>Vessel *</label>
+          <select id="blac-vessel-select" onchange="window._blacVesselSelectChange()" style="font-family:monospace;">
+            <option value="">— Select vessel —</option>
+          </select>
+          <div id="blac-vessel-new-row" style="display:none;margin-top:8px;padding:10px 12px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.2);border-radius:4px;">
+            <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:5px;font-weight:700;">Auto-assigned code</div>
+            <div id="blac-vessel-new-code" style="font-family:monospace;font-size:17px;font-weight:800;color:var(--gold);"></div>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px;">A new vessel will be registered in the Vessel Register on save.</div>
+          </div>
           <div id="blac-vessel-status" style="margin-top:5px;font-size:11px;min-height:16px;"></div>
-          <div class="field-hint">Select a registered vessel or type a new code — new vessels are registered automatically on save.</div>
+          <input type="hidden" id="blac-reference">
+          <div class="field-hint">Select a registered vessel or "+ Register New" to auto-assign the next code for this type.</div>
         </div>
         <div class="mfield">
           <label>Owner / Client *</label>
@@ -12089,40 +12096,93 @@ window._vrApplyFilter = function() {
 };
 
 window._vrPopulateVesselDropdown = function(typeFilter) {
-  // Populate the datalist for the Vessel Code field in Add Liquid form
-  var dl = document.getElementById('blac-vessel-datalist');
-  if (!dl) return;
+  var sel = document.getElementById('blac-vessel-select');
+  if (!sel) return;
   var vessels = _vrVessels.filter(function(v){
     if (typeFilter && v.vessel_type !== typeFilter) return false;
+    if (v.status === 'decommissioned') return false;
     return true;
   });
-  dl.innerHTML = vessels.map(function(v){
-    var lbl = v.id;
-    if (v.location) lbl += ' — ' + v.location;
-    if (v.status === 'in_use') lbl += ' [In Use]';
-    return '<option value="' + v.id + '">' + lbl + '</option>';
-  }).join('');
-  // Also refresh the preview for the current input value
-  window._blacVesselInputChange();
+  var typeLabel = typeFilter ? (_vrTypeLabel[typeFilter] || typeFilter) : 'Vessel';
+
+  var opts = '<option value="">— Select vessel —</option>';
+
+  // With-liquid group
+  var withLiq = vessels.filter(function(v){ return v.status === 'in_use'; });
+  var empty   = vessels.filter(function(v){ return v.status !== 'in_use'; });
+
+  if (withLiq.length) {
+    opts += '<optgroup label="In Use">'
+      + withLiq.map(function(v){
+          var lbl = v.id;
+          if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+          if (v.location) lbl += ' · ' + v.location;
+          lbl += ' [In Use]';
+          return '<option value="' + v.id + '">' + lbl + '</option>';
+        }).join('')
+      + '</optgroup>';
+  }
+  if (empty.length) {
+    opts += '<optgroup label="Available">'
+      + empty.map(function(v){
+          var lbl = v.id;
+          if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+          if (v.location) lbl += ' · ' + v.location;
+          return '<option value="' + v.id + '">' + lbl + '</option>';
+        }).join('')
+      + '</optgroup>';
+  }
+  opts += '<option value="__new__" style="color:var(--gold);font-style:italic;">+ Register New ' + typeLabel + '</option>';
+  sel.innerHTML = opts;
+
+  // Re-run change handler to sync hidden input
+  window._blacVesselSelectChange();
 };
 
-window._blacVesselInputChange = function() {
-  var input = document.getElementById('blac-reference');
+window._blacVesselSelectChange = function() {
+  var sel      = document.getElementById('blac-vessel-select');
+  var hidRef   = document.getElementById('blac-reference');
+  var newRow   = document.getElementById('blac-vessel-new-row');
+  var newCode  = document.getElementById('blac-vessel-new-code');
   var statusEl = document.getElementById('blac-vessel-status');
-  if (!statusEl) return;
-  var val = (input ? input.value.trim().toUpperCase() : '');
-  if (!val) { statusEl.textContent = ''; return; }
-  var match = _vrVessels && _vrVessels.find(function(v){ return v.id.toUpperCase() === val; });
-  if (match) {
-    var stLbl = _vrStatusLabel[match.status] || match.status;
-    var stCol = _vrStatusColour[match.status] || 'var(--muted)';
-    statusEl.innerHTML = '&#10003; <strong style="color:var(--green);">Registered vessel</strong> &nbsp;·&nbsp; '
-      + (_vrTypeLabel[match.vessel_type]||match.vessel_type)
-      + (match.capacity_litres ? ' &nbsp;·&nbsp; ' + parseFloat(match.capacity_litres).toLocaleString() + 'L capacity' : '')
-      + ' &nbsp;·&nbsp; <span style="color:' + stCol + ';font-weight:700;">' + stLbl + '</span>'
-      + (match.location ? ' &nbsp;·&nbsp; ' + match.location : '');
+  if (!sel) return;
+  var val = sel.value;
+
+  if (val === '__new__') {
+    // Auto-generate next code based on type
+    var type = (document.getElementById('blac-type')||{}).value || '';
+    var prefix = _vrTypePrefix[type] || 'VES-';
+    var existing = _vrVessels.filter(function(v){ return v.id.startsWith(prefix); });
+    var maxN = 0;
+    existing.forEach(function(v){
+      var n = parseInt(v.id.replace(prefix,'')) || 0;
+      if (n > maxN) maxN = n;
+    });
+    var generatedCode = prefix + String(maxN + 1).padStart(3, '0');
+    if (newCode)  newCode.textContent = generatedCode;
+    if (newRow)   newRow.style.display = '';
+    if (hidRef)   hidRef.value = generatedCode;
+    if (statusEl) statusEl.textContent = '';
+  } else if (val) {
+    // Existing vessel selected
+    if (newRow) newRow.style.display = 'none';
+    if (hidRef) hidRef.value = val;
+    var vessel = _vrVessels && _vrVessels.find(function(v){ return v.id === val; });
+    if (vessel && statusEl) {
+      var stLbl = _vrStatusLabel[vessel.status] || vessel.status;
+      var stCol = _vrStatusColour[vessel.status] || 'var(--muted)';
+      statusEl.innerHTML = '<span style="color:var(--green);">&#10003; Registered vessel</span>'
+        + ' &nbsp;·&nbsp; ' + (_vrTypeLabel[vessel.vessel_type]||vessel.vessel_type)
+        + (vessel.capacity_litres ? ' &nbsp;·&nbsp; ' + parseFloat(vessel.capacity_litres).toLocaleString() + 'L' : '')
+        + ' &nbsp;·&nbsp; <span style="color:' + stCol + ';font-weight:600;">' + stLbl + '</span>'
+        + (vessel.location ? ' &nbsp;·&nbsp; ' + vessel.location : '');
+    } else if (statusEl) {
+      statusEl.textContent = '';
+    }
   } else {
-    statusEl.innerHTML = '<span style="color:var(--amber);">&#9675; New vessel</span> &mdash; will be registered automatically on save.';
+    if (newRow)   newRow.style.display = 'none';
+    if (hidRef)   hidRef.value = '';
+    if (statusEl) statusEl.textContent = '';
   }
 };
 
@@ -12389,9 +12449,10 @@ window._vrOpenAddLiquid = function(vesselId) {
       // Trigger type change to update panels
       if (typeof window.handleBLACTypeChange === 'function') window.handleBLACTypeChange();
 
-      // Refresh datalist and update vessel status preview
+      // Populate vessel dropdown filtered to this type and pre-select the vessel
       window._vrPopulateVesselDropdown(vessel.vessel_type);
-      window._blacVesselInputChange();
+      var vsel = document.getElementById('blac-vessel-select');
+      if (vsel) { vsel.value = vessel.id; window._blacVesselSelectChange(); }
 
       window.toast && window.toast('Form pre-filled for vessel ' + vessel.id + '. Enter liquid details and save.', 'success');
     }, 50);
@@ -20914,7 +20975,63 @@ window.saveAdjModal = async function() {
       html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Empty containers ────</option>';
       empty.forEach(function(c) { html += makeOpt(c, context === 'source'); });
     }
+    // For destination context: also show registered vessels with no active liquid batch
+    if (context === 'dest' && window._vrVessels && window._vrVessels.length) {
+      var activeBatchVesselIds = (window._vrAllContainers || [])
+        .filter(function(c){ return c.vessel_id; })
+        .map(function(c){ return c.vessel_id; });
+      var vestDests = window._vrVessels.filter(function(v){
+        if (v.status === 'decommissioned') return false;
+        if (excludeTypes && excludeTypes.indexOf(v.vessel_type) >= 0) return false;
+        if (onlyTypes    && onlyTypes.indexOf(v.vessel_type)    < 0) return false;
+        if (activeBatchVesselIds.indexOf(v.id) >= 0) return false; // already has a batch in the dropdown above
+        return true;
+      });
+      if (vestDests.length) {
+        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (empty) ────</option>';
+        vestDests.forEach(function(v){
+          var lbl = v.id + ' — ' + (_vrTypeLabel[v.vessel_type]||v.vessel_type);
+          if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+          if (v.location) lbl += ' · ' + v.location;
+          html += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
+        });
+      }
+    }
     return html;
+  }
+
+  // Resolve a destination container ID — if it's a __vessel__ prefixed value,
+  // auto-create an empty liquid_containers record for that vessel and return its UUID
+  async function _resolveDestId(val, clientId) {
+    if (!val) return null;
+    if (!val.startsWith || !val.startsWith('__vessel__')) return val;
+    var vesselId = val.replace('__vessel__', '');
+    var vessel   = window._vrVessels && window._vrVessels.find(function(v){ return v.id === vesselId; });
+    if (!vessel) return null;
+    try {
+      // Create empty container record for this vessel
+      var payload = {
+        type:            vessel.vessel_type,
+        reference:       vessel.id,
+        client_id:       clientId || null,
+        capacity_litres: vessel.capacity_litres || null,
+        location:        vessel.location || null,
+        status:          'empty',
+        current_litres:  0,
+        current_lpa:     0,
+        vessel_id:       vessel.id
+      };
+      var ins = await window.db.insert('liquid_containers', payload);
+      var newId = ins && ins[0] && ins[0].id;
+      if (newId) {
+        // Update vessel status
+        try { await window.db.update('vessels', '?id=eq.' + vessel.id, { status: 'in_use' }); } catch(e) {}
+        // Reload liquid data so the new record is in _bl
+        await loadBlData();
+        return newId;
+      }
+    } catch(e) { window.logError && window.logError('resolve dest vessel', e); }
+    return null;
   }
 
   function autoStatus(litres, capacity) {
@@ -21317,6 +21434,8 @@ window.saveAdjModal = async function() {
       setTimeout(function(){ if (banner.parentNode) banner.parentNode.removeChild(banner); }, 8000);
       ['blac-reference','blac-location','blac-spirit','blac-cbw','blac-abv','blac-litres','blac-lpa','blac-lpa-price','blac-filldate','blac-ola','blac-cask-litres','blac-cask-lpa','blac-notes','blac-prefix'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
       var vsEl = document.getElementById('blac-vessel-status'); if (vsEl) vsEl.textContent = '';
+      var vsNR = document.getElementById('blac-vessel-new-row'); if (vsNR) vsNR.style.display = 'none';
+      var vsSel = document.getElementById('blac-vessel-select'); if (vsSel) vsSel.value = '';
       var valEl = document.getElementById('blac-lpa-value'); if (valEl) { valEl.textContent = '—'; valEl.style.color = 'var(--muted)'; }
       var lpaPreview = document.getElementById('blac-lpa-preview'); if(lpaPreview) lpaPreview.style.display='none';
       var ap = document.getElementById('blac-angel-panel'); if(ap) ap.style.display='none';
@@ -21754,6 +21873,14 @@ window.saveAdjModal = async function() {
       if (!confirm(msg)) return;
     }
 
+    // Pre-resolve any __vessel__ destination values
+    var _dgDestSels = document.querySelectorAll('[id^="dg-dc-"]');
+    for (var _di = 0; _di < _dgDestSels.length; _di++) {
+      if (_dgDestSels[_di].value && _dgDestSels[_di].value.startsWith('__vessel__')) {
+        var _resolvedId = await _resolveDestId(_dgDestSels[_di].value, null);
+        if (_resolvedId) _dgDestSels[_di].value = _resolvedId;
+      }
+    }
     var dests = [];
     document.querySelectorAll('[id^="dg-dc-"]').forEach(function(sel){
       var idx  = sel.id.replace('dg-dc-','');
@@ -22476,6 +22603,14 @@ window.saveAdjModal = async function() {
     }
 
     // ── Multi-destination mode ──
+    // Pre-resolve any __vessel__ destination values into real liquid_containers IDs
+    var _blDestSels = document.querySelectorAll('[id^="bl-dc-"]');
+    for (var _di = 0; _di < _blDestSels.length; _di++) {
+      if (_blDestSels[_di].value && _blDestSels[_di].value.startsWith('__vessel__')) {
+        var _resolvedId = await _resolveDestId(_blDestSels[_di].value, null);
+        if (_resolvedId) _blDestSels[_di].value = _resolvedId;
+      }
+    }
     var dests = [];
     document.querySelectorAll('[id^="bl-dr-"]').forEach(function(row) {
       var idx   = row.id.replace('bl-dr-','');
@@ -22988,6 +23123,14 @@ window.saveAdjModal = async function() {
       var lpa = (l && cont && cont.abv) ? l * parseFloat(cont.abv) / 100 : 0;
       sources.push({ container_id: sel.value, litres_actual: l, lpa_actual: lpa, cont: cont });
     });
+    // Pre-resolve any __vessel__ destination values
+    var _btfDestSels = document.querySelectorAll('[id^="btf-dc-"]');
+    for (var _di = 0; _di < _btfDestSels.length; _di++) {
+      if (_btfDestSels[_di].value && _btfDestSels[_di].value.startsWith('__vessel__')) {
+        var _resolvedId = await _resolveDestId(_btfDestSels[_di].value, null);
+        if (_resolvedId) _btfDestSels[_di].value = _resolvedId;
+      }
+    }
     var dests = [];
     document.querySelectorAll('[id^="btf-dc-"]').forEach(function(sel) {
       if (!sel.value) return;
