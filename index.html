@@ -17052,13 +17052,11 @@ window.saveAdjModal = async function() {
         return;
       }
 
-      // All gates clear — confirm
-      var confirmed = await _showConfirmAdvanceModal(
-        'Complete Job',
-        'All sign-offs are complete. Mark this job as Complete?',
-        'Complete Job'
-      );
-      if (!confirmed) return;
+      // All gates clear — show dry goods deduction modal (or plain confirm if no dry goods)
+      var deductionConfirmed = await _showDryGoodsDeductionModal(j, _currentJobId);
+      if (!deductionConfirmed) return;
+      // deductionConfirmed may carry waste entries — handled inside the modal
+      return; // modal calls _finaliseJobComplete internally
     }
 
     try {
@@ -17070,6 +17068,259 @@ window.saveAdjModal = async function() {
       window.closeJobDetail();
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
+
+  // ── Finalise job complete (called by deduction modal on confirm) ─────────────
+  async function _finaliseJobComplete(jobId, prevStage) {
+    try {
+      await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, { stage: 'complete' });
+      _writeAuditLog(jobId, prevStage, 'complete', null);
+    } catch(e) { throw e; }
+  }
+
+  // ── Dry-goods deduction modal ─────────────────────────────────────────────────
+  async function _showDryGoodsDeductionModal(job, jobId) {
+    var actualBottles = parseInt(job.actual_bottles_produced || 0);
+    if (!actualBottles) {
+      await window.lpAlert('Actual bottles produced must be entered on the Results tab before completing this job.', { title: 'Results required', variant: 'warn' });
+      return false;
+    }
+
+    // Load job components (with SKU IDs)
+    var comps;
+    try {
+      comps = await supaGet('job_components?job_id=eq.' + jobId + '&sku_id=not.is.null&order=created_at.asc');
+    } catch(e) {
+      window.toast && window.toast('Could not load components: ' + e.message, 'error');
+      return false;
+    }
+
+    // Filter out liquid (handled separately) and items with no SKU
+    var dryComps = comps.filter(function(c){ return c.sku_id; });
+
+    // If no dry goods at all — skip modal, complete normally
+    if (!dryComps.length) {
+      var ok = await window.lpConfirm('All sign-offs are complete. No dry goods components to deduct.\n\nMark this job as Complete?', { title: 'Complete Job', confirmLabel: 'Complete Job' });
+      if (!ok) return false;
+      try {
+        await _finaliseJobComplete(jobId, job.stage);
+        window.toast && window.toast('Job complete — no dry goods to deduct.', 'success');
+        await loadJobs();
+        window.closeJobDetail();
+      } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
+      return false; // prevent outer caller from running again
+    }
+
+    // Fetch current stock totals per SKU
+    var skuIds = dryComps.map(function(c){ return c.sku_id; });
+    var stockMap = {}; // skuId -> total quantity_remaining
+    var batchMap = {}; // skuId -> array of {id, quantity_remaining} ordered oldest first (FIFO)
+    try {
+      var batchRows = await supaGet('dry_goods_batches?sku_id=in.(' + skuIds.join(',') + ')&select=id,sku_id,quantity_remaining&order=delivery_date.asc');
+      batchRows.forEach(function(b){
+        if (!batchMap[b.sku_id]) batchMap[b.sku_id] = [];
+        batchMap[b.sku_id].push({ id: b.id, qty: parseInt(b.quantity_remaining || 0) });
+        stockMap[b.sku_id] = (stockMap[b.sku_id] || 0) + parseInt(b.quantity_remaining || 0);
+      });
+    } catch(e) { console.warn('Stock fetch for deduction failed:', e); }
+
+    // Build BOM bottles_per_shipper for case items
+    var bomBPS = job.bom_id ? null : null;
+    try {
+      if (job.bom_id) {
+        var bomR = await supaGet('boms?id=eq.' + job.bom_id + '&select=bottles_per_shipper');
+        if (bomR && bomR[0]) bomBPS = parseInt(bomR[0].bottles_per_shipper || 0) || null;
+      }
+    } catch(e) {}
+
+    return new Promise(function(resolve) {
+      var esc = window.escapeHtml;
+      var ov  = document.createElement('div');
+      ov.id   = 'dg-deduct-overlay';
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.92);z-index:100030;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto;font-family:Lato,sans-serif;';
+
+      // Build initial waste values
+      var wasteVals = {};
+      dryComps.forEach(function(c){ wasteVals[c.sku_id] = 0; });
+
+      function calcRow(c, waste) {
+        var isCaseItem = c.item_name && (c.item_name.toLowerCase().indexOf('shipper') > -1 || c.item_name.toLowerCase().indexOf('divider') > -1);
+        var qtyPerUnit;
+        if (isCaseItem && bomBPS) {
+          qtyPerUnit = Math.ceil(actualBottles / bomBPS);
+        } else {
+          qtyPerUnit = c.qty_required != null ? parseFloat(c.qty_required) : actualBottles;
+        }
+        var baseDeduct  = isCaseItem ? qtyPerUnit : qtyPerUnit; // already factored
+        var totalDeduct = baseDeduct + parseInt(waste || 0);
+        var currentStock = stockMap[c.sku_id] != null ? stockMap[c.sku_id] : null;
+        var stockAfter   = currentStock != null ? Math.max(0, currentStock - totalDeduct) : null;
+        var belowZero    = currentStock != null && (currentStock - totalDeduct) < 0;
+        var noStock      = currentStock == null;
+        return { qtyPerUnit: qtyPerUnit, totalDeduct: totalDeduct, currentStock: currentStock, stockAfter: stockAfter, belowZero: belowZero, noStock: noStock };
+      }
+
+      function renderTable() {
+        var rows = dryComps.map(function(c) {
+          var waste = parseInt(wasteVals[c.sku_id] || 0);
+          var r = calcRow(c, waste);
+          var rowBg = r.belowZero ? 'background:rgba(224,87,87,0.08);' : r.noStock ? 'background:rgba(255,160,0,0.06);' : '';
+          var stockAfterDisp = r.stockAfter != null ? r.stockAfter : '—';
+          var stockCurDisp   = r.currentStock != null ? r.currentStock : '—';
+          var warn = r.belowZero
+            ? '<div style="font-size:10px;color:var(--red,#e05757);margin-top:2px;">Stock will go below zero — will be set to 0</div>'
+            : r.noStock
+              ? '<div style="font-size:10px;color:#ffa000;margin-top:2px;">&#9888; No stock record — will be skipped</div>'
+              : '';
+          return '<tr style="border-bottom:1px solid var(--navy-border);">'
+            + '<td style="padding:9px 8px 4px;' + rowBg + 'font-size:12px;color:var(--white);font-weight:600;">' + esc(c.item_name || c.sku_id) + warn + '</td>'
+            + '<td style="padding:9px 8px;text-align:right;font-size:12px;color:var(--text);">' + r.qtyPerUnit.toLocaleString() + '</td>'
+            + '<td style="padding:9px 8px;text-align:right;font-size:12px;color:var(--text);">' + actualBottles.toLocaleString() + '</td>'
+            + '<td style="padding:6px 8px;text-align:center;">'
+            +   '<input type="number" min="0" step="1" value="' + waste + '" data-sku="' + esc(c.sku_id) + '" class="dg-waste-inp" style="width:64px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:4px 6px;font-size:12px;border-radius:3px;text-align:right;">'
+            + '</td>'
+            + '<td style="padding:9px 8px;text-align:right;font-size:12px;font-weight:700;color:var(--white);">' + r.totalDeduct.toLocaleString() + '</td>'
+            + '<td style="padding:9px 8px;text-align:right;font-size:12px;color:' + (r.noStock ? '#ffa000' : 'var(--text)') + ';">' + stockCurDisp + '</td>'
+            + '<td style="padding:9px 8px;text-align:right;font-size:12px;font-weight:700;color:' + (r.belowZero ? 'var(--red,#e05757)' : r.noStock ? '#ffa000' : 'var(--green)') + ';">' + (r.stockAfter != null ? r.stockAfter.toLocaleString() : '—') + '</td>'
+            + '</tr>';
+        }).join('');
+        return rows;
+      }
+
+      function buildModal() {
+        ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px 28px 22px;width:min(820px,100%);margin:auto;">'
+          + '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;">'
+          +   '<div>'
+          +     '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Complete Job</div>'
+          +     '<div style="font-size:16px;font-weight:800;color:var(--white);">Dry Goods Stock Deduction</div>'
+          +   '</div>'
+          +   '<button id="dg-dd-close" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0;line-height:1;">&#10005;</button>'
+          + '</div>'
+          + '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">Review quantities to deduct based on <strong style="color:var(--white);">' + actualBottles.toLocaleString() + ' bottles produced</strong>. Enter any waste per component, then confirm to complete the job and update stock.</div>'
+          + '<div style="overflow-x:auto;">'
+          + '<table style="width:100%;border-collapse:collapse;min-width:560px;">'
+          + '<thead><tr style="border-bottom:2px solid var(--navy-border);">'
+          +   '<th style="text-align:left;padding:8px 8px 10px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Component</th>'
+          +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;">BOM Qty / Unit</th>'
+          +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Actual Units</th>'
+          +   '<th style="text-align:center;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Waste</th>'
+          +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;">Total to Deduct</th>'
+          +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;">Current Stock</th>'
+          +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;">Stock After</th>'
+          + '</tr></thead>'
+          + '<tbody id="dg-dd-tbody">' + renderTable() + '</tbody>'
+          + '</table>'
+          + '</div>'
+          + '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:22px;flex-wrap:wrap;">'
+          +   '<button id="dg-dd-cancel" style="padding:10px 20px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;">Cancel</button>'
+          +   '<button id="dg-dd-confirm" style="padding:10px 22px;background:var(--gold);border:none;border-radius:4px;color:var(--navy-dark,#0a1628);cursor:pointer;font-size:12px;font-weight:800;">Complete Job and Deduct Stock</button>'
+          + '</div>'
+          + '</div>';
+      }
+
+      buildModal();
+      document.body.appendChild(ov);
+      document.body.style.overflow = 'hidden';
+
+      // Live-update table when waste inputs change
+      ov.addEventListener('input', function(e) {
+        if (!e.target.classList.contains('dg-waste-inp')) return;
+        var skuId = e.target.dataset.sku;
+        wasteVals[skuId] = Math.max(0, parseInt(e.target.value || 0) || 0);
+        var tbody = document.getElementById('dg-dd-tbody');
+        if (tbody) tbody.innerHTML = renderTable();
+        // Re-wire new inputs
+        ov.querySelectorAll('.dg-waste-inp').forEach(function(inp) {
+          inp.value = wasteVals[inp.dataset.sku] || 0;
+        });
+      });
+
+      function closeModal() {
+        ov.remove();
+        document.body.style.overflow = '';
+        resolve(false);
+      }
+
+      ov.querySelector('#dg-dd-close').onclick   = closeModal;
+      ov.querySelector('#dg-dd-cancel').onclick  = closeModal;
+
+      ov.querySelector('#dg-dd-confirm').onclick = async function() {
+        var confirmBtn = ov.querySelector('#dg-dd-confirm');
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Processing…';
+
+        // Build deduction list
+        var deductions = [];
+        dryComps.forEach(function(c) {
+          var waste = parseInt(wasteVals[c.sku_id] || 0);
+          var r = calcRow(c, waste);
+          if (r.noStock) return; // skip — no stock record
+          deductions.push({ comp: c, waste: waste, totalDeduct: r.totalDeduct, stockBefore: r.currentStock, stockAfter: r.stockAfter });
+        });
+
+        try {
+          // 1. Deduct stock from dry_goods_batches (FIFO across batches)
+          for (var di = 0; di < deductions.length; di++) {
+            var d = deductions[di];
+            var remaining = d.totalDeduct;
+            var batches   = batchMap[d.comp.sku_id] || [];
+            for (var bi = 0; bi < batches.length && remaining > 0; bi++) {
+              var batch      = batches[bi];
+              var deductFrom = Math.min(batch.qty, remaining);
+              var newQty     = Math.max(0, batch.qty - deductFrom);
+              await supaMut('PATCH', 'dry_goods_batches', '?id=eq.' + batch.id, { quantity_remaining: newQty });
+              remaining -= deductFrom;
+            }
+          }
+
+          // 2. Insert stock_movements records
+          var byId = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
+          for (var di2 = 0; di2 < deductions.length; di2++) {
+            var d2 = deductions[di2];
+            try {
+              await supaMut('POST', 'stock_movements', '', {
+                job_id:            jobId,
+                sku_id:            d2.comp.sku_id,
+                quantity_deducted: d2.totalDeduct,
+                waste_recorded:    d2.waste,
+                stock_before:      d2.stockBefore,
+                stock_after:       d2.stockAfter,
+                deducted_by:       byId || null
+              });
+            } catch(e) { console.warn('stock_movements insert failed (non-critical):', e.message); }
+          }
+
+          // 3. Insert job_waste records
+          for (var di3 = 0; di3 < deductions.length; di3++) {
+            var d3 = deductions[di3];
+            if (!d3.waste) continue;
+            try {
+              await supaMut('POST', 'job_waste', '', {
+                job_id:          jobId,
+                sku_id:          d3.comp.sku_id,
+                waste_quantity:  d3.waste,
+                recorded_by:     byId || null
+              });
+            } catch(e) { console.warn('job_waste insert failed (non-critical):', e.message); }
+          }
+
+          // 4. Mark job complete
+          await _finaliseJobComplete(jobId, job.stage);
+          var deducted = deductions.filter(function(d){ return !d.noStock; }).length;
+          window.toast && window.toast('Job complete — stock updated for ' + deducted + ' component' + (deducted !== 1 ? 's' : '') + '.', 'success');
+          ov.remove();
+          document.body.style.overflow = '';
+          await loadJobs();
+          window.closeJobDetail();
+          resolve(false); // outer caller must not run again
+        } catch(e) {
+          window.toast && window.toast('Error completing job: ' + e.message, 'error');
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Complete Job and Deduct Stock';
+          resolve(false);
+        }
+      };
+    });
+  }
 
   // ── Audit log helper ─────────────────────────────────────────────────────────
   async function _writeAuditLog(jobId, fromStage, toStage, reason) {
