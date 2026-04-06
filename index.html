@@ -7569,19 +7569,7 @@ window.loadBoms = async function initBoms() {
     </div>
   </div>
 
-  <!-- BOM Approvals Card — visible only to users with boms_lock permission -->
-  <div class="card" id="bom-approvals-card" style="margin-bottom:24px;padding:20px 24px;display:none;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-      <div class="card-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">
-        <span style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--gold);color:var(--navy);font-size:11px;font-weight:800;margin-right:8px;">B</span>
-        BOM Approvals
-      </div>
-      <button onclick="window.loadPendingBomApprovals && window.loadPendingBomApprovals()" style="background:transparent;border:none;color:var(--muted);font-size:11px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.08em;">↻ Refresh</button>
-    </div>
-    <div id="bom-approvals-list">
-      <div style="color:var(--muted);font-size:12px;padding:12px 0;">Loading…</div>
-    </div>
-  </div>
+  <!-- BOM Approvals are now rendered inside the Your Tasks card above -->
 
   <!-- KPI strip -->
   <div class="kpi-strip">
@@ -20755,12 +20743,25 @@ window.saveAdjModal = async function() {
       var userId = window.CURRENT_USER ? window.CURRENT_USER.id : null;
       var tasks;
       if (userId) {
-        // Show tasks explicitly assigned to this user
         tasks = await supaGet('job_tasks?assigned_to=eq.' + userId + '&status=neq.completed&order=created_at.asc&limit=20');
       } else {
         tasks = [];
       }
-      renderOverviewTasks(tasks);
+
+      // Fetch BOM approvals for users with boms_lock permission and merge into task list
+      var bomItems = [];
+      if (window.canDo && window.canDo('boms_lock')) {
+        try {
+          var bomRows = await supaGet('boms?bom_status=in.(pending,approved)&select=id,product_name,bom_status,locked_by,approval_requested_at,edit_requested_by&order=approval_requested_at.asc');
+          if (bomRows && bomRows.length) {
+            bomRows.forEach(function(r) {
+              bomItems.push({ _isBomApproval: true, bom: r });
+            });
+          }
+        } catch(e) { console.warn('BOM approvals load error:', e); }
+      }
+
+      renderOverviewTasks(tasks, bomItems);
     } catch(e) { console.warn('Tasks load error:', e); }
   }
 
@@ -20812,11 +20813,12 @@ window.saveAdjModal = async function() {
     }, 700);
   }
 
-  function renderOverviewTasks(tasks) {
+  function renderOverviewTasks(tasks, bomItems) {
     var el = document.getElementById('overview-tasks-list');
     if (!el) return;
     el.innerHTML = '';
-    if (!tasks || !tasks.length) {
+    bomItems = bomItems || [];
+    if ((!tasks || !tasks.length) && !bomItems.length) {
       el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px 0;">No pending tasks assigned to you. All clear ✓</div>';
       return;
     }
@@ -20902,6 +20904,59 @@ window.saveAdjModal = async function() {
 
       el.appendChild(card);
     });
+
+    // Render BOM approval items
+    if (bomItems.length) {
+      if (tasks && tasks.length) {
+        var sep = document.createElement('div');
+        sep.style.cssText = 'font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:14px 0 8px;font-weight:700;';
+        sep.textContent = 'BOM Approvals';
+        el.appendChild(sep);
+      }
+      bomItems.forEach(function(item) {
+        var r = item.bom;
+        var isEdit    = r.bom_status === 'approved' && r.edit_requested_by;
+        var isPending = r.bom_status === 'pending';
+        var accentColor = isPending ? 'rgba(255,160,0,0.4)' : 'rgba(201,168,76,0.3)';
+        var bgColor     = isPending ? 'rgba(255,160,0,0.06)' : 'rgba(201,168,76,0.04)';
+        var when = r.approval_requested_at ? new Date(r.approval_requested_at).toLocaleDateString() : '';
+        var byLine = isPending
+          ? (when ? when : '') + (r.locked_by ? (when ? ' · submitted by ' : 'Submitted by ') + r.locked_by : '')
+          : 'Edit requested by ' + (r.edit_requested_by || 'unknown');
+
+        var card = document.createElement('div');
+        card.style.cssText = 'background:' + bgColor + ';border:1px solid ' + accentColor + ';border-left:3px solid ' + accentColor + ';border-radius:6px;padding:12px 16px;margin-bottom:10px;';
+
+        var top = document.createElement('div');
+        top.style.cssText = 'display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;flex-wrap:wrap;';
+        top.innerHTML = '<div>'
+          + '<div style="font-size:13px;font-weight:600;color:var(--white);margin-bottom:3px;">' + (window.escapeHtml ? window.escapeHtml(r.product_name || r.id) : (r.product_name || r.id)) + '</div>'
+          + '<div style="font-size:10px;color:var(--muted);">' + (window.escapeHtml ? window.escapeHtml(byLine) : byLine) + '</div>'
+          + '</div>'
+          + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:4px 10px;border-radius:3px;white-space:nowrap;flex-shrink:0;background:rgba(255,160,0,0.15);color:var(--amber);">' + (isPending ? 'Awaiting Approval' : 'Edit Request') + '</span>';
+        card.appendChild(top);
+
+        var actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;';
+
+        if (isPending) {
+          var approveBtn = document.createElement('button');
+          approveBtn.innerHTML = '&#10003; Approve';
+          approveBtn.style.cssText = 'background:rgba(74,199,132,0.10);border:1px solid var(--green);color:var(--green);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;';
+          (function(bomId){ approveBtn.onclick = function(e){ e.stopPropagation(); window.approveBom(bomId); }; })(r.id);
+          actions.appendChild(approveBtn);
+        }
+
+        var returnBtn = document.createElement('button');
+        returnBtn.textContent = isEdit ? 'Unlock for Edit' : 'Return to Draft';
+        returnBtn.style.cssText = 'background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:5px 12px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;';
+        (function(bomId){ returnBtn.onclick = function(e){ e.stopPropagation(); window.returnBomToDraft(bomId); }; })(r.id);
+        actions.appendChild(returnBtn);
+
+        card.appendChild(actions);
+        el.appendChild(card);
+      });
+    }
   }
 
   // ── Hook into showPage for jobs tab ──────────────────────────────────────────
@@ -20921,70 +20976,10 @@ window.saveAdjModal = async function() {
   });
 
   // ── BOM pending approvals — shown on overview for users with boms_lock ──────
-  window.loadPendingBomApprovals = async function() {
-    var card = document.getElementById('bom-approvals-card');
-    var list = document.getElementById('bom-approvals-list');
-    if (!card || !list) return;
-
-    // Only show for users who can lock BOMs
-    if (!(window.canDo && window.canDo('boms_lock'))) {
-      card.style.display = 'none';
-      return;
-    }
-    card.style.display = '';
-
-    try {
-      var rows = await supaGet('boms?bom_status=in.(pending,approved)&select=id,product_name,bom_status,locked_by,approval_requested_at,edit_requested_by&order=approval_requested_at.asc');
-      if (!rows || !rows.length) {
-        list.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0;">No BOMs awaiting action.</div>';
-        return;
-      }
-
-      var pendingApproval = rows.filter(function(r){ return r.bom_status === 'pending'; });
-      var editRequests    = rows.filter(function(r){ return r.bom_status === 'approved' && r.edit_requested_by; });
-
-      var html = '';
-
-      if (pendingApproval.length) {
-        html += '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px;">Awaiting Approval</div>';
-        html += pendingApproval.map(function(r) {
-          var when = r.approval_requested_at ? new Date(r.approval_requested_at).toLocaleDateString() : '';
-          var by   = r.locked_by ? ' · submitted by ' + r.locked_by : '';
-          return '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;margin-bottom:6px;border-radius:5px;border:1px solid rgba(255,160,0,0.3);background:rgba(255,160,0,0.06);">'
-            + '<div>'
-            + '<div style="font-size:12px;font-weight:700;color:var(--white);">' + (r.product_name || r.id) + '</div>'
-            + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">' + when + by + '</div>'
-            + '</div>'
-            + '<div style="display:flex;gap:6px;">'
-            + '<button onclick="window.approveBom(\'' + r.id + '\')" style="background:rgba(74,199,132,0.10);border:1px solid var(--green);color:var(--green);font-size:11px;padding:4px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;font-weight:700;">&#10003; Approve</button>'
-            + '<button onclick="window.returnBomToDraft(\'' + r.id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:4px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Return to draft</button>'
-            + '</div>'
-            + '</div>';
-        }).join('');
-      }
-
-      if (editRequests.length) {
-        html += '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-top:' + (pendingApproval.length ? '14px' : '0') + ';margin-bottom:6px;">Edit Requests</div>';
-        html += editRequests.map(function(r) {
-          return '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;margin-bottom:6px;border-radius:5px;border:1px solid rgba(201,168,76,0.25);background:rgba(201,168,76,0.05);">'
-            + '<div>'
-            + '<div style="font-size:12px;font-weight:700;color:var(--white);">' + (r.product_name || r.id) + '</div>'
-            + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">Edit requested by ' + (r.edit_requested_by || 'unknown') + '</div>'
-            + '</div>'
-            + '<button onclick="window.returnBomToDraft(\'' + r.id + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:11px;padding:4px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Return to draft</button>'
-            + '</div>';
-        }).join('');
-      }
-
-      if (!html) {
-        html = '<div style="color:var(--muted);font-size:12px;padding:8px 0;">No BOMs awaiting action.</div>';
-      }
-
-      list.innerHTML = html;
-    } catch(e) {
-      list.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0;">Could not load BOM approvals.</div>';
-      console.warn('BOM approvals load error:', e.message);
-    }
+  // BOM approvals are now rendered inside the Your Tasks card — this function
+  // simply refreshes the whole tasks list so all existing call sites still work.
+  window.loadPendingBomApprovals = function() {
+    loadMyTasks();
   };
 
   // Initial load and expose
