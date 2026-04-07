@@ -21054,6 +21054,82 @@ window.saveAdjModal = async function() {
     }).join('');
   };
 
+  // ── Overview: Today's Attendance ─────────────────────────────────────────────
+  window.loadOverviewAttendance = async function() {
+    var el = document.getElementById('ov-attendance-list');
+    if (!el) return;
+    var uid = window.CURRENT_USER && window.CURRENT_USER.id;
+    if (!uid) {
+      el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px 0;">Sign in to see your attendance.</div>';
+      return;
+    }
+    try {
+      var todayStr = new Date().toISOString().split('T')[0];
+      var rows = await supaGet('clock_events?user_id=eq.' + uid + '&timestamp=gte.' + todayStr + 'T00:00:00Z&order=timestamp.asc');
+      if (!rows || !rows.length) {
+        el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px 0;">You haven\'t clocked in today.</div>';
+        return;
+      }
+
+      var TYPE_LABEL = { clock_in: 'Clocked in', clock_out: 'Clocked out', break_start: 'Break started', break_end: 'Break ended' };
+      var TYPE_COLOUR = { clock_in: 'var(--green)', clock_out: 'var(--muted)', break_start: 'var(--amber)', break_end: 'var(--blue)' };
+
+      function fmt(ts) { return new Date(ts).toLocaleTimeString('en-IE', { hour: '2-digit', minute: '2-digit' }); }
+      function dur(from, to) {
+        var ms = new Date(to).getTime() - new Date(from).getTime();
+        var h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+        return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+      }
+
+      // Calculate total work time and current state
+      var totalWorkMs = 0, breakMs = 0;
+      var lastClockIn = null, lastBreakStart = null;
+      var currentState = 'clocked_out';
+      rows.forEach(function(r) {
+        if (r.event_type === 'clock_in')      { lastClockIn = r.timestamp; currentState = 'clocked_in'; }
+        else if (r.event_type === 'break_start') { lastBreakStart = r.timestamp; currentState = 'on_break'; }
+        else if (r.event_type === 'break_end')   { if (lastBreakStart) breakMs += new Date(r.timestamp) - new Date(lastBreakStart); lastBreakStart = null; currentState = 'clocked_in'; }
+        else if (r.event_type === 'clock_out')   { if (lastClockIn) totalWorkMs += new Date(r.timestamp) - new Date(lastClockIn); lastClockIn = null; currentState = 'clocked_out'; }
+      });
+      // If still clocked in, add time up to now
+      if (currentState === 'clocked_in' && lastClockIn) totalWorkMs += Date.now() - new Date(lastClockIn);
+      if (currentState === 'on_break' && lastBreakStart) breakMs += Date.now() - new Date(lastBreakStart);
+      var netWorkMs = totalWorkMs - breakMs;
+      function fmtMs(ms) { var h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000); return h > 0 ? h+'h '+m+'m' : m+'m'; }
+
+      // Status banner
+      var statusColour = currentState === 'clocked_in' ? 'var(--green)' : currentState === 'on_break' ? 'var(--amber)' : 'var(--muted)';
+      var statusLabel  = currentState === 'clocked_in' ? '● Clocked in' : currentState === 'on_break' ? '● On break' : '○ Clocked out';
+      var html = '<div style="display:flex;gap:20px;margin-bottom:14px;flex-wrap:wrap;">'
+        + '<div><div style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:3px;">Status</div>'
+        +   '<div style="font-size:12px;font-weight:700;color:' + statusColour + ';">' + statusLabel + '</div></div>'
+        + '<div><div style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:3px;">Time on site</div>'
+        +   '<div style="font-size:12px;font-weight:700;color:var(--white);">' + fmtMs(netWorkMs) + '</div></div>';
+      if (breakMs > 0) {
+        html += '<div><div style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:3px;">Break time</div>'
+          + '<div style="font-size:12px;font-weight:700;color:var(--amber);">' + fmtMs(breakMs) + '</div></div>';
+      }
+      html += '</div>';
+
+      // Event timeline
+      html += '<div style="border-top:1px solid var(--navy-border);padding-top:10px;">';
+      rows.forEach(function(r) {
+        var col = TYPE_COLOUR[r.event_type] || 'var(--muted)';
+        var lbl = TYPE_LABEL[r.event_type]  || r.event_type;
+        html += '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid rgba(36,61,87,0.4);">'
+          + '<span style="width:8px;height:8px;border-radius:50%;background:' + col + ';flex-shrink:0;"></span>'
+          + '<span style="font-size:11px;color:var(--white);font-weight:600;">' + lbl + '</span>'
+          + '<span style="font-size:11px;color:var(--muted);margin-left:auto;">' + fmt(r.timestamp) + '</span>'
+          + '</div>';
+      });
+      html += '</div>';
+      el.innerHTML = html;
+    } catch(e) {
+      el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px 0;">Could not load attendance data.</div>';
+      console.warn('Overview attendance error:', e);
+    }
+  };
+
   // ── Overview: My Roster this week ─────────────────────────────────────────────
   window.loadOverviewMyRoster = async function() {
     var el = document.getElementById('ov-my-roster');
