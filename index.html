@@ -3278,6 +3278,27 @@ window.copyInviteLink = function() {
         </div>
 
         <div style="max-width:420px;margin-top:32px;padding-top:24px;border-top:1px solid var(--navy-border);">
+          <div style="font-size:13px;font-weight:700;color:var(--white);margin-bottom:16px;">BOM Workflow</div>
+          <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:6px;">
+            <label style="position:relative;display:inline-block;width:38px;height:22px;flex-shrink:0;margin-top:1px;">
+              <input type="checkbox" id="sys-bom-approval" style="opacity:0;width:0;height:0;position:absolute;">
+              <span onclick="var cb=document.getElementById('sys-bom-approval');cb.checked=!cb.checked;this.style.background=cb.checked?'var(--gold)':'var(--navy-border)';" id="sys-bom-approval-track" style="position:absolute;inset:0;background:var(--navy-border);border-radius:11px;cursor:pointer;transition:background 0.2s;">
+                <span id="sys-bom-approval-knob" style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform 0.2s;pointer-events:none;"></span>
+              </span>
+            </label>
+            <div>
+              <div style="font-size:12px;font-weight:700;color:var(--white);margin-bottom:3px;">Require BOM approval workflow</div>
+              <div style="font-size:11px;color:var(--muted);line-height:1.5;">When on, BOMs must be sent to Quality &amp; Compliance for approval before they can be locked. Turn off to allow BOMs to be approved directly without the send-to-quality step.</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="max-width:420px;margin-top:24px;">
+          <button onclick="window.saveSystemSettings()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save Settings</button>
+          <span id="sys-save-status-2" style="font-size:12px;margin-left:12px;"></span>
+        </div>
+
+        <div style="max-width:420px;margin-top:32px;padding-top:24px;border-top:1px solid var(--navy-border);">
           <div style="font-size:13px;font-weight:700;color:var(--white);margin-bottom:6px;">Invite New User</div>
           <div style="font-size:12px;color:var(--muted);margin-bottom:16px;">Send a signup link to a new user. They'll be pre-assigned their role on joining.</div>
           <button onclick="window.closeSettings(); setTimeout(window.openInviteModal, 150);" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">
@@ -5083,6 +5104,7 @@ window.copyInviteLink = function() {
     if(!(await window.lpConfirm('Permanently delete this employee record? Cannot be undone.', { title: 'Delete employee', confirmLabel: 'Delete', destructive: true }))) return;
     try {
       if(_hrCurrentProfile) await sbDelete('hr_profiles','?id=eq.'+_hrCurrentProfile.id);
+      try { await sbDelete('job_tasks','?task_type=eq.hr_profile_setup&target_user_id=eq.'+_hrCurrentUserId); } catch(e) { console.warn('task cleanup failed:', e); }
       await sbDelete('app_users','?id=eq.'+_hrCurrentUserId);
       window.toast&&window.toast('Deleted.','success');
       _hrCurrentUserId=null; _hrCurrentProfile=null;
@@ -6430,7 +6452,7 @@ function renderBoms() {
     var deleteBtn = (!isLocked && canEdit)
       ? '<button class="bom-action-delete" data-bomid="' + bid + '" data-bomprod="' + product + '" style="background:transparent;border:1px solid var(--navy-border);color:var(--red);' + btnStyle + '">Delete</button>'
       : '';
-    var approvalBtn = !isLocked && canEdit
+    var approvalBtn = (!isLocked && canEdit && window._bomApprovalRequired !== false)
       ? '<button class="bom-action-reqapproval" data-bomid="' + bid + '" style="background:rgba(201,168,76,0.08);border:1px solid var(--gold-dim);color:var(--gold);' + btnStyle + '" title="Send to Quality for approval">&#10148; Approval</button>'
       : '';
     var returnDraftBtn = canLock && (bStatus === 'pending' || bStatus === 'approved')
@@ -7232,6 +7254,10 @@ async function _bomPatch(bomId, payload) {
 }
 
 window.requestBomApproval = async function(bomId) {
+  if (window._bomApprovalRequired === false) {
+    window.toast && window.toast('BOM approval workflow is disabled in System Settings.', 'info');
+    return;
+  }
   var bom = BOMS.find(function(b){ return b.id === bomId; });
   if (!bom) return;
   if (!(await window.lpConfirm('Send "' + bom.product + '" to Quality & Compliance for approval?', { title: 'Request approval', confirmLabel: 'Send', destructive: false }))) return;
@@ -24551,10 +24577,19 @@ window.saveAdjModal = async function() {
       var rows = await sbGet('app_settings?key=eq.system&limit=1');
       if (rows.length && rows[0].value) {
         var s = typeof rows[0].value === 'string' ? JSON.parse(rows[0].value) : rows[0].value;
-        var keyEl = document.getElementById('sys-resend-key');
+        var keyEl  = document.getElementById('sys-resend-key');
         var fromEl = document.getElementById('sys-from-email');
-        if (keyEl && s.resend_key) keyEl.value = s.resend_key;
-        if (fromEl && s.from_email) fromEl.value = s.from_email;
+        if (keyEl  && s.resend_key)  keyEl.value  = s.resend_key;
+        if (fromEl && s.from_email)  fromEl.value = s.from_email;
+        // BOM approval toggle
+        var bomCb    = document.getElementById('sys-bom-approval');
+        var bomTrack = document.getElementById('sys-bom-approval-track');
+        var bomKnob  = document.getElementById('sys-bom-approval-knob');
+        var bomOn    = s.bom_approval_required !== false; // default ON
+        window._bomApprovalRequired = bomOn;
+        if (bomCb)    { bomCb.checked = bomOn; }
+        if (bomTrack) { bomTrack.style.background = bomOn ? 'var(--gold)' : 'var(--navy-border)'; }
+        if (bomKnob)  { bomKnob.style.transform   = bomOn ? 'translateX(16px)' : 'none'; }
       }
     } catch(e) { console.warn('System settings load error:', e); }
   }
@@ -24562,9 +24597,12 @@ window.saveAdjModal = async function() {
   window.saveSystemSettings = async function() {
     var key  = (document.getElementById('sys-resend-key').value||'').trim();
     var from = (document.getElementById('sys-from-email').value||'').trim();
-    var statusEl = document.getElementById('sys-save-status');
+    var bomCb = document.getElementById('sys-bom-approval');
+    var bomOn = bomCb ? bomCb.checked : true;
+    var statusEl  = document.getElementById('sys-save-status');
+    var statusEl2 = document.getElementById('sys-save-status-2');
     try {
-      var val = { resend_key: key, from_email: from };
+      var val = { resend_key: key, from_email: from, bom_approval_required: bomOn };
       var existing = await sbGet('app_settings?key=eq.system&limit=1');
       if (existing.length) {
         await sbPatch('app_settings','?key=eq.system',{value:val,updated_at:new Date().toISOString()});
@@ -24572,12 +24610,24 @@ window.saveAdjModal = async function() {
         await sbPost('app_settings',{key:'system',value:val});
       }
       // Cache for this session
-      window._resendKey  = key;
-      window._fromEmail  = from;
-      if (statusEl) { statusEl.textContent = '✓ Saved'; statusEl.style.color = 'var(--green)'; setTimeout(function(){ statusEl.textContent=''; }, 3000); }
+      window._resendKey            = key;
+      window._fromEmail            = from;
+      window._bomApprovalRequired  = bomOn;
+      // Update toggle knob position
+      var bomTrack = document.getElementById('sys-bom-approval-track');
+      var bomKnob  = document.getElementById('sys-bom-approval-knob');
+      if (bomTrack) bomTrack.style.background = bomOn ? 'var(--gold)' : 'var(--navy-border)';
+      if (bomKnob)  bomKnob.style.transform   = bomOn ? 'translateX(16px)' : 'none';
+      [statusEl, statusEl2].forEach(function(el) {
+        if (el) { el.textContent = '✓ Saved'; el.style.color = 'var(--green)'; setTimeout(function(){ el.textContent=''; }, 3000); }
+      });
       window.toast && window.toast('System settings saved.','success');
+      // Re-render BOMs table so Send to Quality button shows/hides
+      if (typeof window.renderBoms === 'function') window.renderBoms();
     } catch(e) {
-      if (statusEl) { statusEl.textContent = 'Error: '+e.message; statusEl.style.color = 'var(--red)'; }
+      [statusEl, statusEl2].forEach(function(el) {
+        if (el) { el.textContent = 'Error: '+e.message; el.style.color = 'var(--red)'; }
+      });
     }
   };
 
@@ -24587,8 +24637,11 @@ window.saveAdjModal = async function() {
       var rows = await sbGet('app_settings?key=eq.system&limit=1');
       if (rows.length && rows[0].value) {
         var s = typeof rows[0].value === 'string' ? JSON.parse(rows[0].value) : rows[0].value;
-        window._resendKey = s.resend_key || '';
-        window._fromEmail = s.from_email || 'noreply@lighthousedrinks.com';
+        window._resendKey           = s.resend_key || '';
+        window._fromEmail           = s.from_email || 'noreply@lighthousedrinks.com';
+        window._bomApprovalRequired = s.bom_approval_required !== false; // default ON
+      } else {
+        window._bomApprovalRequired = true; // default ON when no setting saved yet
       }
     } catch(e) { window.logError('load system settings', e); }
   }
