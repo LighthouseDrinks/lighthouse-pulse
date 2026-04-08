@@ -3738,6 +3738,63 @@ window.copyInviteLink = function() {
   </div>
 </div>
 
+<!-- ══ EDIT BATCH MODAL ══════════════════════════════════════════════════════ -->
+<div id="edit-batch-modal-overlay" class="inv-modal-overlay" onclick="if(event.target===this)window.closeEditBatchModal()">
+  <div class="inv-modal" style="max-width:520px;">
+    <div class="modal-header">
+      <div>
+        <div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">Dry Goods — Edit Delivery</div>
+        <div class="modal-title">Edit Batch Record</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px;" id="eb-batch-label"></div>
+      </div>
+      <button class="modal-close" onclick="window.closeEditBatchModal()">✕</button>
+    </div>
+
+    <input type="hidden" id="eb-batch-id">
+
+    <div style="background:rgba(201,168,76,0.08);border:1px solid var(--gold-dim);border-radius:4px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--text);">
+      You can update the price and other details on this delivery record. Quantity changes must use <strong style="color:var(--gold);">± Adjust</strong>.
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="mfield">
+        <label>Delivery Date</label>
+        <input type="date" id="eb-date">
+      </div>
+      <div class="mfield">
+        <label>Unit Cost (€) *</label>
+        <input type="number" id="eb-unit-cost" placeholder="e.g. 0.45" min="0" step="0.0001">
+        <div style="font-size:10px;color:var(--muted);margin-top:3px;">Price per unit — used for stock valuation and BOM costing.</div>
+      </div>
+      <div class="mfield">
+        <label>PO / Supplier Reference</label>
+        <input type="text" id="eb-po" placeholder="e.g. PO-2026-0081">
+      </div>
+      <div class="mfield">
+        <label>Supplier (this delivery)</label>
+        <input type="text" id="eb-supplier" placeholder="Leave blank for SKU default">
+      </div>
+      <div class="mfield">
+        <label>Location</label>
+        <input type="text" id="eb-location" placeholder="e.g. Rack A3, Bay 2">
+      </div>
+      <div class="mfield">
+        <label>Expiry Date</label>
+        <input type="date" id="eb-expiry">
+      </div>
+      <div class="mfield" style="grid-column:1/-1;">
+        <label>Notes</label>
+        <textarea id="eb-notes" rows="2" placeholder="Any notes about this delivery…"></textarea>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="window.closeEditBatchModal()">Cancel</button>
+      <button class="btn btn-gold" id="eb-save-btn" onclick="window.saveEditBatch()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
 
 
 <div id="supplier-side-panel" style="display:none;position:fixed;top:0;right:0;bottom:0;width:520px;max-width:100vw;z-index:291;background:var(--navy-mid);border-left:1px solid var(--navy-border);overflow-y:auto;flex-direction:column;">
@@ -14825,10 +14882,11 @@ window.openSKUPanel = async function(skuId) {
           + (b.received_by ? '<span>Received by: <span style="color:var(--text);">'+b.received_by+'</span></span>' : '')
           + (b.docket_url ? '<span><a href="'+b.docket_url+'" target="_blank" style="color:var(--gold);">📎 Delivery Docket</a></span>' : '')
           + '</div>'
-          + '<div style="display:flex;gap:8px;">'
+          + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
           + '<button onclick="window.showBatchQR(\''+b.id+'\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">🔲 QR</button>'
           + (b.docket_url ? '<a href="'+b.docket_url+'" target="_blank" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;text-decoration:none;">📄 Docket</a>' : '')
           + (rem > 0 ? '<button onclick="window.manualAdjust(\''+b.id+'\',\''+skuId+'\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">± Adjust</button>' : '')
+          + '<button onclick="window.openEditBatchModal(\''+b.id+'\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">✏ Edit</button>'
           + '</div></div>';
       }).join('');
     }
@@ -15057,6 +15115,72 @@ window.saveEditSKU = async function() {
     window.toast('SKU '+skuId+' updated.', 'success');
     window.closeEditSKUModal();
     await window.loadDryGoods();
+  } catch(e) {
+    window.toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save Changes';
+  }
+};
+
+window.openEditBatchModal = async function(batchId) {
+  var batch = _batches.find(function(b){ return b.id === batchId; });
+  if (!batch) {
+    // Batch may not be in local cache if detail panel loaded separately — fetch it
+    try {
+      var rows = await supaFetch('dry_goods_batches', '?id=eq.' + batchId);
+      if (!rows.length) { window.toast('Batch not found.', 'error'); return; }
+      batch = rows[0];
+    } catch(e) { window.toast('Error loading batch: ' + e.message, 'error'); return; }
+  }
+  document.getElementById('eb-batch-id').value    = batchId;
+  document.getElementById('eb-batch-label').textContent = (batch.batch_ref || batchId.substring(0,8)) + ' — delivered ' + (batch.delivery_date || '');
+  document.getElementById('eb-date').value        = batch.delivery_date || '';
+  document.getElementById('eb-unit-cost').value   = batch.unit_cost != null ? batch.unit_cost : '';
+  document.getElementById('eb-po').value          = batch.po_reference || '';
+  document.getElementById('eb-supplier').value    = batch.supplier || '';
+  document.getElementById('eb-location').value    = batch.location || '';
+  document.getElementById('eb-expiry').value      = batch.expiry_date || '';
+  document.getElementById('eb-notes').value       = batch.notes || '';
+  var ov = document.getElementById('edit-batch-modal-overlay');
+  if (ov) { ov.classList.add('open'); document.body.style.overflow = 'hidden'; }
+};
+
+window.closeEditBatchModal = function() {
+  var ov = document.getElementById('edit-batch-modal-overlay');
+  if (ov) ov.classList.remove('open');
+  document.body.style.overflow = '';
+};
+
+window.saveEditBatch = async function() {
+  var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
+  var batchId = gv('eb-batch-id');
+  if (!batchId) { await window.lpAlert('Batch ID missing.', { variant: 'warn' }); return; }
+
+  var btn = document.getElementById('eb-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+
+  try {
+    var payload = {
+      delivery_date: gv('eb-date') || null,
+      unit_cost:     gv('eb-unit-cost') ? parseFloat(gv('eb-unit-cost')) : null,
+      po_reference:  gv('eb-po') || null,
+      supplier:      gv('eb-supplier') || null,
+      location:      gv('eb-location') || null,
+      expiry_date:   gv('eb-expiry') || null,
+      notes:         gv('eb-notes') || null
+    };
+
+    await supaMutate('PATCH', 'dry_goods_batches', '?id=eq.' + batchId, payload);
+
+    // Update local cache
+    var idx = _batches.findIndex(function(b){ return b.id === batchId; });
+    if (idx >= 0) Object.assign(_batches[idx], payload);
+
+    window.toast('Delivery record updated.', 'success');
+    window.closeEditBatchModal();
+    await window.loadDryGoods();
+    // Refresh the SKU detail panel if it is open
+    if (window._currentSKUId) await window.openSKUPanel(window._currentSKUId);
   } catch(e) {
     window.toast('Error: ' + e.message, 'error');
   } finally {
