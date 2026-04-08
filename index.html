@@ -15123,24 +15123,36 @@ window.saveEditSKU = async function() {
 };
 
 window.openEditBatchModal = async function(batchId) {
-  var batch = _batches.find(function(b){ return b.id === batchId; });
-  if (!batch) {
-    // Batch may not be in local cache if detail panel loaded separately — fetch it
-    try {
-      var rows = await supaFetch('dry_goods_batches', '?id=eq.' + batchId);
-      if (!rows.length) { window.toast('Batch not found.', 'error'); return; }
-      batch = rows[0];
-    } catch(e) { window.toast('Error loading batch: ' + e.message, 'error'); return; }
+  // Always fetch fresh from DB so we don't rely on cache state
+  var batch = null;
+  try {
+    var rows = await window.db.select('dry_goods_batches', '?id=eq.' + batchId);
+    if (!rows || !rows.length) { window.toast('Batch record not found.', 'error'); return; }
+    batch = rows[0];
+  } catch(e) {
+    window.toast('Could not load batch: ' + (e.message||e), 'error');
+    return;
   }
-  document.getElementById('eb-batch-id').value    = batchId;
-  document.getElementById('eb-batch-label').textContent = (batch.batch_ref || batchId.substring(0,8)) + ' — delivered ' + (batch.delivery_date || '');
-  document.getElementById('eb-date').value        = batch.delivery_date || '';
-  document.getElementById('eb-unit-cost').value   = batch.unit_cost != null ? batch.unit_cost : '';
-  document.getElementById('eb-po').value          = batch.po_reference || '';
-  document.getElementById('eb-supplier').value    = batch.supplier || '';
-  document.getElementById('eb-location').value    = batch.location || '';
-  document.getElementById('eb-expiry').value      = batch.expiry_date || '';
-  document.getElementById('eb-notes').value       = batch.notes || '';
+
+  var setVal = function(id, val) {
+    var el = document.getElementById(id);
+    if (el) el.value = val != null ? val : '';
+  };
+  var setText = function(id, val) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = val || '';
+  };
+
+  setVal('eb-batch-id', batchId);
+  setText('eb-batch-label', (batch.batch_ref || batchId.substring(0,8)) + (batch.delivery_date ? ' — delivered ' + batch.delivery_date : ''));
+  setVal('eb-date',      batch.delivery_date);
+  setVal('eb-unit-cost', batch.unit_cost);
+  setVal('eb-po',        batch.po_reference);
+  setVal('eb-supplier',  batch.supplier);
+  setVal('eb-location',  batch.location);
+  setVal('eb-expiry',    batch.expiry_date);
+  setVal('eb-notes',     batch.notes);
+
   var ov = document.getElementById('edit-batch-modal-overlay');
   if (ov) { ov.classList.add('open'); document.body.style.overflow = 'hidden'; }
 };
@@ -15170,11 +15182,7 @@ window.saveEditBatch = async function() {
       notes:         gv('eb-notes') || null
     };
 
-    await supaMutate('PATCH', 'dry_goods_batches', '?id=eq.' + batchId, payload);
-
-    // Update local cache
-    var idx = _batches.findIndex(function(b){ return b.id === batchId; });
-    if (idx >= 0) Object.assign(_batches[idx], payload);
+    await window.db.update('dry_goods_batches', '?id=eq.' + batchId, payload);
 
     window.toast('Delivery record updated.', 'success');
     window.closeEditBatchModal();
