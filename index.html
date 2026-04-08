@@ -12946,31 +12946,33 @@ window._vrOpenAddLiquid = function(vesselId) {
 // ── Print Vessel QR ───────────────────────────────────────────────────────────
 
 window.printVesselQR = function(vesselId) {
-  var vessel = _vrVessels.find(function(v){ return v.id === vesselId; }) || { id: vesselId };
+  var vessel  = _vrVessels.find(function(v){ return v.id === vesselId; }) || { id: vesselId };
   var typeLbl = _vrTypeLabel[vessel.vessel_type] || vessel.vessel_type || '';
+  var capLine = typeLbl + (vessel.capacity_litres ? ' · ' + parseFloat(vessel.capacity_litres).toLocaleString() + ' L' : '');
   var qrData  = JSON.stringify({ vessel_id: vesselId, type: vessel.vessel_type });
-  var qrSrc   = 'https://api.qrserver.com/v1/create-qr-code/?data=' + encodeURIComponent(qrData) + '&size=220x220';
-  var win = window.open('', '_blank', 'width=340,height=480');
+  var qrSrc   = 'https://api.qrserver.com/v1/create-qr-code/?data=' + encodeURIComponent(qrData) + '&size=260x260&margin=4';
+  var win = window.open('', '_blank', 'width=640,height=480');
   if (!win) { window.toast && window.toast('Allow pop-ups to print QR.', 'error'); return; }
   win.document.write(
     '<html><head><title>QR Label — ' + vesselId + '</title>'
-    + '<style>body{margin:0;padding:28px 20px;text-align:center;font-family:Arial,sans-serif;background:#fff;color:#111;}'
-    + '.code{font-size:26px;font-weight:900;letter-spacing:0.06em;margin-bottom:4px;color:#0d3349;}'
-    + '.type{font-size:13px;color:#888;margin-bottom:18px;text-transform:uppercase;letter-spacing:0.12em;}'
-    + 'img{display:block;margin:0 auto 14px;border:2px solid #c9a84c;padding:6px;border-radius:4px;}'
-    + '.sub{font-size:11px;color:#666;margin-top:6px;}'
-    + '.cap{font-size:12px;color:#333;margin-top:4px;}'
-    + '.border{border-top:3px solid #c9a84c;padding-top:14px;}'
-    + '@media print{.no-print{display:none;}}</style></head><body>'
-    + '<div class="border">'
-    + '<div class="code">' + vesselId + '</div>'
-    + '<div class="type">' + typeLbl + (vessel.capacity_litres ? ' &nbsp;·&nbsp; ' + parseFloat(vessel.capacity_litres).toLocaleString() + ' L' : '') + '</div>'
-    + '<img src="' + qrSrc + '" width="220" height="220">'
-    + (vessel.location ? '<div class="cap">Location: ' + vessel.location + '</div>' : '')
-    + '<div class="sub">Lighthouse Drinks Ltd &nbsp;·&nbsp; Scan to view full vessel history in Pulse</div>'
-    + '</div>'
-    + '<div class="no-print" style="margin-top:20px;">'
-    + '<button onclick="window.print()" style="background:#c9a84c;border:none;color:#0d3349;font-weight:700;padding:8px 24px;font-size:13px;cursor:pointer;border-radius:4px;">Print Label</button>'
+    + '<style>'
+    + '@page { size: 6in 4in; margin: 0; }'
+    + 'body { margin:0; padding:0; font-family:Arial,sans-serif; background:#fff; color:#111; }'
+    + '.label { width:6in; height:4in; display:flex; flex-direction:column; align-items:center; justify-content:center; box-sizing:border-box; padding:0.3in; text-align:center; }'
+    + '.lh  { font-size:11pt; letter-spacing:0.15em; text-transform:uppercase; color:#888; margin-bottom:4pt; }'
+    + '.ref { font-family:monospace; font-size:22pt; font-weight:700; letter-spacing:0.08em; margin-bottom:4pt; color:#0d3349; }'
+    + '.type{ font-size:10pt; color:#888; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:10pt; }'
+    + 'img  { display:block; margin:0 auto; border:2px solid #c9a84c; padding:5px; border-radius:4px; }'
+    + '.loc { font-size:10pt; color:#555; margin-top:8pt; }'
+    + '.sub { font-size:9pt; color:#aaa; margin-top:6pt; letter-spacing:0.06em; }'
+    + '</style></head><body>'
+    + '<div class="label">'
+    + '<div class="lh">Lighthouse Drinks</div>'
+    + '<div class="ref">' + vesselId + '</div>'
+    + '<div class="type">' + capLine + '</div>'
+    + '<img src="' + qrSrc + '" width="260" height="260">'
+    + (vessel.location ? '<div class="loc">📍 ' + vessel.location + '</div>' : '')
+    + '<div class="sub">Scan to view in Pulse</div>'
     + '</div>'
     + '<script>window.onload=function(){window.print();}<\/script>'
     + '</body></html>'
@@ -22590,6 +22592,7 @@ window.saveAdjModal = async function() {
     try {
       if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
       var total = ((type === 'cask' || type === 'ibc') && qty > 1) ? qty : 1;
+      var savedItems = []; // collect all { id, ref } for bulk QR print
       for (var i = 0; i < total; i++) {
         var rowPayload = Object.assign({}, payload);
         var rowCode = total > 1 ? (prefix + String(startN + i).padStart(3, '0')).toUpperCase() : ref;
@@ -22598,6 +22601,7 @@ window.saveAdjModal = async function() {
         rowPayload.vessel_id = await _ensureVessel(rowCode, type, capacity, payload.location);
         var ins = await window.db.insert('liquid_containers', rowPayload);
         if (ins && ins[0]) {
+          savedItems.push({ id: ins[0].id, ref: rowCode });
           await writeHistory({ container_id: ins[0].id, event_type: 'add',
             container_ref: ins[0].reference || rowPayload.reference,
             litres_before: 0, litres_after: litres, litres_changed: litres,
@@ -22611,15 +22615,16 @@ window.saveAdjModal = async function() {
       var _typeLabel = type === 'cask' ? 'cask' : type === 'ibc' ? 'IBC' : 'container';
       var msg = total > 1 ? total + ' ' + _typeLabel + 's added successfully.' : 'Liquid added successfully.';
       window.toast && window.toast(msg, 'success');
-      // Show inline success banner + QR print button
+      // Show inline success banner + QR print button(s)
       var banner = document.createElement('div');
-      banner.style.cssText = 'display:flex;align-items:center;gap:12px;padding:12px 16px;background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:16px;';
-      var _lastSavedRef = total === 1 ? ref : null;
-      var _lastSavedId  = total === 1 && ins && ins[0] ? ins[0].id : null;
+      banner.style.cssText = 'display:flex;align-items:center;gap:12px;padding:12px 16px;background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:16px;flex-wrap:wrap;';
+      window._lastBulkSavedItems = savedItems; // store for bulk print
       banner.innerHTML = '<span style="color:var(--green);font-size:13px;font-weight:700;flex:1;">✓ ' + msg + '</span>'
-        + (total === 1 && _lastSavedId
-          ? '<button onclick="window._printBLACQR(\'' + _lastSavedId + '\',\'' + _lastSavedRef + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">🖨 Print QR</button>'
-          : '');
+        + (savedItems.length === 1
+          ? '<button onclick="window._printBLACQR(\'' + savedItems[0].id + '\',\'' + savedItems[0].ref + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">&#128424; Print QR</button>'
+          : savedItems.length > 1
+            ? '<button onclick="window._printBulkBLACQR(window._lastBulkSavedItems)" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">&#128424; Print All ' + savedItems.length + ' QR Labels</button>'
+            : '');
       var saveBtn = document.getElementById('blac-save-btn');
       if (saveBtn && saveBtn.parentNode) saveBtn.parentNode.insertBefore(banner, saveBtn);
       setTimeout(function(){ if (banner.parentNode) banner.parentNode.removeChild(banner); }, 8000);
@@ -22652,24 +22657,59 @@ window.saveAdjModal = async function() {
     }
   };
 
-  // Print QR directly after adding a container (no need to find it in inventory)
-  window._printBLACQR = function(id, ref) {
-    var qrSrc = 'https://api.qrserver.com/v1/create-qr-code/?data='
-      + encodeURIComponent(JSON.stringify({ id: id, ref: ref })) + '&size=200x200';
-    var win = window.open('', '_blank', 'width=320,height=420');
-    if (!win) { window.toast && window.toast('Allow pop-ups to print QR.', 'error'); return; }
-    win.document.write(
-      '<html><head><title>QR – ' + ref + '</title>'
-      + '<style>body{margin:0;padding:30px 20px;text-align:center;font-family:Arial,sans-serif;background:#fff;color:#111;}'
-      + 'h2{margin:0 0 16px;font-size:18px;letter-spacing:0.05em;}img{display:block;margin:0 auto 12px;}'
-      + 'p{margin:4px 0;font-size:12px;color:#555;}</style></head><body>'
-      + '<h2>' + ref + '</h2>'
-      + '<img src="' + qrSrc + '" width="200" height="200">'
-      + '<p style="font-family:monospace;font-size:13px;color:#111;margin-top:8px;">' + ref + '</p>'
-      + '<p>Scan to look up this container in Pulse</p>'
+  // Shared: build a 6x4 inch label page HTML for one or more containers
+  function _buildLabelHTML(items, title) {
+    var labelCSS = [
+      '@page { size: 6in 4in; margin: 0; }',
+      'body { margin: 0; padding: 0; font-family: Arial, sans-serif; background: #fff; color: #111; }',
+      '.label {',
+      '  width: 6in; height: 4in;',
+      '  display: flex; flex-direction: column;',
+      '  align-items: center; justify-content: center;',
+      '  page-break-after: always;',
+      '  box-sizing: border-box; padding: 0.3in;',
+      '  text-align: center;',
+      '}',
+      '.label:last-child { page-break-after: auto; }',
+      '.lh { font-size: 11pt; letter-spacing: 0.15em; text-transform: uppercase; color: #888; margin-bottom: 6pt; }',
+      '.ref { font-family: monospace; font-size: 22pt; font-weight: 700; letter-spacing: 0.08em; margin-bottom: 10pt; }',
+      '.qr { display: block; margin: 0 auto; }',
+      '.sub { font-size: 9pt; color: #aaa; margin-top: 8pt; letter-spacing: 0.06em; }'
+    ].join('\n');
+
+    var labels = items.map(function(item) {
+      var qrSrc = 'https://api.qrserver.com/v1/create-qr-code/?data='
+        + encodeURIComponent(JSON.stringify({ id: item.id, ref: item.ref }))
+        + '&size=260x260&margin=4';
+      return '<div class="label">'
+        + '<div class="lh">Lighthouse Drinks</div>'
+        + '<div class="ref">' + item.ref + '</div>'
+        + '<img class="qr" src="' + qrSrc + '" width="260" height="260">'
+        + '<div class="sub">Scan to view in Pulse</div>'
+        + '</div>';
+    }).join('');
+
+    return '<html><head><title>' + title + '</title>'
+      + '<style>' + labelCSS + '</style></head><body>'
+      + labels
       + '<script>window.onload=function(){window.print();}<\/script>'
-      + '</body></html>'
-    );
+      + '</body></html>';
+  }
+
+  // Print QR for a single container (6×4 label)
+  window._printBLACQR = function(id, ref) {
+    var win = window.open('', '_blank', 'width=640,height=480');
+    if (!win) { window.toast && window.toast('Allow pop-ups to print QR.', 'error'); return; }
+    win.document.write(_buildLabelHTML([{ id: id, ref: ref }], 'QR Label — ' + ref));
+    win.document.close();
+  };
+
+  // Print QR labels for bulk-added containers (one 6×4 label per page)
+  window._printBulkBLACQR = function(items) {
+    if (!items || !items.length) return;
+    var win = window.open('', '_blank', 'width=640,height=480');
+    if (!win) { window.toast && window.toast('Allow pop-ups to print QR labels.', 'error'); return; }
+    win.document.write(_buildLabelHTML(items, 'QR Labels — ' + items.length + ' containers'));
     win.document.close();
   };
 
