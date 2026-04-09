@@ -12855,26 +12855,40 @@ window.fixLegacyVesselNames = async function() {
   await window.loadVesselRegister();
 };
 
-// Fix any liquid_containers where reference still has old no-dash format but vessel_id is already correct
-window._fixLegacyContainerRefs = async function(allVessels) {
-  // Build map of old→new from vessels that are now correctly named
-  var dashedIds = (allVessels || []).map(function(v){ return v.id; }).filter(function(id){ return /^[A-Z]+-\d+$/.test(id); });
+// Fix any liquid_containers where reference still has old no-dash format
+window._fixLegacyContainerRefs = async function() {
+  // Fetch all containers whose reference has letters immediately followed by digits (no dash)
+  var allContainers = [];
+  try {
+    allContainers = await window.db.select('liquid_containers', '?select=id,reference,vessel_id&limit=5000');
+  } catch(e) {
+    window.toast && window.toast('Could not load containers: ' + e.message, 'error'); return;
+  }
+
+  var toFix = allContainers.filter(function(c) {
+    return c.reference && /^[A-Za-z]+\d+$/.test(c.reference);
+  });
+
+  if (!toFix.length) {
+    window.toast && window.toast('All container references already up to date.', 'success'); return;
+  }
+
   var fixed = 0;
-  for (var i = 0; i < dashedIds.length; i++) {
-    var newId   = dashedIds[i];
-    var parts   = newId.split('-');
-    var oldId   = parts[0] + parts[1]; // IBC-001 → IBC001
+  for (var i = 0; i < toFix.length; i++) {
+    var c = toFix[i];
+    var letters = c.reference.match(/^[A-Za-z]+/)[0].toUpperCase();
+    var digits  = c.reference.match(/\d+$/)[0];
+    var newRef  = letters + '-' + digits;
     try {
-      var res = await window.db.update('liquid_containers', '?reference=eq.' + encodeURIComponent(oldId), { reference: newId }).catch(function(){ return null; });
-      if (res !== null) fixed++;
-    } catch(e) {}
+      await window.db.update('liquid_containers', '?id=eq.' + encodeURIComponent(c.id), { reference: newRef });
+      fixed++;
+    } catch(e) {
+      console.warn('Could not fix ref', c.reference, e.message);
+    }
   }
-  if (fixed > 0) {
-    window.toast && window.toast(fixed + ' container references updated to dash format.', 'success');
-    if (typeof loadBlData === 'function') loadBlData();
-  } else {
-    window.toast && window.toast('All container references already up to date.', 'success');
-  }
+
+  window.toast && window.toast(fixed + ' container references updated to dash format.', 'success');
+  if (typeof loadBlData === 'function') await loadBlData();
 };
 // ── END FIX LEGACY VESSEL NAMES ──────────────────────────────────────────────
 
