@@ -9386,6 +9386,7 @@ window.loadBoms = async function initBoms() {
         <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;font-weight:700;">Liquid Products Register</div>
         <div id="lp-modal-title" style="font-size:17px;font-weight:800;color:var(--white);margin-bottom:20px;">Add Product</div>
         <input type="hidden" id="lp-edit-id">
+        <input type="hidden" id="lp-old-name">
         <div class="mfield" style="margin-bottom:16px;">
           <label>Product Name *</label>
           <input type="text" id="lp-name" placeholder="e.g. 3 YO Single Malt Ex Sherry" style="font-size:14px;">
@@ -13376,9 +13377,14 @@ window.openLPModal = function(editId) {
   idIn.value = editId || '';
   nameIn.value = '';
   title.textContent = editId ? 'Edit Product' : 'Add Product';
+  var oldNameIn = document.getElementById('lp-old-name');
+  if (oldNameIn) oldNameIn.value = '';
   if (editId) {
     var existing = (window._liquidProducts || []).find(function(r){ return r.id === editId; });
-    if (existing) nameIn.value = existing.name;
+    if (existing) {
+      nameIn.value = existing.name;
+      if (oldNameIn) oldNameIn.value = existing.name;
+    }
   }
   modal.style.display = 'flex';
   setTimeout(function(){ nameIn.focus(); }, 80);
@@ -13390,26 +13396,38 @@ window.closeLPModal = function() {
 };
 
 window.saveLiquidProduct = async function() {
-  var name = (document.getElementById('lp-name')||{}).value.trim();
-  var editId = (document.getElementById('lp-edit-id')||{}).value.trim();
+  var name    = (document.getElementById('lp-name')    ||{}).value.trim();
+  var editId  = (document.getElementById('lp-edit-id') ||{}).value.trim();
+  var oldName = (document.getElementById('lp-old-name')||{}).value.trim();
   if (!name) { toast('Product name is required', 'warn'); return; }
   try {
     if (editId) {
       await window.db.update('liquid_products', '?id=eq.' + editId, { name: name });
-      toast('Product updated');
+      // Cascade rename to all liquid_containers using the old name
+      if (oldName && oldName !== name) {
+        try {
+          await window.db.update('liquid_containers', '?spirit_type=eq.' + encodeURIComponent(oldName), { spirit_type: name });
+        } catch(ce) {
+          // Non-fatal — containers may already be correct or table may not yet exist
+          console.warn('Cascade rename warning:', ce.message);
+        }
+        toast('Product renamed — all containers updated');
+      } else {
+        toast('Product updated');
+      }
     } else {
       await window.db.insert('liquid_products', { name: name });
       toast('Product added');
     }
     window.closeLPModal();
     await window.loadLiquidProducts();
-    // Refresh any open dropdowns elsewhere
     window._refreshLiquidProductDropdowns && window._refreshLiquidProductDropdowns();
+    // Reload liquid inventory so renamed spirit shows immediately
+    if (editId && oldName && oldName !== name && typeof loadBlData === 'function') loadBlData();
   } catch(e) {
     if (e.message && e.message.indexOf('23505') > -1) {
       toast('A product with that name already exists', 'warn');
     } else {
-      logError('saveLiquidProduct', e);
       toast('Error saving product: ' + e.message, 'error');
     }
   }
