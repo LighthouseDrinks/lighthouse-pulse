@@ -23003,7 +23003,7 @@ window.saveAdjModal = async function() {
     }
 
     // Normalise date strings to ISO YYYY-MM-DD regardless of input format
-    // Handles: DD/MM/YY, DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD (already correct)
+    // Handles: DD/MM/YY, DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, Excel serial numbers
     function normDateISO(s) {
       if (!s) return null;
       s = s.trim();
@@ -23015,6 +23015,16 @@ window.saveAdjModal = async function() {
       // DD/MM/YY or DD-MM-YY  → assume 20xx
       var m2 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/);
       if (m2) return '20' + m2[3] + '-' + m2[2].padStart(2,'0') + '-' + m2[1].padStart(2,'0');
+      // Excel serial number (e.g. 45546) — integers in plausible date range (2000–2050 = 36526–73050)
+      if (/^\d{5}$/.test(s)) {
+        var serial = parseInt(s);
+        if (serial >= 36526 && serial <= 73050) {
+          // Excel epoch is Dec 30 1899; Unix epoch offset = 25569 days
+          var d = new Date((serial - 25569) * 86400000);
+          var yr = d.getUTCFullYear(), mo = d.getUTCMonth()+1, dy = d.getUTCDate();
+          return yr + '-' + String(mo).padStart(2,'0') + '-' + String(dy).padStart(2,'0');
+        }
+      }
       return s; // return as-is and let DB validate
     }
 
@@ -23040,6 +23050,19 @@ window.saveAdjModal = async function() {
                    || clients.find(function(c){ return c.name.toLowerCase().indexOf(cn) >= 0; })         // DB name contains CSV value
                    || clients.find(function(c){ return cn.indexOf(c.name.toLowerCase()) >= 0; });        // CSV value contains DB name
       }
+      // Validate date — if normDateISO couldn't parse it, flag as error
+      var fillDateRaw = g('fill_date');
+      var fillDate    = normDateISO(fillDateRaw);
+      var dateError   = null;
+      if (fillDate && !/^\d{4}-\d{2}-\d{2}$/.test(fillDate)) {
+        dateError = 'Unrecognised date "' + fillDateRaw + '" — use DD/MM/YYYY';
+        fillDate = null;
+      }
+      // Validate ABV range
+      var abvError = (abv !== null && (abv < 0 || abv > 100)) ? 'ABV ' + abv + ' out of range (0-100)' : null;
+
+      var rowError = !caskNum ? 'Missing cask number' : (dateError || abvError || null);
+
       var row = {
         rowNum:       i + (hasHeader ? 2 : 1),
         cask_number:  caskNum,
@@ -23047,7 +23070,7 @@ window.saveAdjModal = async function() {
         location:     g('location') || null,
         spirit:       g('spirit') || null,
         abv:          abv,
-        fill_date:    normDateISO(g('fill_date')),
+        fill_date:    fillDate,
         lpa:          lpa,
         litres:       litres,
         lpa_price:    parseFloat(g('lpa_price')) || null,
@@ -23058,7 +23081,7 @@ window.saveAdjModal = async function() {
         fill_number:       parseInt(g('fill_number')) || null,
         previous_contents: g('previous_contents') || null,
         notes:             g('notes') || null,
-        error:             caskNum ? null : 'Missing cask number'
+        error:             rowError
       };
       if (row.error) errors++;
       _caskImportRows.push(row);
@@ -23204,8 +23227,8 @@ window.saveAdjModal = async function() {
         if (tbody && tbody.rows[i]) {
           tbody.rows[i].style.background = 'rgba(224,87,87,0.1)';
           var lastCell = tbody.rows[i].cells[tbody.rows[i].cells.length - 1];
-          var errMsg = (e.message||'Error') + (e.details ? ' — ' + e.details : '') + (e.code ? ' ['+e.code+']' : '');
-          if (lastCell) lastCell.innerHTML = '<span style="color:var(--red);font-size:10px;">&#9888; ' + errMsg + '</span>';
+          var errMsg = '[' + (e.code||'ERR') + '] ' + (e.message||'Error') + (e.details ? ' — ' + e.details : '') + (e.hint ? ' Hint: ' + e.hint : '');
+          if (lastCell) lastCell.innerHTML = '<span style="color:var(--red);font-size:10px;" title="' + errMsg.replace(/"/g,"'") + '">&#9888; ' + errMsg + '</span>';
         }
       }
     }
