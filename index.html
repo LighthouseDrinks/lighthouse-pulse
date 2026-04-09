@@ -10013,13 +10013,14 @@ window.loadBoms = async function initBoms() {
     <!-- Instructions -->
     <div style="background:rgba(201,168,76,0.07);border:1px solid var(--gold-dim);border-radius:4px;padding:12px 16px;margin-bottom:16px;font-size:12px;color:var(--text);line-height:1.7;">
       <strong style="color:var(--gold);">How to use:</strong> Paste CSV data below or upload a file. One cask per row.<br>
-      Required column: <code style="color:var(--gold);">cask_number</code>. Optional: <code>capacity, location, spirit, abv, fill_date, litres, ola, lpa_price, cbw_rotation, client, notes</code><br>
+      Required column: <code style="color:var(--gold);">cask_number</code>. Optional: <code>capacity, location, spirit, abv, fill_date, lpa, lpa_price, cbw_rotation, notes</code><br>
+      <span style="color:var(--muted);">Litres are calculated automatically from LPA ÷ ABV. LPA is treated as current regauged LPA — angel share tracks forward from import date. CBW rotation can be left blank and updated later.</span><br>
       <button onclick="window.downloadCaskImportTemplate()" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:11px;padding:4px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-top:6px;">&#8595; Download Template CSV</button>
     </div>
 
     <!-- Paste / Upload -->
     <div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start;margin-bottom:12px;">
-      <textarea id="cask-import-csv" rows="8" placeholder="Paste CSV here… or upload a file below&#10;&#10;cask_number,capacity,location,spirit,abv,fill_date,litres,ola,cbw_rotation,notes&#10;KF-4821,200,Warehouse A,Single Malt,63.5,2024-03-15,195,97.5,R-2025-001,First fill bourbon" style="font-family:monospace;font-size:11px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);padding:10px 12px;border-radius:4px;resize:vertical;width:100%;box-sizing:border-box;"></textarea>
+      <textarea id="cask-import-csv" rows="8" placeholder="Paste CSV here… or upload a file below&#10;&#10;cask_number,capacity,location,spirit,abv,fill_date,lpa,lpa_price,cbw_rotation,notes&#10;KF-4821,200,Warehouse A,Single Malt,63.5,2024-03-15,97.5,4.50,,First fill bourbon" style="font-family:monospace;font-size:11px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);padding:10px 12px;border-radius:4px;resize:vertical;width:100%;box-sizing:border-box;"></textarea>
       <div style="display:flex;flex-direction:column;gap:8px;">
         <input type="file" id="cask-import-file" accept=".csv,.txt" style="display:none;" onchange="window.loadCaskImportFile(this)">
         <button onclick="document.getElementById('cask-import-file').click()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:8px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;white-space:nowrap;">&#128194; Load File</button>
@@ -10038,8 +10039,8 @@ window.loadBoms = async function initBoms() {
           <thead>
             <tr>
               <th>#</th><th>Cask Number *</th><th>Capacity (L)</th><th>Location</th>
-              <th>Spirit</th><th>ABV%</th><th>Fill Date</th><th>Litres</th>
-              <th>OLA</th><th>CBW Rotation</th><th>Notes</th><th>Status</th>
+              <th>Spirit</th><th>ABV%</th><th>Fill Date</th><th>LPA</th>
+              <th>Litres (calc)</th><th>CBW Rotation</th><th>Notes</th><th>Status</th>
             </tr>
           </thead>
           <tbody id="cask-import-tbody"></tbody>
@@ -12511,7 +12512,8 @@ window._vrRender = function(vessels) {
   var esc = window.escapeHtml || function(s){ return String(s||''); };
   var rows = vessels.map(function(v) {
     var cont    = contMap[v.id];
-    var liqCell = cont ? (esc(cont.spirit_type || cont.reference || '—') + (cont.current_litres ? ' &nbsp;<span style="color:var(--gold);font-size:10px;">' + parseFloat(cont.current_litres).toFixed(0) + 'L</span>' : '')) : '<span style="color:var(--muted);">—</span>';
+    var _liqSpiritLabel = cont && cont.spirit_type ? (v.vessel_type==='cask' ? window._spiritAgeLabel(cont.spirit_type, cont.fill_date) : cont.spirit_type) : null;
+    var liqCell = cont ? (esc(_liqSpiritLabel || cont.reference || '—') + (cont.current_litres ? ' &nbsp;<span style="color:var(--gold);font-size:10px;">' + parseFloat(cont.current_litres).toFixed(0) + 'L</span>' : '')) : '<span style="color:var(--muted);">—</span>';
     var stCol   = _vrStatusColour[v.status] || 'var(--muted)';
     var stLbl   = _vrStatusLabel[v.status]  || (v.status||'—');
     var nextInsp = v.next_inspection ? v.next_inspection.slice(0,10) : '—';
@@ -13393,7 +13395,7 @@ window.saveLiquidProduct = async function() {
   if (!name) { toast('Product name is required', 'warn'); return; }
   try {
     if (editId) {
-      await window.db.update('liquid_products', { id: 'eq.' + editId }, { name: name });
+      await window.db.update('liquid_products', '?id=eq.' + editId, { name: name });
       toast('Product updated');
     } else {
       await window.db.insert('liquid_products', { name: name });
@@ -13416,7 +13418,7 @@ window.saveLiquidProduct = async function() {
 window.archiveLiquidProduct = async function(id, name) {
   if (!(await window.lpConfirm('Archive "' + name + '"? It will no longer appear in dropdowns but existing records are preserved.', { title: 'Archive product', confirmLabel: 'Archive', destructive: false }))) return;
   try {
-    await window.db.update('liquid_products', { id: 'eq.' + id }, { is_active: false });
+    await window.db.update('liquid_products', '?id=eq.' + id, { is_active: false });
     toast('"' + name + '" archived');
     await window.loadLiquidProducts();
     window._refreshLiquidProductDropdowns && window._refreshLiquidProductDropdowns();
@@ -13428,7 +13430,7 @@ window.archiveLiquidProduct = async function(id, name) {
 
 window.restoreLiquidProduct = async function(id) {
   try {
-    await window.db.update('liquid_products', { id: 'eq.' + id }, { is_active: true });
+    await window.db.update('liquid_products', '?id=eq.' + id, { is_active: true });
     toast('Product restored');
     await window.loadLiquidProducts();
     window._refreshLiquidProductDropdowns && window._refreshLiquidProductDropdowns();
@@ -13582,6 +13584,16 @@ function _fmtSpiritType(s) {
 }
 window._fmtSpiritType = _fmtSpiritType;
 
+// Returns the spirit label with an automatic age prefix derived from fill_date.
+// e.g. "Single Malt" + 2024-01-01 fill → "2 Year Old Single Malt" (no DB writes, display only)
+window._spiritAgeLabel = function(spirit, fillDate) {
+  var base = _fmtSpiritType(spirit);
+  if (!base || !fillDate) return base;
+  var years = Math.floor((Date.now() - new Date(fillDate).getTime()) / (1000*60*60*24*365.25));
+  if (years < 1) return base; // under 1 year — show plain name
+  return years + ' Year Old ' + base;
+};
+
 window.renderLiquid = function() {
   var search  = (document.getElementById('liq-search')        ||{}).value || '';
   var typef   = (document.getElementById('liq-filter-type')   ||{}).value || '';
@@ -13619,7 +13631,7 @@ window.renderLiquid = function() {
     } else {
       bar = '<div style="margin-top:5px;"><span class="fill-bar-wrap"><span class="fill-bar" style="width:' + pct + '%;background:' + barColour + ';display:block;"></span></span></div>';
     }
-    var spiritLabel  = esc(_fmtSpiritType(c.spirit_type) || '—');
+    var spiritLabel  = esc((c.type==='cask' ? window._spiritAgeLabel(c.spirit_type, c.fill_date) : _fmtSpiritType(c.spirit_type)) || '—');
     var spiritColour = (litres > 0 && window._spiritColour) ? window._spiritColour(c.spirit_type) : null;
     var spirit = (c.spirit_type && litres > 0)
       ? '<span class="spirit-badge" style="color:' + spiritColour + ';border-color:' + spiritColour + '55;">' + spiritLabel + '</span>'
@@ -13901,7 +13913,7 @@ window.openLiqView = async function(id) {
     // Spirit shown only when container has liquid; colour-coded
     var spiritColour = (inC > 0 && window._spiritColour) ? window._spiritColour(c.spirit_type) : null;
     var spiritText   = inC > 0 && c.spirit_type
-      ? c.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();})
+      ? (c.type==='cask' ? window._spiritAgeLabel(c.spirit_type, c.fill_date) : c.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase()}))
       : null;
     var spirit       = spiritText
       ? '<span style="color:' + spiritColour + ';font-weight:700;">' + spiritText + '</span>'
@@ -14222,7 +14234,7 @@ function containerOptions(context) {
       label = c.reference + '  [' + tLbl + ']  EMPTY  · ' + clientName(c.client_id);
     } else {
       var abvS = c.abv ? ' @ ' + parseFloat(c.abv).toFixed(1) + '%' : '';
-      var sp   = c.spirit_type ? '  ·  ' + _fmtSpiritType(c.spirit_type) : '';
+      var sp   = c.spirit_type ? '  ·  ' + (c.type==='cask' ? window._spiritAgeLabel(c.spirit_type, c.fill_date) : _fmtSpiritType(c.spirit_type)) : '';
       label    = c.reference + '  [' + tLbl + ']  ' + l.toFixed(0) + 'L' + abvS + sp + '  · ' + clientName(c.client_id);
     }
     return '<option value="' + c.id + '"' + (disableIt ? ' disabled' : '') + '>' + label + '</option>';
@@ -14272,7 +14284,7 @@ window.onTfSrcChange = function(idx) {
   // Effective ABV = LPA / litres (works even if ABV field is blank, e.g. blended tanks)
   var effectiveAbv = litres > 0 && lpa > 0 ? (lpa / litres * 100) : abv;
 
-  var spirit = cont.spirit_type ? (SPIRIT_LABELS[cont.spirit_type]||cont.spirit_type) : '';
+  var spirit = cont.spirit_type ? (cont.type==='cask' ? window._spiritAgeLabel(cont.spirit_type, cont.fill_date) : (SPIRIT_LABELS[cont.spirit_type]||cont.spirit_type)) : '';
   var abvDisplay = effectiveAbv > 0 ? effectiveAbv.toFixed(2) + '%' : null;
 
   info.innerHTML = (spirit ? '<span class="tf-info-badge">' + spirit + '</span> ' : '')
@@ -14318,7 +14330,7 @@ window.onTfDstChange = function(idx) {
   if (!cont) { info.innerHTML = ''; return; }
   var litres = parseFloat(cont.current_litres||0);
   var cap    = parseFloat(cont.capacity_litres||0);
-  var spirit = cont.spirit_type ? (SPIRIT_LABELS[cont.spirit_type]||cont.spirit_type) : 'Empty';
+  var spirit = cont.spirit_type ? (cont.type==='cask' ? window._spiritAgeLabel(cont.spirit_type, cont.fill_date) : (SPIRIT_LABELS[cont.spirit_type]||cont.spirit_type)) : 'Empty';
   // Base info — spirit, current litres, headspace
   info.innerHTML = '<span class="tf-info-badge">' + spirit + '</span>'
     + (litres > 0 ? '<span style="color:var(--text);font-size:11px;margin-left:6px;">Currently ' + litres.toFixed(1) + ' L</span>' : '')
@@ -22745,9 +22757,9 @@ window.saveAdjModal = async function() {
   };
 
   window.downloadCaskImportTemplate = function() {
-    var csv = 'cask_number,capacity,location,spirit,abv,fill_date,litres,ola,lpa_price,cbw_rotation,notes\n'
-            + 'KF-4821,200,Warehouse A,Single Malt,63.5,2024-03-15,195,97.5,4.50,R-2025-001,First fill bourbon\n'
-            + 'KF-4822,200,Warehouse A,Single Malt,63.5,2024-03-15,197,98.5,4.50,R-2025-001,\n';
+    var csv = 'cask_number,capacity,location,spirit,abv,fill_date,lpa,lpa_price,cbw_rotation,notes\n'
+            + 'KF-4821,200,Warehouse A,Single Malt,63.5,2024-03-15,97.5,4.50,R-2025-001,First fill bourbon\n'
+            + 'KF-4822,200,Warehouse A,Single Malt,63.5,2024-03-15,98.5,4.50,,\n';
     var blob = new Blob([csv], { type: 'text/csv' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -22791,7 +22803,7 @@ window.saveAdjModal = async function() {
     }
 
     // Column indices from header (or use positional defaults)
-    var COL = { cask_number:0, capacity:1, location:2, spirit:3, abv:4, fill_date:5, litres:6, ola:7, lpa_price:8, cbw_rotation:9, notes:10 };
+    var COL = { cask_number:0, capacity:1, location:2, spirit:3, abv:4, fill_date:5, lpa:6, lpa_price:7, cbw_rotation:8, notes:9 };
     if (hasHeader) {
       var hCols = parseCSVLine(lines[0]).map(function(h){ return h.toLowerCase().replace(/[\s\-]/g,'_'); });
       Object.keys(COL).forEach(function(k){
@@ -22807,20 +22819,24 @@ window.saveAdjModal = async function() {
       var cols = parseCSVLine(line);
       var g = function(k) { return (cols[COL[k]] || '').trim(); };
       var caskNum = g('cask_number').toUpperCase();
+      var abv   = parseFloat(g('abv')) || null;
+      var lpa   = parseFloat(g('lpa')) || null;
+      // Litres derived from LPA and ABV: litres = lpa * 100 / abv
+      var litres = (lpa && abv) ? Math.round((lpa * 100 / abv) * 10) / 10 : null;
       var row = {
-        rowNum:      i + (hasHeader ? 2 : 1),
-        cask_number: caskNum,
-        capacity:    parseFloat(g('capacity')) || null,
-        location:    g('location') || null,
-        spirit:      g('spirit') || null,
-        abv:         parseFloat(g('abv')) || null,
-        fill_date:   g('fill_date') || null,
-        litres:      parseFloat(g('litres')) || null,
-        ola:         parseFloat(g('ola')) || null,
-        lpa_price:   parseFloat(g('lpa_price')) || null,
-        cbw_rotation:g('cbw_rotation') || null,
-        notes:       g('notes') || null,
-        error:       caskNum ? null : 'Missing cask number'
+        rowNum:       i + (hasHeader ? 2 : 1),
+        cask_number:  caskNum,
+        capacity:     parseFloat(g('capacity')) || null,
+        location:     g('location') || null,
+        spirit:       g('spirit') || null,
+        abv:          abv,
+        fill_date:    g('fill_date') || null,
+        lpa:          lpa,
+        litres:       litres,
+        lpa_price:    parseFloat(g('lpa_price')) || null,
+        cbw_rotation: g('cbw_rotation') || null,
+        notes:        g('notes') || null,
+        error:        caskNum ? null : 'Missing cask number'
       };
       if (row.error) errors++;
       _caskImportRows.push(row);
@@ -22846,9 +22862,9 @@ window.saveAdjModal = async function() {
         + '<td>' + (r.spirit||'—') + '</td>'
         + '<td>' + (r.abv!=null?r.abv+'%':'—') + '</td>'
         + '<td>' + (r.fill_date||'—') + '</td>'
-        + '<td>' + (r.litres!=null?r.litres:'—') + '</td>'
-        + '<td>' + (r.ola!=null?r.ola:'—') + '</td>'
-        + '<td style="font-size:10px;">' + (r.cbw_rotation||'—') + '</td>'
+        + '<td style="color:var(--gold);">' + (r.lpa!=null?r.lpa+' LPA':'—') + '</td>'
+        + '<td style="color:var(--muted);font-size:10px;">' + (r.litres!=null?r.litres+'L':'—') + '</td>'
+        + '<td style="font-size:10px;">' + (r.cbw_rotation||'<span style="color:var(--muted)">—</span>') + '</td>'
         + '<td style="font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (r.notes||'—') + '</td>'
         + '<td>' + statusCell + '</td>'
         + '</tr>';
@@ -22890,9 +22906,11 @@ window.saveAdjModal = async function() {
         if (progBar) progBar.style.width = pct + '%';
         if (progLbl) progLbl.textContent = 'Importing ' + (i+1) + ' of ' + validRows.length + ': ' + r.cask_number + '…';
 
-        var lpa = r.ola || (r.litres && r.abv ? r.litres * r.abv / 100 : 0);
+        // LPA is regauged current LPA — also becomes OLA (baseline for angel share from import day)
+        var lpa      = r.lpa || 0;
+        var litres   = r.litres || (lpa && r.abv ? Math.round((lpa * 100 / r.abv) * 10) / 10 : 0);
         var capacity = r.capacity || null;
-        var status = r.litres > 0 ? (capacity && r.litres >= capacity * 0.9 ? 'full' : 'part_full') : 'empty';
+        var status   = litres > 0 ? (capacity && litres >= capacity * 0.9 ? 'full' : 'part_full') : 'empty';
 
         // 1. Register vessel
         var vesselId = await _ensureVessel(r.cask_number, 'cask', capacity, r.location);
@@ -22909,22 +22927,22 @@ window.saveAdjModal = async function() {
           spirit_type: r.spirit || null,
           cbw_rotation: r.cbw_rotation || null,
           abv: r.abv || null,
-          current_litres: r.litres || 0,
+          current_litres: litres,
           current_lpa: lpa,
           lpa_price: r.lpa_price || null,
           fill_date: r.fill_date || null,
-          ola: r.ola || null,
+          ola: lpa || null,   // OLA = regauged LPA at import; angel share tracks forward from here
           notes: r.notes || null
         };
         var ins = await window.db.insert('liquid_containers', payload);
         if (ins && ins[0]) {
           savedItems.push({ id: ins[0].id, ref: r.cask_number });
           // Write history
-          if (r.litres > 0) {
+          if (litres > 0) {
             await writeHistory({
               container_id: ins[0].id, event_type: 'add',
               container_ref: r.cask_number,
-              litres_before: 0, litres_after: r.litres || 0, litres_changed: r.litres || 0,
+              litres_before: 0, litres_after: litres, litres_changed: litres,
               abv_before: null, abv_after: r.abv || null,
               lpa_before: 0, lpa_after: lpa,
               notes: 'Bulk CSV import',
