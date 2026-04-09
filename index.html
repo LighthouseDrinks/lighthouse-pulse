@@ -9094,7 +9094,8 @@ window.loadBoms = async function initBoms() {
         <div style="font-size:13px;color:var(--text);margin-bottom:4px;">Master register of all physical vessels — IBCs, casks, drums and tanks. Each vessel has a permanent code and QR label.</div>
         <div style="font-size:11px;color:var(--muted);">Vessel records persist across fills. Link liquid batches to vessels as you register them.</div>
       </div>
-      <div style="display:flex;gap:8px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button onclick="window.toggleCaskPricePanel()" class="btn btn-outline" style="font-size:12px;padding:8px 18px;">&#8364; Price Casks by Fill</button>
         <button onclick="window.toggleVesselRangePanel()" class="btn btn-outline" style="font-size:12px;padding:8px 18px;">&#9776; Generate Range</button>
         <button onclick="window.openVesselModal()" class="btn btn-gold" style="font-size:12px;padding:8px 18px;">+ Register Vessel</button>
       </div>
@@ -9161,6 +9162,43 @@ window.loadBoms = async function initBoms() {
           <div id="vrg-prog-bar" style="height:100%;background:var(--gold);width:0%;transition:width 0.2s;"></div>
         </div>
         <div id="vrg-prog-lbl" style="font-size:11px;color:var(--muted);"></div>
+      </div>
+    </div>
+
+    <!-- Bulk Cask Pricing Panel -->
+    <div id="cask-price-panel" style="display:none;background:var(--navy-card);border:1px solid var(--gold-dim);border-radius:6px;padding:20px 24px;margin-bottom:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <div style="font-size:14px;font-weight:700;color:var(--gold);">Price Casks by Fill Number</div>
+        <button onclick="window.toggleCaskPricePanel()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;line-height:1;">&times;</button>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:16px;">Sets <code style="color:var(--gold);">purchase_price</code> on every cask vessel based on the fill number recorded on its linked liquid container. Only updates casks that have a fill number set.</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:16px;">
+        <div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">1st Fill — Price (€)</label>
+          <input id="cpp-fill1" type="number" min="0" step="0.01" value="100" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;box-sizing:border-box;">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">2nd Fill — Price (€)</label>
+          <input id="cpp-fill2" type="number" min="0" step="0.01" value="80" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;box-sizing:border-box;">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">3rd Fill — Price (€) <span style="color:var(--muted);font-size:10px;">(optional)</span></label>
+          <input id="cpp-fill3" type="number" min="0" step="0.01" placeholder="Leave blank to skip" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;box-sizing:border-box;">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">4th Fill+ — Price (€) <span style="color:var(--muted);font-size:10px;">(optional)</span></label>
+          <input id="cpp-fill4" type="number" min="0" step="0.01" placeholder="Leave blank to skip" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;box-sizing:border-box;">
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+        <div id="cpp-status" style="font-size:12px;color:var(--muted);flex:1;"></div>
+        <button onclick="window.runCaskPricing()" class="btn btn-gold" style="font-size:12px;padding:8px 20px;">Apply Prices to All Casks</button>
+      </div>
+      <div id="cpp-progress" style="display:none;margin-top:14px;">
+        <div style="background:var(--navy-border);border-radius:3px;height:6px;overflow:hidden;margin-bottom:6px;">
+          <div id="cpp-prog-bar" style="height:100%;background:var(--gold);width:0%;transition:width 0.2s;"></div>
+        </div>
+        <div id="cpp-prog-lbl" style="font-size:11px;color:var(--muted);"></div>
       </div>
     </div>
 
@@ -12659,6 +12697,81 @@ window.runVesselRange = async function() {
   await window.loadVesselRegister();
 };
 // ── END VESSEL RANGE GENERATOR ───────────────────────────────────────────────
+
+// ── BULK CASK PRICING BY FILL NUMBER ────────────────────────────────────────
+window.toggleCaskPricePanel = function() {
+  var p = document.getElementById('cask-price-panel');
+  if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+  // Close range panel if open
+  var rp = document.getElementById('vessel-range-panel');
+  if (rp) rp.style.display = 'none';
+};
+
+window.runCaskPricing = async function() {
+  var prices = {
+    1: parseFloat((document.getElementById('cpp-fill1')||{}).value) || null,
+    2: parseFloat((document.getElementById('cpp-fill2')||{}).value) || null,
+    3: parseFloat((document.getElementById('cpp-fill3')||{}).value) || null,
+    4: parseFloat((document.getElementById('cpp-fill4')||{}).value) || null
+  };
+  // Only proceed if at least one price is set
+  if (!prices[1] && !prices[2] && !prices[3] && !prices[4]) {
+    window.toast && window.toast('Enter at least one fill price.', 'error'); return;
+  }
+
+  var statusEl  = document.getElementById('cpp-status');
+  var progWrap  = document.getElementById('cpp-progress');
+  var progBar   = document.getElementById('cpp-prog-bar');
+  var progLbl   = document.getElementById('cpp-prog-lbl');
+  if (statusEl)  statusEl.textContent = 'Loading cask data…';
+  if (progWrap)  progWrap.style.display = '';
+  if (progBar)   progBar.style.width = '0%';
+
+  // Fetch all cask containers that have a fill_number and vessel_id
+  var containers = [];
+  try {
+    containers = await window.db.select('liquid_containers',
+      '?type=eq.cask&vessel_id=not.is.null&select=vessel_id,fill_number&archived=is.false'
+    );
+  } catch(e) {
+    window.toast && window.toast('Error loading containers: ' + e.message, 'error'); return;
+  }
+
+  // Filter to only those with a fill_number that has a price assigned
+  var toUpdate = containers.filter(function(c) {
+    return c.fill_number && prices[c.fill_number] !== null && prices[c.fill_number] !== undefined;
+  });
+
+  if (!toUpdate.length) {
+    if (statusEl) statusEl.innerHTML = '<span style="color:var(--amber);">No casks found with a fill number matching your prices. Make sure fill numbers are set on your cask containers.</span>';
+    if (progWrap) progWrap.style.display = 'none';
+    return;
+  }
+
+  if (statusEl) statusEl.textContent = 'Updating ' + toUpdate.length + ' cask vessels…';
+  var updated = 0, errors = 0;
+
+  for (var i = 0; i < toUpdate.length; i++) {
+    var c = toUpdate[i];
+    var price = prices[c.fill_number];
+    if (progBar) progBar.style.width = Math.round((i / toUpdate.length) * 100) + '%';
+    if (progLbl) progLbl.textContent = 'Updating vessel ' + (i+1) + ' of ' + toUpdate.length + '…';
+    try {
+      await window.db.update('vessels', '?id=eq.' + encodeURIComponent(c.vessel_id), { purchase_price: price });
+      updated++;
+    } catch(e) {
+      errors++;
+      console.warn('Cask price update error', c.vessel_id, e.message);
+    }
+  }
+
+  if (progBar) progBar.style.width = '100%';
+  if (progLbl) progLbl.textContent = '✓ Done — ' + updated + ' vessels priced' + (errors ? ', ' + errors + ' errors' : '') + '.';
+  if (statusEl) statusEl.innerHTML = '<span style="color:var(--green);font-weight:700;">✓ ' + updated + ' cask vessels updated</span>' + (errors ? ' <span style="color:var(--red);">(' + errors + ' errors)</span>' : '');
+  window.toast && window.toast(updated + ' cask vessels priced successfully.', 'success');
+  await window.loadVesselRegister();
+};
+// ── END BULK CASK PRICING ────────────────────────────────────────────────────
 
 window.loadVesselRegister = async function() {
   var tbody = document.getElementById('vr-tbody');
