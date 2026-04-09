@@ -22913,7 +22913,9 @@ window.saveAdjModal = async function() {
     reader.readAsText(file);
   };
 
-  window.parseCaskImportCSV = function() {
+  window.parseCaskImportCSV = async function() {
+    // Ensure clients are loaded before matching
+    if (!APP.clients || !APP.clients.length) await loadClients().catch(function(){});
     var raw = (document.getElementById('cask-import-csv') || {}).value || '';
     var lines = raw.split('\n').map(function(l){ return l.trim(); }).filter(Boolean);
     if (!lines.length) { window.toast('Nothing to parse — paste CSV first.', 'error'); return; }
@@ -22974,10 +22976,16 @@ window.saveAdjModal = async function() {
       // Litres derived from LPA and ABV: litres = lpa * 100 / abv
       var litres = (lpa && abv) ? Math.round((lpa * 100 / abv) * 10) / 10 : null;
       var clientName = g('client') || null;
-      // Resolve client name → client id from APP.clients cache
-      var clientMatch = clientName && (APP.clients||[]).find(function(c){
-        return c.name.toLowerCase() === clientName.toLowerCase();
-      });
+      // Resolve client name → client id: exact → case-insensitive → contains
+      var clientMatch = null;
+      if (clientName) {
+        var cn = clientName.toLowerCase().trim();
+        var clients = APP.clients || [];
+        clientMatch = clients.find(function(c){ return c.name === clientName; })                          // exact
+                   || clients.find(function(c){ return c.name.toLowerCase() === cn; })                   // case-insensitive
+                   || clients.find(function(c){ return c.name.toLowerCase().indexOf(cn) >= 0; })         // DB name contains CSV value
+                   || clients.find(function(c){ return cn.indexOf(c.name.toLowerCase()) >= 0; });        // CSV value contains DB name
+      }
       var row = {
         rowNum:       i + (hasHeader ? 2 : 1),
         cask_number:  caskNum,
@@ -23109,14 +23117,42 @@ window.saveAdjModal = async function() {
           archived_by: null
         };
 
+        // Strip null vessel_id if vessel creation failed
+        if (!payload.vessel_id) delete payload.vessel_id;
+
+        // Validate client_id exists in cache; fall back to null if not found
+        var knownClientIds = (APP.clients||[]).map(function(c){ return c.id; });
+        if (payload.client_id && knownClientIds.length && knownClientIds.indexOf(payload.client_id) < 0) {
+          console.warn('Unknown client_id', payload.client_id, '— clearing');
+          payload.client_id = null;
+        }
+
         var savedId;
-        if (existingRec) {
-          // Update existing record (unarchives it if needed)
-          await window.db.update('liquid_containers', '?id=eq.' + existingRec.id, payload);
-          savedId = existingRec.id;
-        } else {
-          var ins = await window.db.insert('liquid_containers', payload);
-          savedId = ins && ins[0] && ins[0].id;
+        try {
+          if (existingRec) {
+            await window.db.update('liquid_containers', '?id=eq.' + existingRec.id, payload);
+            savedId = existingRec.id;
+          } else {
+            var ins = await window.db.insert('liquid_containers', payload);
+            savedId = ins && ins[0] && ins[0].id;
+          }
+        } catch(insertErr) {
+          // If schema error (new columns not yet in DB), retry without new fields
+          var msg = insertErr.message || '';
+          if (msg.indexOf('PGRST') >= 0 || msg.indexOf('schema') >= 0 || msg.indexOf('column') >= 0) {
+            var safePayload = Object.assign({}, payload);
+            delete safePayload.fill_number;
+            delete safePayload.previous_contents;
+            if (existingRec) {
+              await window.db.update('liquid_containers', '?id=eq.' + existingRec.id, safePayload);
+              savedId = existingRec.id;
+            } else {
+              var ins2 = await window.db.insert('liquid_containers', safePayload);
+              savedId = ins2 && ins2[0] && ins2[0].id;
+            }
+          } else {
+            throw insertErr; // re-throw non-schema errors with full message
+          }
         }
 
         if (savedId) {
