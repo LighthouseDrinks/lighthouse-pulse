@@ -13666,7 +13666,7 @@ window.renderLiquid = function() {
     var lpaCell;
     if (c.type === 'cask' && c.ola && c.fill_date && c.abv) {
       var _origL = parseFloat(c.current_litres||0) || (parseFloat(c.ola) * 100 / parseFloat(c.abv));
-      var _r = window._calcAngelShare && window._calcAngelShare(_origL, parseFloat(c.abv), parseFloat(c.ola), c.fill_date);
+      var _r = window._calcAngelShare && window._calcAngelShare(_origL, parseFloat(c.abv), parseFloat(c.ola), c.fill_date, c.created_at);
       lpaCell = _r
         ? _r.estLPA.toFixed(2) + '<span style="font-size:8px;color:var(--muted);display:block;text-align:center;">(est.)</span>'
         : parseFloat(c.current_lpa||0).toFixed(2) + '<span style="font-size:8px;color:var(--muted);display:block;text-align:center;">(stored)</span>';
@@ -13909,7 +13909,7 @@ window.openLiqView = async function(id) {
     // angel share for casks
     var as = null;
     if (isCask && window._calcAngelShare) {
-      as = window._calcAngelShare(parseFloat(c.current_litres||0), parseFloat(c.abv||0), parseFloat(c.ola||0), c.fill_date);
+      as = window._calcAngelShare(parseFloat(c.current_litres||0), parseFloat(c.abv||0), parseFloat(c.ola||0), c.fill_date, c.created_at);
     }
 
     if (ttl) ttl.textContent = c.reference || '—';
@@ -22587,15 +22587,26 @@ window.saveAdjModal = async function() {
   //   volume loss: 2%/yr compounding  → est_litres = L × 0.98^N
   //   ABV loss:    0.6 pts/yr linear  → est_abv    = ABV − 0.6×N  (min 0)
   //   est_lpa = est_litres × est_abv / 100
-  window._calcAngelShare = function(origLitres, origAbv, origLpa, fillDate) {
+  // baselineDate: optional — if provided and LATER than fillDate, angel share projects
+  // forward from baselineDate using origLpa/origLitres as the measured starting point.
+  // This is used for bulk-imported casks where OLA = regauged LPA at import time.
+  window._calcAngelShare = function(origLitres, origAbv, origLpa, fillDate, baselineDate) {
     if (!origLitres || !origAbv || !fillDate) return null;
-    var years    = (Date.now() - new Date(fillDate).getTime()) / (1000*60*60*24*365.25);
+    // Use the later of fillDate and baselineDate as the projection start
+    var startDate = fillDate;
+    if (baselineDate) {
+      var bd = new Date(baselineDate), fd = new Date(fillDate);
+      if (bd > fd) startDate = baselineDate;
+    }
+    var years    = (Date.now() - new Date(startDate).getTime()) / (1000*60*60*24*365.25);
     if (years < 0) years = 0;
     var estL     = origLitres * Math.pow(0.98, years);
     var estABV   = Math.max(0, origAbv - 0.6 * years);
     var estLPA   = estL * estABV / 100;
     var lpaLost  = origLpa - estLPA;
-    var yrs = Math.floor(years), mos = Math.round((years - yrs) * 12);
+    // Age label always from actual fill date
+    var totalYears = (Date.now() - new Date(fillDate).getTime()) / (1000*60*60*24*365.25);
+    var yrs = Math.floor(totalYears), mos = Math.round((totalYears - yrs) * 12);
     var ageLabel = yrs > 0 ? yrs + 'y' + (mos ? ' ' + mos + 'm' : '') : mos + ' mo';
     return { years: years, ageLabel: ageLabel, estL: estL, estABV: estABV, estLPA: estLPA, lpaLost: lpaLost };
   };
@@ -23329,7 +23340,7 @@ window.saveAdjModal = async function() {
     }
     // angel-share-adjusted estimates
     var cs     = window._calcAngelShare
-      ? window._calcAngelShare(parseFloat(cont.current_litres||0), parseFloat(cont.abv||0), parseFloat(cont.ola||0), cont.fill_date)
+      ? window._calcAngelShare(parseFloat(cont.current_litres||0), parseFloat(cont.abv||0), parseFloat(cont.ola||0), cont.fill_date, cont.created_at)
       : null;
     var estL   = cs ? cs.estL   : parseFloat(cont.current_litres||0);
     var estAbv = cs ? cs.estABV : parseFloat(cont.abv||0);
