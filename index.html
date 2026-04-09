@@ -12778,19 +12778,31 @@ window.runCaskPricing = async function() {
 // Renames vessels like IBC001 → IBC-001, DRM001 → DRM-001 etc.
 // Strategy: insert new record, re-link containers, delete old record.
 window.fixLegacyVesselNames = async function() {
+  // Fetch ALL vessels (including decommissioned) so previous partial runs are caught too
+  var allVessels = [];
+  try {
+    allVessels = await window.db.select('vessels', '?order=id.asc&select=*');
+  } catch(e) {
+    window.toast && window.toast('Could not load vessels: ' + e.message, 'error'); return;
+  }
+
   // Find vessels whose ID has letters immediately followed by digits (no dash/separator)
-  var legacy = (_vrVessels || []).filter(function(v) {
-    return /^[A-Z]+\d+$/.test(v.id); // e.g. IBC001, DRM042
+  var legacy = allVessels.filter(function(v) {
+    return /^[A-Za-z]+\d+$/.test(v.id); // e.g. IBC001, DRM042
   });
+
   if (!legacy.length) {
-    window.toast && window.toast('No legacy vessel names found — all good!', 'success'); return;
+    // Also check if any liquid_containers still have old-format references
+    window.toast && window.toast('No legacy vessel names found. Checking container references…', 'info');
+    await window._fixLegacyContainerRefs(allVessels);
+    return;
   }
 
   // Build preview list
   var preview = legacy.map(function(v) {
-    var letters = v.id.match(/^[A-Z]+/)[0];
+    var letters = v.id.match(/^[A-Za-z]+/)[0].toUpperCase();
     var digits  = v.id.match(/\d+$/)[0];
-    var newId   = letters + '-' + digits; // IBC001 → IBC-001 (keeps original padding)
+    var newId   = letters + '-' + digits;
     return { old: v.id, new: newId, vessel: v };
   });
 
@@ -12798,7 +12810,7 @@ window.fixLegacyVesselNames = async function() {
     + (preview.length > 8 ? '\n…and ' + (preview.length - 8) + ' more' : '');
 
   if (!(await window.lpConfirm(
-    'Found ' + preview.length + ' vessels with legacy naming:\n\n' + previewText + '\n\nRename all to dash format and re-link their containers?',
+    'Found ' + preview.length + ' vessels with legacy naming:\n\n' + previewText + '\n\nRename all to dash format, re-link containers, and remove old records?',
     { title: 'Fix Legacy Vessel Names', confirmLabel: 'Rename All', destructive: false }
   ))) return;
 
@@ -12810,31 +12822,27 @@ window.fixLegacyVesselNames = async function() {
     try {
       var v = p.vessel;
 
-      // 1. Check the new ID doesn't already exist
+      // 1. Ensure new vessel record exists
       var existing = await window.db.select('vessels', '?id=eq.' + encodeURIComponent(p.new) + '&limit=1').catch(function(){ return []; });
-      if (existing && existing[0]) {
-        // New ID already exists — just re-link containers to it and delete the old vessel
-        await window.db.update('liquid_containers', '?vessel_id=eq.' + encodeURIComponent(p.old), { vessel_id: p.new }).catch(function(){});
-        await window.db.update('liquid_containers', '?reference=eq.'  + encodeURIComponent(p.old), { reference:  p.new }).catch(function(){});
-        await window.db.update('liquid_containers', '?reference=eq.'  + encodeURIComponent(p.old.toLowerCase()), { reference: p.new }).catch(function(){});
-      } else {
-        // 2. Insert new vessel record with corrected ID
-        var newVessel = Object.assign({}, v, { id: p.new });
-        delete newVessel.created_at; // let DB set its own timestamp
+      if (!existing || !existing[0]) {
+        var newVessel = Object.assign({}, v, { id: p.new, status: 'available' });
+        delete newVessel.created_at;
         await window.db.insert('vessels', newVessel);
-
-        // 3. Re-link liquid_containers: vessel_id and reference fields
-        await window.db.update('liquid_containers', '?vessel_id=eq.' + encodeURIComponent(p.old), { vessel_id: p.new }).catch(function(){});
-        await window.db.update('liquid_containers', '?reference=eq.'  + encodeURIComponent(p.old), { reference:  p.new }).catch(function(){});
       }
 
-      // 4. Delete the old vessel record using the proper auth client
-      try {
-        await window.db.delete('vessels', '?id=eq.' + encodeURIComponent(p.old));
-      } catch(de) {
-        // If delete fails (FK still exists), mark decommissioned as fallback
-        await window.db.update('vessels', '?id=eq.' + encodeURIComponent(p.old), { status: 'decommissioned' }).catch(function(){});
-      }
+      // 2. Re-link all liquid_containers that reference the old vessel ID
+      await window.db.update('liquid_containers', '?vessel_id=eq.' + encodeURIComponent(p.old), { vessel_id: p.new }).catch(function(){});
+
+      // 3. Fix reference field on containers (both exact case and uppercase variant)
+      await window.db.update('liquid_containers', '?reference=eq.' + encodeURIComponent(p.old),                { reference: p.new }).catch(function(){});
+      await window.db.update('liquid_containers', '?reference=eq.' + encodeURIComponent(p.old.toUpperCase()), { reference: p.new }).catch(function(){});
+      await window.db.update('liquid_containers', '?reference=eq.' + encodeURIComponent(p.old.toLowerCase()), { reference: p.new }).catch(function(){});
+
+      // 4. Delete the old vessel record
+      await window.db.delete('vessels', '?id=eq.' + encodeURIComponent(p.old)).catch(function(de){
+        // If delete blocked by FK, just decommission — it will be hidden from the register
+        window.db.update('vessels', '?id=eq.' + encodeURIComponent(p.old), { status: 'decommissioned' }).catch(function(){});
+      });
 
       renamed++;
     } catch(e) {
@@ -12843,8 +12851,30 @@ window.fixLegacyVesselNames = async function() {
     }
   }
 
-  window.toast && window.toast(renamed + ' vessels renamed' + (errors ? ', ' + errors + ' errors (check console)' : '') + '.', renamed > 0 ? 'success' : 'error');
+  window.toast && window.toast(renamed + ' vessels renamed' + (errors ? ', ' + errors + ' errors' : '') + '.', renamed > 0 ? 'success' : 'error');
   await window.loadVesselRegister();
+};
+
+// Fix any liquid_containers where reference still has old no-dash format but vessel_id is already correct
+window._fixLegacyContainerRefs = async function(allVessels) {
+  // Build map of old→new from vessels that are now correctly named
+  var dashedIds = (allVessels || []).map(function(v){ return v.id; }).filter(function(id){ return /^[A-Z]+-\d+$/.test(id); });
+  var fixed = 0;
+  for (var i = 0; i < dashedIds.length; i++) {
+    var newId   = dashedIds[i];
+    var parts   = newId.split('-');
+    var oldId   = parts[0] + parts[1]; // IBC-001 → IBC001
+    try {
+      var res = await window.db.update('liquid_containers', '?reference=eq.' + encodeURIComponent(oldId), { reference: newId }).catch(function(){ return null; });
+      if (res !== null) fixed++;
+    } catch(e) {}
+  }
+  if (fixed > 0) {
+    window.toast && window.toast(fixed + ' container references updated to dash format.', 'success');
+    if (typeof loadBlData === 'function') loadBlData();
+  } else {
+    window.toast && window.toast('All container references already up to date.', 'success');
+  }
 };
 // ── END FIX LEGACY VESSEL NAMES ──────────────────────────────────────────────
 
