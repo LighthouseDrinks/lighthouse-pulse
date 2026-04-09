@@ -9057,6 +9057,7 @@ window.loadBoms = async function initBoms() {
       <span id="liq-bulk-count" style="font-size:12px;color:var(--gold);font-weight:700;"></span>
       <button onclick="window.bulkArchiveSelected()" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Archive Selected</button>
       <button onclick="window.liqClearSelection()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Clear Selection</button>
+      <button onclick="window.archiveAllCreatedToday()" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:auto;">⚠ Archive All Created Today</button>
     </div>
 
     <!-- Table -->
@@ -14253,6 +14254,31 @@ window.liqClearSelection = function() {
   if (all) { all.checked = false; all.indeterminate = false; }
   var bar = document.getElementById('liq-bulk-bar');
   if (bar) bar.style.display = 'none';
+};
+
+window.archiveAllCreatedToday = async function() {
+  var today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  var todayRecords = _liquid.filter(function(c) {
+    return !c.archived && c.created_at && c.created_at.slice(0, 10) === today;
+  });
+  if (!todayRecords.length) { window.toast && window.toast('No records created today found.', 'warn'); return; }
+  if (!(await window.lpConfirm(
+    'This will archive ALL ' + todayRecords.length + ' liquid containers created today (' + today + '). Your original records before today are safe. Continue?',
+    { title: 'Archive Today\'s Records', confirmLabel: 'Archive ' + todayRecords.length + ' Records', destructive: true }
+  ))) return;
+  var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'system';
+  var ts  = new Date().toISOString();
+  var fail = 0;
+  for (var i = 0; i < todayRecords.length; i++) {
+    try { await window.db.update('liquid_containers', '?id=eq.' + todayRecords[i].id, { archived: true, archived_at: ts, archived_by: who }); }
+    catch(e) { fail++; }
+  }
+  window.toast && window.toast(
+    fail === 0 ? todayRecords.length + ' records archived — clean slate ready.' : (todayRecords.length - fail) + ' archived, ' + fail + ' failed.',
+    fail === 0 ? 'success' : 'error'
+  );
+  window.liqClearSelection();
+  await loadLiquid();
 };
 
 window.bulkArchiveSelected = async function() {
@@ -23055,10 +23081,9 @@ window.saveAdjModal = async function() {
     var validRows = _caskImportRows.filter(function(r){ return !r.error; });
     if (!validRows.length) return;
 
-    // Get default client — use Lighthouse Drinks (CLI-000) as fallback
-    var defaultClient = 'CLI-000';
+    // Default client from the Add Liquid form dropdown (already validated)
     var clientEl = document.getElementById('blac-client');
-    if (clientEl && clientEl.value) defaultClient = clientEl.value;
+    var defaultClient = (clientEl && clientEl.value) ? clientEl.value : null;
 
     var runBtn   = document.getElementById('cask-import-run-btn');
     var progress = document.getElementById('cask-import-progress');
@@ -23084,7 +23109,7 @@ window.saveAdjModal = async function() {
         var lpa      = r.lpa || 0;
         var litres   = r.litres || (lpa && r.abv ? Math.round((lpa * 100 / r.abv) * 10) / 10 : 0);
         var capacity = r.capacity || null;
-        var status   = litres > 0 ? (capacity && litres >= capacity * 0.9 ? 'full' : 'part_full') : 'empty';
+        var status   = litres > 0 ? (capacity && litres >= capacity * 0.9 ? 'full' : 'partially_full') : 'empty';
 
         // 1. Register vessel
         var vesselId = await _ensureVessel(r.cask_number, 'cask', capacity, r.location);
@@ -23093,66 +23118,36 @@ window.saveAdjModal = async function() {
         var existing = await window.db.select('liquid_containers', '?reference=eq.' + encodeURIComponent(r.cask_number) + '&limit=1').catch(function(){ return []; });
         var existingRec = existing && existing[0];
 
+        // Build minimal safe payload — only fields known to exist in the table
         var payload = {
-          type: 'cask',
-          reference: r.cask_number,
-          vessel_id: vesselId,
-          client_id: r.client_id || defaultClient,
-          capacity_litres: capacity,
-          location: r.location || null,
-          status: status,
-          spirit_type: r.spirit || null,
-          cbw_rotation:      r.cbw_rotation || null,
-          abv:               r.abv || null,
-          current_litres:    litres,
-          current_lpa:       lpa,
-          lpa_price:         r.lpa_price || null,
-          fill_date:         r.fill_date || null,
-          ola:               lpa || null,
-          fill_number:       r.fill_number || null,
-          previous_contents: r.previous_contents || null,
-          notes:             r.notes || null,
-          archived:          false,
-          archived_at: null,
-          archived_by: null
+          type:            'cask',
+          reference:       r.cask_number,
+          status:          status,
+          current_litres:  litres,
+          current_lpa:     lpa
         };
-
-        // Strip null vessel_id if vessel creation failed
-        if (!payload.vessel_id) delete payload.vessel_id;
-
-        // Validate client_id exists in cache; fall back to null if not found
-        var knownClientIds = (APP.clients||[]).map(function(c){ return c.id; });
-        if (payload.client_id && knownClientIds.length && knownClientIds.indexOf(payload.client_id) < 0) {
-          console.warn('Unknown client_id', payload.client_id, '— clearing');
-          payload.client_id = null;
-        }
+        // Optional fields — only add if non-null
+        if (vesselId)            payload.vessel_id       = vesselId;
+        if (r.client_id || defaultClient) payload.client_id = r.client_id || defaultClient;
+        if (capacity)            payload.capacity_litres = capacity;
+        if (r.location)          payload.location        = r.location;
+        if (r.spirit)            payload.spirit_type     = r.spirit;
+        if (r.cbw_rotation)      payload.cbw_rotation    = r.cbw_rotation;
+        if (r.abv)               payload.abv             = r.abv;
+        if (r.lpa_price)         payload.lpa_price       = r.lpa_price;
+        if (r.fill_date)         payload.fill_date       = r.fill_date;
+        if (lpa)                 payload.ola             = lpa;
+        if (r.notes)             payload.notes           = r.notes;
+        if (r.fill_number)       payload.fill_number     = r.fill_number;
+        if (r.previous_contents) payload.previous_contents = r.previous_contents;
 
         var savedId;
-        try {
-          if (existingRec) {
-            await window.db.update('liquid_containers', '?id=eq.' + existingRec.id, payload);
-            savedId = existingRec.id;
-          } else {
-            var ins = await window.db.insert('liquid_containers', payload);
-            savedId = ins && ins[0] && ins[0].id;
-          }
-        } catch(insertErr) {
-          // If schema error (new columns not yet in DB), retry without new fields
-          var msg = insertErr.message || '';
-          if (msg.indexOf('PGRST') >= 0 || msg.indexOf('schema') >= 0 || msg.indexOf('column') >= 0) {
-            var safePayload = Object.assign({}, payload);
-            delete safePayload.fill_number;
-            delete safePayload.previous_contents;
-            if (existingRec) {
-              await window.db.update('liquid_containers', '?id=eq.' + existingRec.id, safePayload);
-              savedId = existingRec.id;
-            } else {
-              var ins2 = await window.db.insert('liquid_containers', safePayload);
-              savedId = ins2 && ins2[0] && ins2[0].id;
-            }
-          } else {
-            throw insertErr; // re-throw non-schema errors with full message
-          }
+        if (existingRec) {
+          await window.db.update('liquid_containers', '?id=eq.' + existingRec.id, payload);
+          savedId = existingRec.id;
+        } else {
+          var ins = await window.db.insert('liquid_containers', payload);
+          savedId = ins && ins[0] && ins[0].id;
         }
 
         if (savedId) {
@@ -23172,11 +23167,14 @@ window.saveAdjModal = async function() {
         }
       } catch(e) {
         errorCount++;
+        // Log full error details to console for diagnosis
+        console.error('[BulkImport] Row', i+1, r.cask_number, '| Error:', e.message, '| Details:', e.details || '', '| Hint:', e.hint || '', '| Code:', e.code || '');
         var tbody = document.getElementById('cask-import-tbody');
         if (tbody && tbody.rows[i]) {
           tbody.rows[i].style.background = 'rgba(224,87,87,0.1)';
           var lastCell = tbody.rows[i].cells[tbody.rows[i].cells.length - 1];
-          if (lastCell) lastCell.innerHTML = '<span style="color:var(--red);font-size:10px;">&#9888; ' + (e.message||'Error') + '</span>';
+          var errMsg = (e.message||'Error') + (e.details ? ' — ' + e.details : '') + (e.code ? ' ['+e.code+']' : '');
+          if (lastCell) lastCell.innerHTML = '<span style="color:var(--red);font-size:10px;">&#9888; ' + errMsg + '</span>';
         }
       }
     }
