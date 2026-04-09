@@ -23019,7 +23019,10 @@ window.saveAdjModal = async function() {
         // 1. Register vessel
         var vesselId = await _ensureVessel(r.cask_number, 'cask', capacity, r.location);
 
-        // 2. Create liquid container
+        // 2. Check if a container with this reference already exists (inc. archived)
+        var existing = await window.db.select('liquid_containers', '?reference=eq.' + encodeURIComponent(r.cask_number) + '&limit=1').catch(function(){ return []; });
+        var existingRec = existing && existing[0];
+
         var payload = {
           type: 'cask',
           reference: r.cask_number,
@@ -23035,28 +23038,40 @@ window.saveAdjModal = async function() {
           current_lpa: lpa,
           lpa_price: r.lpa_price || null,
           fill_date: r.fill_date || null,
-          ola: lpa || null,   // OLA = regauged LPA at import; angel share tracks forward from here
-          notes: r.notes || null
+          ola: lpa || null,
+          notes: r.notes || null,
+          archived: false,
+          archived_at: null,
+          archived_by: null
         };
-        var ins = await window.db.insert('liquid_containers', payload);
-        if (ins && ins[0]) {
-          savedItems.push({ id: ins[0].id, ref: r.cask_number });
-          // Write history
+
+        var savedId;
+        if (existingRec) {
+          // Update existing record (unarchives it if needed)
+          await window.db.update('liquid_containers', '?id=eq.' + existingRec.id, payload);
+          savedId = existingRec.id;
+        } else {
+          var ins = await window.db.insert('liquid_containers', payload);
+          savedId = ins && ins[0] && ins[0].id;
+        }
+
+        if (savedId) {
+          savedItems.push({ id: savedId, ref: r.cask_number });
           if (litres > 0) {
             await writeHistory({
-              container_id: ins[0].id, event_type: 'add',
+              container_id: savedId, event_type: existingRec ? 'edit' : 'add',
               container_ref: r.cask_number,
-              litres_before: 0, litres_after: litres, litres_changed: litres,
-              abv_before: null, abv_after: r.abv || null,
-              lpa_before: 0, lpa_after: lpa,
-              notes: 'Bulk CSV import',
+              litres_before: existingRec ? parseFloat(existingRec.current_litres||0) : 0,
+              litres_after: litres, litres_changed: litres,
+              abv_before: existingRec ? existingRec.abv : null, abv_after: r.abv || null,
+              lpa_before: existingRec ? parseFloat(existingRec.current_lpa||0) : 0, lpa_after: lpa,
+              notes: existingRec ? 'Bulk CSV re-import (updated)' : 'Bulk CSV import',
               performed_by_id: pById, performed_by_name: pByName
             });
           }
         }
       } catch(e) {
         errorCount++;
-        // Mark row as errored in the table
         var tbody = document.getElementById('cask-import-tbody');
         if (tbody && tbody.rows[i]) {
           tbody.rows[i].style.background = 'rgba(224,87,87,0.1)';
