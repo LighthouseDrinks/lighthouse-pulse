@@ -22830,6 +22830,22 @@ window.saveAdjModal = async function() {
       });
     }
 
+    // Normalise date strings to ISO YYYY-MM-DD regardless of input format
+    // Handles: DD/MM/YY, DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD (already correct)
+    function normDateISO(s) {
+      if (!s) return null;
+      s = s.trim();
+      // Already ISO: YYYY-MM-DD
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      // DD/MM/YYYY or DD-MM-YYYY
+      var m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+      if (m) return m[3] + '-' + m[2].padStart(2,'0') + '-' + m[1].padStart(2,'0');
+      // DD/MM/YY or DD-MM-YY  → assume 20xx
+      var m2 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/);
+      if (m2) return '20' + m2[3] + '-' + m2[2].padStart(2,'0') + '-' + m2[1].padStart(2,'0');
+      return s; // return as-is and let DB validate
+    }
+
     _caskImportRows = [];
     var errors = 0;
     dataLines.forEach(function(line, i) {
@@ -22853,7 +22869,7 @@ window.saveAdjModal = async function() {
         location:     g('location') || null,
         spirit:       g('spirit') || null,
         abv:          abv,
-        fill_date:    g('fill_date') || null,
+        fill_date:    normDateISO(g('fill_date')),
         lpa:          lpa,
         litres:       litres,
         lpa_price:    parseFloat(g('lpa_price')) || null,
@@ -22997,15 +23013,48 @@ window.saveAdjModal = async function() {
     if (progLbl) progLbl.textContent = '✓ Done — ' + okCount + ' casks imported' + (errorCount ? ', ' + errorCount + ' errors' : '') + '.';
     window.toast && window.toast(okCount + ' casks imported successfully' + (errorCount ? ' (' + errorCount + ' failed)' : '') + '.', 'success');
 
-    // Show bulk QR print button
+    // Show bulk QR print + undo buttons
     if (okCount > 0) {
       window._lastBulkSavedItems = savedItems;
+
+      var btnRow = document.createElement('div');
+      btnRow.style.cssText = 'display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center;';
+
       var printBtn = document.createElement('button');
       printBtn.className = 'btn btn-outline';
-      printBtn.style.marginTop = '10px';
       printBtn.innerHTML = '&#128424; Print All ' + okCount + ' QR Labels';
       printBtn.onclick = function(){ window._printBulkBLACQR(window._lastBulkSavedItems); };
-      if (progress) progress.appendChild(printBtn);
+      btnRow.appendChild(printBtn);
+
+      var undoBtn = document.createElement('button');
+      undoBtn.style.cssText = 'background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;';
+      undoBtn.innerHTML = '&#8630; Undo Import (' + okCount + ' casks)';
+      undoBtn.onclick = async function() {
+        if (!(await window.lpConfirm('This will archive all ' + okCount + ' casks from this import. They can be restored individually if needed. Continue?', { title: 'Undo Import', confirmLabel: 'Archive All', destructive: true }))) return;
+        undoBtn.disabled = true; undoBtn.textContent = 'Archiving…';
+        var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'system';
+        var ts  = new Date().toISOString();
+        var failCount = 0;
+        for (var i = 0; i < savedItems.length; i++) {
+          try {
+            await window.db.update('liquid_containers', '?id=eq.' + savedItems[i].id, { archived: true, archived_at: ts, archived_by: who });
+          } catch(e) { failCount++; }
+        }
+        window.toast && window.toast(
+          failCount === 0
+            ? 'All ' + okCount + ' casks archived — re-upload when ready.'
+            : (okCount - failCount) + ' archived, ' + failCount + ' failed.',
+          failCount === 0 ? 'success' : 'error'
+        );
+        undoBtn.textContent = '✓ Undone';
+        undoBtn.disabled = true;
+        printBtn.disabled = true;
+        window._lastBulkSavedItems = [];
+        await loadBlData();
+      };
+      btnRow.appendChild(undoBtn);
+
+      if (progress) progress.appendChild(btnRow);
     }
 
     if (runBtn) { runBtn.disabled = false; runBtn.textContent = 'Import ' + validRows.length + ' Casks'; }
