@@ -9038,11 +9038,19 @@ window.loadBoms = async function initBoms() {
       </button>
     </div>
 
+    <!-- Bulk action toolbar (hidden until rows selected) -->
+    <div id="liq-bulk-bar" style="display:none;background:rgba(201,168,76,0.08);border:1px solid var(--gold-dim);border-radius:4px;padding:10px 16px;margin-bottom:10px;display:none;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span id="liq-bulk-count" style="font-size:12px;color:var(--gold);font-weight:700;"></span>
+      <button onclick="window.bulkArchiveSelected()" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Archive Selected</button>
+      <button onclick="window.liqClearSelection()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Clear Selection</button>
+    </div>
+
     <!-- Table -->
     <div class="table-wrap">
       <table class="data-table">
         <thead>
           <tr>
+            <th style="width:32px;padding:8px;"><input type="checkbox" id="liq-select-all" title="Select all" onclick="window.liqToggleSelectAll(this)" style="cursor:pointer;accent-color:var(--gold);"></th>
             <th style="min-width:100px;">Reference</th>
             <th class="mob-hide" style="min-width:70px;">Type</th>
             <th class="mob-hide" style="min-width:110px;">Client</th>
@@ -9054,7 +9062,7 @@ window.loadBoms = async function initBoms() {
           </tr>
         </thead>
         <tbody id="liq-tbody">
-          <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:32px;">Loading liquid inventory…</td></tr>
+          <tr><td colspan="9" style="text-align:center;color:var(--muted);padding:32px;">Loading liquid inventory…</td></tr>
         </tbody>
       </table>
     </div>
@@ -13633,7 +13641,7 @@ window.renderLiquid = function() {
     return true;
   });
 
-  if (!list.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:32px;">No containers found.</td></tr>'; return; }
+  if (!list.length) { tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:32px;">No containers found.</td></tr>'; return; }
 
   var esc = window.escapeHtml;
   tbody.innerHTML = list.map(function(c) {
@@ -13691,6 +13699,7 @@ window.renderLiquid = function() {
       statusPill = '<span style="font-size:10px;font-weight:700;letter-spacing:0.05em;padding:3px 8px;background:rgba(61,186,120,0.11);color:var(--green,#3dba78);border:1px solid rgba(61,186,120,0.28);border-radius:3px;text-transform:uppercase;">Active</span>';
     }
     return '<tr class="mob-data-row liq-row" data-cid="' + cid + '">'
+      + '<td style="width:32px;padding:8px;"><input type="checkbox" class="liq-row-cb" data-cid="' + cid + '" onclick="window.liqRowCheck(this)" style="cursor:pointer;accent-color:var(--gold);"></td>'
       + '<td style="font-weight:700;color:var(--white);">' + ref + '</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + typ + '</td>'
       + '<td class="mob-hide" style="font-size:12px;">' + cname + '</td>'
@@ -14175,6 +14184,55 @@ window.archiveContainer = async function(id) {
     toastMsg('Container archived.');
     await loadLiquid();
   } catch(e) { logError('archiveContainer', e); toastMsg('Error archiving container: ' + e.message, 'error'); }
+};
+
+// ── Bulk selection helpers ────────────────────────────────────────────────────
+window.liqRowCheck = function(cb) {
+  var bar   = document.getElementById('liq-bulk-bar');
+  var count = document.getElementById('liq-bulk-count');
+  var all   = document.getElementById('liq-select-all');
+  var cbs   = document.querySelectorAll('.liq-row-cb');
+  var checked = document.querySelectorAll('.liq-row-cb:checked').length;
+  if (bar)   bar.style.display   = checked > 0 ? 'flex' : 'none';
+  if (count) count.textContent   = checked + ' cask' + (checked !== 1 ? 's' : '') + ' selected';
+  if (all)   all.indeterminate   = checked > 0 && checked < cbs.length;
+  if (all)   all.checked         = checked === cbs.length && cbs.length > 0;
+};
+
+window.liqToggleSelectAll = function(masterCb) {
+  document.querySelectorAll('.liq-row-cb').forEach(function(cb){ cb.checked = masterCb.checked; });
+  window.liqRowCheck();
+};
+
+window.liqClearSelection = function() {
+  document.querySelectorAll('.liq-row-cb').forEach(function(cb){ cb.checked = false; });
+  var all = document.getElementById('liq-select-all');
+  if (all) { all.checked = false; all.indeterminate = false; }
+  var bar = document.getElementById('liq-bulk-bar');
+  if (bar) bar.style.display = 'none';
+};
+
+window.bulkArchiveSelected = async function() {
+  var checked = Array.from(document.querySelectorAll('.liq-row-cb:checked'));
+  if (!checked.length) return;
+  var ids = checked.map(function(cb){ return cb.getAttribute('data-cid'); });
+  if (!(await window.lpConfirm(
+    'Archive ' + ids.length + ' selected cask' + (ids.length !== 1 ? 's' : '') + '? They will be hidden from inventory but all data is preserved and can be restored.',
+    { title: 'Bulk Archive', confirmLabel: 'Archive ' + ids.length, destructive: true }
+  ))) return;
+  var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'system';
+  var ts  = new Date().toISOString();
+  var fail = 0;
+  for (var i = 0; i < ids.length; i++) {
+    try { await window.db.update('liquid_containers', '?id=eq.' + ids[i], { archived: true, archived_at: ts, archived_by: who }); }
+    catch(e) { fail++; }
+  }
+  window.toast && window.toast(
+    fail === 0 ? ids.length + ' casks archived.' : (ids.length - fail) + ' archived, ' + fail + ' failed.',
+    fail === 0 ? 'success' : 'error'
+  );
+  window.liqClearSelection();
+  await loadLiquid();
 };
 
 window.unarchiveContainer = async function(id) {
