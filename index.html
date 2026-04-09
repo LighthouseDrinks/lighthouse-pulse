@@ -9095,6 +9095,7 @@ window.loadBoms = async function initBoms() {
         <div style="font-size:11px;color:var(--muted);">Vessel records persist across fills. Link liquid batches to vessels as you register them.</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button onclick="window.fixLegacyVesselNames()" class="btn btn-outline" style="font-size:12px;padding:8px 18px;">&#8635; Fix Legacy Names</button>
         <button onclick="window.toggleCaskPricePanel()" class="btn btn-outline" style="font-size:12px;padding:8px 18px;">&#8364; Price Casks by Fill</button>
         <button onclick="window.toggleVesselRangePanel()" class="btn btn-outline" style="font-size:12px;padding:8px 18px;">&#9776; Generate Range</button>
         <button onclick="window.openVesselModal()" class="btn btn-gold" style="font-size:12px;padding:8px 18px;">+ Register Vessel</button>
@@ -12772,6 +12773,82 @@ window.runCaskPricing = async function() {
   await window.loadVesselRegister();
 };
 // ── END BULK CASK PRICING ────────────────────────────────────────────────────
+
+// ── FIX LEGACY VESSEL NAMES ──────────────────────────────────────────────────
+// Renames vessels like IBC001 → IBC-001, DRM001 → DRM-001 etc.
+// Strategy: insert new record, re-link containers, delete old record.
+window.fixLegacyVesselNames = async function() {
+  // Find vessels whose ID has letters immediately followed by digits (no dash/separator)
+  var legacy = (_vrVessels || []).filter(function(v) {
+    return /^[A-Z]+\d+$/.test(v.id); // e.g. IBC001, DRM042
+  });
+  if (!legacy.length) {
+    window.toast && window.toast('No legacy vessel names found — all good!', 'success'); return;
+  }
+
+  // Build preview list
+  var preview = legacy.map(function(v) {
+    var letters = v.id.match(/^[A-Z]+/)[0];
+    var digits  = v.id.match(/\d+$/)[0];
+    var newId   = letters + '-' + digits; // IBC001 → IBC-001 (keeps original padding)
+    return { old: v.id, new: newId, vessel: v };
+  });
+
+  var previewText = preview.slice(0, 8).map(function(p){ return p.old + ' → ' + p.new; }).join('\n')
+    + (preview.length > 8 ? '\n…and ' + (preview.length - 8) + ' more' : '');
+
+  if (!(await window.lpConfirm(
+    'Found ' + preview.length + ' vessels with legacy naming:\n\n' + previewText + '\n\nRename all to dash format and re-link their containers?',
+    { title: 'Fix Legacy Vessel Names', confirmLabel: 'Rename All', destructive: false }
+  ))) return;
+
+  var renamed = 0, errors = 0;
+  window.toast && window.toast('Renaming ' + preview.length + ' vessels…', 'info');
+
+  for (var i = 0; i < preview.length; i++) {
+    var p = preview[i];
+    try {
+      var v = p.vessel;
+
+      // 1. Check the new ID doesn't already exist
+      var existing = await window.db.select('vessels', '?id=eq.' + encodeURIComponent(p.new) + '&limit=1').catch(function(){ return []; });
+      if (existing && existing[0]) {
+        // New ID already exists — just re-link containers to it and delete the old vessel
+        await window.db.update('liquid_containers', '?vessel_id=eq.' + encodeURIComponent(p.old), { vessel_id: p.new }).catch(function(){});
+        await window.db.update('liquid_containers', '?reference=eq.'  + encodeURIComponent(p.old), { reference:  p.new }).catch(function(){});
+        await window.db.update('liquid_containers', '?reference=eq.'  + encodeURIComponent(p.old.toLowerCase()), { reference: p.new }).catch(function(){});
+      } else {
+        // 2. Insert new vessel record with corrected ID
+        var newVessel = Object.assign({}, v, { id: p.new });
+        delete newVessel.created_at; // let DB set its own timestamp
+        await window.db.insert('vessels', newVessel);
+
+        // 3. Re-link liquid_containers: vessel_id and reference fields
+        await window.db.update('liquid_containers', '?vessel_id=eq.' + encodeURIComponent(p.old), { vessel_id: p.new }).catch(function(){});
+        await window.db.update('liquid_containers', '?reference=eq.'  + encodeURIComponent(p.old), { reference:  p.new }).catch(function(){});
+      }
+
+      // 4. Delete the old vessel record
+      await window.db.update('vessels', '?id=eq.' + encodeURIComponent(p.old), { status: 'decommissioned' }).catch(function(){});
+      try {
+        // Attempt hard delete — may fail if other FKs remain
+        await fetch(SUPA_URL + '/rest/v1/vessels?id=eq.' + encodeURIComponent(p.old), {
+          method: 'DELETE',
+          headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + SUPA_KEY }
+        });
+      } catch(de) { /* soft-decommission is fine fallback */ }
+
+      renamed++;
+    } catch(e) {
+      errors++;
+      console.error('Fix legacy name error', p.old, '→', p.new, e.message);
+    }
+  }
+
+  window.toast && window.toast(renamed + ' vessels renamed' + (errors ? ', ' + errors + ' errors (check console)' : '') + '.', renamed > 0 ? 'success' : 'error');
+  await window.loadVesselRegister();
+};
+// ── END FIX LEGACY VESSEL NAMES ──────────────────────────────────────────────
 
 window.loadVesselRegister = async function() {
   var tbody = document.getElementById('vr-tbody');
