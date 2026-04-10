@@ -7511,6 +7511,10 @@ window.openGIModal = function(bomId) {
 };
 
 window.saveGIApproval = async function(bomId) {
+  if (!(window.canDo && window.canDo('boms_lock'))) {
+    window.toast && window.toast('You do not have permission to update GI approval.', 'error');
+    return;
+  }
   var bom = BOMS.find(function(b){ return b.id === bomId; });
   if (!bom) return;
   var btn = document.getElementById('gi-save-btn');
@@ -13981,7 +13985,7 @@ window._refreshLiquidProductDropdowns = function() {
 var LP_MANAGER_ROLES = ['warehouse', 'liquid', 'ops director', 'managing director', 'quality', 'compliance', 'client coordinator', 'admin'];
 window._canManageLiquidProducts = function() {
   var role = (window._userRole || '').toLowerCase();
-  if (!role) return true; // no role system loaded — allow access
+  if (!role) return false;
   return LP_MANAGER_ROLES.some(function(r){ return role.indexOf(r) > -1; });
 };
 
@@ -15443,7 +15447,7 @@ window.renderDryGoods = function() {
       + (sku.location ? '<div class="mob-d-item"><span class="mob-d-label">Location</span><span class="mob-d-value">'+sku.location+'</span></div>' : '')
       + '<div class="mob-d-item"><span class="mob-d-label">Deliveries</span><span class="mob-d-value">'+activeBatches.length+' active</span></div>'
       + (totalVal > 0 ? '<div class="mob-d-item"><span class="mob-d-label">Value</span><span class="mob-d-value">€'+totalVal.toLocaleString('en-IE',{minimumFractionDigits:2,maximumFractionDigits:2})+'</span></div>' : '')
-      + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;"><button onclick="event.stopPropagation();window.openAddBatchModalForSKU(\''+sku.id+'\')" style="background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);color:var(--green);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">+ Add Delivery</button><button onclick="event.stopPropagation();window.openEditSKUModal(\''+sku.id+'\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Edit</button></div>'
+      + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'+(window.canDo&&window.canDo('drygoods_edit')?'<button onclick="event.stopPropagation();window.openAddBatchModalForSKU(\''+sku.id+'\')" style="background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);color:var(--green);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;margin-right:8px;">+ Add Delivery</button><button onclick="event.stopPropagation();window.openEditSKUModal(\''+sku.id+'\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Edit</button>':'')+'</div>'
       + '</div></td></tr>');
   });
   tbody.innerHTML = rows.join('');
@@ -17168,9 +17172,30 @@ window.saveAdjModal = async function() {
 
   window.openAssignLiquidModal = async function(jobId) {
     _almJobId = jobId;
-    _almJob   = JOBS.find(function(j){ return j.id === jobId; }) || null;
     _almSelectedIds = new Set();
-    if (!_almJob) return;
+
+    // Prefer _jobs (Supabase-loaded) over the legacy JOBS array
+    var rawJob = _jobs.find(function(j){ return j.id === jobId; })
+              || (typeof JOBS !== 'undefined' && JOBS.find(function(j){ return j.id === jobId; }))
+              || null;
+    if (!rawJob) { window.toast && window.toast('Job not found — try refreshing the Jobs list.', 'error'); return; }
+
+    // Normalise both row shapes into the fields the modal uses
+    _almJob = {
+      id:          rawJob.id,
+      product:     rawJob.product_name || rawJob.product || '',
+      client:      (rawJob.clients && rawJob.clients.name) || rawJob.client || rawJob.client_id || '',
+      client_id:   rawJob.client_id || '',
+      target:      rawJob.job_target_type === 'liquid' ? 'Liquid'
+                 : rawJob.job_target_type === 'bottles' ? 'Bottles'
+                 : (rawJob.target || rawJob.target_type || 'Bottles'),
+      litres:      rawJob.liquid_litres || rawJob.litres || '',
+      bottles:     rawJob.bottle_target || rawJob.bottles || '',
+      bomId:       rawJob.bom_id || rawJob.bomId || '',
+      specId:      rawJob.bom_id || rawJob.specId || '',
+      bottlingAbv: rawJob.bottling_abv || rawJob.bottlingAbv || '',
+      stage:       rawJob.stage || ''
+    };
 
     var ov = document.getElementById('assign-liquid-overlay');
     if (!ov) return;
@@ -21022,20 +21047,39 @@ window.saveAdjModal = async function() {
         var res = await supaMut('POST','job_drygoods_prep','',{job_id:jobId});
         pid = res[0].id;
       }
-      // BOM items are stored as SKU columns on boms table, not in bom_items
+      // BOM items are stored as SKU columns on boms table
       var bomDgRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=*');
-      var items = []; // placeholder - DG prep uses job_components now
-      for (var i=0;i<items.length;i++) {
-        var item = items[i];
-        if (!item.sku_id && !item.description) continue;
+      var bomRow = bomDgRows && bomDgRows[0];
+      if (!bomRow) { window.toast && window.toast('BOM not found.','error'); return; }
+      var DG_SKU_FIELDS = [
+        { col: 'bottle_sku_id',       label: 'Bottle' },
+        { col: 'ropp_sku_id',         label: 'ROPP Capsule' },
+        { col: 'cork_sku_id',         label: 'Cork' },
+        { col: 'foil_sku_id',         label: 'Foil / Heat Shrink' },
+        { col: 'front_label_sku_id',  label: 'Front Label' },
+        { col: 'back_label_sku_id',   label: 'Back Label' },
+        { col: 'neck_label_sku_id',   label: 'Neck Label' },
+        { col: 'shipper_sku_id',      label: 'Shipper' },
+        { col: 'divider_sku_id',      label: 'Divider / Insert' },
+        { col: 'string_twine_sku_id', label: 'String / Twine' },
+        { col: 'monocarton_sku_id',   label: 'Monocarton' },
+        { col: 'gift_tube_sku_id',    label: 'Gift Tube' },
+        { col: 'tube_lid_sku_id',     label: 'Tube Lid' }
+      ];
+      var inserted = 0;
+      for (var i = 0; i < DG_SKU_FIELDS.length; i++) {
+        var f = DG_SKU_FIELDS[i];
+        var skuId = bomRow[f.col];
+        if (!skuId) continue;
         await supaMut('POST','job_drygoods_prep_items','',{
           prep_id: pid, job_id: jobId,
-          sku_id: item.sku_id||null,
-          item_name: (item.dry_goods_skus&&item.dry_goods_skus.description)||item.description||item.sku_id||'Item',
-          qty_required: item.quantity||null
+          sku_id: skuId,
+          item_name: f.label,
+          qty_required: null
         });
+        inserted++;
       }
-      window.toast && window.toast('Items loaded from BOM.','success');
+      window.toast && window.toast(inserted ? inserted + ' item' + (inserted !== 1 ? 's' : '') + ' loaded from BOM.' : 'No dry goods SKUs found on this BOM.', inserted ? 'success' : 'info');
       loadDryGoodsTab(jobId);
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
@@ -22565,8 +22609,8 @@ window.saveAdjModal = async function() {
 
     cal.innerHTML = html;
 
-    // Delegated click on job blocks
-    cal.addEventListener('click', function(e) {
+    // Delegated click on job blocks — use onclick to avoid stacking listeners on re-renders
+    cal.onclick = function(e) {
       var el = e.target;
       while (el && el !== cal) {
         var jid = el.getAttribute('data-jid');
@@ -22574,7 +22618,7 @@ window.saveAdjModal = async function() {
         el = el.parentElement;
       }
       hideCtxMenu();
-    });
+    };
   }
 
   // ── Context menu ─────────────────────────────────────────────────────────────
@@ -23076,7 +23120,7 @@ window.saveAdjModal = async function() {
       }
       window.toast && window.toast('Liquid sign-off task completed on job.', 'success');
     } catch(e) {
-      logError('_blAutoCompleteSignoff', e);
+      window.logError ? window.logError('_blAutoCompleteSignoff', e) : console.error('_blAutoCompleteSignoff', e);
     }
   }
 
@@ -27117,7 +27161,7 @@ function renderRoster(){
   days.forEach(function(d,i){var iT=d.getTime()===today.getTime(),iW=i>=5;h+='<th style="padding:10px 8px;text-align:center;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;border-bottom:2px solid var(--navy-border);min-width:88px;color:'+(iT?'var(--gold)':iW?'rgba(255,255,255,0.3)':'var(--muted)')+'"><div>'+DN[i]+'</div><div style="font-size:14px;font-weight:700;margin-top:2px;">'+(iT?'<span style="background:var(--gold);color:var(--navy-dark);border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;">':'')+d.getDate()+(iT?'</span>':'')+'</div></th>';});
   h+='</tr></thead><tbody>';
   _emps.forEach(function(emp,ei){
-    h+='<tr style="background:'+(ei%2===0?'transparent':'rgba(255,255,255,0.015')+';">';
+    h+='<tr style="background:'+(ei%2===0?'transparent':'rgba(255,255,255,0.015)')+';">';
     h+='<td style="padding:8px 14px;border-bottom:1px solid var(--navy-border);font-size:12px;font-weight:700;color:var(--white);">'+window.escapeHtml(emp.display_name||'Unknown')+'</td>';
     days.forEach(function(d){
       var d2=ds(d),key=rk(emp.id,d2),isL=_leaveMap[key],sh=_roster[key],isPast=d<today;
@@ -27132,10 +27176,10 @@ function renderRoster(){
   if(!_emps.length) h+='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--muted);">No employees found.</td></tr>';
   h+='</tbody></table>';
   grid.innerHTML=h;
-  grid.addEventListener('click', function(e){
+  grid.onclick=function(e){
     var el=e.target.closest('[data-action="openShift"]');
     if(el) window.openShiftPicker(el, el.dataset.uid, el.dataset.date);
-  });
+  };
 }
 
 window.openShiftPicker=function(el,uid,d2){
@@ -27803,8 +27847,7 @@ function dayModal(d2){
         if(b1s&&b1e)rows.push({user_id:uid,event_type:'break_end',timestamp:date+'T'+b1e+':00'});
         if(b2s)rows.push({user_id:uid,event_type:'break_start',timestamp:date+'T'+b2s+':00'});
         if(b2s&&b2e)rows.push({user_id:uid,event_type:'break_end',timestamp:date+'T'+b2e+':00'});
-        var r=await post('clock_events',rows);
-        if(!r.ok){var e=await r.text();window.toast&&window.toast('Error: '+e.slice(0,100),'error');return;}
+        await post('clock_events',rows);
       } else {
         // update existing
         if(rec.ci)await patch('clock_events?id=eq.'+rec.ci.id,{timestamp:date+'T'+ci+':00'});
@@ -27853,9 +27896,8 @@ window.tsQuickAdd=function(dateStr,evType){
       var v=document.getElementById('ts-qt').value;
       if(!v){window.toast&&window.toast('Please enter a time','error');return;}
       var uid=_selAuth||_sel;
-      var r=await post('clock_events',[{user_id:uid,event_type:evType,timestamp:dateStr+'T'+v+':00'}]);
-      if(r.ok){window.toast&&window.toast('Saved \u2713','success');window.tsLoad();}
-      else{var e=await r.text();window.toast&&window.toast('Error: '+e.slice(0,100),'error');}
+      await post('clock_events',[{user_id:uid,event_type:evType,timestamp:dateStr+'T'+v+':00'}]);
+      window.toast&&window.toast('Saved \u2713','success');window.tsLoad();
     }
   });
 };
@@ -27872,9 +27914,8 @@ window.tsEditEvt=function(id,dateStr){
     ok:'Save',
     cb:async function(){
       var v=document.getElementById('ts-t').value;if(!v)return;
-      var r=await patch('clock_events?id=eq.'+id,{timestamp:dateStr+'T'+v+':00'});
-      if(r.ok){window.toast&&window.toast('Saved','success');window.tsLoad();}
-      else window.toast&&window.toast('Error','error');
+      await patch('clock_events?id=eq.'+id,{timestamp:dateStr+'T'+v+':00'});
+      window.toast&&window.toast('Saved','success');window.tsLoad();
     }
   });
 };
