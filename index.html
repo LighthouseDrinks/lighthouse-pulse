@@ -7618,9 +7618,6 @@ window.BOMS          = BOMS;
 
 // ── Load BOMs from Supabase — inside boms-script so local BOMS array is accessible ──
 window.loadBoms = async function initBoms() {
-  // Reset array each call
-  BOMS.length = 0;
-
   // Wait for _sb and auth session
   var waited = 0;
   while (!window._sb && waited < 5000) { await new Promise(function(r){setTimeout(r,200);}); waited+=200; }
@@ -7628,7 +7625,7 @@ window.loadBoms = async function initBoms() {
   try {
     var rows = await window.db.select('boms', '?order=created_at.desc&select=*');
 
-    if (!Array.isArray(rows) || !rows.length) { renderBoms(); return; }
+    if (!Array.isArray(rows) || !rows.length) { BOMS.length = 0; renderBoms(); return; }
 
     // Collect all referenced SKU IDs
     var skuFields = ['liquid_sku_id','bottle_sku_id','cork_sku_id','ropp_sku_id','foil_sku_id',
@@ -7657,9 +7654,11 @@ window.loadBoms = async function initBoms() {
 
     function desc(id) { return id ? (skuDescMap[id] || '') : ''; }
 
+    // Build into a local array so concurrent calls cannot interleave their pushes
+    var _fresh = [];
     rows.forEach(function(r) {
       var ai = r.additional_info || {};
-      BOMS.push({
+      _fresh.push({
         id:               r.id,
         product:          r.product_name,
         clientId:         r.client_id,
@@ -7705,10 +7704,14 @@ window.loadBoms = async function initBoms() {
         added:            r.created_at ? r.created_at.slice(0,10) : ''
       });
     });
+    // Atomic swap — replace shared array in one go so no concurrent call can interleave
+    BOMS.length = 0;
+    _fresh.forEach(function(b){ BOMS.push(b); });
     window.BOMS = BOMS;
     renderBoms();
   } catch(e) {
     console.warn('BOMs load failed:', e.message);
+    BOMS.length = 0;
     renderBoms();
   }
 };
