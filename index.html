@@ -2491,7 +2491,7 @@ async function handleSession(session) {
       showDashboard(window.CURRENT_USER);
       // Settings cog visibility is handled inside showDashboard
     } else {
-      await _sb.auth.signOut();
+      await window._sb.auth.signOut();
       window.CURRENT_USER = null;
       showLogin();
       setAuthError('Your account is not yet activated. Contact your Lighthouse Drinks administrator.');
@@ -2533,7 +2533,7 @@ window.doLogin = async function() {
 
 // ── Sign out ─────────────────────────────────────────────────────────────────
 window.doLogout = async function() {
-  await _sb.auth.signOut().catch(function(){});
+  await (window._sb && window._sb.auth.signOut()).catch(function(){});
   window.CURRENT_USER = null;
   // Clear hash and reset all page state so next login starts clean
   window.history.replaceState({}, '', window.location.pathname);
@@ -2583,7 +2583,7 @@ window.doRegister = async function() {
   if (pw !== pw2)    { if (errEl) { errEl.textContent='Passwords do not match.'; errEl.classList.add('show'); } return; }
   if (btn) { btn.disabled=true; btn.textContent='Creating account…'; }
   try {
-    var result = await _sb.auth.signUp({ email: email, password: pw });
+    var result = await window._sb.auth.signUp({ email: email, password: pw });
     if (result.error) throw result.error;
     var userId = result.data && result.data.user && result.data.user.id;
     if (!userId) throw new Error('Account creation failed. Please try again.');
@@ -6109,7 +6109,8 @@ function onJobBomChange() {
   if (!productEl) return;
   // Only auto-fill if product field is empty — don't overwrite intentional entries
   if (!productEl.value.trim()) {
-    productEl.value = sel.value;
+    var bom = (typeof BOMS !== 'undefined' ? BOMS : []).find(function(b){ return b.id === sel.value; });
+    productEl.value = (bom && (bom.product_name || bom.product)) || '';
   }
 }
 window.onJobBomChange = onJobBomChange;
@@ -13394,11 +13395,11 @@ window.openVesselDetail = async function(vesselId) {
     }
 
     var html = '<div style="margin-bottom:20px;">';
-    html += dRow('Type',            _vrTypeLabel[vessel.vessel_type] || vessel.vessel_type);
-    html += dRow('Status',          stLbl, stCol);
+    html += dRow('Type',            esc(_vrTypeLabel[vessel.vessel_type] || vessel.vessel_type));
+    html += dRow('Status',          esc(stLbl), stCol);
     html += dRow('Capacity',        vessel.capacity_litres ? parseFloat(vessel.capacity_litres).toLocaleString() + ' L' : null);
-    html += dRow('Owner',           vessel.owner);
-    html += dRow('Location',        vessel.location);
+    html += dRow('Owner',           esc(vessel.owner));
+    html += dRow('Location',        esc(vessel.location));
     html += dRow('Purchase Price',  vessel.purchase_price ? '€' + parseFloat(vessel.purchase_price).toLocaleString('en-IE',{minimumFractionDigits:2,maximumFractionDigits:2}) : null, 'var(--gold)');
     html += dRow('Purchase Date',   vessel.purchase_date ? vessel.purchase_date.slice(0,10) : null);
     html += dRow('Last Inspected',  vessel.last_inspected  ? vessel.last_inspected.slice(0,10) : null);
@@ -13882,6 +13883,7 @@ window.closeLPModal = function() {
 };
 
 window.saveLiquidProduct = async function() {
+  if (!(window.canDo && window.canDo('liquid_products_edit'))) { window.toast && window.toast('You do not have permission to edit liquid products.', 'error'); return; }
   var name    = (document.getElementById('lp-name')    ||{}).value.trim();
   var editId  = (document.getElementById('lp-edit-id') ||{}).value.trim();
   var oldName = (document.getElementById('lp-old-name')||{}).value.trim();
@@ -15706,6 +15708,7 @@ window.closeSKUPanel = function() {
 };
 
 window.deleteSKU = async function(skuId) {
+  if (!(window.canDo && window.canDo('drygoods_edit'))) { window.toast && window.toast('You do not have permission to delete SKUs.', 'error'); return; }
   var sku = _skus.find(function(s){ return s.id === skuId; });
   if (!sku) return;
 
@@ -17205,6 +17208,8 @@ window.saveAdjModal = async function() {
       bomId:       rawJob.bom_id || rawJob.bomId || '',
       specId:      rawJob.bom_id || rawJob.specId || '',
       bottlingAbv: rawJob.bottling_abv || rawJob.bottlingAbv || '',
+      chill:       rawJob.chill_filtration ? 'Yes' : (rawJob.chill === 'Yes' ? 'Yes' : ''),
+      colour:      rawJob.colouring        ? 'Yes' : (rawJob.colour === 'Yes' ? 'Yes' : ''),
       stage:       rawJob.stage || ''
     };
 
@@ -18787,6 +18792,7 @@ window.saveAdjModal = async function() {
   };
 
   window.signOffComponents = async function(jobId) {
+    if (!(window.canDo && (window.canDo('jobs_write') || window.canDo('client_coordinator')))) { window.toast && window.toast('You do not have permission to sign off components.', 'error'); return; }
     var name = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || '';
     var displayName = await window.lpPrompt('Enter your name to sign off the Supply Chain Tracker.', name, { title: 'Supply Chain sign-off', placeholder: 'Full name' });
     if (displayName === null || !String(displayName).trim()) return;
@@ -18903,6 +18909,7 @@ window.saveAdjModal = async function() {
   };
 
   window.updateComponent = async function(id, field, value) {
+    if (!(window.canDo && (window.canDo('jobs_write') || window.canDo('warehouse_liquid')))) { window.toast && window.toast('You do not have permission to update components.', 'error'); return; }
     try { var p={}; p[field]=value; await supaMut('PATCH','job_components','?id=eq.'+id,p); }
     catch(e) { console.warn('Component update failed:', e); }
   };
@@ -19054,12 +19061,13 @@ window.saveAdjModal = async function() {
     var isLiquid = j.job_target_type === 'liquid';
 
     function section(title) {
-      return '<tr><td colspan="2" style="background:#0d3349;color:#c9a84c;font-weight:700;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;padding:8px 12px;border:1px solid #1e3a50;">' + title + '</td></tr>';
+      return '<tr><td colspan="2" style="background:#0d3349;color:#c9a84c;font-weight:700;font-size:11px;letter-spacing:0.15em;text-transform:uppercase;padding:8px 12px;border:1px solid #1e3a50;">' + (window.escapeHtml ? window.escapeHtml(title) : title) + '</td></tr>';
     }
+    var _pEsc = window.escapeHtml || function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
     function row(label, val) {
       if (!val && val !== 0) return '';
-      return '<tr><td style="padding:7px 12px;border:1px solid #dde;font-weight:600;width:220px;background:#f8f9fc;font-size:12px;color:#333;">' + label + '</td>'
-        + '<td style="padding:7px 12px;border:1px solid #dde;font-size:12px;color:#111;">' + val + '</td></tr>';
+      return '<tr><td style="padding:7px 12px;border:1px solid #dde;font-weight:600;width:220px;background:#f8f9fc;font-size:12px;color:#333;">' + _pEsc(label) + '</td>'
+        + '<td style="padding:7px 12px;border:1px solid #dde;font-size:12px;color:#111;">' + _pEsc(String(val)) + '</td></tr>';
     }
 
     // Fetch linked containers for accurate dilution status
@@ -19274,6 +19282,7 @@ window.saveAdjModal = async function() {
   }
 
   window.saveResults = async function(jobId) {
+    if (!(window.canDo && (window.canDo('jobs_write') || window.canDo('production_manager')))) { window.toast && window.toast('You do not have permission to save production results.', 'error'); return; }
     var gv = function(id) {
       var e = document.getElementById('res-'+id);
       if (!e) return null;
@@ -19646,7 +19655,7 @@ window.saveAdjModal = async function() {
       if (!isLocked) {
         html += sec('Sign Off');
         html += frow('Your Name',
-          '<input type="text" id="lso-signed-by" value="' + (d.signed_by||'') + '" placeholder="Enter your name to enable sign-off" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;">',
+          '<input type="text" id="lso-signed-by" value="' + (window.escapeHtml ? window.escapeHtml(d.signed_by||'') : (d.signed_by||'').replace(/"/g,'&quot;')) + '" placeholder="Enter your name to enable sign-off" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;">',
           'Once signed off, this document locks and the task completes automatically');
       }
 
@@ -19822,6 +19831,7 @@ window.saveAdjModal = async function() {
   };
 
   window.unsignLiquidSignoff = async function(jobId, existingId) {
+    if (!(window.canDo && window.canDo('jobs_signoff_liquid'))) { window.toast && window.toast('You do not have permission to reopen a liquid sign-off.', 'error'); return; }
     if (!existingId) return;
     var reason = await window.lpPrompt('Reason for reopening this sign-off (required):', '', { title: 'Reopen liquid sign-off', placeholder: 'Reason' });
     if (reason === null) return; // cancelled
@@ -20994,13 +21004,13 @@ window.saveAdjModal = async function() {
       html += '<div class="inv-section-title">Sign-Off</div>'
         + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">'
         + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Warehouse &amp; Liquid Manager</label>'
-        + '<input type="text" id="dgp-wh-name" value="' + (d.signed_by_warehouse||'') + '" placeholder="Name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
+        + '<input type="text" id="dgp-wh-name" value="' + (window.escapeHtml ? window.escapeHtml(d.signed_by_warehouse||'') : (d.signed_by_warehouse||'').replace(/"/g,'&quot;')) + '" placeholder="Name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
         + '</div>'
         + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Date</label>'
         + '<input type="date" id="dgp-wh-date" value="' + (d.signed_at_warehouse ? d.signed_at_warehouse.slice(0,10) : '') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
         + '</div>'
         + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Client Coordinator</label>'
-        + '<input type="text" id="dgp-cc-name" value="' + (d.signed_by_coordinator||'') + '" placeholder="Name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
+        + '<input type="text" id="dgp-cc-name" value="' + (window.escapeHtml ? window.escapeHtml(d.signed_by_coordinator||'') : (d.signed_by_coordinator||'').replace(/"/g,'&quot;')) + '" placeholder="Name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
         + '</div>'
         + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Date</label>'
         + '<input type="date" id="dgp-cc-date" value="' + (d.signed_at_coordinator ? d.signed_at_coordinator.slice(0,10) : '') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;">'
@@ -21028,6 +21038,7 @@ window.saveAdjModal = async function() {
   }
 
   window.saveDGPrep = async function(jobId, existingId) {
+    if (!(window.canDo && (window.canDo('jobs_write') || window.canDo('warehouse_liquid')))) { window.toast && window.toast('You do not have permission to save dry goods prep.', 'error'); return; }
     var gv = function(id) { var e = document.getElementById('dgp-'+id); return e ? e.value.trim() : null; };
     var payload = {
       job_id: jobId,
@@ -21325,6 +21336,7 @@ window.saveAdjModal = async function() {
   };
 
   window.saveQCModal = async function() {
+    if (!(window.canDo && (window.canDo('jobs_write') || window.canDo('quality_compliance')))) { window.toast && window.toast('You do not have permission to save QC checks.', 'error'); return; }
     var jobId = _qcModalJobId, type = _qcModalType, round = _qcModalRound;
     if (!jobId) return;
     var btn = document.getElementById('qcm-save-btn');
@@ -21695,6 +21707,7 @@ window.saveAdjModal = async function() {
   };
 
   window.saveWMModal = async function() {
+    if (!(window.canDo && (window.canDo('jobs_write') || window.canDo('warehouse_liquid')))) { window.toast && window.toast('You do not have permission to save waste management records.', 'error'); return; }
     var jobId = _wmJobId, batchNum = _wmNextBatch;
     if (!jobId) return;
     var btn = document.getElementById('wm-save-btn');
@@ -25532,14 +25545,14 @@ window.saveAdjModal = async function() {
     _blShowJobContextWarning('blend-tab-transfer');
   }
 
-  function _btfCalcTotal() {
+  window._btfCalcTotal = function _btfCalcTotal() {
     var total = 0;
     document.querySelectorAll('[id^="btf-sl-"]').forEach(function(el){
       var v = parseFloat(el.value); if (v > 0) total += v;
     });
     var totalEl = document.getElementById('btf-src-total');
     if (totalEl) totalEl.textContent = total > 0 ? total.toFixed(1) + 'L total' : '';
-  }
+  };
 
   window.addBTFSource = function() {
     var i = _btfSrcN++;
@@ -25550,7 +25563,7 @@ window.saveAdjModal = async function() {
     row.innerHTML =
       '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">'
       + '<select id="btf-sc-' + i + '" onchange="window.onBTFSrcChange(' + i + ')" style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">' + conOptHtml(_bl, null, null, ['cask'], 'source') + '</select>'
-      + '<button onclick="document.getElementById(\'btf-sr-' + i + '\').remove();_btfCalcTotal();" style="flex-shrink:0;background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 9px;border-radius:3px;cursor:pointer;">✕</button>'
+      + '<button onclick="document.getElementById(\'btf-sr-' + i + '\').remove();window._btfCalcTotal();" style="flex-shrink:0;background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 9px;border-radius:3px;cursor:pointer;">✕</button>'
       + '</div>'
       + '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;">'
       + '<div id="btf-savail-' + i + '" style="font-size:11px;padding:6px 10px;background:rgba(0,0,0,0.25);border:1px solid var(--navy-border);border-radius:3px;color:var(--muted);">Available: —</div>'
@@ -25604,7 +25617,7 @@ window.saveAdjModal = async function() {
         if (litresEl) litresEl.style.borderColor = 'var(--navy-border)';
       }
     }
-    _btfCalcTotal();
+    window._btfCalcTotal();
   };
 
   window.addBTFDest = function() {
@@ -25641,7 +25654,13 @@ window.saveAdjModal = async function() {
       }
       var l = parseFloat(gv('btf-sl-' + i)) || 0;
       var cont = _bl.find(function(c){ return c.id === sel.value; });
-      var lpa = (l && cont && cont.abv) ? l * parseFloat(cont.abv) / 100 : 0;
+      // Use proportional LPA: (litres_transferred / current_litres) * current_lpa
+      var lpa = 0;
+      if (l && cont) {
+        var contLitres = parseFloat(cont.current_litres || 0);
+        var contLpa    = parseFloat(cont.current_lpa    || 0);
+        lpa = contLitres > 0 ? (l / contLitres) * contLpa : l * parseFloat(cont.abv || 0) / 100;
+      }
       sources.push({ container_id: sel.value, litres_actual: l, lpa_actual: lpa, cont: cont });
     });
     // Pre-resolve any __vessel__ destination values
@@ -26801,8 +26820,7 @@ window.lvSubmitLeave = async function(){
   msgEl.textContent='Submitting…';
 
   var row={user_id:appId,leave_type:leaveType,start_date:from,end_date:to,days:days,days_requested:days,notes:notes,status:'pending'};
-  var r=await post('leave_requests',row);
-  if(!r.ok){var e=await r.text();msgEl.textContent='Error: '+e.slice(0,100);msgEl.style.color='var(--red)';return;}
+  try { await post('leave_requests',row); } catch(e){ msgEl.textContent='Error: '+(e.message||e).toString().slice(0,100);msgEl.style.color='var(--red)';return; }
 
   // Send email to reports-to manager
   await lvSendApprovalEmail(appId,from,to,days,leaveType,notes);
@@ -26844,7 +26862,7 @@ async function lvSendApprovalEmail(appId,from,to,days,leaveType,notes){
         +'<tr><td style="padding:6px 0;color:#7a93a8;width:130px;">Dates</td><td style="padding:6px 0;font-weight:600;">'+dateStr+'</td></tr>'
         +'<tr><td style="padding:6px 0;color:#7a93a8;">Type</td><td style="padding:6px 0;">'+typeLabel+'</td></tr>'
         +'<tr><td style="padding:6px 0;color:#7a93a8;">Days</td><td style="padding:6px 0;">'+days+'</td></tr>'
-        +(notes?'<tr><td style="padding:6px 0;color:#7a93a8;">Notes</td><td style="padding:6px 0;">'+notes+'</td></tr>':'')
+        +(notes?'<tr><td style="padding:6px 0;color:#7a93a8;">Notes</td><td style="padding:6px 0;">'+(window.escapeHtml?window.escapeHtml(notes):notes.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'))+'</td></tr>':'')
         +'</table>'
         +'<p>Please log into <strong>Pulse</strong> to approve or decline this request.</p>'
         +'</div>'
@@ -27620,7 +27638,10 @@ window.tsShowDrop=function(v){renderDrop(v||'');};
 
 window.tsSelect=function(uid){
   var emp=_emps.find(function(e){return e.id===uid;});if(!emp)return;
-  _sel=uid;_selAuth=emp.auth_user_id||null;_selName=emp.display_name||'';_selRole=emp.role||'';
+  // Use CURRENT_USER.id as auth fallback when selecting self, in case auth_user_id isn't populated
+  var me=window.CURRENT_USER;
+  var isSelf=me&&(me.app_user_id===uid||me.id===uid);
+  _sel=uid;_selAuth=emp.auth_user_id||(isSelf&&me&&me.id)||null;_selName=emp.display_name||'';_selRole=emp.role||'';
   window._sel=_sel;window._selAuth=_selAuth;
   var inp=document.getElementById('ts-search');if(inp)inp.value=emp.display_name||'';
   var drop=document.getElementById('ts-emp-drop');if(drop)drop.style.display='none';
@@ -28011,7 +28032,7 @@ window.loadTimesheet=async function(){
     var me=window.CURRENT_USER;
     var myId=me&&(me.app_user_id||me.id);
     var emp=_emps.find(function(e){return e.id===myId;})||_emps[0];
-    if(emp){_sel=emp.id;_selAuth=emp.auth_user_id||null;_selName=emp.display_name||'';_selRole=emp.role||'';}
+    if(emp){_sel=emp.id;_selAuth=emp.auth_user_id||(me&&me.id)||null;_selName=emp.display_name||'';_selRole=emp.role||'';}
     document.getElementById('ts-placeholder').style.display='none';
     var det=document.getElementById('ts-detail');if(det)det.style.display='flex';
     window.tsLoad();
