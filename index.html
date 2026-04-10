@@ -6509,11 +6509,14 @@ function renderBoms() {
   }
 
   var jobCounts = {};
-  if (window.JOBS) {
-    window.JOBS.forEach(function(j) {
-      if (j.specId) jobCounts[j.specId] = (jobCounts[j.specId] || 0) + 1;
-    });
-  }
+  // Count jobs per BOM using both the legacy JOBS array and the live _jobs array (jobs module)
+  var _allJobsForCount = (window.JOBS || []).concat(
+    (typeof _jobs !== 'undefined' ? _jobs : (window._jobs || []))
+  );
+  _allJobsForCount.forEach(function(j) {
+    var bomKey = j.specId || j.bomId || j.bom_id;
+    if (bomKey) jobCounts[bomKey] = (jobCounts[bomKey] || 0) + 1;
+  });
   var clientsMap = {};
   if (window.APP && window.APP.clients) {
     window.APP.clients.forEach(function(c){ clientsMap[c.id] = c.name; });
@@ -6522,7 +6525,7 @@ function renderBoms() {
   var esc = window.escapeHtml;
   tbody.innerHTML = BOMS.map(function(b) {
     var clientName  = esc(clientsMap[b.clientId] || b.clientId || '—');
-    var linked      = jobCounts[b.product] || 0;
+    var linked      = jobCounts[b.id] || 0;
     var rawVolAbv   = (b.volume ? b.volume + 'cl' : '') + (b.abv ? (b.volume ? ' / ' : '') + b.abv + '%' : '');
     var volAbv      = esc(rawVolAbv || '—');
     var bid         = esc(b.id);
@@ -7090,15 +7093,16 @@ window.printBom = async function(bomId) {
   var clientName = clientsMap[b.clientId] || b.clientId || '—';
 
   // ── Print row builders ───────────────────────────────
+  var _pe = window.escapeHtml || function(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
   function pr(label, val) {
     if (!val && val !== 0) return '';
     if (typeof val === 'string' && val.trim() === '') return '';
-    return '<tr><td class="lbl">' + label + '</td><td class="val">' + val + '</td></tr>';
+    return '<tr><td class="lbl">' + label + '</td><td class="val">' + _pe(val) + '</td></tr>';
   }
   function prs(label, desc, skuId) {
     if (!desc && !skuId) return '';
-    var badge = skuId ? ' <span class="sku-badge">' + skuId + '</span>' : '';
-    return '<tr><td class="lbl">' + label + '</td><td class="val">' + (desc||'') + badge + '</td></tr>';
+    var badge = skuId ? ' <span class="sku-badge">' + _pe(skuId) + '</span>' : '';
+    return '<tr><td class="lbl">' + label + '</td><td class="val">' + (desc ? _pe(desc) : '') + badge + '</td></tr>';
   }
   function psec(title) {
     return '<tr class="sec-row"><td colspan="2">' + title + '</td></tr>';
@@ -12961,7 +12965,7 @@ window.loadVesselRegister = async function() {
   }
 
   try {
-    _vrAllContainers = await supa('liquid_containers', '?archived=is.false&select=id,reference,type,spirit_type,current_litres,current_lpa,status,vessel_id&order=reference.asc');
+    _vrAllContainers = await supa('liquid_containers', '?archived=is.false&select=id,reference,type,spirit_type,current_litres,current_lpa,status,vessel_id,fill_date&order=reference.asc');
   } catch(e) { _vrAllContainers = []; }
 
   // Populate vessel dropdown in Add Container form
@@ -15345,7 +15349,10 @@ window.loadDryGoods = async function() {
       cliSel.innerHTML = '<option value="">All Clients</option>'
         + _clients.map(function(c){ return '<option value="'+c.id+'">'+c.name+'</option>'; }).join('');
       // Default to Lighthouse Drinks on first load; preserve selection on reload
-      cliSel.value = prevCli || 'CLI-000';
+      if (!cliSel.value || cliSel.value !== prevCli) {
+        var lhDefault = prevCli || (_clients.find(function(c){ return c.name && c.name.toLowerCase().indexOf('lighthouse') > -1; }) || {}).id || '';
+        cliSel.value = lhDefault;
+      }
     }
 
     // KPIs
@@ -15925,6 +15932,7 @@ window.saveEditBatch = async function() {
 };
 
 window.saveNewSKU = async function() {
+  if (!(window.canDo && window.canDo('drygoods_edit'))) { window.toast && window.toast('You do not have permission to create SKUs.', 'error'); return; }
   var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
   if (!gv('ns-client'))      { await window.lpAlert('Please select a client.', { variant: 'warn' }); return; }
   if (!gv('ns-description')) { await window.lpAlert('Description is required.', { variant: 'warn' }); return; }
@@ -16045,6 +16053,7 @@ window.calcABTotal = function() {
 };
 
 window.saveNewBatch = async function() {
+  if (!(window.canDo && window.canDo('drygoods_edit'))) { window.toast && window.toast('You do not have permission to record deliveries.', 'error'); return; }
   var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
   var skuId = gv('ab-sku-id');
   if (!skuId)           { await window.lpAlert('SKU not set.', { variant: 'warn' }); return; }
@@ -16196,6 +16205,7 @@ window.closeAdjModal = function() {
 };
 
 window.saveAdjModal = async function() {
+  if (!(window.canDo && window.canDo('drygoods_edit'))) { window.toast && window.toast('You do not have permission to adjust stock.', 'error'); return; }
   var batchId = document.getElementById('adj-batch-id').value;
   var skuId   = document.getElementById('adj-sku-id').value;
   var qty     = parseInt(document.getElementById('adj-qty').value);
@@ -16459,6 +16469,7 @@ window.saveAdjModal = async function() {
   };
 
   window.saveSupplier = async function() {
+    if (!(window.canDo && (window.canDo('drygoods_edit') || window.canDo('suppliers_edit')))) { window.toast && window.toast('You do not have permission to save suppliers.', 'error'); return; }
     var editId = document.getElementById('sm-edit-id').value;
     var name = document.getElementById('sm-name').value.trim();
     if (!name) { window.toast && window.toast('Supplier name is required.', 'error'); return; }
@@ -19765,6 +19776,7 @@ window.saveAdjModal = async function() {
     }
   }
   window.saveLiquidSignoff = async function(jobId, existingId) {
+    if (!(window.canDo && window.canDo('jobs_signoff_liquid'))) { window.toast && window.toast('You do not have permission to sign off liquid.', 'error'); return; }
     var gv = function(id) { var e = document.getElementById('lso-'+id); return e?(e.type==='checkbox'?e.checked:e.value.trim()):null; };
     var j = _jobs.find(function(x){ return x.id === jobId; })||{};
     var signedBy = gv('signed-by')||null;
@@ -27093,8 +27105,6 @@ window.lvApproveReq = async function(id, approve){
 </script>
 
 
-</body>
-</html>
 <!-- ══ ROSTER SCRIPT ═════════════════════════════════════════════════════════ -->
 <script>
 (function(){
@@ -28012,3 +28022,6 @@ var _oSPT=window.showPeopleTab;
 window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);}};
 })();
 </script>
+
+</body>
+</html>
