@@ -2134,11 +2134,18 @@ window.loadOverviewValues = async function loadOverviewValues() {
   function setText(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; }
 
   try {
-    var containers = await db.select('liquid_containers', '?client_id=eq.CLI-000&status=neq.empty');
-    var liqVal = containers.reduce(function(s,c){ return s + parseFloat(c.current_lpa||0) * parseFloat(c.lpa_price||0); }, 0);
+    var allClients = await db.select('clients', '?order=name.asc&limit=1000');
+    var lhClient = allClients.find(function(c){ return c.name && c.name.toLowerCase().indexOf('lighthouse') > -1; });
+    var lhId = lhClient ? lhClient.id : null;
+    var liqVal = 0, lhContCount = 0;
+    if (lhId) {
+      var allConts = await db.select('liquid_containers', '?archived=is.false&select=client_id,current_lpa,current_litres,lpa_price');
+      var lhConts = allConts.filter(function(c){ return c.client_id === lhId && parseFloat(c.current_litres||0) > 0; });
+      lhContCount = lhConts.length;
+      liqVal = lhConts.reduce(function(s,c){ return s + parseFloat(c.current_lpa||0) * parseFloat(c.lpa_price||0); }, 0);
+    }
     setText('ov-lh-liquid-value', liqVal > 0 ? '€' + liqVal.toLocaleString('en-IE', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—');
-    var totalLpa = containers.reduce(function(s,c){ return s + parseFloat(c.current_lpa||0); }, 0);
-    setText('ov-lh-liquid-sub', totalLpa.toLocaleString('en-IE', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' LPA · at recorded price');
+    setText('ov-lh-liquid-sub', liqVal > 0 ? lhContCount + ' container' + (lhContCount !== 1 ? 's' : '') + ' · at recorded LPA price' : 'LH-owned spirit at recorded LPA price');
   } catch(e) { window.logError('loadOverviewValues:liquid', e); }
 
   try {
@@ -15224,11 +15231,21 @@ window.toast = toastMsg;
 // ── Cask KPI for overview ─────────────────────────────────────────────────────
 window.loadCaskKPI = async function() {
   try {
-    var rows   = await supa('liquid_containers','?type=eq.cask&select=id,status');
+    var rows   = await supa('liquid_containers','?type=eq.cask&archived=is.false&select=id,status,current_lpa,lpa_price');
     var total  = rows.length;
     var active = rows.filter(function(r){ return r.status !== 'empty'; }).length;
+    var totalVal = rows.reduce(function(s,r){ return s + parseFloat(r.current_lpa||0) * parseFloat(r.lpa_price||0); }, 0);
     setText('kpi-casks-storage', total);
     setText('kpi-casks-sub', active + ' active' + (total-active > 0 ? ', '+(total-active)+' empty' : ''));
+    var valEl = document.getElementById('kpi-casks-value');
+    if (valEl) {
+      if (totalVal > 0) {
+        valEl.textContent = '€' + totalVal.toLocaleString('en-IE', {minimumFractionDigits:0, maximumFractionDigits:0});
+        valEl.style.display = '';
+      } else {
+        valEl.style.display = 'none';
+      }
+    }
   } catch(e) { console.warn('Cask KPI:', e.message); }
 };
 
