@@ -5555,6 +5555,15 @@ const FACTORY_RATE   = 300;  // € per hour
       sel.selectedIndex = 0;
     }
 
+    // Auto-fill label price inputs from tier (only if the field is currently empty)
+    const labelTier = LABEL_TIERS[sel.value];
+    if (labelTier) {
+      const frontEl = document.getElementById('frontlabelPrice');
+      const backEl  = document.getElementById('backlabelPrice');
+      if (frontEl && frontEl.value === '') frontEl.value = labelTier.front;
+      if (backEl  && backEl.value  === '') backEl.value  = labelTier.back;
+    }
+
     if (isNaN(qty) || qty <= 0 || isNaN(bph) || bph <= 0) {
       _bottlingCostPerBottle = null;
       if (note) note.textContent = qty > 0 && !isNaN(qty) ? 'Enter bottles per hour' : 'Enter run quantity & bottles per hour';
@@ -5621,13 +5630,25 @@ const FACTORY_RATE   = 300;  // € per hour
   }
 
   function getRoppPrice() {
-    const sizeEl = document.getElementById('roppSize');
+    const sizeEl   = document.getElementById('roppSize');
+    if (!sizeEl || !sizeEl.value) return null; // size must be chosen
+    const manualEl = document.getElementById('roppManualPrice');
+    if (manualEl && manualEl.value !== '') {
+      const v = parseFloat(manualEl.value);
+      if (!isNaN(v)) return v;
+    }
     const typeEl = document.getElementById('roppType');
-    if (!sizeEl || !typeEl) return null;
-    const size = sizeEl.value;
-    const type = typeEl.value;
-    if (!size || !type) return null;
-    return parseFloat(type);
+    if (!typeEl || !typeEl.value) return null;
+    return parseFloat(typeEl.value);
+  }
+
+  function onRoppTypeChange() {
+    const typeEl   = document.getElementById('roppType');
+    const manualEl = document.getElementById('roppManualPrice');
+    if (typeEl && manualEl && typeEl.value) {
+      manualEl.value = typeEl.value;
+    }
+    updateSummary();
   }
 
   function getManualPrice(inputId) {
@@ -5651,11 +5672,15 @@ const FACTORY_RATE   = 300;  // € per hour
   }
 
   function getFrontLabelPrice() {
+    const el = document.getElementById('frontlabelPrice');
+    if (el && el.value !== '') { const v = parseFloat(el.value); if (!isNaN(v)) return v; }
     const bracket = getRunBracket();
     return bracket && LABEL_TIERS[bracket] ? LABEL_TIERS[bracket].front : null;
   }
 
   function getBackLabelPrice() {
+    const el = document.getElementById('backlabelPrice');
+    if (el && el.value !== '') { const v = parseFloat(el.value); if (!isNaN(v)) return v; }
     const bracket = getRunBracket();
     return bracket && LABEL_TIERS[bracket] ? LABEL_TIERS[bracket].back : null;
   }
@@ -5690,11 +5715,20 @@ const FACTORY_RATE   = 300;  // € per hour
   function toggleComponent(checkbox, id) {
     const controls = document.getElementById(id + '-controls');
     const row = checkbox.closest('.component-row');
-    if (row) {
-      row.classList.toggle('excluded', !checkbox.checked);
-    }
+    if (row) row.classList.toggle('excluded', !checkbox.checked);
     if (controls) {
       controls.querySelectorAll('input[type="number"]').forEach(inp => { inp.disabled = !checkbox.checked; });
+    }
+    // ROPP checked → automatically uncheck & disable Heat Shrink (mutually exclusive)
+    if (id === 'ropp' && checkbox.checked) {
+      const hsRow = document.getElementById('row-heatshrink');
+      const hsCb  = hsRow && hsRow.querySelector('.toggle-check');
+      if (hsCb && hsCb.checked) {
+        hsCb.checked = false;
+        hsRow.classList.add('excluded');
+        const hsCtrl = document.getElementById('heatshrink-controls');
+        if (hsCtrl) hsCtrl.querySelectorAll('input[type="number"]').forEach(inp => { inp.disabled = true; });
+      }
     }
     updateSummary();
   }
@@ -5749,15 +5783,19 @@ const FACTORY_RATE   = 300;  // € per hour
     const isCorkOnly = CORK_ONLY_BOTTLES.some(name => label.startsWith(name));
 
     if (ROPP_BOTTLES.includes(val)) {
-      // Auto-select ROPP 30x35, untick cork
+      // Auto-select ROPP 30x35 Non-Custom, untick cork
       document.getElementById('roppSize').value = '30x35';
       document.getElementById('roppType').value = '0.05';
+      const manualEl = document.getElementById('roppManualPrice');
+      if (manualEl && manualEl.value === '') manualEl.value = '0.05';
       if (corkCb && corkCb.checked)  { corkCb.checked = false; toggleComponent(corkCb, 'cork'); }
       if (roppCb && !roppCb.checked) { roppCb.checked = true;  toggleComponent(roppCb, 'ropp'); }
     } else if (isCorkOnly) {
       // Tick cork, untick ROPP, clear ROPP selects
       document.getElementById('roppSize').value = '';
       document.getElementById('roppType').value = '';
+      const manualEl = document.getElementById('roppManualPrice');
+      if (manualEl) manualEl.value = '';
       if (corkCb && !corkCb.checked) { corkCb.checked = true;  toggleComponent(corkCb, 'cork'); }
       if (roppCb && roppCb.checked)  { roppCb.checked = false; toggleComponent(roppCb, 'ropp'); }
     }
@@ -5798,7 +5836,13 @@ const FACTORY_RATE   = 300;  // € per hour
     if (total > 0 && marginPct < 100) {
       sellPrice = total / (1 - marginPct / 100);
     }
-    document.getElementById('sell-price-val').textContent = sellPrice !== null ? '€' + sellPrice.toFixed(2) : '—';
+    const sellPriceText = sellPrice !== null ? '€' + sellPrice.toFixed(2) : '—';
+    document.getElementById('sell-price-val').textContent = sellPriceText;
+    // Mirror sell price down to the #9 card in the left column
+    const spv2 = document.getElementById('sell-price-val2');
+    if (spv2) spv2.textContent = sellPriceText;
+    const spl2 = document.getElementById('sell-price-label2');
+    if (spl2) spl2.textContent = marginPct > 0 ? 'at ' + marginPct + '% margin' : '';
 
     document.getElementById('run-total-block').style.display = 'none';
 
@@ -5874,6 +5918,7 @@ window.toggleComponent = toggleComponent;
 window.fmt = fmt;
 window.updateLiquid = updateLiquid;
 window.onBottleChange = onBottleChange;
+window.onRoppTypeChange = onRoppTypeChange;
 window.updateSummary = updateSummary;
 window.updateProfit = updateProfit;
 })();
@@ -8339,19 +8384,21 @@ window.loadBoms = async function initBoms() {
         <input type="checkbox" class="toggle-check" checked onchange="toggleComponent(this, 'ropp')">
         <div><div class="component-label">ROPP Cap</div><div class="component-sub">Rolled-on pilfer-proof closure</div></div>
         <div class="component-controls" id="ropp-controls">
-          <div class="inline-row">
+          <div class="inline-row" style="flex-wrap:wrap;gap:8px;">
             <select id="roppSize" class="sub-select" onchange="updateSummary()">
               <option value="">— Size —</option>
               <option value="30x35">30 × 35</option>
               <option value="31x44">31 × 44</option>
               <option value="30x60">30 × 60</option>
             </select>
-            <select id="roppType" class="sub-select" onchange="updateSummary()">
+            <select id="roppType" class="sub-select" onchange="onRoppTypeChange()">
               <option value="">— Type —</option>
               <option value="0.05">Non-Custom (€0.05)</option>
               <option value="0.10">Custom (€0.10)</option>
             </select>
+            <input type="number" id="roppManualPrice" placeholder="€ / cap" step="0.001" min="0" oninput="updateSummary()" style="max-width:100px;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:6px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
           </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px;">Dropdowns set a recommended price — override in the box if needed.</div>
           <div class="price-tag" id="ropp-price">—</div>
         </div>
       </div>
@@ -8391,13 +8438,19 @@ window.loadBoms = async function initBoms() {
       <div class="card-title"><span class="section-num">6</span> Labels</div>
       <div class="component-row" id="row-frontlabel">
         <input type="checkbox" class="toggle-check" checked onchange="toggleComponent(this, 'frontlabel')">
-        <div><div class="component-label">Front Label</div><div class="component-sub" id="frontlabel-sub">Auto-priced from run tier</div></div>
-        <div class="component-controls" id="frontlabel-controls"><div class="price-tag" id="frontlabel-price">—</div></div>
+        <div><div class="component-label">Front Label</div><div class="component-sub" id="frontlabel-sub">Auto-filled from run tier — editable</div></div>
+        <div class="component-controls" id="frontlabel-controls" style="display:flex;align-items:center;gap:10px;">
+          <input type="number" id="frontlabelPrice" placeholder="Auto" step="0.001" min="0" oninput="updateSummary()" style="max-width:110px;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:6px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
+          <div class="price-tag" id="frontlabel-price">—</div>
+        </div>
       </div>
       <div class="component-row" id="row-backlabel">
         <input type="checkbox" class="toggle-check" checked onchange="toggleComponent(this, 'backlabel')">
-        <div><div class="component-label">Back Label</div><div class="component-sub" id="backlabel-sub">Auto-priced from run tier</div></div>
-        <div class="component-controls" id="backlabel-controls"><div class="price-tag" id="backlabel-price">—</div></div>
+        <div><div class="component-label">Back Label</div><div class="component-sub" id="backlabel-sub">Auto-filled from run tier — editable</div></div>
+        <div class="component-controls" id="backlabel-controls" style="display:flex;align-items:center;gap:10px;">
+          <input type="number" id="backlabelPrice" placeholder="Auto" step="0.001" min="0" oninput="updateSummary()" style="max-width:110px;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:6px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
+          <div class="price-tag" id="backlabel-price">—</div>
+        </div>
       </div>
       <div class="component-row" id="row-necklabel">
         <input type="checkbox" class="toggle-check" onchange="toggleComponent(this, 'necklabel')">
@@ -8432,6 +8485,18 @@ window.loadBoms = async function initBoms() {
         <div class="profit-box"><div class="pb-label">Total Invoice Value</div><div class="pb-val" id="pb-invoice">—</div></div>
         <div class="profit-box"><div class="pb-label">Net Profit Total</div><div class="pb-val" id="pb-net-total">—</div></div>
         <div class="profit-box highlight"><div class="pb-label">Net Profit %</div><div class="pb-val" id="pb-net-pct">—</div></div>
+      </div>
+    </div>
+
+    <!-- SELL PRICE -->
+    <div class="card" style="border-top:3px solid var(--gold);margin-top:2px;">
+      <div class="card-title" style="margin-bottom:12px;"><span class="section-num">9</span> Sell Price / Bottle</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0 10px;">
+        <div>
+          <div id="sell-price-label2" style="font-size:12px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px;"></div>
+          <div style="font-size:11px;color:var(--muted);">Set margin % in the Cost Summary →</div>
+        </div>
+        <div id="sell-price-val2" style="font-size:2.6em;font-weight:900;color:var(--gold);font-family:'Lato',sans-serif;letter-spacing:0.01em;">—</div>
       </div>
     </div>
 
