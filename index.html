@@ -5949,6 +5949,192 @@ window.backToToolsGrid = function() {
   showPage('tools', document.getElementById('sbnav-tools'));
 };
 </script>
+
+<!-- ── SAVED QUOTES MODAL ──────────────────────────────────────────────────── -->
+<div id="saved-quotes-overlay" class="modal-overlay" onclick="if(event.target===this)window.closeSavedQuotes()" style="display:none;opacity:0;transition:opacity .2s;">
+  <div class="modal-box" style="max-width:680px;width:96%;" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px;">Pricing Calculator</div>
+        <div class="job-id-preview">Saved Quotes</div>
+      </div>
+      <button class="modal-close" onclick="window.closeSavedQuotes()">✕</button>
+    </div>
+    <div id="saved-quotes-list" style="max-height:460px;overflow-y:auto;padding:4px 0;">
+      <div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  // ── State serialise / deserialise ────────────────────────────────────────
+  var _FIELDS = ['customerName','productName','runQty','bottlesPerHour','lpaPrice','bottleAbv',
+    'bottleVolume','bottleType','corkPrice','roppSize','roppType','roppManualPrice',
+    'heatshrinkPrice','shipperPrice','dividerPrice','frontlabelPrice','backlabelPrice',
+    'necklabelPrice','monocartonPrice','marginPct'];
+  var _CBS = ['liquid','bottle','cork','ropp','heatshrink','shipper','divider',
+    'frontlabel','backlabel','necklabel','monocarton'];
+
+  function _getState() {
+    var s = {};
+    _FIELDS.forEach(function(id){
+      var e = document.getElementById(id);
+      s[id] = e ? e.value : '';
+    });
+    _CBS.forEach(function(id){
+      var row = document.getElementById('row-' + id);
+      var cb  = row && row.querySelector('.toggle-check');
+      s['cb_' + id] = cb ? cb.checked : false;
+    });
+    var botCb = document.querySelector('#bottling-controls') &&
+      document.querySelector('#bottling-controls').closest('.component-row') &&
+      document.querySelector('#bottling-controls').closest('.component-row').querySelector('.toggle-check');
+    s.cb_bottling = botCb ? botCb.checked : true;
+    return s;
+  }
+
+  function _setState(s) {
+    _FIELDS.forEach(function(id){
+      var e = document.getElementById(id);
+      if (e && s[id] !== undefined) e.value = s[id];
+    });
+    // Checkboxes — apply via toggleComponent so CSS + disabled state follows
+    _CBS.forEach(function(id){
+      var row = document.getElementById('row-' + id);
+      var cb  = row && row.querySelector('.toggle-check');
+      var want = s['cb_' + id] === true;
+      if (cb && cb.checked !== want) { cb.checked = want; if(window.toggleComponent) window.toggleComponent(cb, id); }
+    });
+    var botCb = document.querySelector('#bottling-controls') &&
+      document.querySelector('#bottling-controls').closest('.component-row') &&
+      document.querySelector('#bottling-controls').closest('.component-row').querySelector('.toggle-check');
+    if (botCb && botCb.checked !== (s.cb_bottling !== false)) {
+      botCb.checked = s.cb_bottling !== false;
+      if (window.toggleComponent) window.toggleComponent(botCb, 'bottling');
+    }
+    // Re-trigger calculations
+    if (window.updateBottling) window.updateBottling();
+    if (window.onBottleChange) window.onBottleChange();
+  }
+
+  // ── Get current sell price for display ──────────────────────────────────
+  function _getCurrentSellPrice() {
+    var el = document.getElementById('sell-price-val');
+    return el ? el.textContent : '—';
+  }
+
+  // ── Open / close modal ───────────────────────────────────────────────────
+  window.openSavedQuotes = async function() {
+    var ov = document.getElementById('saved-quotes-overlay');
+    if (!ov) return;
+    ov.style.display = 'flex';
+    setTimeout(function(){ ov.style.opacity = '1'; }, 10);
+    document.body.style.overflow = 'hidden';
+    await _renderQuotesList();
+  };
+
+  window.closeSavedQuotes = function() {
+    var ov = document.getElementById('saved-quotes-overlay');
+    if (!ov) return;
+    ov.style.opacity = '0';
+    setTimeout(function(){ ov.style.display = 'none'; }, 200);
+    document.body.style.overflow = '';
+  };
+
+  // ── Save current quote ───────────────────────────────────────────────────
+  window.saveCurrentQuote = async function() {
+    var customer = (document.getElementById('customerName') || {}).value || '';
+    var product  = (document.getElementById('productName')  || {}).value || '';
+    var defName  = [customer, product].filter(Boolean).join(' — ') || 'Untitled Quote';
+    var name = await window.lpPrompt('Name this quote:', defName, { title: 'Save Quote', placeholder: 'e.g. Acme Spirits — Single Malt Reserve' });
+    if (!name || !name.trim()) return;
+    var payload = {
+      name:       name.trim(),
+      customer:   customer,
+      product:    product,
+      sell_price: _getCurrentSellPrice(),
+      data:       _getState(),
+      created_by: (window.CURRENT_USER && window.CURRENT_USER.display_name) || (window.CURRENT_USER && window.CURRENT_USER.email) || 'Unknown',
+    };
+    try {
+      await window.db.insert('pricing_quotes', payload);
+      window.toast('Quote "' + name.trim() + '" saved.', 'success');
+    } catch(e) {
+      console.error('[Quotes] save error:', e);
+      var msg = e.message || '';
+      if (msg.indexOf('relation') !== -1 && msg.indexOf('exist') !== -1) {
+        await window.lpAlert('The pricing_quotes table doesn\'t exist yet in Supabase.\n\nRun this SQL in your Supabase dashboard:\n\nCREATE TABLE pricing_quotes (\n  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,\n  name text NOT NULL,\n  customer text,\n  product text,\n  sell_price text,\n  data jsonb NOT NULL,\n  created_by text,\n  created_at timestamptz DEFAULT now()\n);\n\nThen enable RLS with a policy allowing authenticated users full access.', { title: 'Setup required', variant: 'warn' });
+      } else {
+        window.toast('Error saving quote: ' + msg, 'error');
+      }
+    }
+  };
+
+  // ── List quotes ──────────────────────────────────────────────────────────
+  async function _renderQuotesList() {
+    var container = document.getElementById('saved-quotes-list');
+    if (!container) return;
+    container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">Loading…</div>';
+    try {
+      var rows = await window.db.select('pricing_quotes', '?order=created_at.desc');
+      if (!rows || !rows.length) {
+        container.innerHTML = '<div style="text-align:center;padding:48px 24px;color:var(--muted);font-size:13px;">No saved quotes yet.<br><span style="font-size:11px;opacity:0.7;">Fill in the calculator and click Save Quote.</span></div>';
+        return;
+      }
+      var esc = window.escapeHtml || function(s){ return String(s||''); };
+      container.innerHTML = rows.map(function(r) {
+        var date = r.created_at ? new Date(r.created_at).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
+        var sub  = [r.customer, r.product].filter(Boolean).map(esc).join(' — ') || '—';
+        return '<div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--navy-border);">'
+          + '<div style="flex:1;min-width:0;">'
+          + '<div style="font-weight:700;color:var(--white);font-size:14px;margin-bottom:2px;">' + esc(r.name) + '</div>'
+          + '<div style="font-size:11px;color:var(--muted);margin-bottom:2px;">' + sub + '</div>'
+          + '<div style="font-size:10px;color:var(--muted);opacity:0.7;">' + date + (r.created_by ? ' &nbsp;·&nbsp; ' + esc(r.created_by) : '') + '</div>'
+          + '</div>'
+          + '<div style="font-size:1.5em;font-weight:900;color:var(--gold);font-family:Lato,sans-serif;white-space:nowrap;min-width:70px;text-align:right;">' + esc(r.sell_price||'—') + '</div>'
+          + '<div style="display:flex;flex-direction:column;gap:6px;margin-left:8px;">'
+          + '<button onclick="window.loadQuote(\'' + esc(r.id) + '\')" style="background:var(--gold);border:none;color:var(--navy);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;white-space:nowrap;">Load</button>'
+          + '<button onclick="window.deleteQuote(\'' + esc(r.id) + '\',\'' + esc(r.name).replace(/'/g,'\\\'') + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">Delete</button>'
+          + '</div>'
+          + '</div>';
+      }).join('');
+    } catch(e) {
+      console.error('[Quotes] list error:', e);
+      container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--red);font-size:13px;">Error loading quotes: ' + (e.message||'') + '</div>';
+    }
+  }
+
+  // ── Load a quote into the calculator ────────────────────────────────────
+  window.loadQuote = async function(id) {
+    try {
+      var rows = await window.db.select('pricing_quotes', '?id=eq.' + id);
+      if (!rows || !rows[0] || !rows[0].data) { window.toast('Quote not found.', 'error'); return; }
+      window.closeSavedQuotes();
+      // Navigate to pricing calc if not already open
+      if (window.showToolCalc) window.showToolCalc('pricing');
+      setTimeout(function(){ _setState(rows[0].data); }, 150);
+      window.toast('Quote "' + (rows[0].name||'') + '" loaded.', 'success');
+    } catch(e) {
+      console.error('[Quotes] load error:', e);
+      window.toast('Error loading quote: ' + (e.message||''), 'error');
+    }
+  };
+
+  // ── Delete a quote ───────────────────────────────────────────────────────
+  window.deleteQuote = async function(id, name) {
+    if (!(await window.lpConfirm('Delete quote "' + name + '"? This cannot be undone.', { title: 'Delete quote', confirmLabel: 'Delete', destructive: true }))) return;
+    try {
+      await window.db.delete('pricing_quotes', '?id=eq.' + id);
+      window.toast('Quote deleted.', 'success');
+      await _renderQuotesList();
+    } catch(e) {
+      window.toast('Error deleting quote: ' + (e.message||''), 'error');
+    }
+  };
+})();
+</script>
+
 <script id="jobs-script">
 (function() {
 'use strict';
@@ -7999,8 +8185,16 @@ window.loadBoms = async function initBoms() {
 
   <!-- TOOLS CALCULATOR VIEW (shown when a tile is launched) -->
   <div id="tools-calc-view" style="display:none;">
-    <div class="wrapper" style="padding-bottom:0;padding-top:24px;">
-      <button type="button" onclick="window.backToToolsGrid()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:7px 16px;cursor:pointer;margin-bottom:20px;transition:border-color .15s,color .15s;" onmouseover="this.style.borderColor='var(--gold)';this.style.color='var(--gold)'" onmouseout="this.style.borderColor='var(--navy-border)';this.style.color='var(--muted)'">&#8592; Back to Tools</button>
+    <div class="wrapper" style="padding-bottom:0;padding-top:24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:4px;">
+      <button type="button" onclick="window.backToToolsGrid()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:7px 16px;cursor:pointer;transition:border-color .15s,color .15s;" onmouseover="this.style.borderColor='var(--gold)';this.style.color='var(--gold)'" onmouseout="this.style.borderColor='var(--navy-border)';this.style.color='var(--muted)'">&#8592; Back to Tools</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="button" onclick="window.openSavedQuotes()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:7px 16px;cursor:pointer;transition:border-color .15s,color .15s;" onmouseover="this.style.borderColor='var(--gold)';this.style.color='var(--gold)'" onmouseout="this.style.borderColor='var(--navy-border)';this.style.color='var(--muted)'">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="margin-right:5px;vertical-align:-1px;"><path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v13.5a.5.5 0 0 1-.777.416L8 13.101l-5.223 2.815A.5.5 0 0 1 2 15.5V2zm2-1a1 1 0 0 0-1 1v12.566l4.723-2.482a.5.5 0 0 1 .554 0L13 14.566V2a1 1 0 0 0-1-1H4z"/></svg>Saved Quotes
+        </button>
+        <button type="button" onclick="window.saveCurrentQuote()" style="background:var(--gold);border:1px solid var(--gold);color:var(--navy);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:7px 16px;cursor:pointer;transition:opacity .15s;" onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="margin-right:5px;vertical-align:-1px;"><path d="M2 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H9.5a1 1 0 0 0-1 1v7.293l2.646-2.647a.5.5 0 0 1 .708.708l-3.5 3.5a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L7.5 9.293V2a2 2 0 0 1 2-2H14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h2.5a.5.5 0 0 1 0 1H2z"/></svg>Save Quote
+        </button>
+      </div>
     </div>
   <!-- CARAMEL + PRICING CALCULATOR PANELS -->
   <!-- CARAMEL CALCULATOR PANEL -->
@@ -8784,6 +8978,44 @@ window.loadBoms = async function initBoms() {
 </div>
 </div>
 
+<!-- ── CLIENT DETAIL MODAL ───────────────────────────────────────────────── -->
+<div id="client-detail-overlay" class="modal-overlay" onclick="if(event.target===this)window.closeClientDetail()" style="display:none;opacity:0;transition:opacity .2s;">
+  <div class="modal-box" style="max-width:740px;width:96%;" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px;">Client Profile</div>
+        <div class="job-id-preview" id="cd-id">CLI-???</div>
+      </div>
+      <button class="modal-close" onclick="window.closeClientDetail()">✕</button>
+    </div>
+
+    <!-- Contact strip -->
+    <div id="cd-contact-strip" style="display:flex;flex-wrap:wrap;gap:18px;padding:14px 0 18px;border-bottom:1px solid var(--navy-border);margin-bottom:18px;"></div>
+
+    <!-- Jobs -->
+    <div class="modal-section-title" style="margin-bottom:10px;">Active &amp; Recent Jobs</div>
+    <div style="overflow-x:auto;margin-bottom:20px;">
+      <table class="data-table" style="min-width:500px;">
+        <thead><tr>
+          <th>Job ID</th><th>Product</th><th>Qty</th><th>Stage</th><th>Bottling Date</th>
+        </tr></thead>
+        <tbody id="cd-jobs-tbody"><tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <!-- Containers -->
+    <div class="modal-section-title" style="margin-bottom:10px;">Liquid in Storage</div>
+    <div style="overflow-x:auto;margin-bottom:8px;">
+      <table class="data-table" style="min-width:500px;">
+        <thead><tr>
+          <th>Reference</th><th>Type</th><th>Litres</th><th>LPA</th><th>ABV</th><th>Status</th>
+        </tr></thead>
+        <tbody id="cd-containers-tbody"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <script>
 (function(){
   var CLIENTS = [
@@ -8884,7 +9116,8 @@ window.loadBoms = async function initBoms() {
           + '<td class="mob-hide">' + emailLink + '</td>'
           + '<td class="mob-hide" style="color:var(--muted);font-size:12px;">' + phone + '</td>'
           + '<td class="mob-hide" style="color:var(--muted);font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + notes + '</td>'
-          + '<td style="white-space:nowrap;"><button data-editclient="' + cid + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
+          + '<td style="white-space:nowrap;"><button class="client-view-btn" data-viewclient="' + cid + '" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-right:6px;">View</button>'
+          + '<button data-editclient="' + cid + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
           + '<button class="client-delete-btn mob-hide" data-deleteclient="' + cid + '" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:8px;">Delete</button></td>'
           + '</tr>'
           + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="6">'
@@ -8902,6 +9135,12 @@ window.loadBoms = async function initBoms() {
         btn.addEventListener('click', function(e){
           e.stopPropagation();
           window.openClientModal(this.getAttribute('data-editclient'));
+        });
+      });
+      tbody.querySelectorAll('[data-viewclient]').forEach(function(btn){
+        btn.addEventListener('click', function(e){
+          e.stopPropagation();
+          window.openClientDetail(this.getAttribute('data-viewclient'));
         });
       });
       var cliTbl = tbody.closest('table');
@@ -9097,6 +9336,106 @@ window.loadBoms = async function initBoms() {
 
   // Expose so showPage can trigger a refresh when navigating to the Clients page
   window._reloadClientsFromDB = reloadClientsFromDB;
+
+  // ── Client Detail modal ────────────────────────────────────────────────
+  window.openClientDetail = async function(clientId) {
+    var ov = document.getElementById('client-detail-overlay');
+    if (!ov) return;
+    var esc = window.escapeHtml || function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+
+    // Find client in local array
+    var c = CLIENTS.find(function(x){ return x.id === clientId; }) || {};
+
+    // Header
+    var idEl = document.getElementById('cd-id');
+    if (idEl) idEl.textContent = c.id || clientId;
+
+    // Contact strip
+    var strip = document.getElementById('cd-contact-strip');
+    if (strip) {
+      var stripItems = [
+        { label: 'Company',  val: c.company || c.name || '' },
+        { label: 'Contact',  val: c.contact || '' },
+        { label: 'Email',    val: c.email   || '' },
+        { label: 'Phone',    val: c.phone   || '' },
+        { label: 'Notes',    val: c.notes   || '' },
+      ].filter(function(i){ return i.val; });
+      strip.innerHTML = stripItems.map(function(i){
+        return '<div style="min-width:120px;">'
+          + '<div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">' + i.label + '</div>'
+          + '<div style="font-size:13px;color:var(--white);">' + esc(i.val) + '</div>'
+          + '</div>';
+      }).join('') || '<div style="color:var(--muted);font-size:12px;">No contact details.</div>';
+    }
+
+    // Show modal
+    ov.style.display = 'flex';
+    setTimeout(function(){ ov.style.opacity = '1'; }, 10);
+    document.body.style.overflow = 'hidden';
+
+    // Reset tables to loading state
+    var jobsTbody = document.getElementById('cd-jobs-tbody');
+    var contTbody = document.getElementById('cd-containers-tbody');
+    if (jobsTbody) jobsTbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
+    if (contTbody) contTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
+
+    // Load Jobs
+    try {
+      var jobs = await window.db.select('jobs', '?client_id=eq.' + clientId + '&order=created_at.desc&limit=30');
+      if (jobsTbody) {
+        jobsTbody.innerHTML = jobs && jobs.length ? jobs.map(function(j){
+          var col   = j.stage === 'Complete' ? 'var(--green)' : j.stage === 'In Progress' ? 'var(--gold)' : 'var(--muted)';
+          var jobId = esc(j.job_id || j.id);
+          var name  = esc(j.product_name || '—');
+          var qty   = j.qty_bottles ? Number(j.qty_bottles).toLocaleString() : '—';
+          var stage = esc(j.stage || '—');
+          var date  = j.bottling_date ? new Date(j.bottling_date).toLocaleDateString('en-IE') : '—';
+          return '<tr>'
+            + '<td><span class="job-num">' + jobId + '</span></td>'
+            + '<td style="color:var(--white);font-weight:600;">' + name + '</td>'
+            + '<td>' + qty + '</td>'
+            + '<td><span style="color:' + col + ';">' + stage + '</span></td>'
+            + '<td>' + date + '</td>'
+            + '</tr>';
+        }).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No jobs on file.</td></tr>';
+      }
+    } catch(e) {
+      if (jobsTbody) jobsTbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:16px;">Error loading jobs.</td></tr>';
+    }
+
+    // Load Containers
+    try {
+      var conts = await window.db.select('liquid_containers', '?client_id=eq.' + clientId + '&archived=is.false&order=reference.asc');
+      if (contTbody) {
+        contTbody.innerHTML = conts && conts.length ? conts.map(function(ct){
+          var ref    = esc(ct.reference || ct.ref || ct.id);
+          var type   = esc(ct.type || '—');
+          var litres = ct.current_litres != null ? Number(ct.current_litres).toLocaleString(undefined,{maximumFractionDigits:1}) : '—';
+          var lpa    = ct.current_lpa != null ? Number(ct.current_lpa).toLocaleString(undefined,{maximumFractionDigits:2}) : '—';
+          var abv    = ct.abv != null ? Number(ct.abv).toFixed(1) + '%' : '—';
+          var status = esc(ct.status || '—');
+          return '<tr>'
+            + '<td style="font-weight:600;color:var(--white);">' + ref + '</td>'
+            + '<td>' + type + '</td>'
+            + '<td>' + litres + '</td>'
+            + '<td>' + lpa + '</td>'
+            + '<td>' + abv + '</td>'
+            + '<td>' + status + '</td>'
+            + '</tr>';
+        }).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No liquid in storage.</td></tr>';
+      }
+    } catch(e) {
+      if (contTbody) contTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--red);padding:16px;">Error loading containers.</td></tr>';
+    }
+  };
+
+  window.closeClientDetail = function() {
+    var ov = document.getElementById('client-detail-overlay');
+    if (!ov) return;
+    ov.style.opacity = '0';
+    setTimeout(function(){ ov.style.display = 'none'; }, 200);
+    document.body.style.overflow = '';
+  };
 
   // Initial render — try Supabase first, fall back to hardcoded list
   reloadClientsFromDB();
