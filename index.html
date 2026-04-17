@@ -8892,12 +8892,8 @@ window.loadBoms = async function initBoms() {
     if (!(await window.lpConfirm('Delete ' + label + '? This cannot be undone.', { title: 'Delete client', confirmLabel: 'Delete', destructive: true }))) return;
     try {
       await db.delete('clients', '?id=eq.' + id);
-      // Mutate in place — never reassign the local var or window.CLIENTS ref breaks
-      var idx = CLIENTS.findIndex(function(x){ return x.id === id; });
-      if (idx > -1) CLIENTS.splice(idx, 1);
-      _syncClientsGlobal();
       toast(label + ' deleted.');
-      renderClients();
+      await reloadClientsFromDB();
     } catch(e) {
       toast('Error deleting client: ' + e.message, 'error');
     }
@@ -8932,10 +8928,7 @@ window.loadBoms = async function initBoms() {
     var saved = false;
     try {
       if(editId){
-        var idx = CLIENTS.findIndex(function(c){ return c.id===editId; });
-        if(idx>=0) Object.assign(CLIENTS[idx], localPayload);
         await db.update('clients', '?id=eq.' + editId, dbPayload);
-        _syncClientsGlobal();
         toast('Client updated.');
       } else {
         // Always derive new ID from DB to avoid stale-local-array collisions
@@ -8943,13 +8936,12 @@ window.loadBoms = async function initBoms() {
         localPayload.id = newId;
         dbPayload.id = newId;
         await db.insert('clients', dbPayload);
-        CLIENTS.push(localPayload);
-        _syncClientsGlobal();
         toast('Client ' + newId + ' added.');
       }
       saved = true;
       closeClientModal();
-      renderClients();
+      // Re-fetch from DB to guarantee the list reflects the actual saved state
+      await reloadClientsFromDB();
     } catch(e) {
       toast('Error saving client: ' + e.message, 'error');
     } finally {
@@ -8977,8 +8969,8 @@ window.loadBoms = async function initBoms() {
   // Expose CLIENTS globally so the jobs modal client dropdown can read it
   window.CLIENTS = CLIENTS;
 
-  // Initial render — try Supabase first, fall back to hardcoded list
-  (async function() {
+  // Named reload — used at startup AND after any save/delete to guarantee DB-consistent display
+  async function reloadClientsFromDB() {
     try {
       var rows = await db.select('clients', '?order=name.asc');
       if (rows && rows.length > 0) {
@@ -8999,7 +8991,13 @@ window.loadBoms = async function initBoms() {
       console.warn('Supabase clients load failed, using local data:', e.message);
     }
     renderClients();
-  })();
+  }
+
+  // Expose so showPage can trigger a refresh when navigating to the Clients page
+  window._reloadClientsFromDB = reloadClientsFromDB;
+
+  // Initial render — try Supabase first, fall back to hardcoded list
+  reloadClientsFromDB();
 })();
 </script>
 
@@ -9832,6 +9830,7 @@ window.loadBoms = async function initBoms() {
       var reconBtn = document.querySelector('#reports-tabs .inv-tab');
       if (window.showReportsTab && reconBtn) window.showReportsTab('lpa-recon', reconBtn);
     }
+    if (name === 'clients' && window._reloadClientsFromDB) setTimeout(window._reloadClientsFromDB, 50);
     var drawer = document.getElementById('mob-more-drawer');
     if (drawer) drawer.style.display = 'none';
     var dov = document.getElementById('mob-drawer-overlay');
