@@ -8768,13 +8768,16 @@ window.loadBoms = async function initBoms() {
   // Returns next ID verified against the DB — always accurate regardless of load timing
   async function nextClientIdFromDB() {
     try {
-      var rows = await db.select('clients', '?select=id&order=id.desc&limit=1');
-      var dbMax = rows && rows[0] ? parseInt((rows[0].id||'').replace('CLI-',''),10)||0 : 0;
-      var localMax = Math.max.apply(null, CLIENTS.map(function(c){ return parseInt((c.id||'').replace('CLI-',''),10)||0; }).concat([0]));
+      // Fetch ALL ids so we can find the true numeric max regardless of text-sort order
+      var rows = await window.db.select('clients', '?select=id');
+      var nums = (rows || []).map(function(r){ return parseInt((r.id||'').replace(/^CLI-/,''),10)||0; }).filter(function(n){ return n>0; });
+      var dbMax = nums.length ? Math.max.apply(null, nums) : 0;
+      var localMax = Math.max.apply(null, CLIENTS.map(function(c){ return parseInt((c.id||'').replace(/^CLI-/,''),10)||0; }).concat([0]));
       var next = Math.max(dbMax, localMax) + 1;
       return 'CLI-' + ('000' + next).slice(-3);
     } catch(e) {
-      return nextClientId(); // fallback to local computation
+      console.warn('[Clients] nextClientIdFromDB fallback:', e.message);
+      return nextClientId();
     }
   }
 
@@ -8792,61 +8795,62 @@ window.loadBoms = async function initBoms() {
   }
 
   function renderClients(){
-    var search = el('client-search') ? el('client-search').value.toLowerCase() : '';
-    var list = CLIENTS.filter(function(c){
-      if(!search) return true;
-      return [c.company,c.contact,c.email,c.phone,c.notes].join(' ').toLowerCase().indexOf(search) >= 0;
-    });
-    var lbl = el('client-count-label');
-    if(lbl) lbl.textContent = list.length + ' client' + (list.length!==1?'s':'') + ' shown';
-    var tbody = el('clients-tbody');
-    if(!tbody) return;
-    if(!list.length){
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">No clients match your search.</td></tr>';
-      return;
-    }
-    var esc = window.escapeHtml;
-    tbody.innerHTML = list.map(function(c){
-      var company   = esc(c.company  || '—');
-      var contact   = esc(c.contact  || '—');
-      var phone     = esc(c.phone    || '—');
-      var notes     = esc(c.notes    || '—');
-      var emailEsc  = esc(c.email    || '');
-      var emailLink = c.email
-        ? '<a href="mailto:' + emailEsc + '" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">' + emailEsc + '</a>'
-        : '—';
-      var cid = esc(c.id);
-      return '<tr class="mob-data-row">'
-        + '<td style="color:var(--white);font-weight:700;">' + company + '</td>'
-        + '<td class="mob-hide">' + contact + '</td>'
-        + '<td class="mob-hide">' + emailLink + '</td>'
-        + '<td class="mob-hide" style="color:var(--muted);font-size:12px;">' + phone + '</td>'
-        + '<td class="mob-hide" style="color:var(--muted);font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + notes + '</td>'
-        + '<td style="white-space:nowrap;"><button data-editclient="' + cid + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
-        + '<button class="client-delete-btn mob-hide" data-deleteclient="' + cid + '" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:8px;">Delete</button></td>'
-        + '</tr>'
-        + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="6">'
-        + '<div class="mob-detail-inner">'
-        + (c.contact ? '<div class="mob-d-item"><span class="mob-d-label">Contact</span><span class="mob-d-value">' + contact + '</span></div>' : '')
-        + '<div class="mob-d-item"><span class="mob-d-label">Email</span><span class="mob-d-value">' + emailLink + '</span></div>'
-        + (c.phone ? '<div class="mob-d-item"><span class="mob-d-label">Phone</span><span class="mob-d-value">' + phone + '</span></div>' : '')
-        + (c.notes ? '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Notes</span><span class="mob-d-value">' + notes + '</span></div>' : '')
-        + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
-        + '<button data-editclient="' + cid + '" class="mob-detail-edit-btn" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;">Edit Client</button>'
-        + '</div>'
-        + '</div></td></tr>';
-    }).join('');
-    tbody.querySelectorAll('[data-editclient]').forEach(function(btn){
-      btn.addEventListener('click', function(e){
-        e.stopPropagation();
-        window.openClientModal(this.getAttribute('data-editclient'));
+    try {
+      var esc = window.escapeHtml || function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+      var search = el('client-search') ? el('client-search').value.toLowerCase() : '';
+      var list = CLIENTS.filter(function(c){
+        if(!search) return true;
+        return [c.company,c.contact,c.email,c.phone,c.notes].join(' ').toLowerCase().indexOf(search) >= 0;
       });
-    });
-    // Wire tap-to-expand on mobile
-    var cliTbl = tbody.closest('table');
-    if (cliTbl && window.mobExpandInit) window.mobExpandInit(cliTbl);
-
-
+      var lbl = el('client-count-label');
+      if(lbl) lbl.textContent = list.length + ' client' + (list.length!==1?'s':'') + ' shown';
+      var tbody = el('clients-tbody');
+      if(!tbody) return;
+      if(!list.length){
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">No clients match your search.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = list.map(function(c){
+        var company   = esc(c.company  || '—');
+        var contact   = esc(c.contact  || '—');
+        var phone     = esc(c.phone    || '—');
+        var notes     = esc(c.notes    || '—');
+        var emailEsc  = esc(c.email    || '');
+        var emailLink = c.email
+          ? '<a href="mailto:' + emailEsc + '" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">' + emailEsc + '</a>'
+          : '—';
+        var cid = esc(c.id);
+        return '<tr class="mob-data-row">'
+          + '<td style="color:var(--white);font-weight:700;">' + company + '</td>'
+          + '<td class="mob-hide">' + contact + '</td>'
+          + '<td class="mob-hide">' + emailLink + '</td>'
+          + '<td class="mob-hide" style="color:var(--muted);font-size:12px;">' + phone + '</td>'
+          + '<td class="mob-hide" style="color:var(--muted);font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + notes + '</td>'
+          + '<td style="white-space:nowrap;"><button data-editclient="' + cid + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Edit</button>'
+          + '<button class="client-delete-btn mob-hide" data-deleteclient="' + cid + '" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:8px;">Delete</button></td>'
+          + '</tr>'
+          + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="6">'
+          + '<div class="mob-detail-inner">'
+          + (c.contact ? '<div class="mob-d-item"><span class="mob-d-label">Contact</span><span class="mob-d-value">' + contact + '</span></div>' : '')
+          + '<div class="mob-d-item"><span class="mob-d-label">Email</span><span class="mob-d-value">' + emailLink + '</span></div>'
+          + (c.phone ? '<div class="mob-d-item"><span class="mob-d-label">Phone</span><span class="mob-d-value">' + phone + '</span></div>' : '')
+          + (c.notes ? '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Notes</span><span class="mob-d-value">' + notes + '</span></div>' : '')
+          + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">'
+          + '<button data-editclient="' + cid + '" class="mob-detail-edit-btn" style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-weight:700;">Edit Client</button>'
+          + '</div>'
+          + '</div></td></tr>';
+      }).join('');
+      tbody.querySelectorAll('[data-editclient]').forEach(function(btn){
+        btn.addEventListener('click', function(e){
+          e.stopPropagation();
+          window.openClientModal(this.getAttribute('data-editclient'));
+        });
+      });
+      var cliTbl = tbody.closest('table');
+      if (cliTbl && window.mobExpandInit) window.mobExpandInit(cliTbl);
+    } catch(renderErr) {
+      console.error('[Clients] renderClients error:', renderErr);
+    }
   }
 
   window.openClientModal = function(editId){
@@ -8890,20 +8894,34 @@ window.loadBoms = async function initBoms() {
     var label = c ? (c.id + ' — ' + c.company) : id;
     if (id === 'CLI-000') { await window.lpAlert('Lighthouse Drinks cannot be deleted.', { variant: 'warn' }); return; }
     if (!(await window.lpConfirm('Delete ' + label + '? This cannot be undone.', { title: 'Delete client', confirmLabel: 'Delete', destructive: true }))) return;
+    var deleted = false;
     try {
-      await db.delete('clients', '?id=eq.' + id);
-      toast(label + ' deleted.');
-      await reloadClientsFromDB();
+      await window.db.delete('clients', '?id=eq.' + id);
+      deleted = true;
+      window.toast(label + ' deleted.', 'success');
     } catch(e) {
-      toast('Error deleting client: ' + e.message, 'error');
+      console.error('[Clients] deleteClient error:', e);
+      var detail = e.message || String(e);
+      var friendly = detail;
+      if (detail.indexOf('42501') !== -1) friendly = 'Permission denied by the database (RLS policy).';
+      else if (detail.indexOf('23503') !== -1) friendly = 'Cannot delete — this client is referenced by other records.';
+      window.toast('Error deleting client: ' + friendly, 'error');
+    }
+    if (deleted) {
+      try { await reloadClientsFromDB(); } catch(e) { console.error('[Clients] post-delete refresh error:', e); }
     }
   };
 
   window.saveClient = async function(){
     var _cuRole = window.CURRENT_USER && window.CURRENT_USER.role;
-    var _canEditClients = ['managing_director','operations_director','business_analyst','commercial_manager'].indexOf(_cuRole) > -1
-      || (window.canDo && (window.canDo('clients_edit') || window.canDo('commercial_manager')));
-    if (!_canEditClients) { window.toast && window.toast('You do not have permission to edit clients.', 'error'); return; }
+    var _superRoles = ['managing_director','operations_director','business_analyst','commercial_manager'];
+    var _canEditClients = _superRoles.indexOf(_cuRole) > -1
+      || (window.canDo && window.canDo('clients_edit'));
+    if (!_canEditClients) {
+      window.toast && window.toast('You do not have permission to edit clients.', 'error');
+      return;
+    }
+
     var compEl = el('cf-company');
     if(!compEl) return;
     var company = compEl.value.trim();
@@ -8911,14 +8929,14 @@ window.loadBoms = async function initBoms() {
     function gv(id){ var e=el(id); return e?e.value.trim():''; }
     var editId = gv('cf-edit-id');
 
-    // Duplicate name check
+    // Duplicate name check (case-insensitive, skip self on edit)
     var nameLower = company.toLowerCase();
     var duplicate = CLIENTS.find(function(c){ return c.company.toLowerCase() === nameLower && c.id !== editId; });
     if (duplicate) {
-      await window.lpAlert('A client named "' + duplicate.company + '" (' + duplicate.id + ') already exists.', { variant: 'warn' }); return;
+      await window.lpAlert('A client named "' + duplicate.company + '" (' + duplicate.id + ') already exists.', { variant: 'warn' });
+      return;
     }
 
-    var localPayload = { company:company, contact:gv('cf-contact'), email:gv('cf-email'), phone:gv('cf-phone'), notes:gv('cf-notes') };
     var dbPayload = { name:company, contact_name:gv('cf-contact')||null, email:gv('cf-email')||null, phone:gv('cf-phone')||null, notes:gv('cf-notes')||null };
 
     var saveBtn = el('client-modal-save-btn');
@@ -8928,27 +8946,52 @@ window.loadBoms = async function initBoms() {
     var saved = false;
     try {
       if(editId){
-        await db.update('clients', '?id=eq.' + editId, dbPayload);
-        toast('Client updated.');
+        await window.db.update('clients', '?id=eq.' + editId, dbPayload);
+        saved = true;
+        closeClientModal();
+        window.toast('Client updated.', 'success');
       } else {
-        // Always derive new ID from DB to avoid stale-local-array collisions
+        // Generate ID from DB; retry once if there is a collision (ghost from a previous failed save)
         var newId = await nextClientIdFromDB();
-        localPayload.id = newId;
         dbPayload.id = newId;
-        await db.insert('clients', dbPayload);
-        toast('Client ' + newId + ' added.');
+        try {
+          await window.db.insert('clients', dbPayload);
+        } catch(insertErr) {
+          var errMsg = insertErr.message || '';
+          // Duplicate key — bump the ID by 1 and try again
+          if (errMsg.indexOf('23505') !== -1 || errMsg.indexOf('duplicate') !== -1 || errMsg.indexOf('unique') !== -1) {
+            console.warn('[Clients] ID collision on', newId, '— retrying with next ID');
+            var num = parseInt(newId.replace('CLI-',''), 10) || 0;
+            newId = 'CLI-' + ('000' + (num + 1)).slice(-3);
+            dbPayload.id = newId;
+            await window.db.insert('clients', dbPayload);
+          } else {
+            throw insertErr;
+          }
+        }
+        saved = true;
+        closeClientModal();
+        window.toast('Client ' + newId + ' added.', 'success');
       }
-      saved = true;
-      closeClientModal();
-      // Re-fetch from DB to guarantee the list reflects the actual saved state
-      await reloadClientsFromDB();
     } catch(e) {
-      toast('Error saving client: ' + e.message, 'error');
+      console.error('[Clients] saveClient error:', e);
+      // Give a meaningful message based on the error code
+      var detail = e.message || String(e);
+      var friendly = detail;
+      if (detail.indexOf('42501') !== -1) friendly = 'Permission denied by the database. Check Supabase RLS policy for the clients table.';
+      else if (detail.indexOf('23505') !== -1) friendly = 'A client with that ID already exists. Please try again.';
+      else if (detail.indexOf('22P02') !== -1) friendly = 'ID format rejected by the database. Contact the administrator.';
+      else if (detail.indexOf('timeout') !== -1 || detail.indexOf('timed out') !== -1) friendly = 'Request timed out. Check your connection.';
+      window.toast('Error saving client: ' + friendly, 'error');
     } finally {
       if(saveBtn && !saved){
         saveBtn.disabled = false;
         saveBtn.innerHTML = svgIcon + (editId ? 'Save Changes' : 'Save Client');
       }
+    }
+    // Refresh list after modal is closed — isolated so any display error never masks save success
+    if (saved) {
+      try { await reloadClientsFromDB(); } catch(e) { console.error('[Clients] post-save refresh error:', e); }
     }
   };
 
@@ -8972,7 +9015,7 @@ window.loadBoms = async function initBoms() {
   // Named reload — used at startup AND after any save/delete to guarantee DB-consistent display
   async function reloadClientsFromDB() {
     try {
-      var rows = await db.select('clients', '?order=name.asc');
+      var rows = await window.db.select('clients', '?order=name.asc');
       if (rows && rows.length > 0) {
         CLIENTS.length = 0;
         rows.forEach(function(r) {
@@ -8988,9 +9031,10 @@ window.loadBoms = async function initBoms() {
         _syncClientsGlobal();
       }
     } catch(e) {
-      console.warn('Supabase clients load failed, using local data:', e.message);
+      console.warn('[Clients] DB load failed, using cached data:', e.message);
     }
-    renderClients();
+    // Render is isolated — a display bug must never surface as a "save failed" error
+    try { renderClients(); } catch(e) { console.error('[Clients] renderClients error:', e); }
   }
 
   // Expose so showPage can trigger a refresh when navigating to the Clients page
