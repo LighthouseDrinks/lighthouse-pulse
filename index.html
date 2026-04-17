@@ -8765,6 +8765,32 @@ window.loadBoms = async function initBoms() {
     return 'CLI-' + ('000'+(max+1)).slice(-3);
   }
 
+  // Returns next ID verified against the DB — always accurate regardless of load timing
+  async function nextClientIdFromDB() {
+    try {
+      var rows = await db.select('clients', '?select=id&order=id.desc&limit=1');
+      var dbMax = rows && rows[0] ? parseInt((rows[0].id||'').replace('CLI-',''),10)||0 : 0;
+      var localMax = Math.max.apply(null, CLIENTS.map(function(c){ return parseInt((c.id||'').replace('CLI-',''),10)||0; }).concat([0]));
+      var next = Math.max(dbMax, localMax) + 1;
+      return 'CLI-' + ('000' + next).slice(-3);
+    } catch(e) {
+      return nextClientId(); // fallback to local computation
+    }
+  }
+
+  function _syncClientsGlobal() {
+    window.CLIENTS = CLIENTS;
+    if (window.APP) {
+      window.APP.clients = CLIENTS.map(function(c){ return { id: c.id, name: c.company }; });
+      window.APP.loaded.clients = true;
+    }
+    // Also sync into _clients if the inventory module uses it
+    if (window._clients) {
+      window._clients.length = 0;
+      CLIENTS.forEach(function(c){ window._clients.push({ id: c.id, name: c.company }); });
+    }
+  }
+
   function renderClients(){
     var search = el('client-search') ? el('client-search').value.toLowerCase() : '';
     var list = CLIENTS.filter(function(c){
@@ -8856,13 +8882,20 @@ window.loadBoms = async function initBoms() {
   };
 
   window.deleteClient = async function(id) {
+    var _cuRole2 = window.CURRENT_USER && window.CURRENT_USER.role;
+    var _canDelClient = ['managing_director','operations_director','business_analyst','commercial_manager'].indexOf(_cuRole2) > -1
+      || (window.canDo && window.canDo('clients_edit'));
+    if (!_canDelClient) { window.toast && window.toast('You do not have permission to delete clients.', 'error'); return; }
     var c = CLIENTS.find(function(x){ return x.id === id; });
     var label = c ? (c.id + ' — ' + c.company) : id;
     if (id === 'CLI-000') { await window.lpAlert('Lighthouse Drinks cannot be deleted.', { variant: 'warn' }); return; }
     if (!(await window.lpConfirm('Delete ' + label + '? This cannot be undone.', { title: 'Delete client', confirmLabel: 'Delete', destructive: true }))) return;
     try {
       await db.delete('clients', '?id=eq.' + id);
-      CLIENTS = CLIENTS.filter(function(x){ return x.id !== id; });
+      // Mutate in place — never reassign the local var or window.CLIENTS ref breaks
+      var idx = CLIENTS.findIndex(function(x){ return x.id === id; });
+      if (idx > -1) CLIENTS.splice(idx, 1);
+      _syncClientsGlobal();
       toast(label + ' deleted.');
       renderClients();
     } catch(e) {
@@ -8871,38 +8904,59 @@ window.loadBoms = async function initBoms() {
   };
 
   window.saveClient = async function(){
+    var _cuRole = window.CURRENT_USER && window.CURRENT_USER.role;
+    var _canEditClients = ['managing_director','operations_director','business_analyst','commercial_manager'].indexOf(_cuRole) > -1
+      || (window.canDo && (window.canDo('clients_edit') || window.canDo('commercial_manager')));
+    if (!_canEditClients) { window.toast && window.toast('You do not have permission to edit clients.', 'error'); return; }
     var compEl = el('cf-company');
     if(!compEl) return;
     var company = compEl.value.trim();
     if(!company){ await window.lpAlert('Please enter a Company Name.', { variant: 'warn' }); return; }
     function gv(id){ var e=el(id); return e?e.value.trim():''; }
     var editId = gv('cf-edit-id');
+
+    // Duplicate name check
+    var nameLower = company.toLowerCase();
+    var duplicate = CLIENTS.find(function(c){ return c.company.toLowerCase() === nameLower && c.id !== editId; });
+    if (duplicate) {
+      await window.lpAlert('A client named "' + duplicate.company + '" (' + duplicate.id + ') already exists.', { variant: 'warn' }); return;
+    }
+
     var localPayload = { company:company, contact:gv('cf-contact'), email:gv('cf-email'), phone:gv('cf-phone'), notes:gv('cf-notes') };
     var dbPayload = { name:company, contact_name:gv('cf-contact')||null, email:gv('cf-email')||null, phone:gv('cf-phone')||null, notes:gv('cf-notes')||null };
 
     var saveBtn = el('client-modal-save-btn');
-    if(saveBtn){ saveBtn.disabled=true; saveBtn.textContent='Saving…'; }
+    var svgIcon = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg> ';
+    if(saveBtn){ saveBtn.disabled=true; saveBtn.innerHTML = svgIcon + 'Saving…'; }
 
+    var saved = false;
     try {
       if(editId){
         var idx = CLIENTS.findIndex(function(c){ return c.id===editId; });
         if(idx>=0) Object.assign(CLIENTS[idx], localPayload);
         await db.update('clients', '?id=eq.' + editId, dbPayload);
+        _syncClientsGlobal();
         toast('Client updated.');
       } else {
-        var newId = nextClientId();
+        // Always derive new ID from DB to avoid stale-local-array collisions
+        var newId = await nextClientIdFromDB();
         localPayload.id = newId;
-        CLIENTS.push(localPayload);
         dbPayload.id = newId;
         await db.insert('clients', dbPayload);
+        CLIENTS.push(localPayload);
+        _syncClientsGlobal();
         toast('Client ' + newId + ' added.');
       }
+      saved = true;
       closeClientModal();
       renderClients();
     } catch(e) {
       toast('Error saving client: ' + e.message, 'error');
     } finally {
-      if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent=editId?'Save Changes':'Save Client'; }
+      if(saveBtn && !saved){
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = svgIcon + (editId ? 'Save Changes' : 'Save Client');
+      }
     }
   };
 
@@ -8923,15 +8977,13 @@ window.loadBoms = async function initBoms() {
   // Expose CLIENTS globally so the jobs modal client dropdown can read it
   window.CLIENTS = CLIENTS;
 
-  // Initial render — try Supabase first, fall back to local
+  // Initial render — try Supabase first, fall back to hardcoded list
   (async function() {
     try {
       var rows = await db.select('clients', '?order=name.asc');
-      // Only replace the local list if Supabase returned real data —
-      // if it returns zero rows or fails, keep the hardcoded fallback intact.
       if (rows && rows.length > 0) {
         CLIENTS.length = 0;
-        rows.forEach(function(r, i) {
+        rows.forEach(function(r) {
           CLIENTS.push({
             id:      r.id,
             company: r.name,
@@ -8940,14 +8992,8 @@ window.loadBoms = async function initBoms() {
             phone:   r.phone || '',
             notes:   r.notes || ''
           });
-          if (!CLIENTS[i].displayId) CLIENTS[i].displayId = r.id;
         });
-        window.CLIENTS = CLIENTS;
-        // Sync into APP cache so inventory module can use them without re-fetching
-        if (window.APP) {
-          APP.clients = rows.map(function(r){ return { id: r.id, name: r.name }; });
-          APP.loaded.clients = true;
-        }
+        _syncClientsGlobal();
       }
     } catch(e) {
       console.warn('Supabase clients load failed, using local data:', e.message);
