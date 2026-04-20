@@ -17392,7 +17392,10 @@ window.saveAdjModal = async function() {
         supaGet('jobs?order=created_at.desc&select=*,clients(name)'),
         supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null'),
         supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
-        supaGet('job_quality_checks?select=job_id'),
+        // QA dot must only light up once the Quality task is signed off — which
+        // itself requires (a) a production check recorded and (b) client label
+        // approval (gated by autoCompleteTask / checkTaskDocDone → _qualityLabelGate).
+        supaGet('job_tasks?select=job_id&task_type=eq.quality&status=eq.completed'),
         supaGet('job_tasks?select=job_id&task_type=eq.bom_link&status=eq.completed')
       ]);
       var rows    = results[0];
@@ -17494,7 +17497,7 @@ window.saveAdjModal = async function() {
         + soTick(_bomDone[j.id], 'BOM',          'Bill of Materials Sign-Off')
         + soTick(_scDone[j.id], 'Supply Chain', 'Supply Chain Sign-Off')
         + soTick(_lsDone[j.id], 'Liquid',        'Liquid Sign-Off')
-        + soTick(_qaDone[j.id], 'Prod Checks',   'Production Checks (on-line + off-line rounds)')
+        + soTick(_qaDone[j.id], 'Quality',       'Quality Sign-Off (production checks + client label approval)')
         + '</div>';
 
       var row = '<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openJobDetail(\'' + jid + '\')">';
@@ -17515,7 +17518,7 @@ window.saveAdjModal = async function() {
         + soTick(_bomDone[j.id], 'BOM',          'Bill of Materials Sign-Off')
         + soTick(_scDone[j.id], 'Supply Chain', 'Supply Chain Sign-Off')
         + soTick(_lsDone[j.id], 'Liquid',        'Liquid Sign-Off')
-        + soTick(_qaDone[j.id], 'Prod Checks',   'Production Checks (on-line + off-line rounds)')
+        + soTick(_qaDone[j.id], 'Quality',       'Quality Sign-Off (production checks + client label approval)')
         + '</span></div>';
       row += '</div></td></tr>';
       return row;
@@ -18590,6 +18593,8 @@ window.saveAdjModal = async function() {
       window.toast && window.toast('Task completed. ✓', 'success');
       if (_currentJobId) refreshJobTasks(_currentJobId);
       loadMyTasks();
+      // Refresh dashboard/jobs-table dot maps (BOM / Quality completion drives dots).
+      if (typeof loadJobs === 'function') loadJobs();
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
 
@@ -18608,6 +18613,12 @@ window.saveAdjModal = async function() {
           completed_by: window.CURRENT_USER ? window.CURRENT_USER.email : 'auto',
           completed_at: new Date().toISOString()
         });
+        // Sync the dashboard dot maps in-memory so the overview/jobs table flip
+        // to green immediately, without waiting for a full loadJobs() roundtrip.
+        if (taskType === 'quality')    _qaDone[jobId]  = true;
+        if (taskType === 'bom_link')   _bomDone[jobId] = true;
+        if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
+        if (typeof renderJobsTable === 'function') renderJobsTable();
         loadMyTasks();
         if (_currentJobId === jobId) refreshJobTasks(jobId);
       }
@@ -22039,18 +22050,8 @@ window.saveAdjModal = async function() {
         wmBatches.forEach(function(b){ html += renderWMBatch(b, jobId); });
       }
 
-      // ── SIGN-OFF ──────────────────────────────────────────────────────────────
-      var lastCheck = checks[checks.length-1] || {};
-      html += '<div style="margin-top:28px;display:flex;align-items:center;gap:0;margin-bottom:14px;">'
-        + '<span style="font-size:10px;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);white-space:nowrap;padding-right:14px;">Production Sign-Off</span>'
-        + '<div style="flex:1;height:1px;background:linear-gradient(to right,rgba(201,168,76,0.5),transparent);"></div>'
-        + '</div>'
-        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">'
-        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Name</label>'
-        + '<input type="text" id="qc-signed-by" value="' + (lastCheck.checked_by||'') + '" placeholder="Name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"></div>'
-        + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Date</label>'
-        + '<input type="date" id="qc-date" value="' + (lastCheck.checked_at ? lastCheck.checked_at.slice(0,10) : '') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;width:100%;box-sizing:border-box;border-radius:3px;"></div>'
-        + '</div>';
+      // Production Sign-Off is automatic now: driven by (a) client label approval
+      // and (b) Quality completing the Quality task. No manual name/date box.
 
       el.innerHTML = html;
       // Hydrate the Label Verification block (async)
