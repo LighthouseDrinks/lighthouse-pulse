@@ -21888,6 +21888,10 @@ window.saveAdjModal = async function() {
       +     rows + satRow
       +   '</table>'
       +   '<div style="margin-top:14px;">'
+      +     '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Overall Comments</label>'
+      +     '<textarea id="qcm-overall-comment" rows="3" placeholder="Any overall notes, observations or issues for this round…" style="' + inpStyle + 'resize:vertical;min-height:70px;line-height:1.5;"></textarea>'
+      +   '</div>'
+      +   '<div style="margin-top:14px;">'
       +     '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Checked By</label>'
       +     '<input type="text" id="qcm-checked-by" value="' + checkedBy + '" placeholder="Your name" style="' + inpStyle + '">'
       +   '</div>'
@@ -21928,7 +21932,8 @@ window.saveAdjModal = async function() {
         job_id: jobId, check_round: round, check_type: type,
         checked_at: new Date().toISOString(),
         satisfactory: !!(document.getElementById('qcm-satisfactory') && document.getElementById('qcm-satisfactory').checked),
-        checked_by: gv('checked-by')
+        checked_by: gv('checked-by'),
+        overall_comment: gv('overall-comment') || null
       };
       if (type === 'online') {
         var commentFields = { front_label: true, back_label: true };
@@ -22133,17 +22138,17 @@ window.saveAdjModal = async function() {
       +     _wmSCell('wm-sstd',     'Std Dev (sample)')
       +     _wmSCell('wm-smin',     'Min Observed Fill')
       +     _wmSCell('wm-smax',     'Max Observed Fill')
-      +     _wmSCell('wm-st1count', 'Below T1 limit')
-      +     _wmSCell('wm-st2count', 'Below T2 limit')
+      +     _wmSCell('wm-st1count', 'Outside T1 range')
+      +     _wmSCell('wm-st2count', 'Outside T2 range')
       +   '</div>'
       // Row 2: compliance verdict
       +   '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;border:1px solid var(--navy-border);border-top:none;border-radius:0 0 5px 5px;overflow:hidden;">'
       +     '<div style="padding:10px 16px;border-right:1px solid var(--navy-border);">'
-      +       '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Mean ≥ Nominal</div>'
+      +       '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Mean within ±T1</div>'
       +       '<div id="wm-smean-check" style="font-size:13px;font-weight:700;">—</div>'
       +     '</div>'
       +     '<div style="padding:10px 16px;border-right:1px solid var(--navy-border);">'
-      +       '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">No bottles below T2</div>'
+      +       '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">All bottles within ±T2</div>'
       +       '<div id="wm-st2-check" style="font-size:13px;font-weight:700;">—</div>'
       +     '</div>'
       +     '<div style="padding:10px 16px;">'
@@ -22186,32 +22191,46 @@ window.saveAdjModal = async function() {
       + '</div>';
   }
 
-  // ── Core EU average-fill compliance engine ──────────────────────────────────
+  // ── Core symmetric fill compliance engine ───────────────────────────────────
+  // Legal baseline (EU Directive 76/211/EEC "e-mark"): underfill fails.
+  //   Mean must be ≥ nominal, and no bottle may be below nominal − T2.
+  // Added production guards (commercial + data-sanity): overfill fails too.
+  //   Mean must also be ≤ nominal + T1 (symmetric window), and no bottle
+  //   may be above nominal + T2 — prevents give-away and catches impossible
+  //   fills (e.g. 700 mL bottle averaging 888 mL from a bad SG / weight).
   // Formula path:
   //   row:  liquid_ml = (full_g - empty_g - cap_g) / sg          [÷0 guarded]
   //   agg:  mean      = Σ(liquid_ml) / n
   //   agg:  s         = √( Σ(xi - mean)² / (n-1) )              [sample s.d.]
-  //   T1 lower limit  = nominal - T1_tolerance
-  //   T2 lower limit  = nominal - T2_tolerance
-  //   satisfactory    = (mean ≥ nominal) AND (no bottle < T2 limit)
+  //   satisfactory    = |mean - nominal| ≤ T1   AND   no bottle outside ±T2
   function _wmCompliance(liquids, nominal, t1Tol, t2Tol) {
     var n = liquids.length;
     if (!n) return null;
     var mean      = liquids.reduce(function(a,b){return a+b;},0) / n;
-    // sample standard deviation (n-1 denominator; guard n=1 → 0)
     var variance  = n > 1 ? liquids.reduce(function(a,v){return a+Math.pow(v-mean,2);},0) / (n-1) : 0;
     var stdDev    = Math.sqrt(variance);
-    var t1Limit   = nominal - t1Tol;
-    var t2Limit   = nominal - t2Tol;
-    var belowT1   = liquids.filter(function(v){return v < t1Limit;}).length;
-    var belowT2   = liquids.filter(function(v){return v < t2Limit;}).length;
-    var meanOk    = mean >= nominal;
-    var t2Ok      = belowT2 === 0;
-    var satisfactory = meanOk && t2Ok;
+    var t1Low     = nominal - t1Tol, t1High = nominal + t1Tol;
+    var t2Low     = nominal - t2Tol, t2High = nominal + t2Tol;
+    var belowT1   = liquids.filter(function(v){return v < t1Low; }).length;
+    var aboveT1   = liquids.filter(function(v){return v > t1High;}).length;
+    var belowT2   = liquids.filter(function(v){return v < t2Low; }).length;
+    var aboveT2   = liquids.filter(function(v){return v > t2High;}).length;
+    var meanOk    = mean >= nominal;                 // legal underfill test
+    var meanUnderOk = mean <= t1High;                // overfill / give-away guard
+    var t2LowOk   = belowT2 === 0;
+    var t2HighOk  = aboveT2 === 0;
+    var satisfactory = meanOk && meanUnderOk && t2LowOk && t2HighOk;
     var minFill   = Math.min.apply(null, liquids);
     var maxFill   = Math.max.apply(null, liquids);
-    return { n:n, mean:mean, stdDev:stdDev, t1Limit:t1Limit, t2Limit:t2Limit,
-             belowT1:belowT1, belowT2:belowT2, meanOk:meanOk, t2Ok:t2Ok, satisfactory:satisfactory,
+    return { n:n, mean:mean, stdDev:stdDev,
+             t1Low:t1Low, t1High:t1High, t2Low:t2Low, t2High:t2High,
+             // legacy aliases retained for any external callers
+             t1Limit:t1Low, t2Limit:t2Low,
+             belowT1:belowT1, aboveT1:aboveT1, belowT2:belowT2, aboveT2:aboveT2,
+             outT1:belowT1+aboveT1, outT2:belowT2+aboveT2,
+             meanOk:meanOk, meanUnderOk:meanUnderOk,
+             t2Ok:t2LowOk && t2HighOk, t2LowOk:t2LowOk, t2HighOk:t2HighOk,
+             satisfactory:satisfactory,
              minFill:minFill, maxFill:maxFill };
   }
 
@@ -22235,9 +22254,10 @@ window.saveAdjModal = async function() {
         var t1  = parseFloat((document.getElementById('wm-t1') ||{}).value) || 15;
         var t2  = parseFloat((document.getElementById('wm-t2') ||{}).value) || 30;
         if (nom > 0) {
-          if      (ml < nom - t2) liqEl.style.borderColor = 'var(--red)';
-          else if (ml < nom - t1) liqEl.style.borderColor = 'var(--amber)';
-          else                    liqEl.style.borderColor = 'rgba(201,168,76,0.3)';
+          var dev = Math.abs(ml - nom);
+          if      (dev > t2) liqEl.style.borderColor = 'var(--red)';
+          else if (dev > t1) liqEl.style.borderColor = 'var(--amber)';
+          else               liqEl.style.borderColor = 'rgba(201,168,76,0.3)';
         }
       } else {
         liqEl.value = ''; liqEl.style.borderColor = 'var(--red)';
@@ -22272,19 +22292,39 @@ window.saveAdjModal = async function() {
       var pct = Math.round((k / total) * 100);
       return k + ' / ' + total + ' (' + pct + '%)';
     }
-    _set('wm-smean',    r.mean.toFixed(2) + ' mL',      'var(--white)');
-    _set('wm-sstd',     r.stdDev.toFixed(2),             'var(--white)');
-    _set('wm-smin',     r.minFill.toFixed(2) + ' mL',
-                        r.minFill < (nom - t2) ? 'var(--red)' : r.minFill < (nom - t1) ? 'var(--amber)' : 'var(--green)');
-    _set('wm-smax',     r.maxFill.toFixed(2) + ' mL',   'var(--white)');
-    _set('wm-st1count', _countFmt(r.belowT1),
-                        r.belowT1 > 0 ? 'var(--amber)' : 'var(--green)');
-    _set('wm-st2count', _countFmt(r.belowT2),
-                        r.belowT2 > 0 ? 'var(--red)'   : 'var(--green)');
+    function _extremeCol(v) {
+      if (!(nom > 0)) return 'var(--white)';
+      var dev = Math.abs(v - nom);
+      return dev > t2 ? 'var(--red)' : dev > t1 ? 'var(--amber)' : 'var(--green)';
+    }
+    _set('wm-smean',    r.mean.toFixed(2) + ' mL',    _extremeCol(r.mean));
+    _set('wm-sstd',     r.stdDev.toFixed(2),           'var(--white)');
+    _set('wm-smin',     r.minFill.toFixed(2) + ' mL', _extremeCol(r.minFill));
+    _set('wm-smax',     r.maxFill.toFixed(2) + ' mL', _extremeCol(r.maxFill));
+    _set('wm-st1count', _countFmt(r.outT1) + (r.outT1 ? '  (' + r.belowT1 + '↓ ' + r.aboveT1 + '↑)' : ''),
+                        r.outT1 > 0 ? 'var(--amber)' : 'var(--green)');
+    _set('wm-st2count', _countFmt(r.outT2) + (r.outT2 ? '  (' + r.belowT2 + '↓ ' + r.aboveT2 + '↑)' : ''),
+                        r.outT2 > 0 ? 'var(--red)'   : 'var(--green)');
 
-    _set('wm-smean-check', nom > 0 ? (r.meanOk ? '✓ PASS  (' + r.mean.toFixed(2) + ' ≥ ' + nom + ')' : '✗ FAIL  (' + r.mean.toFixed(2) + ' < ' + nom + ')')  : '—',
-                           nom > 0 ? (r.meanOk ? 'var(--green)' : 'var(--red)') : 'var(--muted)');
-    _set('wm-st2-check',   nom > 0 ? (r.t2Ok ? '✓ PASS  (0 below ' + r.t2Limit.toFixed(1) + ' mL)' : '✗ FAIL  (' + r.belowT2 + ' bottle' + (r.belowT2>1?'s':'') + ' below ' + r.t2Limit.toFixed(1) + ' mL)') : '—',
+    var meanWithinOk = r.meanOk && r.meanUnderOk;
+    var meanTxt;
+    if (!(nom > 0)) meanTxt = '—';
+    else if (meanWithinOk) meanTxt = '✓ PASS  (' + r.mean.toFixed(2) + ' within ' + (nom - t1).toFixed(1) + '–' + (nom + t1).toFixed(1) + ')';
+    else if (!r.meanOk)      meanTxt = '✗ FAIL  (' + r.mean.toFixed(2) + ' < ' + nom + ' — underfill)';
+    else                     meanTxt = '✗ FAIL  (' + r.mean.toFixed(2) + ' > ' + (nom + t1).toFixed(1) + ' — overfill / give-away)';
+    _set('wm-smean-check', meanTxt,
+                           nom > 0 ? (meanWithinOk ? 'var(--green)' : 'var(--red)') : 'var(--muted)');
+
+    var t2Txt;
+    if (!(nom > 0)) t2Txt = '—';
+    else if (r.t2Ok) t2Txt = '✓ PASS  (all bottles ' + r.t2Low.toFixed(1) + '–' + r.t2High.toFixed(1) + ' mL)';
+    else {
+      var parts = [];
+      if (r.belowT2) parts.push(r.belowT2 + ' below ' + r.t2Low.toFixed(1) + ' mL');
+      if (r.aboveT2) parts.push(r.aboveT2 + ' above ' + r.t2High.toFixed(1) + ' mL');
+      t2Txt = '✗ FAIL  (' + parts.join(', ') + ')';
+    }
+    _set('wm-st2-check',   t2Txt,
                            nom > 0 ? (r.t2Ok ? 'var(--green)' : 'var(--red)') : 'var(--muted)');
     _set('wm-sresult',     nom > 0 ? (r.satisfactory ? '✓ SATISFACTORY' : '✗ NOT SATISFACTORY') : '—',
                            nom > 0 ? (r.satisfactory ? 'var(--green)' : 'var(--red)') : 'var(--muted)');
