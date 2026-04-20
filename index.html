@@ -1627,6 +1627,12 @@
   html.resuming-session header       { display: none !important; }
   html.resuming-session #sidebar     { display: none !important; }
   html.resuming-session .page        { display: none !important; }
+  /* Public label-approval page always shows on top when active, regardless of session state */
+  html.label-approval-active #auth-screen,
+  html.label-approval-active header,
+  html.label-approval-active #sidebar,
+  html.label-approval-active .page,
+  html.label-approval-active #client-portal { display: none !important; }
 
   /* ─── AUTH / LOGIN ─────────────────────────────────── */
   #auth-screen {
@@ -1883,6 +1889,16 @@
       <div class="auth-success" id="reg-success">
         Account created! Signing you in…
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ LABEL APPROVAL (public magic-link page) ═════════════════════════════════ -->
+<!-- Shown when URL hash matches #/label/<uuid>. Intercepts boot before auth. -->
+<div id="label-approval-screen" style="display:none;position:fixed;inset:0;z-index:9999;background:var(--navy);overflow-y:auto;">
+  <div style="max-width:780px;margin:0 auto;padding:40px 24px;">
+    <div id="la-body">
+      <div style="text-align:center;color:var(--muted);padding:80px 0;font-size:13px;">Loading label approval…</div>
     </div>
   </div>
 </div>
@@ -2323,6 +2339,22 @@ document.addEventListener('DOMContentLoaded', function() {
     auth: { storageKey: 'lhd-auth', persistSession: true, autoRefreshToken: true }
   });
   const _sb = window._sb;  // local alias so all code inside DCL can use _sb directly
+
+  // ── Public label-approval magic link interception ──────────────────────────
+  // If the URL hash matches #/label/<uuid>, render the standalone approval page
+  // and skip the authenticated app bootstrap entirely. Clients hit this page
+  // from email links without needing a Pulse account.
+  var _labelHash = (window.location.hash || '').match(/^#\/label\/([0-9a-f-]{36})$/i);
+  if (_labelHash) {
+    document.documentElement.classList.add('label-approval-active');
+    document.documentElement.classList.remove('resuming-session');
+    var _laScreen = document.getElementById('label-approval-screen');
+    if (_laScreen) _laScreen.style.display = 'block';
+    if (typeof window._labelApprovalBoot === 'function') {
+      window._labelApprovalBoot(_labelHash[1]);
+    }
+    return;  // skip the rest of the auth bootstrap
+  }
 
   // Check for existing session on load
   _sb.auth.getSession().then(function(res) {
@@ -4592,6 +4624,18 @@ window.copyInviteLink = function() {
         <label>Special Instructions</label>
         <textarea id="bm-notes" style="font-family:'Lato',sans-serif;font-size:13px;background:var(--navy-mid);border:1px solid var(--navy-border);padding:9px 12px;color:var(--white);outline:none;width:100%;resize:vertical;min-height:70px;transition:border-color 0.15s;" placeholder="Any special requirements or notes…"></textarea>
       </div>
+    </div>
+
+    <!-- SECTION 9: Label Master Photos (finished-product reference library) -->
+    <div class="modal-section-title" style="margin-top:28px;">Label Master Photos</div>
+    <div style="background:rgba(13,27,42,0.5);border:1px solid var(--navy-border);border-radius:5px;padding:20px;margin-bottom:8px;">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.6;">
+        Upload finished-product reference photos so the business has a visual record of what this SKU should look like. Front and back are the core record; the optional slots cover closure, neck wrap, carton and side views for richer documentation.
+      </div>
+      <div id="bm-label-photos-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+        <!-- Populated by window._bmRenderLabelPhotos() -->
+      </div>
+      <div id="bm-label-photos-status" style="font-size:11px;color:var(--muted);margin-top:10px;min-height:14px;"></div>
     </div>
 
     <div class="modal-actions">
@@ -7084,6 +7128,11 @@ async function openBomModal(editId) {
   ['bm-pallet','bm-duty-stamp','bm-annex2','bm-lot-number']
   .forEach(function(id) { var e = el(id); if (e) e.selectedIndex = 0; });
 
+  // Reset label master photos for a brand-new BOM — the edit branch below
+  // will re-hydrate from the stored BOM if editId is set.
+  window._bmLabelPhotos = {};
+  if (typeof window._bmRenderLabelPhotos === 'function') window._bmRenderLabelPhotos();
+
   ov.style.display = 'flex';
   document.body.style.overflow = 'hidden';
 
@@ -7124,6 +7173,10 @@ async function openBomModal(editId) {
       // Pre-fill liquid spec select
       var liqSpecEl = el('bm-liquid-sku');
       if (liqSpecEl) await window.populateLiquidProductSelect(liqSpecEl, b.liquid || '', true);
+
+      // Hydrate label master photos from the stored BOM
+      window._bmLabelPhotos = Object.assign({}, b.labelMasterPhotos || {});
+      if (typeof window._bmRenderLabelPhotos === 'function') window._bmRenderLabelPhotos();
 
       // Load client inventory, then restore dropdown selections by SKU ID
       window.onBomClientChange().then(function() {
@@ -7559,8 +7612,14 @@ async function saveBom() {
     colour_spec:         gv('bm-colour-spec-bom')||null,
     additional_info:     additionalInfo,
     notes:               gv('bm-notes')||null,
-    gi_verified:         false
+    gi_verified:         false,
+    label_master_photos: (window._bmLabelPhotos && Object.keys(window._bmLabelPhotos).length) ? window._bmLabelPhotos : {}
   };
+  // Stamp who/when only if at least one photo is present
+  if (dbPayload.label_master_photos && Object.keys(dbPayload.label_master_photos).length) {
+    dbPayload.label_master_set_at = new Date().toISOString();
+    dbPayload.label_master_set_by = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || null;
+  }
 
   function localBom(id) {
     return {
@@ -7591,6 +7650,9 @@ async function saveBom() {
       pallet: gv('bm-pallet'), casesLayer: gv('bm-cases-layer'),
       layersPallet: gv('bm-layers-pallet'), labelPosition: gv('bm-label-position'),
       notes: gv('bm-notes'), gi: 'N', giDocUrl: '',
+      labelMasterPhotos: Object.assign({}, window._bmLabelPhotos || {}),
+      labelMasterSetAt:  dbPayload.label_master_set_at || '',
+      labelMasterSetBy:  dbPayload.label_master_set_by || '',
       status: 'draft', lockedBy: '', approvalRequestedAt: '', editRequestedBy: '',
       added: new Date().toISOString().slice(0,10)
     };
@@ -7859,6 +7921,120 @@ window.printBom      = printBom;
 window.renderBoms    = renderBoms;
 window.BOMS          = BOMS;
 
+// ───────────────────────────────────────────────────────────────────────────────
+// Label photo upload + rendering (shared by BOM modal + Job Quality tab)
+// ───────────────────────────────────────────────────────────────────────────────
+// Uploads any image file to the `label-photos` bucket and returns a public URL.
+// Works for both BOM master photos (subdir='bom') and job verification photos
+// (subdir='job/<jobId>'). Camera-capture and file-picker both land here.
+window._uploadLabelPhoto = async function(file, subdir) {
+  if (!file) throw new Error('No file provided');
+  if (!/^image\//.test(file.type)) throw new Error('Only image files are supported');
+  var waited = 0;
+  while (!window._sb && waited < 3000) { await new Promise(function(r){setTimeout(r,200);}); waited+=200; }
+  var sess = window._sb && await window._sb.auth.getSession();
+  var token = sess && sess.data && sess.data.session && sess.data.session.access_token;
+  if (!token) throw new Error('Not authenticated');
+  var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co';
+  var apiKey = (typeof SUPA_KEY !== 'undefined') ? SUPA_KEY : '';
+  var ext = (file.name && file.name.split('.').pop()) || 'jpg';
+  if (ext.length > 5) ext = 'jpg';
+  var fname = (Date.now().toString(36)) + '-' + (Math.random().toString(36).slice(2,8)) + '.' + ext.toLowerCase();
+  var path = (subdir || 'misc') + '/' + fname;
+  var res = await fetch(SUPA_URL + '/storage/v1/object/label-photos/' + path, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'apikey': apiKey || '',
+      'Content-Type': file.type,
+      'x-upsert': 'true'
+    },
+    body: file
+  });
+  if (!res.ok) {
+    var errText = await res.text();
+    throw new Error('Upload failed: ' + (errText || res.statusText));
+  }
+  return SUPA_URL + '/storage/v1/object/public/label-photos/' + path;
+};
+
+// ── BOM modal master-photo grid ──────────────────────────────────────────────
+// 6 slots: Front + Back required; Closure / Neck wrap / Carton / Side optional.
+// Each slot renders a thumbnail-or-upload tile with camera/file input and,
+// when populated, a Remove (x) button. State lives on window._bmLabelPhotos.
+(function() {
+  var SLOTS = [
+    { key: 'front',   label: 'Front',     required: true  },
+    { key: 'back',    label: 'Back',      required: true  },
+    { key: 'closure', label: 'Closure',   required: false },
+    { key: 'neck',    label: 'Neck wrap', required: false },
+    { key: 'carton',  label: 'Carton',    required: false },
+    { key: 'side',    label: 'Side',      required: false }
+  ];
+  window._bmLabelPhotos = window._bmLabelPhotos || {};
+
+  window._bmRenderLabelPhotos = function() {
+    var grid = document.getElementById('bm-label-photos-grid');
+    if (!grid) return;
+    var canEdit = !!(window.canDo && window.canDo('labels_manage'));
+    grid.innerHTML = SLOTS.map(function(s) {
+      var url = (window._bmLabelPhotos || {})[s.key];
+      var reqBadge = s.required
+        ? '<span style="color:var(--red);font-size:10px;margin-left:4px;">*</span>'
+        : '<span style="color:var(--muted);font-size:9px;margin-left:6px;text-transform:uppercase;letter-spacing:0.1em;">optional</span>';
+      var body;
+      if (url) {
+        body =
+          '<div style="position:relative;aspect-ratio:1/1;background:#000;border-radius:4px;overflow:hidden;">'
+          +   '<img src="' + url + '" style="width:100%;height:100%;object-fit:cover;" onclick="window.open(\'' + url + '\',\'_blank\')">'
+          + (canEdit
+              ? '<button type="button" onclick="window._bmClearLabelPhoto(\'' + s.key + '\')" title="Remove photo" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.72);border:none;color:#fff;width:22px;height:22px;border-radius:11px;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;">&times;</button>'
+              : '')
+          + '</div>';
+      } else {
+        body = canEdit
+          ? '<label for="bm-lp-file-' + s.key + '" style="display:block;aspect-ratio:1/1;border:1px dashed var(--navy-border);border-radius:4px;background:rgba(13,27,42,0.35);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--muted);font-size:11px;text-align:center;padding:8px;transition:border-color .15s,color .15s;" onmouseover="this.style.borderColor=\'var(--gold)\';this.style.color=\'var(--gold)\'" onmouseout="this.style.borderColor=\'var(--navy-border)\';this.style.color=\'var(--muted)\'">'
+            +   '<svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor" style="margin-bottom:6px;opacity:0.75;"><path d="M10.5 8.5a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z"/><path d="M2 4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-1.172a2 2 0 0 1-1.414-.586l-.828-.828A2 2 0 0 0 9.172 2H6.828a2 2 0 0 0-1.414.586l-.828.828A2 2 0 0 1 3.172 4H2zm.5 2a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zm9 2.5a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0z"/></svg>'
+            +   'Upload / Take photo'
+            + '</label>'
+            + '<input type="file" id="bm-lp-file-' + s.key + '" accept="image/*" capture="environment" style="display:none;" onchange="window._bmHandleLabelPhotoInput(this,\'' + s.key + '\')">'
+          : '<div style="aspect-ratio:1/1;border:1px dashed var(--navy-border);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px;">No photo</div>';
+      }
+      return '<div>'
+        + '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">' + s.label + reqBadge + '</div>'
+        + body
+        + '</div>';
+    }).join('');
+  };
+
+  window._bmHandleLabelPhotoInput = async function(inputEl, slotKey) {
+    var file = inputEl && inputEl.files && inputEl.files[0];
+    if (!file) return;
+    var statusEl = document.getElementById('bm-label-photos-status');
+    if (statusEl) { statusEl.textContent = 'Uploading ' + slotKey + '…'; statusEl.style.color = 'var(--muted)'; }
+    try {
+      var url = await window._uploadLabelPhoto(file, 'bom');
+      window._bmLabelPhotos = window._bmLabelPhotos || {};
+      window._bmLabelPhotos[slotKey] = url;
+      window._bmRenderLabelPhotos();
+      if (statusEl) { statusEl.textContent = '✓ ' + slotKey + ' uploaded — save the BOM to persist.'; statusEl.style.color = 'var(--green)'; }
+    } catch(e) {
+      if (statusEl) { statusEl.textContent = 'Upload failed: ' + e.message; statusEl.style.color = 'var(--red)'; }
+      window.toast && window.toast('Photo upload failed: ' + e.message, 'error');
+    }
+    try { inputEl.value = ''; } catch(e) {}
+  };
+
+  window._bmClearLabelPhoto = function(slotKey) {
+    if (!(window.canDo && window.canDo('labels_manage'))) return;
+    if (!window._bmLabelPhotos) return;
+    delete window._bmLabelPhotos[slotKey];
+    window._bmRenderLabelPhotos();
+    var statusEl = document.getElementById('bm-label-photos-status');
+    if (statusEl) { statusEl.textContent = slotKey + ' removed — save the BOM to persist.'; statusEl.style.color = 'var(--amber)'; }
+  };
+})();
+
 // ── Load BOMs from Supabase — inside boms-script so local BOMS array is accessible ──
 window.loadBoms = async function initBoms() {
   // Wait for _sb and auth session
@@ -7944,6 +8120,9 @@ window.loadBoms = async function initBoms() {
         layersPallet:     ai.layersPallet   || '',
         labelPosition:    ai.labelPosition  || '',
         notes:            ai.notes || r.notes || '',
+        labelMasterPhotos: r.label_master_photos || {},
+        labelMasterSetAt:  r.label_master_set_at || '',
+        labelMasterSetBy:  r.label_master_set_by || '',
         added:            r.created_at ? r.created_at.slice(0,10) : ''
       });
     });
@@ -18417,6 +18596,11 @@ window.saveAdjModal = async function() {
   // Auto-complete the task for a given job + task_type
   window.autoCompleteTask = async function(jobId, taskType) {
     try {
+      // Gate: Quality cannot auto-complete until the client has approved the labels.
+      if (taskType === 'quality') {
+        var gated = await window._qualityLabelGate(jobId, { silent: true });
+        if (!gated) return;
+      }
       var tasks = await supaGet('job_tasks?job_id=eq.' + jobId + '&task_type=eq.' + taskType + '&status=neq.completed&limit=1');
       if (tasks.length) {
         await supaMut('PATCH', 'job_tasks', '?id=eq.' + tasks[0].id, {
@@ -18428,6 +18612,37 @@ window.saveAdjModal = async function() {
         if (_currentJobId === jobId) refreshJobTasks(jobId);
       }
     } catch(e) { console.warn('autoCompleteTask failed:', e.message); }
+  };
+
+  // Returns true if the job's label verification is 'approved'.
+  // In silent mode no toast/alert is fired — used for automatic completion.
+  // In loud mode (silent=false) a toast points the user to the Label Verification
+  // section so they know why sign-off is blocked.
+  window._qualityLabelGate = async function(jobId, opts) {
+    opts = opts || {};
+    try {
+      var rows = await supaGet('job_label_approvals?job_id=eq.' + jobId + '&order=created_at.desc&limit=1');
+      var rec = rows && rows[0];
+      if (rec && rec.client_decision === 'approved') return true;
+      if (!opts.silent) {
+        var msg;
+        if (!rec) {
+          msg = 'Capture label photos and get client approval before signing off Quality.';
+        } else if (rec.client_decision === 'rejected') {
+          msg = 'Client has rejected the labels — capture new photos and re-send for approval.';
+        } else if (rec.client_email_sent_at) {
+          msg = 'Waiting on client approval for the labels — Quality sign-off is blocked until they respond.';
+        } else {
+          msg = 'Send the label photos to the client and wait for approval before signing off Quality.';
+        }
+        window.toast && window.toast(msg, 'warn');
+      }
+      return false;
+    } catch(e) {
+      // If the query fails (e.g. table missing), don't lock up the app — warn and allow.
+      console.warn('_qualityLabelGate check failed:', e && e.message);
+      return true;
+    }
   };
 
   // Check if a task's underlying document is complete before allowing manual Complete
@@ -18461,6 +18676,12 @@ window.saveAdjModal = async function() {
         var qc = await supaGet('job_quality_checks?job_id=eq.' + jobId + '&limit=1');
         if (!qc.length) {
           window.toast && window.toast('Complete at least one Production Check round first.', 'error');
+          openTaskInJob(jobId, type);
+          return false;
+        }
+        // Client label approval must be in place before Quality can be signed off.
+        var labelsOk = await window._qualityLabelGate(jobId);
+        if (!labelsOk) {
           openTaskInJob(jobId, type);
           return false;
         }
@@ -21767,6 +21988,10 @@ window.saveAdjModal = async function() {
         + '</div>';
       html += '<div style="font-size:11px;color:var(--muted);margin-bottom:24px;line-height:1.6;">Checks to be done 10 min at job start, after each break, and at the start of each new day. A separate final check to be done at the end of the job with a random bottle chosen.</div>';
 
+      // ── LABEL VERIFICATION (client double-check) ─────────────────────────────
+      // This is the first gate. Sign-off is blocked until the client approves.
+      html += '<div id="jd-label-verif" data-job="' + jobId + '" style="margin-bottom:28px;"><div style="color:var(--muted);font-size:11px;padding:12px 0;">Loading label verification…</div></div>';
+
       // ── SECTION HEADER helper (gold title + full-width underline) ─────────────
       function qSectionHd(label, btnJobId, btnType) {
         return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">'
@@ -21828,10 +22053,300 @@ window.saveAdjModal = async function() {
         + '</div>';
 
       el.innerHTML = html;
+      // Hydrate the Label Verification block (async)
+      if (typeof window._renderLabelVerification === 'function') {
+        window._renderLabelVerification(jobId);
+      }
     } catch(e) {
       el.innerHTML = '<div style="color:var(--red);font-size:12px;">Error: ' + e.message + '</div>';
     }
   }
+
+  // ─── LABEL VERIFICATION — client double-check workflow ─────────────────────────
+  // Lives at the top of the Quality tab. Blocks the Production Sign-Off until the
+  // client has approved the labels via the magic-link approval page.
+  //
+  // States rendered:
+  //   • No record         → "Capture labels" button (QA uploads photos)
+  //   • Draft (photos, not sent) → Photo grid + "Send to Client" button
+  //   • Sent (pending)    → Photo grid + "Awaiting client approval" banner
+  //   • Approved          → Green banner + who/when + photos read-only
+  //   • Rejected          → Red banner + notes + "Capture new photos" to reset
+  window._labelApprovalCache = window._labelApprovalCache || {};
+
+  async function _loadLabelApproval(jobId) {
+    try {
+      var rows = await supaGet('job_label_approvals?job_id=eq.' + jobId + '&order=created_at.desc&limit=1');
+      return (rows && rows[0]) || null;
+    } catch(e) {
+      window.logError && window.logError('_loadLabelApproval', e);
+      return null;
+    }
+  }
+
+  window._renderLabelVerification = async function(jobId) {
+    var host = document.getElementById('jd-label-verif');
+    if (!host) return;
+    host.setAttribute('data-job', jobId);
+    var j = (_jobs || []).find(function(x){ return x.id === jobId; }) || {};
+    var rec = await _loadLabelApproval(jobId);
+    window._labelApprovalCache[jobId] = rec || null;
+
+    var canEdit = !!(window.canDo && window.canDo('labels_manage'));
+    var status = !rec ? 'none'
+               : rec.client_decision === 'approved' ? 'approved'
+               : rec.client_decision === 'rejected' ? 'rejected'
+               : rec.client_email_sent_at ? 'sent'
+               : 'draft';
+
+    var banner;
+    switch (status) {
+      case 'none':
+        banner = '<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 16px;background:rgba(255,255,255,0.03);border:1px solid var(--navy-border);border-radius:4px;">'
+          + '<div style="display:flex;align-items:center;gap:10px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);"></span><span style="font-size:12px;color:var(--muted);">No label verification yet — QA must capture photos and send to the client before Production can be signed off.</span></div>'
+          + (canEdit
+              ? '<button class="btn btn-outline" onclick="window._labelStartRecord(\'' + jobId + '\')" style="font-size:11px;padding:5px 12px;flex-shrink:0;">Start label check</button>'
+              : '')
+          + '</div>';
+        break;
+      case 'draft':
+        banner = '<div style="padding:12px 16px;background:rgba(201,168,76,0.08);border:1px solid var(--gold-dim);border-radius:4px;">'
+          + '<div style="display:flex;align-items:center;gap:10px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--gold);"></span><span style="font-size:12px;color:var(--gold);font-weight:700;">Draft — capture Front + Back (at minimum), then send to the client for approval.</span></div>'
+          + '</div>';
+        break;
+      case 'sent':
+        banner = '<div style="padding:12px 16px;background:rgba(122,162,255,0.08);border:1px solid rgba(122,162,255,0.35);border-radius:4px;">'
+          + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">'
+          +   '<div style="display:flex;align-items:center;gap:10px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#7aa2ff;"></span>'
+          +     '<span style="font-size:12px;color:#7aa2ff;font-weight:700;">Awaiting client approval</span>'
+          +     '<span style="font-size:11px;color:var(--muted);">Sent to ' + (rec.client_email_to||'—') + ' on ' + (rec.client_email_sent_at ? new Date(rec.client_email_sent_at).toLocaleString('en-IE') : '—') + '</span>'
+          +   '</div>'
+          + (canEdit
+              ? '<div style="display:flex;gap:6px;"><button class="btn btn-outline" onclick="window._labelResend(\'' + jobId + '\')" style="font-size:11px;padding:4px 10px;">Resend</button><button class="btn btn-outline" onclick="window._labelCopyLink(\'' + jobId + '\')" style="font-size:11px;padding:4px 10px;">Copy link</button></div>'
+              : '')
+          +   '</div>'
+          + '</div>';
+        break;
+      case 'approved':
+        banner = '<div style="padding:12px 16px;background:rgba(61,186,120,0.1);border:1px solid var(--green);border-radius:4px;">'
+          + '<div style="display:flex;align-items:center;gap:10px;"><span style="color:var(--green);font-size:14px;">&#10003;</span>'
+          +   '<div><div style="font-size:12px;color:var(--green);font-weight:700;">Approved by client</div>'
+          +        '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + window.escapeHtml(rec.client_approver_name || rec.client_email_to || 'Client') + ' on ' + (rec.client_decided_at ? new Date(rec.client_decided_at).toLocaleString('en-IE') : '—') + (rec.client_notes ? ' — ' + window.escapeHtml(rec.client_notes) : '') + '</div></div>'
+          + '</div>'
+          + '</div>';
+        break;
+      case 'rejected':
+        banner = '<div style="padding:12px 16px;background:rgba(220,50,50,0.1);border:1px solid var(--red);border-radius:4px;">'
+          + '<div style="display:flex;align-items:flex-start;gap:10px;"><span style="color:var(--red);font-size:14px;margin-top:1px;">&#10007;</span>'
+          +   '<div style="flex:1;">'
+          +     '<div style="font-size:12px;color:var(--red);font-weight:700;">Rejected by client — Production Sign-Off is blocked</div>'
+          +     '<div style="font-size:11px;color:var(--muted);margin-top:3px;">' + window.escapeHtml(rec.client_approver_name || rec.client_email_to || 'Client') + ' on ' + (rec.client_decided_at ? new Date(rec.client_decided_at).toLocaleString('en-IE') : '—') + '</div>'
+          +     (rec.client_notes ? '<div style="font-size:12px;color:var(--white);margin-top:6px;padding:8px 10px;background:rgba(0,0,0,0.2);border-radius:3px;white-space:pre-wrap;">' + window.escapeHtml(rec.client_notes) + '</div>' : '')
+          +   '</div>'
+          + (canEdit
+              ? '<button class="btn btn-outline" onclick="window._labelRestart(\'' + jobId + '\')" style="font-size:11px;padding:5px 12px;flex-shrink:0;">Capture new photos</button>'
+              : '')
+          + '</div>'
+          + '</div>';
+        break;
+    }
+
+    // Header
+    var header = '<div style="display:flex;align-items:center;gap:0;margin-bottom:12px;">'
+      + '<span style="font-size:10px;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);white-space:nowrap;padding-right:14px;">Label Verification</span>'
+      + '<div style="flex:1;height:1px;background:linear-gradient(to right,rgba(201,168,76,0.5),transparent);"></div>'
+      + '</div>';
+
+    // Photo grid (visible once a draft/sent/approved/rejected record exists)
+    var grid = '';
+    if (rec) {
+      var photos = Array.isArray(rec.qa_photos) ? rec.qa_photos : [];
+      var editable = canEdit && (status === 'draft' || status === 'rejected');
+      grid = '<div style="margin-top:14px;padding:14px;background:rgba(13,27,42,0.45);border:1px solid var(--navy-border);border-radius:4px;">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+        +   '<div style="font-size:11px;color:var(--muted);">' + photos.length + ' photo' + (photos.length===1?'':'s') + ' captured</div>'
+        + (editable
+            ? '<div style="display:flex;gap:6px;">'
+              +   '<label for="jdlv-file-' + jobId + '" style="font-size:11px;padding:5px 12px;cursor:pointer;background:transparent;border:1px solid var(--gold);color:var(--gold);border-radius:3px;font-family:Lato,sans-serif;font-weight:700;">+ Add Photo</label>'
+              +   '<input type="file" id="jdlv-file-' + jobId + '" accept="image/*" capture="environment" style="display:none;" onchange="window._labelAddPhoto(\'' + jobId + '\', this)">'
+              +   (photos.length >= 2 && status === 'draft'
+                    ? '<button class="btn btn-gold" onclick="window._labelSendToClient(\'' + jobId + '\')" style="font-size:11px;padding:5px 14px;">Send to client</button>'
+                    : (photos.length < 2 && status === 'draft' ? '<span style="font-size:10px;color:var(--muted);align-self:center;">Capture Front + Back to enable sending</span>' : ''))
+              + '</div>'
+            : '')
+        + '</div>';
+      if (!photos.length) {
+        grid += '<div style="padding:16px 0;color:var(--muted);font-size:11px;text-align:center;">No photos captured yet.</div>';
+      } else {
+        grid += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;">';
+        photos.forEach(function(p, idx) {
+          var captionStr = p.caption || (idx === 0 ? 'Front' : idx === 1 ? 'Back' : 'Extra');
+          grid += '<div style="position:relative;">'
+            + '<div style="aspect-ratio:1/1;background:#000;border-radius:4px;overflow:hidden;"><img src="' + p.url + '" style="width:100%;height:100%;object-fit:cover;cursor:pointer;" onclick="window.open(\'' + p.url + '\',\'_blank\')"></div>'
+            + '<div style="font-size:10px;color:var(--muted);margin-top:4px;text-align:center;">' + window.escapeHtml(captionStr) + '</div>'
+            + (editable
+                ? '<button type="button" title="Remove" onclick="window._labelRemovePhoto(\'' + jobId + '\',' + idx + ')" style="position:absolute;top:4px;right:4px;background:rgba(0,0,0,0.72);border:none;color:#fff;width:20px;height:20px;border-radius:10px;cursor:pointer;font-size:11px;line-height:1;">&times;</button>'
+                : '')
+            + '</div>';
+        });
+        grid += '</div>';
+      }
+      grid += '</div>';
+    }
+
+    host.innerHTML = header + banner + grid;
+  };
+
+  // Creates the initial job_label_approvals row so QA can start uploading.
+  window._labelStartRecord = async function(jobId) {
+    try {
+      var j = (_jobs || []).find(function(x){ return x.id === jobId; }) || {};
+      var payload = {
+        job_id: jobId,
+        bom_id: j.bom_id || null,
+        qa_photos: [],
+        qa_captured_by: (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || null,
+        qa_captured_at: new Date().toISOString()
+      };
+      await supaMut('POST', 'job_label_approvals', '', payload);
+      window.toast && window.toast('Label check started — capture Front + Back photos.', 'success');
+      await window._renderLabelVerification(jobId);
+    } catch(e) {
+      window.toast && window.toast('Could not start label check: ' + e.message, 'error');
+    }
+  };
+
+  // Rejection reset: wipe decision + notes so QA can re-upload and re-send.
+  window._labelRestart = async function(jobId) {
+    var rec = window._labelApprovalCache[jobId];
+    if (!rec) return;
+    if (!(await window.lpConfirm('Clear the rejection and start a fresh capture? The previous approval attempt will be archived.', { title: 'Restart label check', confirmLabel: 'Restart' }))) return;
+    try {
+      // Mark the old record archived by leaving decision='rejected' and inserting a new draft row.
+      var j = (_jobs || []).find(function(x){ return x.id === jobId; }) || {};
+      await supaMut('POST', 'job_label_approvals', '', {
+        job_id: jobId,
+        bom_id: j.bom_id || null,
+        qa_photos: [],
+        qa_captured_by: (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || null,
+        qa_captured_at: new Date().toISOString()
+      });
+      await window._renderLabelVerification(jobId);
+    } catch(e) {
+      window.toast && window.toast('Restart failed: ' + e.message, 'error');
+    }
+  };
+
+  window._labelAddPhoto = async function(jobId, inputEl) {
+    var file = inputEl && inputEl.files && inputEl.files[0];
+    if (!file) return;
+    var rec = window._labelApprovalCache[jobId];
+    if (!rec) return;
+    try {
+      window.toast && window.toast('Uploading photo…');
+      var url = await window._uploadLabelPhoto(file, 'job/' + jobId);
+      var photos = Array.isArray(rec.qa_photos) ? rec.qa_photos.slice() : [];
+      var slot = photos.length === 0 ? 'Front' : photos.length === 1 ? 'Back' : 'Extra ' + (photos.length - 1);
+      photos.push({ url: url, caption: slot, captured_at: new Date().toISOString() });
+      await supaMut('PATCH', 'job_label_approvals', '?id=eq.' + rec.id, { qa_photos: photos });
+      await window._renderLabelVerification(jobId);
+    } catch(e) {
+      window.toast && window.toast('Photo upload failed: ' + e.message, 'error');
+    }
+    try { inputEl.value = ''; } catch(e) {}
+  };
+
+  window._labelRemovePhoto = async function(jobId, idx) {
+    var rec = window._labelApprovalCache[jobId];
+    if (!rec) return;
+    var photos = Array.isArray(rec.qa_photos) ? rec.qa_photos.slice() : [];
+    if (idx < 0 || idx >= photos.length) return;
+    photos.splice(idx, 1);
+    try {
+      await supaMut('PATCH', 'job_label_approvals', '?id=eq.' + rec.id, { qa_photos: photos });
+      await window._renderLabelVerification(jobId);
+    } catch(e) {
+      window.toast && window.toast('Remove failed: ' + e.message, 'error');
+    }
+  };
+
+  window._labelCopyLink = function(jobId) {
+    var rec = window._labelApprovalCache[jobId];
+    if (!rec || !rec.approval_token) return;
+    var link = window.location.origin + window.location.pathname + '#/label/' + rec.approval_token;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(link).then(function(){ window.toast && window.toast('Approval link copied.', 'success'); });
+    } else {
+      window.lpAlert && window.lpAlert(link, { title: 'Approval link' });
+    }
+  };
+
+  // Sends the approval email to the client (defaulting to the email on the client
+  // record, editable via prompt). Fires the magic-link template.
+  window._labelSendToClient = async function(jobId) {
+    var rec = window._labelApprovalCache[jobId];
+    if (!rec) return;
+    if (!rec.qa_photos || rec.qa_photos.length < 2) {
+      window.toast && window.toast('Capture at least Front + Back first.', 'warn');
+      return;
+    }
+    var j = (_jobs || []).find(function(x){ return x.id === jobId; }) || {};
+    var client = (window.CLIENTS || []).find(function(c){ return c.id === j.client_id; }) || {};
+    var defaultEmail = rec.client_email_to || client.email || '';
+    var to = await window.lpPrompt(
+      'Send label approval request to:',
+      defaultEmail,
+      { title: 'Send to client', placeholder: 'client@example.com' }
+    );
+    if (!to) return;
+    to = (to || '').trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+      window.toast && window.toast('Please enter a valid email address.', 'error');
+      return;
+    }
+    var link = window.location.origin + window.location.pathname + '#/label/' + rec.approval_token;
+    var subject = 'Label approval required — ' + (j.product_name || 'Job ' + jobId);
+    var html =
+      '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111;">'
+      + '<div style="border-bottom:2px solid #c9a84c;padding-bottom:14px;margin-bottom:20px;">'
+      +   '<div style="font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;">Lighthouse Drinks</div>'
+      +   '<div style="font-size:18px;font-weight:700;margin-top:4px;">Label approval required</div>'
+      + '</div>'
+      + '<p style="font-size:14px;line-height:1.5;">Hello,</p>'
+      + '<p style="font-size:14px;line-height:1.5;">We are about to start bottling <strong>' + window.escapeHtml(j.product_name || '') + '</strong> (Job ' + jobId + '). Before we proceed, please review the labels applied to the first bottle and confirm they are correct.</p>'
+      + '<div style="padding:14px 16px;background:#f5f1e6;border-left:3px solid #c9a84c;margin:18px 0;font-size:13px;line-height:1.6;">'
+      +   '<div><strong>Product:</strong> ' + window.escapeHtml(j.product_name || '—') + '</div>'
+      +   '<div><strong>ABV:</strong> ' + (j.bottling_abv || j.abv || '—') + '%</div>'
+      +   '<div><strong>Volume:</strong> ' + (j.volume_cl ? (j.volume_cl * 10) + ' mL' : '—') + '</div>'
+      +   '<div><strong>Batch / Lot:</strong> ' + window.escapeHtml(j.batch_no || j.lot_no || jobId) + '</div>'
+      + '</div>'
+      + '<p style="text-align:center;margin:28px 0;">'
+      +   '<a href="' + link + '" style="display:inline-block;padding:12px 28px;background:#c9a84c;color:#fff;text-decoration:none;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;font-size:13px;border-radius:3px;">Review labels</a>'
+      + '</p>'
+      + '<p style="font-size:12px;color:#555;line-height:1.5;">Opening the link will show you the photos of the first bottle. You can approve or reject with a note. Nothing will be bottled until we have your approval.</p>'
+      + '<p style="font-size:12px;color:#888;margin-top:22px;">If the button does not work, copy this link: <br><span style="word-break:break-all;">' + link + '</span></p>'
+      + '</div>';
+    try {
+      await window.sendEmail({ to: to, subject: subject, html: html });
+      await supaMut('PATCH', 'job_label_approvals', '?id=eq.' + rec.id, {
+        client_email_to: to,
+        client_email_sent_at: new Date().toISOString()
+      });
+      window.toast && window.toast('Approval request sent to ' + to, 'success');
+      await window._renderLabelVerification(jobId);
+    } catch(e) {
+      window.toast && window.toast('Email failed: ' + e.message, 'error');
+    }
+  };
+
+  window._labelResend = async function(jobId) {
+    var rec = window._labelApprovalCache[jobId];
+    if (!rec) return;
+    // Clear sent-at so UI falls back to "draft" (Send button is available)
+    await supaMut('PATCH', 'job_label_approvals', '?id=eq.' + rec.id, { client_email_sent_at: null });
+    await window._renderLabelVerification(jobId);
+    window._labelSendToClient(jobId);
+  };
 
   function renderQualityCheckCard(c, type) {
     var isOnline = type === 'online';
@@ -26652,6 +27167,7 @@ window.saveAdjModal = async function() {
     { key:'jobs_signoff_components',label:'Sign off components',     category:'Jobs' },
     { key:'boms_edit',          label:'Create & edit BOMs',          category:'BOMs' },
     { key:'boms_lock',          label:'Approve & lock BOMs',         category:'BOMs' },
+    { key:'labels_manage',      label:'Manage label photos & verification', category:'BOMs' },
     { key:'schedule_edit',      label:'Edit schedule',               category:'Schedule' },
     { key:'blending_write',        label:'Save liquid operations',              category:'Inventory' },
     { key:'liquid_products_edit', label:'Add / edit liquid products register', category:'Inventory' },
@@ -26679,15 +27195,15 @@ window.saveAdjModal = async function() {
 
   // Default permissions (MD and Ops Dir always get everything)
   var DEFAULT_PERMISSIONS = {
-    managing_director:   { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
-    operations_director: { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
-    business_analyst:    { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,boms_edit:1,boms_lock:0,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_all:1,reports_view:1,settings_access:1 },
-    commercial_manager:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,boms_lock:0,schedule_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
-    ecommerce_manager:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,boms_lock:0,schedule_edit:0,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
-    production_manager:  { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,boms_edit:0,boms_lock:0,schedule_edit:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:1,reports_view:1,settings_access:0 },
-    quality_compliance:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:0,blending_write:0,boms_edit:1,boms_lock:1,schedule_edit:0,drygoods_edit:0,clients_edit:0,roster_view:0,roster_edit:0,timesheet_edit:0,reports_view:1,settings_access:0 },
-    warehouse_liquid:    { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:0,jobs_signoff_components:1,blending_write:1,liquid_products_edit:1,boms_edit:0,boms_lock:0,schedule_edit:0,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
-    client_coordinator:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,boms_lock:0,schedule_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
+    managing_director:   { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,labels_manage:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
+    operations_director: { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,labels_manage:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
+    business_analyst:    { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,boms_edit:1,boms_lock:0,labels_manage:1,schedule_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_all:1,reports_view:1,settings_access:1 },
+    commercial_manager:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,schedule_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
+    ecommerce_manager:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,schedule_edit:0,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
+    production_manager:  { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,blending_write:1,boms_edit:0,boms_lock:0,labels_manage:1,schedule_edit:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:1,reports_view:1,settings_access:0 },
+    quality_compliance:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:0,blending_write:0,boms_edit:1,boms_lock:1,labels_manage:1,schedule_edit:0,drygoods_edit:0,clients_edit:0,roster_view:0,roster_edit:0,timesheet_edit:0,reports_view:1,settings_access:0 },
+    warehouse_liquid:    { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:0,jobs_signoff_components:1,blending_write:1,liquid_products_edit:1,boms_edit:0,boms_lock:0,labels_manage:0,schedule_edit:0,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
+    client_coordinator:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:1,schedule_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
     production_operator: { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,blending_write:0,boms_edit:0,boms_lock:0,schedule_edit:0,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
   };
 
@@ -28845,6 +29361,251 @@ window.loadTimesheet=async function(){
 
 var _oSPT=window.showPeopleTab;
 window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);}};
+})();
+</script>
+
+<!-- ══ LABEL APPROVAL — public magic-link page bootstrapper ═══════════════════ -->
+<script>
+(function() {
+  // Minimal HTML escape for this page (runs before window.escapeHtml may be ready)
+  function esc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
+  var SUPA = 'https://anhawgzgxoywophqbmji.supabase.co';
+  var KEY  = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
+
+  function apiGet(path) {
+    return fetch(SUPA + '/rest/v1/' + path, {
+      headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY, 'Accept': 'application/json' }
+    }).then(function(r){
+      if (!r.ok) return r.text().then(function(t){ throw new Error(t || r.statusText); });
+      return r.json();
+    });
+  }
+  function apiPatch(path, body) {
+    return fetch(SUPA + '/rest/v1/' + path, {
+      method: 'PATCH',
+      headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY,
+                 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify(body)
+    }).then(function(r){
+      if (!r.ok) return r.text().then(function(t){ throw new Error(t || r.statusText); });
+      return r.json();
+    });
+  }
+
+  // The email Edge Function is public with the anon key — the page can send
+  // the approval-notification trio email directly from the browser.
+  function sendMail(opts) {
+    return fetch(SUPA + '/functions/v1/swift-function', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + KEY },
+      body: JSON.stringify({
+        to: opts.to, subject: opts.subject, html: opts.html,
+        from: opts.from || 'Pulse by Lighthouse Drinks <noreply@lighthousedrinks.com>',
+        resendKey: opts.resendKey || ''
+      })
+    }).then(function(r){ return r.ok ? r.json() : r.text().then(function(t){ throw new Error(t); }); });
+  }
+
+  // The Resend key is kept in system_settings; fetch it server-side via anon select.
+  // (Keep failure soft — the worst case is the confirmation email fails, the
+  //  approval itself still succeeds.)
+  function getResendKey() {
+    return apiGet('system_settings?key=eq.resend_api_key&select=value').then(function(rows){
+      return (rows && rows[0] && rows[0].value) || '';
+    }).catch(function(){ return ''; });
+  }
+
+  // Fetch the list of internal users who should receive the approval/rejection
+  // email by role. We read app_users joined to the employees table for display
+  // names. If either table name differs in your schema, the code falls back
+  // to raw emails from app_users.
+  function getTrioRecipients() {
+    // Active users whose role is Quality, Client Coordinator, or Ops Director.
+    var roles = ['quality_compliance','client_coordinator','operations_director'];
+    var roleFilter = '(' + roles.map(function(r){ return '"' + r + '"'; }).join(',') + ')';
+    return apiGet('app_users?role=in.' + encodeURIComponent(roleFilter) + '&active=eq.true&select=email,display_name,role')
+      .catch(function(){
+        // Fallback: older schemas may not expose the `active` column
+        return apiGet('app_users?role=in.' + encodeURIComponent(roleFilter) + '&select=email,display_name,role').catch(function(){ return []; });
+      });
+  }
+
+  function renderBody(rec, job, client, statusMsg) {
+    var host = document.getElementById('la-body');
+    if (!host) return;
+    var photos = Array.isArray(rec.qa_photos) ? rec.qa_photos : [];
+    var isDecided = !!rec.client_decision;
+
+    var header =
+      '<div style="border-bottom:1px solid rgba(201,168,76,0.3);padding-bottom:16px;margin-bottom:24px;">'
+      + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">'
+      +   '<svg width="28" height="28" viewBox="0 0 48 48" fill="none"><rect width="48" height="48" fill="#152336" rx="8"/><rect x="20" y="28" width="8" height="13" fill="#c9a84c" opacity="0.9"/><polygon points="18,28 30,28 27,14 21,14" fill="#e0bf72"/><rect x="19" y="12" width="10" height="3" fill="#c9a84c"/></svg>'
+      +   '<div><div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;">Lighthouse Drinks</div>'
+      +        '<div style="font-size:18px;font-weight:700;color:var(--white);font-family:Merriweather,serif;margin-top:2px;">Label approval</div></div>'
+      + '</div>'
+      + '</div>';
+
+    var info =
+      '<div style="background:rgba(255,255,255,0.03);border:1px solid var(--navy-border);border-radius:6px;padding:18px 22px;margin-bottom:24px;">'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px;font-size:13px;">'
+      +   '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Product</div><div style="color:var(--white);">' + esc(job.product_name || '—') + '</div></div>'
+      +   '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Job</div><div style="color:var(--white);">' + esc(job.id || '') + '</div></div>'
+      +   '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">ABV</div><div style="color:var(--white);">' + (job.bottling_abv || job.abv || '—') + '%</div></div>'
+      +   '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Volume</div><div style="color:var(--white);">' + (job.volume_cl ? (job.volume_cl * 10) + ' mL' : '—') + '</div></div>'
+      +   '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Batch / Lot</div><div style="color:var(--white);">' + esc(job.batch_no || job.lot_no || job.id || '—') + '</div></div>'
+      +   '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Customer</div><div style="color:var(--white);">' + esc((client && client.name) || '—') + '</div></div>'
+      + '</div>'
+      + '</div>';
+
+    var photoGrid = '<div style="margin-bottom:24px;">'
+      + '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:10px;">First-bottle photos</div>';
+    if (!photos.length) {
+      photoGrid += '<div style="padding:24px;background:rgba(0,0,0,0.2);border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);text-align:center;font-size:12px;">No photos have been captured yet.</div>';
+    } else {
+      photoGrid += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;">';
+      photos.forEach(function(p, idx) {
+        var cap = p.caption || (idx === 0 ? 'Front' : idx === 1 ? 'Back' : 'Extra');
+        photoGrid += '<div>'
+          + '<div style="aspect-ratio:1/1;background:#000;border-radius:4px;overflow:hidden;"><a href="' + p.url + '" target="_blank" rel="noopener"><img src="' + p.url + '" style="width:100%;height:100%;object-fit:cover;" alt="' + esc(cap) + '"></a></div>'
+          + '<div style="font-size:11px;color:var(--muted);margin-top:4px;text-align:center;">' + esc(cap) + '</div>'
+          + '</div>';
+      });
+      photoGrid += '</div>';
+    }
+    photoGrid += '</div>';
+
+    var decisionBlock;
+    if (isDecided) {
+      var isApproved = rec.client_decision === 'approved';
+      decisionBlock =
+        '<div style="padding:20px 22px;background:' + (isApproved ? 'rgba(61,186,120,0.1)' : 'rgba(220,50,50,0.1)') + ';border:1px solid ' + (isApproved ? 'var(--green)' : 'var(--red)') + ';border-radius:5px;">'
+        + '<div style="font-size:14px;font-weight:700;color:' + (isApproved ? 'var(--green)' : 'var(--red)') + ';margin-bottom:6px;">' + (isApproved ? '✓ Approved' : '✗ Rejected') + ' by ' + esc(rec.client_approver_name || rec.client_email_to || 'client') + '</div>'
+        + '<div style="font-size:12px;color:var(--muted);">' + (rec.client_decided_at ? new Date(rec.client_decided_at).toLocaleString('en-IE') : '—') + '</div>'
+        + (rec.client_notes ? '<div style="font-size:13px;color:var(--white);margin-top:10px;padding:10px 12px;background:rgba(0,0,0,0.2);border-radius:3px;white-space:pre-wrap;">' + esc(rec.client_notes) + '</div>' : '')
+        + '<div style="font-size:12px;color:var(--muted);margin-top:14px;">Thank you — you can close this page.</div>'
+        + '</div>';
+    } else {
+      decisionBlock =
+        '<div style="padding:20px 22px;background:rgba(255,255,255,0.03);border:1px solid var(--navy-border);border-radius:5px;">'
+        + '<div style="font-size:13px;color:var(--white);margin-bottom:14px;line-height:1.5;">Please review the photos above and confirm the labels are correct.</div>'
+        + '<label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Your name</label>'
+        + '<input type="text" id="la-name" placeholder="Your name" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:9px 12px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;margin-bottom:14px;">'
+        + '<label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Notes (optional — required if rejecting)</label>'
+        + '<textarea id="la-notes" placeholder="Any comments, changes required…" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:9px 12px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;min-height:80px;resize:vertical;font-family:Lato,sans-serif;"></textarea>'
+        + '<div id="la-err" style="font-size:12px;color:var(--red);min-height:14px;margin-top:10px;"></div>'
+        + '<div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;">'
+        +   '<button id="la-approve" onclick="window._labelSubmitDecision(\'approved\')" style="flex:1;min-width:140px;padding:12px 18px;background:var(--green);color:#fff;border:none;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;font-size:13px;letter-spacing:0.08em;text-transform:uppercase;">Approve</button>'
+        +   '<button id="la-reject" onclick="window._labelSubmitDecision(\'rejected\')" style="flex:1;min-width:140px;padding:12px 18px;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;font-size:13px;letter-spacing:0.08em;text-transform:uppercase;">Reject</button>'
+        + '</div>'
+        + '</div>';
+    }
+
+    host.innerHTML = header + info + photoGrid + decisionBlock + (statusMsg ? '<div style="margin-top:20px;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:4px;font-size:12px;color:var(--muted);text-align:center;">' + esc(statusMsg) + '</div>' : '');
+  }
+
+  function renderError(msg) {
+    var host = document.getElementById('la-body');
+    if (!host) return;
+    host.innerHTML =
+      '<div style="padding:60px 24px;text-align:center;">'
+      + '<div style="font-size:15px;color:var(--red);font-weight:700;margin-bottom:10px;">Link is invalid or expired</div>'
+      + '<div style="font-size:13px;color:var(--muted);max-width:440px;margin:0 auto;line-height:1.55;">' + esc(msg || 'We could not load this label approval. If you believe this is a mistake, please contact Lighthouse Drinks.') + '</div>'
+      + '</div>';
+  }
+
+  var _state = { rec: null, job: null, client: null };
+
+  window._labelSubmitDecision = async function(decision) {
+    var errEl = document.getElementById('la-err');
+    var name = (document.getElementById('la-name')||{}).value || '';
+    var notes = (document.getElementById('la-notes')||{}).value || '';
+    name = name.trim(); notes = notes.trim();
+    if (!name) { if (errEl) errEl.textContent = 'Please enter your name.'; return; }
+    if (decision === 'rejected' && !notes) { if (errEl) errEl.textContent = 'Please describe what needs to change.'; return; }
+
+    var aBtn = document.getElementById('la-approve');
+    var rBtn = document.getElementById('la-reject');
+    if (aBtn) aBtn.disabled = true; if (rBtn) rBtn.disabled = true;
+    if (errEl) errEl.textContent = '';
+
+    try {
+      var updated = await apiPatch('job_label_approvals?approval_token=eq.' + _state.rec.approval_token, {
+        client_decision: decision,
+        client_decided_at: new Date().toISOString(),
+        client_approver_name: name,
+        client_notes: notes || null,
+        client_user_agent: navigator.userAgent || null
+      });
+      _state.rec = (updated && updated[0]) || _state.rec;
+
+      // Fire the trio notification email (best-effort)
+      try {
+        var recipients = await getTrioRecipients();
+        var emails = (recipients || []).map(function(u){ return u.email; }).filter(Boolean);
+        if (emails.length) {
+          var resendKey = await getResendKey();
+          if (resendKey) {
+            var subj = (decision === 'approved' ? '[APPROVED]' : '[REJECTED]') + ' Labels — ' + (_state.job.product_name || 'Job ' + _state.job.id);
+            var bg = decision === 'approved' ? '#e8f6ed' : '#fce8e8';
+            var fg = decision === 'approved' ? '#2d7a4a' : '#a82222';
+            var html =
+              '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111;">'
+              + '<div style="border-bottom:2px solid #c9a84c;padding-bottom:14px;margin-bottom:20px;"><div style="font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;">Lighthouse Drinks</div><div style="font-size:18px;font-weight:700;margin-top:4px;">Label ' + decision + '</div></div>'
+              + '<div style="padding:14px 16px;background:' + bg + ';border-left:3px solid ' + fg + ';margin-bottom:18px;font-size:14px;"><strong>' + (decision === 'approved' ? 'The client has approved the labels.' : 'The client has rejected the labels.') + '</strong></div>'
+              + '<div style="font-size:13px;line-height:1.6;padding:12px 14px;background:#f7f5ee;border-radius:3px;margin-bottom:18px;">'
+              +   '<div><strong>Product:</strong> ' + esc(_state.job.product_name || '—') + '</div>'
+              +   '<div><strong>Job:</strong> ' + esc(_state.job.id) + '</div>'
+              +   '<div><strong>Customer:</strong> ' + esc((_state.client && _state.client.name) || '—') + '</div>'
+              +   '<div><strong>Decided by:</strong> ' + esc(name) + '</div>'
+              +   '<div><strong>When:</strong> ' + new Date().toLocaleString('en-IE') + '</div>'
+              + '</div>'
+              + (notes ? '<div style="font-size:13px;margin-bottom:16px;"><strong>Client notes:</strong><div style="margin-top:6px;padding:10px 12px;background:#fff;border:1px solid #ddd;border-radius:3px;white-space:pre-wrap;">' + esc(notes) + '</div></div>' : '')
+              + (decision === 'rejected' ? '<div style="font-size:13px;color:#a82222;margin-top:10px;">Production Sign-Off for this job is now blocked in Pulse until new photos are captured, approved by the client.</div>' : '<div style="font-size:13px;color:#2d7a4a;margin-top:10px;">Production Sign-Off is now unblocked in Pulse.</div>')
+              + '</div>';
+            // sendMail accepts a single string or array of addresses; Resend is OK with array.
+            await sendMail({ to: emails, subject: subj, html: html, resendKey: resendKey });
+          }
+        }
+      } catch(mailErr) {
+        // Log but don't fail — the decision has been recorded.
+        console.warn('Trio notification failed:', mailErr && mailErr.message);
+      }
+
+      renderBody(_state.rec, _state.job, _state.client);
+    } catch(e) {
+      if (errEl) errEl.textContent = 'Something went wrong: ' + (e.message || e);
+      if (aBtn) aBtn.disabled = false; if (rBtn) rBtn.disabled = false;
+    }
+  };
+
+  window._labelApprovalBoot = async function(token) {
+    try {
+      var rows = await apiGet('job_label_approvals?approval_token=eq.' + encodeURIComponent(token) + '&select=*&limit=1');
+      if (!rows || !rows.length) { renderError('This approval link was not found.'); return; }
+      _state.rec = rows[0];
+      // Load the job (for product/ABV/volume etc.) — by PostgREST text id
+      var job = {};
+      try {
+        var jrs = await apiGet('jobs?id=eq.' + encodeURIComponent(_state.rec.job_id) + '&select=id,product_name,bottling_abv,abv,volume_cl,batch_no,lot_no,client_id');
+        job = (jrs && jrs[0]) || { id: _state.rec.job_id };
+      } catch(e) { job = { id: _state.rec.job_id }; }
+      _state.job = job;
+      // Load the client for display
+      try {
+        if (job.client_id) {
+          var crs = await apiGet('clients?id=eq.' + encodeURIComponent(job.client_id) + '&select=id,name');
+          _state.client = (crs && crs[0]) || null;
+        }
+      } catch(e) {}
+      renderBody(_state.rec, _state.job, _state.client);
+    } catch(e) {
+      renderError(e && e.message);
+    }
+  };
 })();
 </script>
 
