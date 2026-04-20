@@ -22141,20 +22141,41 @@ window.saveAdjModal = async function() {
       +     _wmSCell('wm-st1count', 'Outside T1 range')
       +     _wmSCell('wm-st2count', 'Outside T2 range')
       +   '</div>'
-      // Row 2: compliance verdict
-      +   '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;border:1px solid var(--navy-border);border-top:none;border-radius:0 0 5px 5px;overflow:hidden;">'
-      +     '<div style="padding:10px 16px;border-right:1px solid var(--navy-border);">'
-      +       '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Mean within ±T1</div>'
-      +       '<div id="wm-smean-check" style="font-size:13px;font-weight:700;">—</div>'
+      // Row 2: compliance verdict — split into Statutory vs Operational
+      +   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--navy-border);border-top:none;overflow:hidden;">'
+      // ── Statutory group (Directive 76/211/EEC) ──
+      +     '<div style="border-right:1px solid var(--navy-border);">'
+      +       '<div style="padding:7px 16px;background:rgba(201,168,76,0.05);border-bottom:1px solid var(--navy-border);font-size:9px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);">Statutory · Directive 76/211/EEC</div>'
+      +       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">'
+      +         '<div style="padding:10px 16px;border-right:1px solid var(--navy-border);">'
+      +           '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Mean ≥ Nominal</div>'
+      +           '<div id="wm-legal-mean" style="font-size:13px;font-weight:700;">—</div>'
+      +         '</div>'
+      +         '<div style="padding:10px 16px;">'
+      +           '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">No bottles below T2</div>'
+      +           '<div id="wm-legal-t2" style="font-size:13px;font-weight:700;">—</div>'
+      +         '</div>'
+      +       '</div>'
       +     '</div>'
-      +     '<div style="padding:10px 16px;border-right:1px solid var(--navy-border);">'
-      +       '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">All bottles within ±T2</div>'
-      +       '<div id="wm-st2-check" style="font-size:13px;font-weight:700;">—</div>'
+      // ── Operational group (overfill guardrails) ──
+      +     '<div>'
+      +       '<div style="padding:7px 16px;background:rgba(122,162,255,0.05);border-bottom:1px solid var(--navy-border);font-size:9px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--blue,#7aa2ff);">Operational · Overfill control</div>'
+      +       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">'
+      +         '<div style="padding:10px 16px;border-right:1px solid var(--navy-border);">'
+      +           '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Mean ≤ Nominal + T1</div>'
+      +           '<div id="wm-ops-mean" style="font-size:13px;font-weight:700;">—</div>'
+      +         '</div>'
+      +         '<div style="padding:10px 16px;">'
+      +           '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">No bottles above T2</div>'
+      +           '<div id="wm-ops-t2" style="font-size:13px;font-weight:700;">—</div>'
+      +         '</div>'
+      +       '</div>'
       +     '</div>'
-      +     '<div style="padding:10px 16px;">'
-      +       '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Overall Result</div>'
-      +       '<div id="wm-sresult" style="font-size:14px;font-weight:700;">—</div>'
-      +     '</div>'
+      +   '</div>'
+      // Row 3: overall result
+      +   '<div style="padding:12px 16px;border:1px solid var(--navy-border);border-top:none;border-radius:0 0 5px 5px;background:rgba(255,255,255,0.02);">'
+      +     '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Overall Result</div>'
+      +     '<div id="wm-sresult" style="font-size:14px;font-weight:700;">—</div>'
       +   '</div>'
       + '</div>'
       // Completed by
@@ -22171,7 +22192,14 @@ window.saveAdjModal = async function() {
       + '</div>';
 
     ov.style.display = 'flex';
+    _wmOverfillWarned = false; // reset one-shot overfill guidance per batch
   }
+
+  // One-shot flag for the overfill info popup (reset on modal open; re-armed
+  // when the mean drops back within +2 mL of nominal so the message can fire
+  // again on a second transition into overfill territory).
+  var _wmOverfillWarned = false;
+  var WM_OVERFILL_INFO_MARGIN_ML = 2;
 
   function _wmSCell(id, label) {
     return '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">' + label + '</div>'
@@ -22285,6 +22313,31 @@ window.saveAdjModal = async function() {
     var t2  = parseFloat((document.getElementById('wm-t2') ||{}).value) || 30;
     var r   = _wmCompliance(liquids, nom, t1, t2);
 
+    // ── Overfill info popup (one-shot, fires on entry into overfill territory) ──
+    // Only once all 5 bottles are filled in and the sample mean is more than
+    // WM_OVERFILL_INFO_MARGIN_ML (2 mL) above the BOM capacity. The flag
+    // re-arms when the mean comes back within the margin, so a second drift
+    // into overfill territory will warn again.
+    if (nom > 0 && liquids.length === 5) {
+      if (r.mean > nom + WM_OVERFILL_INFO_MARGIN_ML) {
+        if (!_wmOverfillWarned) {
+          _wmOverfillWarned = true;
+          var over = (r.mean - nom).toFixed(2);
+          if (window.lpAlert) {
+            window.lpAlert(
+              'Heads up — your sample mean (' + r.mean.toFixed(2) + ' mL) is '
+              + over + ' mL above the BOM capacity of ' + nom + ' mL.\n\n'
+              + 'You are in overfill territory. Please refine your inputs '
+              + '(weights or SG) or review the filler calibration before saving.',
+              { title: 'Overfill territory', variant: 'warn' }
+            );
+          }
+        }
+      } else if (r.mean <= nom + WM_OVERFILL_INFO_MARGIN_ML) {
+        _wmOverfillWarned = false;
+      }
+    }
+
     function _set(id, txt, col) { var e=document.getElementById(id); if(e){e.textContent=txt; if(col)e.style.color=col;} }
 
     var total = 5; // fixed sample size
@@ -22306,28 +22359,39 @@ window.saveAdjModal = async function() {
     _set('wm-st2count', _countFmt(r.outT2) + (r.outT2 ? '  (' + r.belowT2 + '↓ ' + r.aboveT2 + '↑)' : ''),
                         r.outT2 > 0 ? 'var(--red)'   : 'var(--green)');
 
-    var meanWithinOk = r.meanOk && r.meanUnderOk;
-    var meanTxt;
-    if (!(nom > 0)) meanTxt = '—';
-    else if (meanWithinOk) meanTxt = '✓ PASS  (' + r.mean.toFixed(2) + ' within ' + (nom - t1).toFixed(1) + '–' + (nom + t1).toFixed(1) + ')';
-    else if (!r.meanOk)      meanTxt = '✗ FAIL  (' + r.mean.toFixed(2) + ' < ' + nom + ' — underfill)';
-    else                     meanTxt = '✗ FAIL  (' + r.mean.toFixed(2) + ' > ' + (nom + t1).toFixed(1) + ' — overfill / give-away)';
-    _set('wm-smean-check', meanTxt,
-                           nom > 0 ? (meanWithinOk ? 'var(--green)' : 'var(--red)') : 'var(--muted)');
-
-    var t2Txt;
-    if (!(nom > 0)) t2Txt = '—';
-    else if (r.t2Ok) t2Txt = '✓ PASS  (all bottles ' + r.t2Low.toFixed(1) + '–' + r.t2High.toFixed(1) + ' mL)';
-    else {
-      var parts = [];
-      if (r.belowT2) parts.push(r.belowT2 + ' below ' + r.t2Low.toFixed(1) + ' mL');
-      if (r.aboveT2) parts.push(r.aboveT2 + ' above ' + r.t2High.toFixed(1) + ' mL');
-      t2Txt = '✗ FAIL  (' + parts.join(', ') + ')';
+    var muted = 'var(--muted)', green = 'var(--green)', red = 'var(--red)';
+    if (!(nom > 0)) {
+      _set('wm-legal-mean', '—', muted);
+      _set('wm-legal-t2',   '—', muted);
+      _set('wm-ops-mean',   '—', muted);
+      _set('wm-ops-t2',     '—', muted);
+      _set('wm-sresult',    '—', muted);
+      return;
     }
-    _set('wm-st2-check',   t2Txt,
-                           nom > 0 ? (r.t2Ok ? 'var(--green)' : 'var(--red)') : 'var(--muted)');
-    _set('wm-sresult',     nom > 0 ? (r.satisfactory ? '✓ SATISFACTORY' : '✗ NOT SATISFACTORY') : '—',
-                           nom > 0 ? (r.satisfactory ? 'var(--green)' : 'var(--red)') : 'var(--muted)');
+
+    // ── Statutory (Directive 76/211/EEC) ───────────────────────────────────
+    _set('wm-legal-mean',
+         r.meanOk ? '✓ PASS  (' + r.mean.toFixed(2) + ' ≥ ' + nom + ')'
+                  : '✗ FAIL  (' + r.mean.toFixed(2) + ' < ' + nom + ' — underfill)',
+         r.meanOk ? green : red);
+    _set('wm-legal-t2',
+         r.t2LowOk ? '✓ PASS  (0 below ' + r.t2Low.toFixed(1) + ' mL)'
+                   : '✗ FAIL  (' + r.belowT2 + ' bottle' + (r.belowT2>1?'s':'') + ' below ' + r.t2Low.toFixed(1) + ' mL)',
+         r.t2LowOk ? green : red);
+
+    // ── Operational (overfill guardrails) ──────────────────────────────────
+    _set('wm-ops-mean',
+         r.meanUnderOk ? '✓ PASS  (' + r.mean.toFixed(2) + ' ≤ ' + (nom + t1).toFixed(1) + ')'
+                       : '✗ FAIL  (' + r.mean.toFixed(2) + ' > ' + (nom + t1).toFixed(1) + ' — overfill / give-away)',
+         r.meanUnderOk ? green : red);
+    _set('wm-ops-t2',
+         r.t2HighOk ? '✓ PASS  (0 above ' + r.t2High.toFixed(1) + ' mL)'
+                    : '✗ FAIL  (' + r.aboveT2 + ' bottle' + (r.aboveT2>1?'s':'') + ' above ' + r.t2High.toFixed(1) + ' mL)',
+         r.t2HighOk ? green : red);
+
+    _set('wm-sresult',
+         r.satisfactory ? '✓ SATISFACTORY' : '✗ NOT SATISFACTORY',
+         r.satisfactory ? green : red);
   };
 
   window.closeWMModal = function() {
