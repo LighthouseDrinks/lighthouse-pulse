@@ -3754,6 +3754,14 @@ window.copyInviteLink = function() {
         <label>Location</label>
         <input type="text" id="ab-location" placeholder="e.g. Rack A3, Bay 2">
       </div>
+      <div class="mfield">
+        <label>Goods-In Condition *</label>
+        <select id="ab-condition">
+          <option value="">— Select —</option>
+          <option value="Satisfactory">Satisfactory</option>
+          <option value="Not Satisfactory">Not Satisfactory</option>
+        </select>
+      </div>
     </div>
 
     <div class="mfield" style="margin-top:4px;">
@@ -16527,7 +16535,7 @@ window.openAddBatchModalForSKU = async function(skuId) {
   document.getElementById('ab-date').value = new Date().toISOString().split('T')[0];
   document.getElementById('ab-qr-preview').style.display = 'none';
 
-  ['ab-quantity','ab-unit-cost','ab-total-cost','ab-expiry','ab-po','ab-supplier','ab-location','ab-notes'].forEach(function(id){
+  ['ab-quantity','ab-unit-cost','ab-total-cost','ab-expiry','ab-po','ab-supplier','ab-location','ab-condition','ab-notes'].forEach(function(id){
     var e = document.getElementById(id); if(e) e.value='';
   });
 
@@ -16588,6 +16596,7 @@ window.saveNewBatch = async function() {
   if (!skuId)           { await window.lpAlert('SKU not set.', { variant: 'warn' }); return; }
   if (!gv('ab-quantity')){ await window.lpAlert('Quantity is required.', { variant: 'warn' }); return; }
   if (!gv('ab-date'))   { await window.lpAlert('Delivery date is required.', { variant: 'warn' }); return; }
+  if (!gv('ab-condition')){ await window.lpAlert('Please select a Goods-In Condition (Satisfactory / Not Satisfactory).', { variant: 'warn' }); return; }
 
   var qty = parseInt(gv('ab-quantity'));
   var btn = document.getElementById('ab-save-btn');
@@ -16615,6 +16624,7 @@ window.saveNewBatch = async function() {
       po_reference:       gv('ab-po') || null,
       supplier:           gv('ab-supplier') || (sku ? sku.supplier : null) || null,
       location:           gv('ab-location') || (sku ? sku.location : null) || null,
+      goods_in_condition: gv('ab-condition') || null,
       received_by:        gv('ab-received-by') || null,
       docket_url:         docketUrl,
       notes:              gv('ab-notes') || null
@@ -16639,6 +16649,24 @@ window.saveNewBatch = async function() {
     window._lastBatchQRData = { data: qrData, ref: saved.batch_ref||saved.id, desc: sku?sku.description:'', qty: qty };
 
     window.toast('Delivery recorded. QR generated.', 'success');
+
+    // Notify Quality & Compliance if the intake was marked Not Satisfactory
+    if (payload.goods_in_condition === 'Not Satisfactory') {
+      window._notifyQCNotSatisfactoryDelivery({
+        sku: sku,
+        skuId: skuId,
+        batchRef: saved.batch_ref || saved.id,
+        quantity: qty,
+        deliveryDate: payload.delivery_date,
+        expiryDate: payload.expiry_date,
+        supplier: payload.supplier,
+        location: payload.location,
+        poReference: payload.po_reference,
+        receivedBy: payload.received_by,
+        notes: payload.notes
+      });
+    }
+
     await window.loadDryGoods();
     // Refresh panel if open
     if (_currentSKUId === skuId) await window.openSKUPanel(skuId);
@@ -16656,6 +16684,67 @@ window.saveNewBatch = async function() {
     btn.disabled=false; btn.textContent='Save & Generate QR';
     btn.style.background=''; btn.style.borderColor=''; btn.style.color='';
     btn.onclick = function() { window.saveNewBatch(); };
+  }
+};
+
+// ── Notify Quality & Compliance when a delivery is marked Not Satisfactory ──
+window._notifyQCNotSatisfactoryDelivery = async function(info) {
+  try {
+    if (!window.sendEmail) return;
+    var qcUsers = await window.db.select('app_users', '?role=eq.quality_compliance&select=email,display_name');
+    var recipients = (qcUsers||[]).map(function(u){ return u.email; }).filter(Boolean);
+    if (!recipients.length) { console.warn('No Quality & Compliance users with email found; skipping notification.'); return; }
+
+    var esc = function(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+    var sku = info.sku || {};
+    var skuId = info.skuId || '';
+    var description = sku.description || '';
+    var clientLabel = '';
+    try { clientLabel = (typeof clientName === 'function') ? clientName(sku.client_id) : (sku.client_id||''); } catch(e) {}
+    var reportedBy = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'Unknown user';
+    var nowStr = new Date().toLocaleString('en-IE');
+
+    var row = function(k, v){ return '<tr><td style="padding:6px 14px 6px 0;color:#7a93a8;font-size:12px;white-space:nowrap;vertical-align:top;">'+k+'</td><td style="padding:6px 0;color:#0d1b2a;font-size:13px;font-weight:600;vertical-align:top;">'+(v?esc(v):'—')+'</td></tr>'; };
+
+    var html = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:28px 24px;background:#f9f9f9;">'
+      + '<div style="background:#0d1b2a;padding:22px;border-radius:8px;text-align:center;margin-bottom:20px;">'
+      +   '<h1 style="color:#c9a84c;font-size:18px;margin:0;">Lighthouse Drinks</h1>'
+      +   '<p style="color:#7a93a8;font-size:11px;margin:4px 0 0;letter-spacing:0.12em;text-transform:uppercase;">Pulse · Goods-In Alert</p>'
+      + '</div>'
+      + '<div style="background:#fff;border-left:4px solid #c92f2f;padding:18px 20px;border-radius:4px;margin-bottom:16px;">'
+      +   '<div style="font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:#c92f2f;font-weight:700;margin-bottom:6px;">Not Satisfactory</div>'
+      +   '<div style="font-size:16px;color:#0d1b2a;font-weight:700;">A delivery has been flagged at goods-in.</div>'
+      +   '<div style="font-size:12px;color:#555;margin-top:4px;">Please review and investigate.</div>'
+      + '</div>'
+      + '<table style="width:100%;border-collapse:collapse;background:#fff;padding:12px;border-radius:4px;">'
+      +   row('SKU', skuId)
+      +   row('Description', description)
+      +   row('Client', clientLabel)
+      +   row('Batch / Delivery Ref', info.batchRef)
+      +   row('Quantity Received', info.quantity)
+      +   row('Delivery Date', info.deliveryDate)
+      +   row('Expiry Date', info.expiryDate)
+      +   row('Supplier', info.supplier)
+      +   row('Location', info.location)
+      +   row('PO / Supplier Ref', info.poReference)
+      +   row('Received By', info.receivedBy)
+      +   row('Reported By', reportedBy)
+      +   row('Reported At', nowStr)
+      +   (info.notes ? row('Notes', info.notes) : '')
+      + '</table>'
+      + '<p style="color:#555;font-size:12px;line-height:1.6;margin-top:18px;">Log into <strong>Pulse</strong> &rarr; Dry Goods to inspect the delivery record and decide on next steps (quarantine, return, accept with deviation, etc.).</p>'
+      + '<p style="color:#888;font-size:11px;margin-top:18px;">This is an automated notification from Pulse by Lighthouse Drinks.</p>'
+      + '</div>';
+
+    await window.sendEmail({
+      to: recipients,
+      subject: 'Goods-In Alert: NOT SATISFACTORY — ' + (skuId || '') + (description ? ' · ' + description : ''),
+      html: html
+    });
+    window.toast && window.toast('Quality & Compliance notified of Not Satisfactory delivery.', 'success');
+  } catch(e) {
+    console.warn('QC not-satisfactory email failed:', e && e.message);
+    window.toast && window.toast('Delivery saved, but QC notification email failed: ' + (e && e.message || 'unknown'), 'error');
   }
 };
 
@@ -18371,7 +18460,7 @@ window.saveAdjModal = async function() {
       } else if (type === 'quality') {
         var qc = await supaGet('job_quality_checks?job_id=eq.' + jobId + '&limit=1');
         if (!qc.length) {
-          window.toast && window.toast('Complete at least one Quality check round first.', 'error');
+          window.toast && window.toast('Complete at least one Production Check round first.', 'error');
           openTaskInJob(jobId, type);
           return false;
         }
@@ -21690,7 +21779,7 @@ window.saveAdjModal = async function() {
       }
 
       // ── ONLINE CHECKS ─────────────────────────────────────────────────────────
-      html += qSectionHd('Quality Parameters (On-Line)', jobId, 'online');
+      html += qSectionHd('Production Checks — On-Line', jobId, 'online');
       if (!online.length) {
         html += '<div style="padding:20px 0 24px;color:var(--muted);font-size:12px;text-align:center;">No online checks recorded yet.</div>';
       } else {
@@ -21698,7 +21787,7 @@ window.saveAdjModal = async function() {
       }
 
       // ── OFFLINE CHECKS ────────────────────────────────────────────────────────
-      html += '<div style="margin-top:28px;">' + qSectionHd('Quality Parameters (Off-Line)', jobId, 'offline') + '</div>';
+      html += '<div style="margin-top:28px;">' + qSectionHd('Production Checks — Off-Line', jobId, 'offline') + '</div>';
       if (!offline.length) {
         html += '<div style="padding:20px 0 24px;color:var(--muted);font-size:12px;text-align:center;">No offline checks recorded yet.</div>';
       } else {
@@ -21728,7 +21817,7 @@ window.saveAdjModal = async function() {
       // ── SIGN-OFF ──────────────────────────────────────────────────────────────
       var lastCheck = checks[checks.length-1] || {};
       html += '<div style="margin-top:28px;display:flex;align-items:center;gap:0;margin-bottom:14px;">'
-        + '<span style="font-size:10px;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);white-space:nowrap;padding-right:14px;">To be completed by Quality</span>'
+        + '<span style="font-size:10px;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);white-space:nowrap;padding-right:14px;">Production Sign-Off</span>'
         + '<div style="flex:1;height:1px;background:linear-gradient(to right,rgba(201,168,76,0.5),transparent);"></div>'
         + '</div>'
         + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">'
@@ -21883,7 +21972,7 @@ window.saveAdjModal = async function() {
     ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:8px;width:100%;max-width:640px;margin:auto;overflow:hidden;">'
       // header
       + '<div style="display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid var(--navy-border);">'
-      +   '<div><div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">' + (isOnline ? 'Quality Parameters (On-Line)' : 'Quality Parameters (Off-Line)') + '</div>'
+      +   '<div><div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">' + (isOnline ? 'Production Checks — On-Line' : 'Production Checks — Off-Line') + '</div>'
       +        '<div style="font-size:13px;color:var(--white);margin-top:3px;">Round ' + round + '</div></div>'
       +   '<button onclick="window.closeQCModal()" style="background:transparent;border:none;color:var(--muted);font-size:20px;cursor:pointer;line-height:1;padding:4px 8px;">&#x2715;</button>'
       + '</div>'
@@ -21959,7 +22048,7 @@ window.saveAdjModal = async function() {
       }
       await supaMut('POST', 'job_quality_checks', '', payload);
       window.closeQCModal();
-      window.toast && window.toast('Quality check round ' + round + ' saved.', 'success');
+      window.toast && window.toast('Production Check round ' + round + ' saved.', 'success');
       await window.autoCompleteTask(jobId, 'quality');
       loadQualityTab(jobId);
     } catch(e) {
