@@ -10167,7 +10167,49 @@ window.loadBoms = async function initBoms() {
         + '</div>';
       return;
     }
+
     var list = filteredDeals();
+
+    // ── EMPTY STATE ────────────────────────────────────────────────────
+    // When there are zero deals (or zero matching filters), don't render
+    // 10 vertical stripes — show a proper hero with a CTA + stage preview.
+    if (!list.length) {
+      var totalDeals = DEALS.length;
+      var heroTitle, heroSub, heroBtn;
+      if (totalDeals === 0) {
+        heroTitle = 'No deals in the pipeline yet';
+        heroSub   = 'Kick things off by creating your first deal. You can always drag it between stages later.';
+        heroBtn   = '<button class="btn btn-gold" onclick="window.openDealModal && window.openDealModal()" style="font-size:13px;padding:10px 20px;">+ Create your first deal</button>';
+      } else {
+        heroTitle = 'No deals match these filters';
+        heroSub   = 'Try clearing your search or toggling "Hide Won &amp; Lost".';
+        heroBtn   = '<button class="btn btn-outline" onclick="window._pipeClearFilters()">Clear filters</button>';
+      }
+      // Inline stage preview strip: one pill per stage, tight, single row
+      var stagePreview = PIPE_STAGES.map(function(s){
+        var c = stageColor(s);
+        return '<div style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;background:var(--navy-mid);border:1px solid var(--navy-border);border-left:3px solid ' + c + ';border-radius:3px;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;color:' + c + ';white-space:nowrap;">'
+          + esc(s.name)
+          + '<span style="color:var(--muted);font-weight:400;letter-spacing:0;text-transform:none;">' + (s.default_probability||0) + '%</span>'
+          + '</div>';
+      }).join('');
+      host.innerHTML = '<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:36px 20px;text-align:center;width:100%;">'
+        + '<div style="font-size:38px;opacity:0.3;">◌</div>'
+        + '<div style="font-size:16px;font-weight:700;color:var(--white);">' + heroTitle + '</div>'
+        + '<div style="font-size:13px;color:var(--muted);max-width:460px;line-height:1.5;">' + heroSub + '</div>'
+        + heroBtn
+        + '<div style="margin-top:24px;width:100%;max-width:1100px;">'
+        +   '<div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:10px;">Your pipeline stages</div>'
+        +   '<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:6px;">' + stagePreview + '</div>'
+        + '</div>'
+        + '</div>';
+      return;
+    }
+
+    // ── POPULATED STATE ───────────────────────────────────────────────
+    // Regular Kanban, all 10 stages visible. Empty stages render as narrow
+    // "stubs" (just a header, no body) so they stay discoverable as drop
+    // targets without dominating the layout.
     var byStage = {};
     PIPE_STAGES.forEach(function(s){ byStage[s.id] = []; });
     list.forEach(function(d){ if (byStage[d.stage_id]) byStage[d.stage_id].push(d); });
@@ -10176,23 +10218,19 @@ window.loadBoms = async function initBoms() {
       var col   = stageColor(s);
       var deals = byStage[s.id] || [];
       var sum   = deals.reduce(function(a,d){ return a + (parseFloat(d.forecast_value)||0); }, 0);
+      var isEmpty = deals.length === 0;
 
-      if (!deals.length) {
-        // Collapsed rail: 44px wide, vertical text, still a valid drop target, click to expand (temporarily)
-        return '<div class="pipe-col pipe-col-empty" data-stage-id="' + esc(s.id) + '" '
-          + 'ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
-          + 'onclick="window._pipeExpandCol(\'' + esc(s.id) + '\')" '
-          + 'title="' + esc(s.name) + ' — click to expand" '
-          + 'style="flex:0 0 44px;min-width:44px;max-width:44px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:10px 0 8px;cursor:pointer;transition:background .15s,flex-basis .2s;">'
-          + '<div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;letter-spacing:0.1em;text-transform:uppercase;font-weight:700;color:' + col + ';white-space:nowrap;line-height:1.2;">' + esc(s.name) + '</div>'
-          + '<div style="font-size:9px;color:var(--muted);font-weight:700;background:var(--navy-mid);border:1px solid var(--navy-border);padding:2px 5px;border-radius:10px;">0</div>'
-          + '</div>';
-      }
+      var bodyHtml = isEmpty
+        ? '<div style="font-size:10px;color:var(--muted);text-align:center;padding:16px 6px;opacity:0.55;border:1px dashed var(--navy-border);border-radius:4px;margin:4px;">Drop deal here</div>'
+        : deals.map(renderCard).join('');
 
-      var forceExpand = (window._pipeExpandedId === s.id) ? ' box-shadow:0 0 0 1px var(--gold-dim);' : '';
-      var cardsHtml = deals.map(renderCard).join('');
-      return '<div class="pipe-col" data-stage-id="' + esc(s.id) + '" ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
-        + 'style="flex:1 1 200px;min-width:200px;max-width:340px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s,flex-basis .2s;' + forceExpand + '">'
+      // Empty columns shrink, populated columns grow (still capped so they don't go massive)
+      var flexBasis = isEmpty ? '160px' : '220px';
+      var minWidth  = isEmpty ? '150px' : '200px';
+      var maxWidth  = isEmpty ? '180px' : '320px';
+
+      return '<div class="pipe-col' + (isEmpty ? ' pipe-col-empty' : '') + '" data-stage-id="' + esc(s.id) + '" ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
+        + 'style="flex:1 1 ' + flexBasis + ';min-width:' + minWidth + ';max-width:' + maxWidth + ';background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s;' + (isEmpty?'opacity:0.75;':'') + '">'
         + '<div style="padding:10px 12px;border-bottom:1px solid var(--navy-border);display:flex;align-items:flex-start;justify-content:space-between;gap:6px;">'
         +   '<div style="min-width:0;flex:1;">'
         +     '<div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;font-weight:700;color:' + col + ';line-height:1.2;">' + esc(s.name) + '</div>'
@@ -10200,41 +10238,12 @@ window.loadBoms = async function initBoms() {
         +   '</div>'
         +   '<div style="font-size:9px;color:var(--muted);font-weight:700;background:var(--navy-mid);border:1px solid var(--navy-border);padding:2px 5px;border-radius:10px;flex:0 0 auto;">' + (s.default_probability||0) + '%</div>'
         + '</div>'
-        + '<div class="pipe-col-body" style="padding:8px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:60px;">' + cardsHtml + '</div>'
+        + '<div class="pipe-col-body" style="padding:6px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:60px;">' + bodyHtml + '</div>'
         + '</div>';
     }).join('');
 
     host.innerHTML = html;
   }
-
-  // Temporarily expand an empty rail (simulates a deal existing so the full column renders once)
-  window._pipeExpandCol = function(stageId) {
-    if (window._pipeExpandedId === stageId) {
-      window._pipeExpandedId = null;
-    } else {
-      window._pipeExpandedId = stageId;
-    }
-    // Nudge: render a "full" column skeleton by mutating the DOM directly (no data change)
-    var col = document.querySelector('.pipe-col[data-stage-id="' + stageId + '"]');
-    if (!col) return;
-    var s = STAGE_BY_ID[stageId]; if (!s) return;
-    if (window._pipeExpandedId === stageId) {
-      var color = stageColor(s);
-      col.classList.remove('pipe-col-empty');
-      col.style.cssText = 'flex:1 1 200px;min-width:200px;max-width:340px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + color + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s,flex-basis .2s;box-shadow:0 0 0 1px var(--gold-dim);';
-      col.onclick = null;
-      col.innerHTML =
-        '<div style="padding:10px 12px;border-bottom:1px solid var(--navy-border);display:flex;align-items:flex-start;justify-content:space-between;gap:6px;">'
-        + '<div style="min-width:0;flex:1;"><div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;font-weight:700;color:' + color + ';line-height:1.2;">' + esc(s.name) + '</div>'
-        + '<div style="font-size:10px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums;">0 · <span style="color:var(--text);">€0</span></div></div>'
-        + '<div style="font-size:9px;color:var(--muted);font-weight:700;background:var(--navy-mid);border:1px solid var(--navy-border);padding:2px 5px;border-radius:10px;flex:0 0 auto;">' + (s.default_probability||0) + '%</div></div>'
-        + '<div class="pipe-col-body" style="padding:8px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:60px;">'
-        + '<div style="font-size:10px;color:var(--muted);text-align:center;padding:14px 6px;opacity:0.7;border:1px dashed var(--navy-border);border-radius:4px;">Drop deal here, or click <span style="color:var(--gold);cursor:pointer;" onclick="event.stopPropagation();window._pipeExpandedId=null;window.renderPipeline();">collapse</span></div>'
-        + '</div>';
-    } else {
-      renderPipeline();
-    }
-  };
 
   function renderCard(d) {
     var client = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; }) || {};
@@ -10867,6 +10876,18 @@ window.loadBoms = async function initBoms() {
   // ─────────────────────────────────────────────────────────────────────
   //  Pipeline page event wiring
   // ─────────────────────────────────────────────────────────────────────
+  window._pipeClearFilters = function() {
+    _pipeState.search = '';
+    _pipeState.owner = '';
+    _pipeState.type = '';
+    _pipeState.hideClosed = false;
+    var s = document.getElementById('pipe-search');       if (s) s.value = '';
+    var o = document.getElementById('pipe-owner-filter'); if (o) o.value = '';
+    var t = document.getElementById('pipe-type-filter');  if (t) t.value = '';
+    var h = document.getElementById('pipe-hide-closed');  if (h) h.checked = false;
+    renderPipeline();
+  };
+
   function _bindPipeControls() {
     var s = document.getElementById('pipe-search');
     if (s) s.addEventListener('input', function(){ _pipeState.search = this.value.trim().toLowerCase(); renderPipeline(); });
