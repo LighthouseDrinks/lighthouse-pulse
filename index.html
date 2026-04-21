@@ -6109,6 +6109,8 @@ window.backToToolsGrid = function() {
   window.saveCurrentQuote = async function() {
     var customer = (document.getElementById('customerName') || {}).value || '';
     var product  = (document.getElementById('productName')  || {}).value || '';
+    var clientId = (document.getElementById('quoteClientId')|| {}).value || '';
+    var dealId   = (document.getElementById('quoteDealId')  || {}).value || '';
     var defName  = [customer, product].filter(Boolean).join(' — ') || 'Untitled Quote';
     var name = await window.lpPrompt('Name this quote:', defName, { title: 'Save Quote', placeholder: 'e.g. Acme Spirits — Single Malt Reserve' });
     if (!name || !name.trim()) return;
@@ -6120,6 +6122,8 @@ window.backToToolsGrid = function() {
       data:       _getState(),
       created_by: (window.CURRENT_USER && window.CURRENT_USER.display_name) || (window.CURRENT_USER && window.CURRENT_USER.email) || 'Unknown',
     };
+    if (clientId) payload.client_id = clientId;
+    if (dealId)   payload.deal_id   = dealId;
     try {
       await window.db.insert('pricing_quotes', payload);
       window.toast('Quote "' + name.trim() + '" saved.', 'success');
@@ -6146,18 +6150,39 @@ window.backToToolsGrid = function() {
         return;
       }
       var esc = window.escapeHtml || function(s){ return String(s||''); };
+      var CLIENTS = window.CLIENTS || [];
+      var DEALS   = window.DEALS   || [];
       container.innerHTML = rows.map(function(r) {
         var date = r.created_at ? new Date(r.created_at).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
         var sub  = [r.customer, r.product].filter(Boolean).map(esc).join(' — ') || '—';
+        // CRM link badges
+        var linkBadge = '';
+        if (r.client_id) {
+          var c = CLIENTS.find(function(x){ return x.id === r.client_id; });
+          var lbl = c ? c.company : r.client_id;
+          linkBadge += '<span style="display:inline-block;background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);color:var(--gold);font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;margin-right:4px;">' + esc(lbl) + '</span>';
+        }
+        if (r.deal_id) {
+          var d = DEALS.find(function(x){ return x.id === r.deal_id; });
+          var dlbl = d ? (r.deal_id + ' · ' + (d.name||'')) : r.deal_id;
+          linkBadge += '<span style="display:inline-block;background:rgba(74,158,221,0.1);border:1px solid rgba(74,158,221,0.4);color:var(--blue);font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;cursor:pointer;" onclick="event.stopPropagation();window.closeSavedQuotes();setTimeout(function(){window.openDealDetail && window.openDealDetail(\'' + esc(r.deal_id) + '\');},220);">↗ ' + esc(dlbl) + '</span>';
+        }
+        // Create Deal button: visible when linked to a client but no deal yet
+        var createDealBtn = '';
+        if (r.client_id && !r.deal_id) {
+          createDealBtn = '<button onclick="window.createDealFromQuote(\'' + esc(r.id) + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">+ Deal</button>';
+        }
         return '<div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--navy-border);">'
           + '<div style="flex:1;min-width:0;">'
           + '<div style="font-weight:700;color:var(--white);font-size:14px;margin-bottom:2px;">' + esc(r.name) + '</div>'
           + '<div style="font-size:11px;color:var(--muted);margin-bottom:2px;">' + sub + '</div>'
+          + (linkBadge ? '<div style="margin-bottom:4px;">' + linkBadge + '</div>' : '')
           + '<div style="font-size:10px;color:var(--muted);opacity:0.7;">' + date + (r.created_by ? ' &nbsp;·&nbsp; ' + esc(r.created_by) : '') + '</div>'
           + '</div>'
           + '<div style="font-size:1.5em;font-weight:900;color:var(--gold);font-family:Lato,sans-serif;white-space:nowrap;min-width:70px;text-align:right;">' + esc(r.sell_price||'—') + '</div>'
           + '<div style="display:flex;flex-direction:column;gap:6px;margin-left:8px;">'
           + '<button onclick="window.loadQuote(\'' + esc(r.id) + '\')" style="background:var(--gold);border:none;color:var(--navy);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;white-space:nowrap;">Load</button>'
+          + createDealBtn
           + '<button onclick="window.deleteQuote(\'' + esc(r.id) + '\',\'' + esc(r.name).replace(/'/g,'\\\'') + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">Delete</button>'
           + '</div>'
           + '</div>';
@@ -8679,12 +8704,25 @@ window.loadBoms = async function initBoms() {
       <div class="card-title"><span class="section-num">0</span> Quote Details</div>
       <div class="quote-header">
         <div class="field-group">
+          <label>Link to Customer <span style="font-size:10px;color:var(--muted);font-weight:400;">(optional)</span></label>
+          <select id="quoteClientId" onchange="window._onQuoteClientChange && window._onQuoteClientChange()" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;">
+            <option value="">— Standalone quote (no customer) —</option>
+          </select>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px;">Pick an existing customer to link this quote to a company &amp; deal.</div>
+        </div>
+        <div class="field-group">
           <label>Customer Name</label>
           <input type="text" id="customerName" placeholder="e.g. Acme Spirits Ltd" oninput="updateSummary()">
         </div>
         <div class="field-group">
           <label>Product Name</label>
           <input type="text" id="productName" placeholder="e.g. Single Malt Reserve" oninput="updateSummary()">
+        </div>
+        <div class="field-group">
+          <label>Link to Deal <span style="font-size:10px;color:var(--muted);font-weight:400;">(optional)</span></label>
+          <select id="quoteDealId" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;" disabled>
+            <option value="">— No deal —</option>
+          </select>
         </div>
       </div>
     </div>
@@ -9117,38 +9155,57 @@ window.loadBoms = async function initBoms() {
 
 <!-- ── CLIENTS (placeholder) ──────────────────────────── -->
 <!-- ============================================================
-     PIPELINE (Sales & CRM)  — Phase 2 will add Kanban + Deals CRUD
+     PIPELINE  (Sales & CRM)  — Kanban + List view of all deals
 ============================================================ -->
 <div id="page-pipeline" class="page">
 <div class="wrapper">
   <div class="page-label">Sales &amp; CRM</div>
   <div class="page-heading">Pipeline</div>
 
-  <div class="card">
-    <div class="card-title">Sales Pipeline
-      <div class="card-title-actions" style="display:flex;gap:6px;">
-        <button class="btn btn-outline" disabled style="opacity:0.6;cursor:not-allowed;">Kanban</button>
-        <button class="btn btn-outline" disabled style="opacity:0.6;cursor:not-allowed;">List</button>
-        <button class="btn btn-gold" disabled style="opacity:0.6;cursor:not-allowed;">+ New Deal</button>
+  <!-- KPI strip -->
+  <div id="pipe-kpi-strip" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:14px;"></div>
+
+  <div class="card" style="padding:0;overflow:hidden;">
+    <!-- Toolbar -->
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--navy-border);">
+      <input id="pipe-search" type="text" placeholder="Search deals…" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:7px 12px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:220px;">
+      <select id="pipe-owner-filter" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:7px 10px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
+        <option value="">All owners</option>
+      </select>
+      <select id="pipe-type-filter" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:7px 10px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
+        <option value="">All types</option>
+        <option value="new_business">New business</option>
+        <option value="repeat">Repeat</option>
+      </select>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;user-select:none;">
+        <input type="checkbox" id="pipe-hide-closed" style="accent-color:var(--gold);"> Hide Won &amp; Lost
+      </label>
+      <div style="flex:1;"></div>
+      <div style="display:inline-flex;border:1px solid var(--navy-border);border-radius:3px;overflow:hidden;">
+        <button id="pipe-view-kanban" class="pipe-view-btn active" style="background:var(--gold);color:var(--navy);border:none;font-size:11px;font-weight:700;padding:7px 12px;cursor:pointer;font-family:Lato,sans-serif;">Kanban</button>
+        <button id="pipe-view-list"                                 style="background:transparent;color:var(--muted);border:none;font-size:11px;font-weight:700;padding:7px 12px;cursor:pointer;font-family:Lato,sans-serif;">List</button>
       </div>
+      <button class="btn btn-gold" onclick="window.openDealModal && window.openDealModal()">+ New Deal</button>
     </div>
 
-    <div style="padding:36px 20px;text-align:center;">
-      <div style="display:inline-flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:22px;max-width:720px;">
-        <span style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Prospect</span>
-        <span style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Discovery Call</span>
-        <span style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Site Visit</span>
-        <span style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">NDA</span>
-        <span style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Specs</span>
-        <span style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Quote Sent</span>
-        <span style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Sample Sent</span>
-        <span style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Verbal Commit</span>
-        <span style="background:rgba(61,186,120,0.08);border:1px solid var(--green);color:var(--green);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Won</span>
-        <span style="background:rgba(224,87,87,0.08);border:1px solid var(--red);color:var(--red);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700;padding:6px 10px;border-radius:3px;">Lost</span>
-      </div>
-      <div style="color:var(--gold);font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Coming in Phase 2</div>
-      <div style="color:var(--muted);font-size:13px;max-width:520px;margin:0 auto;line-height:1.55;">
-        Drag-and-drop Kanban, per-stage forecast totals, new-business vs repeat-customer badges, and <span style="color:var(--gold);">Convert to Job</span> action. Stages are already seeded — run the Phase 1 migration SQL and the deals table will be ready to accept entries.
+    <!-- Kanban board -->
+    <div id="pipe-kanban" style="display:flex;gap:10px;padding:12px;overflow-x:auto;align-items:flex-start;min-height:500px;"></div>
+
+    <!-- List view -->
+    <div id="pipe-list" style="display:none;padding:0 4px;">
+      <div class="table-wrap">
+      <table class="data-table" style="min-width:900px;">
+        <thead><tr>
+          <th style="min-width:200px;">Deal</th>
+          <th>Company</th>
+          <th>Stage</th>
+          <th>Type</th>
+          <th>Forecast</th>
+          <th>Owner</th>
+          <th>Expected Close</th>
+        </tr></thead>
+        <tbody id="pipe-list-tbody"></tbody>
+      </table>
       </div>
     </div>
   </div>
@@ -9393,16 +9450,44 @@ window.loadBoms = async function initBoms() {
       </div>
     </div>
 
-    <!-- Contacts panel (Phase 2) -->
-    <div class="c360-panel" data-panel="contacts" style="display:none;padding:36px 20px;text-align:center;color:var(--muted);font-size:13px;">
-      <div style="color:var(--gold);font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Coming in Phase 2</div>
-      Multiple contacts per company with role, primary flag, and per-contact activity timeline.
+    <!-- Contacts panel -->
+    <div class="c360-panel" data-panel="contacts" style="display:none;padding:14px 4px;">
+      <div style="display:flex;justify-content:flex-end;padding:0 16px 10px;">
+        <button class="btn btn-gold" onclick="window.openContactModal && window.openContactModal()" style="font-size:12px;">+ Add Contact</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="data-table" style="min-width:620px;">
+          <thead><tr>
+            <th style="min-width:160px;">Name</th>
+            <th>Role</th>
+            <th>Email</th>
+            <th>Phone</th>
+            <th>Primary</th>
+            <th style="width:120px;">Actions</th>
+          </tr></thead>
+          <tbody id="c360-contacts-tbody"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr></tbody>
+        </table>
+      </div>
     </div>
 
-    <!-- Deals panel (Phase 2) -->
-    <div class="c360-panel" data-panel="deals" style="display:none;padding:36px 20px;text-align:center;color:var(--muted);font-size:13px;">
-      <div style="color:var(--gold);font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Coming in Phase 2</div>
-      All open and closed deals for this company, with stage, forecast value, expected close, and one-click Convert to Job.
+    <!-- Deals panel -->
+    <div class="c360-panel" data-panel="deals" style="display:none;padding:14px 4px;">
+      <div style="display:flex;justify-content:flex-end;padding:0 16px 10px;">
+        <button class="btn btn-gold" onclick="window.openDealModal && window.openDealModal(null, { client_id: window._c360ClientId })" style="font-size:12px;">+ New Deal</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="data-table" style="min-width:720px;">
+          <thead><tr>
+            <th style="min-width:180px;">Deal</th>
+            <th>Stage</th>
+            <th>Type</th>
+            <th>Forecast</th>
+            <th>Expected Close</th>
+            <th>Owner</th>
+          </tr></thead>
+          <tbody id="c360-deals-tbody"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Jobs panel -->
@@ -9471,6 +9556,13 @@ window.loadBoms = async function initBoms() {
     document.querySelectorAll('.c360-panel').forEach(function(p){
       p.style.display = (p.getAttribute('data-panel') === panelName) ? '' : 'none';
     });
+    // Phase 2 lazy loaders
+    if (panelName === 'deals' && window.loadCompanyDeals && _c360CurrentId) {
+      window.loadCompanyDeals(_c360CurrentId);
+    }
+    if (panelName === 'contacts' && window.loadCompanyContacts && _c360CurrentId) {
+      window.loadCompanyContacts(_c360CurrentId);
+    }
   }
 
   document.querySelectorAll('.c360-tab').forEach(function(btn){
@@ -9500,6 +9592,7 @@ window.loadBoms = async function initBoms() {
   window.openCompanyPage = async function(clientId) {
     if (!clientId) return;
     _c360CurrentId = clientId;
+    window._c360ClientId = clientId;
 
     // Navigate to the page
     if (typeof showPage === 'function') {
@@ -9681,6 +9774,1179 @@ window.loadBoms = async function initBoms() {
     var ov = document.getElementById('client-detail-overlay');
     if (ov) { ov.style.opacity='0'; setTimeout(function(){ ov.style.display='none'; }, 200); }
     document.body.style.overflow = '';
+  };
+})();
+</script>
+
+<!-- ============================================================
+     PHASE 2 — Deals CRUD, Pipeline Kanban, Contacts CRUD
+============================================================ -->
+
+<!-- ── NEW / EDIT DEAL MODAL ─────────────────────────────────────────────── -->
+<div id="deal-modal-overlay" class="modal-overlay" onclick="if(event.target===this)window.closeDealModal()">
+  <div class="modal-box" style="max-width:620px;" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px;">Deal</div>
+        <div class="job-id-preview" id="deal-id-preview">DEA-???</div>
+      </div>
+      <button class="modal-close" onclick="window.closeDealModal()">✕</button>
+    </div>
+    <input type="hidden" id="df-edit-id" value="">
+
+    <div class="modal-section-title">Deal details</div>
+    <div class="modal-grid">
+      <div class="mfield" style="grid-column:1/-1">
+        <label>Deal Name *</label>
+        <input type="text" id="df-name" placeholder="e.g. Kinsale Spirit — Single Malt Reserve, 6,000 btls">
+      </div>
+      <div class="mfield" style="grid-column:1/-1">
+        <label>Company *</label>
+        <select id="df-client" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;">
+          <option value="">— Select a customer —</option>
+        </select>
+      </div>
+      <div class="mfield">
+        <label>Deal Type</label>
+        <select id="df-type" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;">
+          <option value="new_business" selected>New business</option>
+          <option value="repeat">Repeat customer</option>
+        </select>
+      </div>
+      <div class="mfield">
+        <label>Stage</label>
+        <select id="df-stage" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;"></select>
+      </div>
+      <div class="mfield">
+        <label>Forecast Value</label>
+        <input type="number" step="0.01" id="df-forecast" placeholder="e.g. 48000">
+      </div>
+      <div class="mfield">
+        <label>Currency</label>
+        <select id="df-currency" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;">
+          <option value="EUR" selected>EUR €</option>
+          <option value="USD">USD $</option>
+          <option value="GBP">GBP £</option>
+        </select>
+      </div>
+      <div class="mfield">
+        <label>Expected Close</label>
+        <input type="date" id="df-close">
+      </div>
+      <div class="mfield">
+        <label>Owner</label>
+        <input type="text" id="df-owner" placeholder="e.g. John">
+      </div>
+      <div class="mfield">
+        <label>Source</label>
+        <input type="text" id="df-source" placeholder="e.g. Inbound, GND, Referral">
+      </div>
+      <div class="mfield" style="grid-column:1/-1">
+        <label>Notes</label>
+        <textarea id="df-notes" rows="3" placeholder="Anything worth remembering about this deal…" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;resize:vertical;outline:none;border-radius:3px;box-sizing:border-box;"></textarea>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button id="df-delete-btn" class="btn btn-outline" onclick="window.deleteDeal && window.deleteDeal()" style="margin-right:auto;color:var(--red);border-color:var(--red);display:none;">Delete</button>
+      <button class="btn btn-outline" onclick="window.closeDealModal()">Cancel</button>
+      <button class="btn btn-gold" id="df-save-btn" onclick="window.saveDeal && window.saveDeal()">Save Deal</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── DEAL DETAIL SIDE-PANEL ────────────────────────────────────────────── -->
+<div id="deal-detail-overlay" class="modal-overlay" onclick="if(event.target===this)window.closeDealDetail()" style="display:none;opacity:0;transition:opacity .2s;align-items:flex-start;justify-content:flex-end;">
+  <div class="modal-box" id="deal-detail-box" style="max-width:540px;width:96%;max-height:100vh;border-radius:0;border-right:none;border-top:none;border-bottom:none;margin:0;transform:translateX(40px);transition:transform .22s ease;overflow-y:auto;" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div style="min-width:0;">
+        <div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px;">Deal</div>
+        <div class="job-id-preview" id="dd-id">DEA-???</div>
+      </div>
+      <button class="modal-close" onclick="window.closeDealDetail()">✕</button>
+    </div>
+
+    <div id="dd-body" style="padding:0 4px;">
+      <div id="dd-name"    style="font-size:18px;font-weight:700;color:var(--white);line-height:1.3;margin-bottom:4px;">—</div>
+      <div id="dd-company" style="font-size:12px;color:var(--gold);margin-bottom:16px;cursor:pointer;">—</div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+        <div id="dd-stage-pill"></div>
+        <div id="dd-type-pill"></div>
+      </div>
+
+      <!-- KPI row -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;margin-bottom:18px;">
+        <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Forecast</div><div id="dd-forecast" style="font-size:16px;color:var(--white);font-weight:700;">—</div></div>
+        <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Weighted</div><div id="dd-weighted" style="font-size:16px;color:var(--gold);font-weight:700;">—</div></div>
+        <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Expected Close</div><div id="dd-close" style="font-size:13px;color:var(--white);">—</div></div>
+      </div>
+
+      <!-- Stage quick changer -->
+      <div style="margin-bottom:18px;">
+        <div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Move to stage</div>
+        <div id="dd-stage-buttons" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+      </div>
+
+      <!-- Details -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px;">
+        <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Owner</div>       <div id="dd-owner"  style="font-size:13px;color:var(--white);">—</div></div>
+        <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Source</div>      <div id="dd-source" style="font-size:13px;color:var(--white);">—</div></div>
+        <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Created</div>     <div id="dd-created" style="font-size:13px;color:var(--muted);">—</div></div>
+      </div>
+
+      <!-- Linked quote -->
+      <div style="margin-bottom:18px;">
+        <div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Linked Pricing Quote</div>
+        <div id="dd-quote-wrap" style="font-size:13px;color:var(--text);"></div>
+      </div>
+
+      <!-- Notes -->
+      <div style="margin-bottom:18px;">
+        <div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Notes</div>
+        <div id="dd-notes" style="font-size:13px;color:var(--text);line-height:1.55;background:var(--navy-mid);border:1px solid var(--navy-border);padding:10px 12px;border-radius:3px;white-space:pre-wrap;min-height:40px;">—</div>
+      </div>
+
+      <!-- Actions -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap;padding-bottom:18px;">
+        <button class="btn btn-outline" onclick="window.openDealModal && window.openDealModal(window._ddCurrentId)">Edit</button>
+        <button id="dd-convert-btn" class="btn btn-gold" onclick="window.convertDealToJob && window.convertDealToJob()" style="display:none;">Convert to Job →</button>
+        <button id="dd-won-btn"  class="btn"          onclick="window.markDealWon  && window.markDealWon()"  style="background:rgba(61,186,120,0.12);border:1px solid var(--green);color:var(--green);display:none;">Mark Won</button>
+        <button id="dd-lost-btn" class="btn"          onclick="window.markDealLost && window.markDealLost()" style="background:rgba(224,87,87,0.12);border:1px solid var(--red);color:var(--red);display:none;">Mark Lost</button>
+        <div style="flex:1;"></div>
+        <button class="btn btn-outline" onclick="window.deleteDealById && window.deleteDealById(window._ddCurrentId)" style="color:var(--red);border-color:var(--red);">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── NEW / EDIT CONTACT MODAL ─────────────────────────────────────────── -->
+<div id="contact-modal-overlay" class="modal-overlay" onclick="if(event.target===this)window.closeContactModal()">
+  <div class="modal-box" style="max-width:520px;" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px;">Contact</div>
+        <div class="job-id-preview" id="contact-id-preview">CON-???</div>
+      </div>
+      <button class="modal-close" onclick="window.closeContactModal()">✕</button>
+    </div>
+    <input type="hidden" id="ctf-edit-id" value="">
+    <input type="hidden" id="ctf-client-id" value="">
+
+    <div class="modal-section-title">Contact details</div>
+    <div class="modal-grid">
+      <div class="mfield" style="grid-column:1/-1">
+        <label>Name *</label>
+        <input type="text" id="ctf-name" placeholder="e.g. Jane Smith">
+      </div>
+      <div class="mfield">
+        <label>Role / Title</label>
+        <input type="text" id="ctf-role" placeholder="e.g. Head of Production">
+      </div>
+      <div class="mfield">
+        <label>Phone</label>
+        <input type="text" id="ctf-phone">
+      </div>
+      <div class="mfield" style="grid-column:1/-1">
+        <label>Email</label>
+        <input type="email" id="ctf-email">
+      </div>
+      <div class="mfield" style="grid-column:1/-1">
+        <label><input type="checkbox" id="ctf-primary" style="accent-color:var(--gold);vertical-align:middle;margin-right:6px;">Primary contact for this company</label>
+      </div>
+      <div class="mfield" style="grid-column:1/-1">
+        <label>Notes</label>
+        <textarea id="ctf-notes" rows="3" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;resize:vertical;outline:none;border-radius:3px;box-sizing:border-box;"></textarea>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="window.closeContactModal()">Cancel</button>
+      <button class="btn btn-gold" id="ctf-save-btn" onclick="window.saveContact && window.saveContact()">Save Contact</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var esc = function(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+  var CURRENCY = { EUR:'€', USD:'$', GBP:'£' };
+  function fmtMoney(v, cur) {
+    if (v == null || v === '' || isNaN(parseFloat(v))) return '—';
+    var n = parseFloat(v);
+    var sym = CURRENCY[cur||'EUR'] || '€';
+    if (n >= 1000) return sym + (n/1000).toFixed(n>=10000?0:1) + 'k';
+    return sym + Math.round(n);
+  }
+  function fmtMoneyFull(v, cur) {
+    if (v == null || v === '' || isNaN(parseFloat(v))) return '—';
+    var sym = CURRENCY[cur||'EUR'] || '€';
+    return sym + parseFloat(v).toLocaleString('en-IE', { maximumFractionDigits:0 });
+  }
+  function fmtDate(d) {
+    if (!d) return '—';
+    try { return new Date(d).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'2-digit' }); }
+    catch(_) { return '—'; }
+  }
+  function stageColor(stage) {
+    if (!stage) return 'var(--muted)';
+    if (stage.is_won)  return 'var(--green)';
+    if (stage.is_lost) return 'var(--red)';
+    var n = stage.name || '';
+    if (/Verbal|Sample|Quote/i.test(n))       return 'var(--gold)';
+    if (/NDA|Specs/i.test(n))                  return 'var(--amber)';
+    return 'var(--blue)';
+  }
+  function typeBadge(t) {
+    if (t === 'repeat')   return '<span style="display:inline-block;background:rgba(201,168,76,0.12);border:1px solid var(--gold-dim);color:var(--gold);font-size:9px;font-weight:700;letter-spacing:0.06em;padding:2px 6px;border-radius:3px;">REPEAT</span>';
+    return '<span style="display:inline-block;background:rgba(74,158,221,0.12);border:1px solid rgba(74,158,221,0.4);color:var(--blue);font-size:9px;font-weight:700;letter-spacing:0.06em;padding:2px 6px;border-radius:3px;">NEW</span>';
+  }
+  function stagePill(stage, pill) {
+    var col = stageColor(stage);
+    var lbl = (stage && stage.name) || '—';
+    return '<span style="display:inline-block;background:rgba(255,255,255,0.04);border:1px solid ' + col + ';color:' + col + ';font-size:10px;font-weight:700;letter-spacing:0.06em;padding:3px 9px;border-radius:3px;">' + esc(lbl) + '</span>';
+  }
+  function ownerInitials(name) {
+    if (!name) return '';
+    return String(name).split(/\s+/).filter(Boolean).slice(0,2).map(function(p){ return p.charAt(0).toUpperCase(); }).join('');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Caches
+  // ─────────────────────────────────────────────────────────────────────
+  var PIPE_STAGES = [];                      // [{id,name,sort_order,default_probability,is_won,is_lost}]
+  var STAGE_BY_ID = {};
+  var DEALS       = [];                      // populated by reloadDeals()
+  var _pipeView   = 'kanban';                // 'kanban' | 'list'
+  var _pipeState  = { search:'', owner:'', type:'', hideClosed:false };
+
+  // Expose so other modules can check
+  window.PIPE_STAGES = PIPE_STAGES;
+  window.DEALS = DEALS;
+
+  async function loadPipelineMeta() {
+    try {
+      var rows = await window.db.select('pipeline_stages', '?pipeline_id=eq.PIPE-001&order=sort_order.asc');
+      if (rows && rows.length) {
+        PIPE_STAGES.length = 0;
+        rows.forEach(function(r){ PIPE_STAGES.push(r); });
+        STAGE_BY_ID = {};
+        PIPE_STAGES.forEach(function(s){ STAGE_BY_ID[s.id] = s; });
+      }
+    } catch(e) {
+      console.warn('[CRM] loadPipelineMeta:', e.message||e);
+    }
+  }
+
+  async function nextDealId() {
+    try {
+      var rows = await window.db.select('deals', '?select=id');
+      var nums = (rows||[]).map(function(r){ return parseInt((r.id||'').replace(/^DEA-/,''),10)||0; }).filter(function(n){return n>0;});
+      var mx = nums.length ? Math.max.apply(null, nums) : 0;
+      return 'DEA-' + ('000' + (mx+1)).slice(-3);
+    } catch(e) { return 'DEA-001'; }
+  }
+
+  async function reloadDeals() {
+    try {
+      var rows = await window.db.select('deals', '?order=created_at.desc');
+      DEALS.length = 0;
+      (rows||[]).forEach(function(r){ DEALS.push(r); });
+      window.DEALS = DEALS;
+      renderPipeline();
+      populatePipeFilters();
+    } catch(e) {
+      console.warn('[CRM] reloadDeals:', e.message||e);
+    }
+  }
+
+  function populatePipeFilters() {
+    var ownerSel = document.getElementById('pipe-owner-filter');
+    if (!ownerSel) return;
+    var owners = {};
+    DEALS.forEach(function(d){ if (d.owner_id) owners[d.owner_id] = true; });
+    var current = ownerSel.value;
+    var keys = Object.keys(owners).sort();
+    ownerSel.innerHTML = '<option value="">All owners</option>' + keys.map(function(k){ return '<option value="' + esc(k) + '">' + esc(k) + '</option>'; }).join('');
+    if (current) ownerSel.value = current;
+  }
+
+  function filteredDeals() {
+    return DEALS.filter(function(d){
+      if (_pipeState.search) {
+        var s = _pipeState.search;
+        var client = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; });
+        var hay = (d.name + ' ' + (client?client.company:'') + ' ' + (d.owner_id||'') + ' ' + (d.source||'')).toLowerCase();
+        if (hay.indexOf(s) < 0) return false;
+      }
+      if (_pipeState.owner && d.owner_id !== _pipeState.owner) return false;
+      if (_pipeState.type  && d.deal_type !== _pipeState.type) return false;
+      if (_pipeState.hideClosed) {
+        var st = STAGE_BY_ID[d.stage_id];
+        if (st && (st.is_won || st.is_lost)) return false;
+      }
+      return true;
+    });
+  }
+
+  function renderKpiStrip() {
+    var strip = document.getElementById('pipe-kpi-strip');
+    if (!strip) return;
+    var openCount = 0, openSum = 0, weighted = 0, wonThisMonthCount = 0, wonThisMonthSum = 0;
+    var now = new Date();
+    var monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10);
+    DEALS.forEach(function(d){
+      var st = STAGE_BY_ID[d.stage_id];
+      var v = parseFloat(d.forecast_value||0);
+      if (!st) return;
+      if (st.is_won) {
+        if (d.closed_at && String(d.closed_at) >= monthStart) {
+          wonThisMonthCount++;
+          wonThisMonthSum += v;
+        }
+        return;
+      }
+      if (st.is_lost) return;
+      openCount++;
+      openSum  += v;
+      weighted += v * ((st.default_probability||0) / 100);
+    });
+    function tile(label, value, sub, accent) {
+      return '<div class="kpi-card"><div class="kpi-label">' + esc(label) + '</div>'
+        + '<div class="kpi-value" style="' + (accent?'color:'+accent+';':'') + '">' + value + '</div>'
+        + '<div class="kpi-sub">' + (sub||'&nbsp;') + '</div></div>';
+    }
+    strip.innerHTML =
+      tile('Open Deals',       openCount || 0,        fmtMoneyFull(openSum,'EUR') + ' forecast') +
+      tile('Weighted Forecast', fmtMoneyFull(weighted,'EUR'), 'By stage probability', 'var(--gold)') +
+      tile('Won This Month',   wonThisMonthCount || 0, fmtMoneyFull(wonThisMonthSum,'EUR'),       'var(--green)') +
+      tile('Pipeline Velocity', '—',                    'Avg days in stage (soon)');
+  }
+
+  function renderKanban() {
+    var host = document.getElementById('pipe-kanban');
+    if (!host) return;
+    if (!PIPE_STAGES.length) {
+      host.innerHTML = '<div style="padding:40px;color:var(--muted);font-size:13px;text-align:center;width:100%;">Pipeline stages not seeded. Run the Phase 1 migration SQL.</div>';
+      return;
+    }
+    var list = filteredDeals();
+    var byStage = {};
+    PIPE_STAGES.forEach(function(s){ byStage[s.id] = []; });
+    list.forEach(function(d){ if (byStage[d.stage_id]) byStage[d.stage_id].push(d); });
+
+    var html = PIPE_STAGES.map(function(s){
+      var col   = stageColor(s);
+      var deals = byStage[s.id] || [];
+      var sum   = deals.reduce(function(a,d){ return a + (parseFloat(d.forecast_value)||0); }, 0);
+      var cardsHtml = deals.map(renderCard).join('');
+      return '<div class="pipe-col" data-stage-id="' + esc(s.id) + '" ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
+        + 'style="flex:0 0 260px;min-height:400px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:6px;display:flex;flex-direction:column;">'
+        + '<div style="padding:10px 12px;border-bottom:1px solid var(--navy-border);display:flex;align-items:center;justify-content:space-between;gap:8px;">'
+        +   '<div style="min-width:0;">'
+        +     '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;font-weight:700;color:' + col + ';">' + esc(s.name) + '</div>'
+        +     '<div style="font-size:10px;color:var(--muted);margin-top:2px;">' + deals.length + ' · ' + fmtMoneyFull(sum,'EUR') + '</div>'
+        +   '</div>'
+        +   '<div style="font-size:10px;color:var(--muted);font-weight:700;">' + (s.default_probability||0) + '%</div>'
+        + '</div>'
+        + '<div class="pipe-col-body" style="padding:8px;display:flex;flex-direction:column;gap:6px;flex:1;">' + cardsHtml + '</div>'
+        + '</div>';
+    }).join('');
+
+    host.innerHTML = html;
+  }
+
+  function renderCard(d) {
+    var client = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; }) || {};
+    var nameTxt = d.name || 'Untitled deal';
+    var ageDays = d.stage_entered_at ? Math.max(0, Math.floor((Date.now() - new Date(d.stage_entered_at).getTime())/86400000)) : null;
+    var aging = ageDays == null ? '' : '<div style="font-size:9px;color:' + (ageDays>30?'var(--red)':ageDays>14?'var(--amber)':'var(--muted)') + ';">' + ageDays + 'd in stage</div>';
+    return '<div class="pipe-card" draggable="true" ondragstart="window._pipeDragStart(event,this)" ondragend="window._pipeDragEnd(event,this)" onclick="window.openDealDetail(\'' + esc(d.id) + '\')" '
+      + 'data-deal-id="' + esc(d.id) + '" '
+      + 'style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;padding:9px 10px;cursor:pointer;transition:border-color .15s,transform .05s;" '
+      + 'onmouseover="this.style.borderColor=\'var(--gold-dim)\';" onmouseout="this.style.borderColor=\'var(--navy-border)\';">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">'
+      +   '<div style="font-size:12px;font-weight:700;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(nameTxt) + '</div>'
+      +   typeBadge(d.deal_type)
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(client.company || d.client_id || '—') + '</div>'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">'
+      +   '<div style="font-size:13px;font-weight:700;color:var(--gold);">' + fmtMoney(d.forecast_value, d.currency) + '</div>'
+      +   (d.owner_id ? '<div title="' + esc(d.owner_id) + '" style="width:22px;height:22px;border-radius:50%;background:var(--navy-border);color:var(--text);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;">' + esc(ownerInitials(d.owner_id)) + '</div>' : '')
+      + '</div>'
+      + aging
+      + '</div>';
+  }
+
+  function renderList() {
+    var tbody = document.getElementById('pipe-list-tbody');
+    if (!tbody) return;
+    var list = filteredDeals();
+    if (!list.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px;">No deals match your filters.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = list.map(function(d){
+      var client = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; }) || {};
+      var st = STAGE_BY_ID[d.stage_id];
+      return '<tr style="cursor:pointer;" onclick="window.openDealDetail(\'' + esc(d.id) + '\')">'
+        + '<td style="color:var(--white);font-weight:700;">' + esc(d.name||'—') + '</td>'
+        + '<td>' + esc(client.company || d.client_id || '—') + '</td>'
+        + '<td>' + stagePill(st) + '</td>'
+        + '<td>' + typeBadge(d.deal_type) + '</td>'
+        + '<td style="color:var(--white);font-weight:700;">' + fmtMoneyFull(d.forecast_value, d.currency) + '</td>'
+        + '<td style="color:var(--muted);">' + esc(d.owner_id||'—') + '</td>'
+        + '<td style="color:var(--muted);">' + fmtDate(d.expected_close_date) + '</td>'
+        + '</tr>';
+    }).join('');
+  }
+
+  function renderPipeline() {
+    renderKpiStrip();
+    if (_pipeView === 'kanban') renderKanban();
+    else                          renderList();
+  }
+  window.renderPipeline = renderPipeline;
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Drag & drop
+  // ─────────────────────────────────────────────────────────────────────
+  var _dragSrcId = null;
+  window._pipeDragStart = function(e, card) {
+    _dragSrcId = card.getAttribute('data-deal-id');
+    card.style.opacity = '0.4';
+    e.dataTransfer && (e.dataTransfer.effectAllowed = 'move');
+    try { e.dataTransfer.setData('text/plain', _dragSrcId); } catch(_){}
+  };
+  window._pipeDragEnd = function(e, card) {
+    card.style.opacity = '';
+    _dragSrcId = null;
+    document.querySelectorAll('.pipe-col').forEach(function(c){ c.style.background = 'var(--navy-card)'; });
+  };
+  window._pipeDragOver = function(e, col) {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    col.style.background = 'rgba(201,168,76,0.05)';
+  };
+  window._pipeDragLeave = function(e, col) {
+    col.style.background = 'var(--navy-card)';
+  };
+  window._pipeDrop = async function(e, col) {
+    e.preventDefault();
+    col.style.background = 'var(--navy-card)';
+    var dealId  = _dragSrcId;
+    var stageId = col.getAttribute('data-stage-id');
+    if (!dealId || !stageId) return;
+    var deal = DEALS.find(function(d){ return d.id === dealId; });
+    if (!deal || deal.stage_id === stageId) return;
+
+    var st = STAGE_BY_ID[stageId];
+    var payload = { stage_id: stageId, stage_entered_at: new Date().toISOString() };
+    if (st && st.is_won) { payload.closed_at = new Date().toISOString(); payload.closed_reason = 'Won'; }
+    if (st && st.is_lost) { payload.closed_at = new Date().toISOString(); }
+
+    // Optimistic update
+    var prevStage = deal.stage_id;
+    deal.stage_id = stageId;
+    deal.stage_entered_at = payload.stage_entered_at;
+    renderPipeline();
+
+    try {
+      await window.db.update('deals', '?id=eq.' + dealId, payload);
+      if (window.toast) window.toast('Moved to "' + (st?st.name:'—') + '"', 'success');
+      // If moved to Won, auto-promote company to "client" lifecycle
+      if (st && st.is_won && deal.client_id) {
+        try {
+          await window.db.update('clients', '?id=eq.' + deal.client_id, { lifecycle_stage:'client', became_client_at:new Date().toISOString() });
+          if (window._reloadClientsFromDB) window._reloadClientsFromDB();
+        } catch(_){}
+      }
+    } catch(err) {
+      // Roll back
+      deal.stage_id = prevStage;
+      renderPipeline();
+      if (window.toast) window.toast('Could not move deal: ' + (err.message||err), 'error');
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Deal modal
+  // ─────────────────────────────────────────────────────────────────────
+  function _populateClientDropdown(selectEl, currentVal) {
+    var clients = (window.CLIENTS||[]).slice().sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
+    var current = currentVal || selectEl.value;
+    selectEl.innerHTML = '<option value="">— Select a customer —</option>' + clients.map(function(c){
+      return '<option value="' + esc(c.id) + '">' + esc(c.company) + '</option>';
+    }).join('');
+    if (current) selectEl.value = current;
+  }
+  function _populateStageDropdown(selectEl, currentVal) {
+    var current = currentVal || selectEl.value;
+    selectEl.innerHTML = PIPE_STAGES.map(function(s){
+      return '<option value="' + esc(s.id) + '">' + esc(s.name) + ' · ' + (s.default_probability||0) + '%</option>';
+    }).join('');
+    if (current) selectEl.value = current;
+    else if (PIPE_STAGES[0]) selectEl.value = PIPE_STAGES[0].id;
+  }
+
+  window.openDealModal = async function(editId, presets) {
+    presets = presets || {};
+    if (!PIPE_STAGES.length) await loadPipelineMeta();
+    var ov = document.getElementById('deal-modal-overlay'); if (!ov) return;
+    var clientSel = document.getElementById('df-client');
+    var stageSel  = document.getElementById('df-stage');
+    var idPrev    = document.getElementById('deal-id-preview');
+    var delBtn    = document.getElementById('df-delete-btn');
+
+    function sv(id, v){ var n=document.getElementById(id); if (n) n.value = (v==null?'':v); }
+    if (editId) {
+      var d = DEALS.find(function(x){ return x.id === editId; });
+      if (!d) return;
+      document.getElementById('df-edit-id').value = editId;
+      idPrev.textContent = editId;
+      _populateClientDropdown(clientSel, d.client_id);
+      _populateStageDropdown(stageSel, d.stage_id);
+      sv('df-name',     d.name);
+      sv('df-forecast', d.forecast_value);
+      sv('df-close',    d.expected_close_date);
+      sv('df-owner',    d.owner_id);
+      sv('df-source',   d.source);
+      sv('df-notes',    d.notes);
+      document.getElementById('df-type').value     = d.deal_type || 'new_business';
+      document.getElementById('df-currency').value = d.currency  || 'EUR';
+      if (delBtn) delBtn.style.display = '';
+    } else {
+      document.getElementById('df-edit-id').value = '';
+      idPrev.textContent = await nextDealId();
+      _populateClientDropdown(clientSel, presets.client_id || '');
+      _populateStageDropdown(stageSel, presets.stage_id || (PIPE_STAGES[0] && PIPE_STAGES[0].id));
+      ['df-name','df-forecast','df-close','df-owner','df-source','df-notes'].forEach(function(id){ sv(id,''); });
+      document.getElementById('df-type').value     = presets.deal_type || 'new_business';
+      document.getElementById('df-currency').value = 'EUR';
+      // If opened for a repeat customer, auto-suggest repeat type
+      if (presets.client_id) {
+        var cRec = (window.CLIENTS||[]).find(function(c){ return c.id===presets.client_id; });
+        if (cRec && (cRec.lifecycle_stage === 'client' || cRec.lifecycle_stage === 'customer')) {
+          document.getElementById('df-type').value = 'repeat';
+        }
+      }
+      if (delBtn) delBtn.style.display = 'none';
+    }
+    ov.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  };
+
+  window.closeDealModal = function() {
+    var ov = document.getElementById('deal-modal-overlay'); if (!ov) return;
+    ov.classList.remove('open');
+    document.body.style.overflow = '';
+  };
+
+  window.saveDeal = async function() {
+    function gv(id){ var n=document.getElementById(id); return n ? n.value.trim() : ''; }
+    var editId   = document.getElementById('df-edit-id').value;
+    var name     = gv('df-name');
+    var clientId = gv('df-client');
+    var stageId  = gv('df-stage');
+    if (!name)     { await window.lpAlert('Deal name is required.', { variant:'warn' }); return; }
+    if (!clientId) { await window.lpAlert('Please pick a customer.', { variant:'warn' }); return; }
+    if (!stageId)  { await window.lpAlert('Please pick a stage.',    { variant:'warn' }); return; }
+
+    var st = STAGE_BY_ID[stageId];
+    var payload = {
+      name:                name,
+      client_id:           clientId,
+      pipeline_id:         'PIPE-001',
+      stage_id:            stageId,
+      deal_type:           gv('df-type') || 'new_business',
+      forecast_value:      gv('df-forecast') ? parseFloat(gv('df-forecast')) : null,
+      currency:            gv('df-currency') || 'EUR',
+      expected_close_date: gv('df-close')   || null,
+      owner_id:            gv('df-owner')   || null,
+      source:              gv('df-source')  || null,
+      notes:               gv('df-notes')   || null,
+      updated_at:          new Date().toISOString()
+    };
+    if (st && (st.is_won || st.is_lost)) {
+      payload.closed_at = new Date().toISOString();
+      if (st.is_won) payload.closed_reason = 'Won';
+    }
+
+    var btn = document.getElementById('df-save-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      if (editId) {
+        await window.db.update('deals', '?id=eq.' + editId, payload);
+        if (window.toast) window.toast('Deal updated.', 'success');
+      } else {
+        payload.id = await nextDealId();
+        payload.stage_entered_at = new Date().toISOString();
+        try {
+          await window.db.insert('deals', payload);
+        } catch(insertErr) {
+          var msg = insertErr.message || '';
+          if (/23505|duplicate|unique/.test(msg)) {
+            var num = parseInt(payload.id.replace('DEA-',''),10)||0;
+            payload.id = 'DEA-' + ('000' + (num+1)).slice(-3);
+            await window.db.insert('deals', payload);
+          } else { throw insertErr; }
+        }
+        if (window.toast) window.toast('Deal ' + payload.id + ' created.', 'success');
+      }
+      window.closeDealModal();
+      await reloadDeals();
+      // Refresh Company 360 deals tab if open
+      if (window._c360ClientId && window.loadCompanyDeals) window.loadCompanyDeals(window._c360ClientId);
+      // Promote lifecycle: first deal makes a lead → prospect
+      try {
+        var c = (window.CLIENTS||[]).find(function(x){ return x.id === clientId; });
+        if (c && c.lifecycle_stage === 'lead') {
+          await window.db.update('clients', '?id=eq.' + clientId, { lifecycle_stage:'prospect', became_prospect_at:new Date().toISOString() });
+          if (window._reloadClientsFromDB) window._reloadClientsFromDB();
+        }
+      } catch(_){}
+    } catch(e) {
+      console.error('[CRM] saveDeal:', e);
+      var det = e.message || String(e);
+      var friendly = det;
+      if (/relation.*exist/i.test(det)) friendly = 'The deals table does not exist yet. Run the Phase 1 migration SQL.';
+      else if (/42501/.test(det))       friendly = 'Permission denied (RLS).';
+      if (window.toast) window.toast('Error saving deal: ' + friendly, 'error');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Save Deal'; }
+    }
+  };
+
+  window.deleteDeal = async function() {
+    var editId = document.getElementById('df-edit-id').value;
+    if (!editId) return;
+    window.deleteDealById(editId);
+  };
+  window.deleteDealById = async function(dealId) {
+    if (!dealId) return;
+    var d = DEALS.find(function(x){ return x.id === dealId; });
+    var label = d ? (dealId + ' — ' + d.name) : dealId;
+    if (!(await window.lpConfirm('Delete ' + label + '? This cannot be undone.', { title:'Delete deal', confirmLabel:'Delete', destructive:true }))) return;
+    try {
+      await window.db.delete('deals', '?id=eq.' + dealId);
+      if (window.toast) window.toast('Deal deleted.', 'success');
+      window.closeDealModal();
+      window.closeDealDetail();
+      await reloadDeals();
+      if (window._c360ClientId && window.loadCompanyDeals) window.loadCompanyDeals(window._c360ClientId);
+    } catch(e) {
+      if (window.toast) window.toast('Error deleting deal: ' + (e.message||e), 'error');
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Deal detail side-panel
+  // ─────────────────────────────────────────────────────────────────────
+  window._ddCurrentId = null;
+
+  window.openDealDetail = async function(dealId) {
+    if (!dealId) return;
+    if (!PIPE_STAGES.length) await loadPipelineMeta();
+    var d = DEALS.find(function(x){ return x.id === dealId; });
+    if (!d) {
+      try {
+        var rows = await window.db.select('deals', '?id=eq.' + dealId + '&limit=1');
+        d = rows && rows[0];
+      } catch(_){}
+    }
+    if (!d) return;
+    window._ddCurrentId = dealId;
+
+    var ov = document.getElementById('deal-detail-overlay');
+    var box = document.getElementById('deal-detail-box');
+    if (!ov) return;
+    ov.style.display = 'flex';
+    setTimeout(function(){ ov.style.opacity = '1'; if (box) box.style.transform = 'translateX(0)'; }, 10);
+    document.body.style.overflow = 'hidden';
+
+    document.getElementById('dd-id').textContent      = d.id;
+    document.getElementById('dd-name').textContent    = d.name || '—';
+    var companyEl = document.getElementById('dd-company');
+    var client = (window.CLIENTS||[]).find(function(c){ return c.id === d.client_id; }) || {};
+    companyEl.textContent = client.company || d.client_id || '—';
+    companyEl.onclick = d.client_id ? function(){
+      window.closeDealDetail();
+      setTimeout(function(){ window.openCompanyPage(d.client_id); }, 200);
+    } : null;
+
+    var st = STAGE_BY_ID[d.stage_id];
+    document.getElementById('dd-stage-pill').innerHTML = stagePill(st);
+    document.getElementById('dd-type-pill').innerHTML  = typeBadge(d.deal_type);
+
+    document.getElementById('dd-forecast').textContent = fmtMoneyFull(d.forecast_value, d.currency);
+    var prob = st ? (st.default_probability||0) : 0;
+    var weighted = (parseFloat(d.forecast_value)||0) * (prob/100);
+    document.getElementById('dd-weighted').textContent = fmtMoneyFull(weighted, d.currency) + '  (' + prob + '%)';
+    document.getElementById('dd-close').textContent    = fmtDate(d.expected_close_date);
+    document.getElementById('dd-owner').textContent    = d.owner_id || '—';
+    document.getElementById('dd-source').textContent   = d.source   || '—';
+    document.getElementById('dd-created').textContent  = fmtDate(d.created_at);
+    document.getElementById('dd-notes').textContent    = d.notes    || '—';
+
+    // Stage quick-change buttons
+    var stHost = document.getElementById('dd-stage-buttons');
+    stHost.innerHTML = PIPE_STAGES.map(function(s){
+      var active = s.id === d.stage_id;
+      var col = stageColor(s);
+      return '<button onclick="window._ddChangeStage(\'' + esc(s.id) + '\')" '
+        + 'style="background:' + (active?col:'transparent') + ';border:1px solid ' + col + ';color:' + (active?'var(--navy)':col) + ';font-size:10px;font-weight:700;letter-spacing:0.04em;padding:4px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">'
+        + esc(s.name)
+        + '</button>';
+    }).join('');
+
+    // Convert / Won / Lost buttons visibility
+    document.getElementById('dd-convert-btn').style.display = (st && st.is_won) ? '' : 'none';
+    document.getElementById('dd-won-btn').style.display     = (st && !st.is_won  && !st.is_lost) ? '' : 'none';
+    document.getElementById('dd-lost-btn').style.display    = (st && !st.is_lost && !st.is_won)  ? '' : 'none';
+
+    // Load linked quote(s) for this client and current link
+    var wrap = document.getElementById('dd-quote-wrap');
+    wrap.innerHTML = '<span style="color:var(--muted);font-size:12px;">Loading…</span>';
+    try {
+      var quotes = await window.db.select('pricing_quotes', '?client_id=eq.' + d.client_id + '&order=created_at.desc&limit=10');
+      quotes = quotes || [];
+      var options = '<option value="">— No quote linked —</option>' + quotes.map(function(q){
+        var lbl = q.name + (q.sell_price ? ' · ' + q.sell_price : '');
+        return '<option value="' + esc(q.id) + '"' + (q.deal_id === d.id ? ' selected' : '') + '>' + esc(lbl) + '</option>';
+      }).join('');
+      wrap.innerHTML = '<select id="dd-quote-select" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:7px 10px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;">' + options + '</select>'
+        + '<div style="margin-top:6px;">'
+        + '<button onclick="window._ddLinkQuote()" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-right:6px;">Link</button>'
+        + '<button onclick="window.openCalc && window.openCalc(\'pricing\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">New quote →</button>'
+        + '</div>';
+    } catch(e) {
+      wrap.innerHTML = '<span style="color:var(--muted);font-size:12px;">Run the Phase 1 migration to link quotes.</span>';
+    }
+  };
+
+  window._ddLinkQuote = async function() {
+    var sel = document.getElementById('dd-quote-select');
+    if (!sel || !window._ddCurrentId) return;
+    var quoteId = sel.value;
+    try {
+      // Unlink any currently-linked quote first (keep 1:1 for v1)
+      await window.db.update('pricing_quotes', '?deal_id=eq.' + window._ddCurrentId, { deal_id: null });
+      if (quoteId) await window.db.update('pricing_quotes', '?id=eq.' + quoteId, { deal_id: window._ddCurrentId });
+      if (window.toast) window.toast(quoteId ? 'Quote linked.' : 'Quote unlinked.', 'success');
+    } catch(e) {
+      if (window.toast) window.toast('Link failed: ' + (e.message||e), 'error');
+    }
+  };
+
+  window._ddChangeStage = async function(stageId) {
+    if (!window._ddCurrentId) return;
+    var d = DEALS.find(function(x){ return x.id === window._ddCurrentId; });
+    if (!d || d.stage_id === stageId) return;
+    var st = STAGE_BY_ID[stageId];
+    var payload = { stage_id: stageId, stage_entered_at: new Date().toISOString() };
+    if (st && st.is_won)  { payload.closed_at = new Date().toISOString(); payload.closed_reason = 'Won'; }
+    if (st && st.is_lost) { payload.closed_at = new Date().toISOString(); }
+    d.stage_id = stageId; d.stage_entered_at = payload.stage_entered_at;
+    try {
+      await window.db.update('deals', '?id=eq.' + d.id, payload);
+      window.openDealDetail(d.id);
+      renderPipeline();
+      if (window._c360ClientId && window.loadCompanyDeals) window.loadCompanyDeals(window._c360ClientId);
+      if (st && st.is_won && d.client_id) {
+        try {
+          await window.db.update('clients', '?id=eq.' + d.client_id, { lifecycle_stage:'client', became_client_at:new Date().toISOString() });
+          if (window._reloadClientsFromDB) window._reloadClientsFromDB();
+        } catch(_){}
+      }
+    } catch(e) {
+      if (window.toast) window.toast('Stage change failed: ' + (e.message||e), 'error');
+    }
+  };
+
+  window.markDealWon = function() {
+    var wonStage = PIPE_STAGES.find(function(s){ return s.is_won; });
+    if (wonStage) window._ddChangeStage(wonStage.id);
+  };
+  window.markDealLost = async function() {
+    var lostStage = PIPE_STAGES.find(function(s){ return s.is_lost; });
+    if (!lostStage) return;
+    var reason = await window.lpPrompt('Reason for losing this deal (optional):', '', { title:'Mark Lost', placeholder:'e.g. Price, competitor, timing' });
+    if (reason === null) return;
+    var d = DEALS.find(function(x){ return x.id === window._ddCurrentId; });
+    if (!d) return;
+    var payload = { stage_id: lostStage.id, stage_entered_at: new Date().toISOString(), closed_at: new Date().toISOString(), closed_reason: reason || 'Lost' };
+    d.stage_id = lostStage.id;
+    try {
+      await window.db.update('deals', '?id=eq.' + d.id, payload);
+      window.openDealDetail(d.id);
+      renderPipeline();
+    } catch(e) {
+      if (window.toast) window.toast('Failed: ' + (e.message||e), 'error');
+    }
+  };
+
+  window.convertDealToJob = async function() {
+    var d = DEALS.find(function(x){ return x.id === window._ddCurrentId; });
+    if (!d) return;
+    window.closeDealDetail();
+    setTimeout(function(){
+      if (window.openNewJobModal) {
+        window.openNewJobModal({ client_id: d.client_id, deal_id: d.id, product_name: d.name });
+      } else {
+        window.toast && window.toast('Open the Jobs tab and create a new job — prefill is only wired when openNewJobModal accepts presets.', 'info');
+      }
+    }, 220);
+  };
+
+  window.closeDealDetail = function() {
+    var ov = document.getElementById('deal-detail-overlay');
+    var box = document.getElementById('deal-detail-box');
+    if (!ov) return;
+    ov.style.opacity = '0';
+    if (box) box.style.transform = 'translateX(40px)';
+    setTimeout(function(){ ov.style.display = 'none'; }, 220);
+    document.body.style.overflow = '';
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Company 360: Deals tab loader
+  // ─────────────────────────────────────────────────────────────────────
+  window.loadCompanyDeals = async function(clientId) {
+    var tb = document.getElementById('c360-deals-tbody');
+    if (!tb) return;
+    tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
+    try {
+      if (!PIPE_STAGES.length) await loadPipelineMeta();
+      var rows = await window.db.select('deals', '?client_id=eq.' + clientId + '&order=created_at.desc');
+      if (!rows || !rows.length) {
+        tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No deals yet for this company.</td></tr>';
+        return;
+      }
+      tb.innerHTML = rows.map(function(d){
+        var st = STAGE_BY_ID[d.stage_id];
+        return '<tr style="cursor:pointer;" onclick="window.openDealDetail(\'' + esc(d.id) + '\')">'
+          + '<td style="color:var(--white);font-weight:700;">' + esc(d.name||'—') + '<div style="font-size:10px;color:var(--muted);font-weight:400;margin-top:2px;">' + esc(d.id) + '</div></td>'
+          + '<td>' + stagePill(st) + '</td>'
+          + '<td>' + typeBadge(d.deal_type) + '</td>'
+          + '<td style="color:var(--white);font-weight:700;">' + fmtMoneyFull(d.forecast_value, d.currency) + '</td>'
+          + '<td style="color:var(--muted);">' + fmtDate(d.expected_close_date) + '</td>'
+          + '<td style="color:var(--muted);">' + esc(d.owner_id||'—') + '</td>'
+          + '</tr>';
+      }).join('');
+    } catch(e) {
+      tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Run the Phase 1 migration to enable deals.</td></tr>';
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Contacts CRUD
+  // ─────────────────────────────────────────────────────────────────────
+  async function nextContactId() {
+    try {
+      var rows = await window.db.select('contacts', '?select=id');
+      var nums = (rows||[]).map(function(r){ return parseInt((r.id||'').replace(/^CON-/,''),10)||0; }).filter(function(n){return n>0;});
+      var mx = nums.length ? Math.max.apply(null, nums) : 0;
+      return 'CON-' + ('000' + (mx+1)).slice(-3);
+    } catch(e) { return 'CON-001'; }
+  }
+
+  window.loadCompanyContacts = async function(clientId) {
+    var tb = document.getElementById('c360-contacts-tbody');
+    if (!tb) return;
+    tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
+    try {
+      var rows = await window.db.select('contacts', '?client_id=eq.' + clientId + '&order=is_primary.desc,name.asc');
+      if (!rows || !rows.length) {
+        tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No contacts yet. Click <span style="color:var(--gold);">+ Add Contact</span> to create one.</td></tr>';
+        return;
+      }
+      tb.innerHTML = rows.map(function(c){
+        var email = c.email ? '<a href="mailto:' + esc(c.email) + '" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">' + esc(c.email) + '</a>' : '—';
+        var prim  = c.is_primary ? '<span style="color:var(--gold);font-weight:700;">✓ Primary</span>' : '<span style="color:var(--muted);">—</span>';
+        return '<tr>'
+          + '<td style="color:var(--white);font-weight:700;">' + esc(c.name||'—') + '</td>'
+          + '<td>' + esc(c.role_title||'—') + '</td>'
+          + '<td>' + email + '</td>'
+          + '<td style="color:var(--muted);">' + esc(c.phone||'—') + '</td>'
+          + '<td>' + prim + '</td>'
+          + '<td style="white-space:nowrap;">'
+          + '<button onclick="event.stopPropagation();window.openContactModal(\'' + esc(c.id) + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-right:6px;">Edit</button>'
+          + '<button onclick="event.stopPropagation();window.deleteContact(\'' + esc(c.id) + '\',\'' + esc(c.name||'').replace(/\x27/g,'\\\x27') + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Delete</button>'
+          + '</td>'
+          + '</tr>';
+      }).join('');
+    } catch(e) {
+      tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Run the Phase 1 migration to enable contacts.</td></tr>';
+    }
+  };
+
+  window.openContactModal = async function(editId) {
+    var ov = document.getElementById('contact-modal-overlay'); if (!ov) return;
+    function sv(id,v){ var n=document.getElementById(id); if(n) n.value = (v==null?'':v); }
+    function cb(id,v){ var n=document.getElementById(id); if(n) n.checked = !!v; }
+    var idPrev = document.getElementById('contact-id-preview');
+    if (editId) {
+      try {
+        var rows = await window.db.select('contacts', '?id=eq.' + editId + '&limit=1');
+        var c = rows && rows[0]; if (!c) return;
+        document.getElementById('ctf-edit-id').value  = editId;
+        document.getElementById('ctf-client-id').value = c.client_id || '';
+        idPrev.textContent = editId;
+        sv('ctf-name',  c.name);
+        sv('ctf-role',  c.role_title);
+        sv('ctf-email', c.email);
+        sv('ctf-phone', c.phone);
+        sv('ctf-notes', c.notes);
+        cb('ctf-primary', c.is_primary);
+      } catch(e) { return; }
+    } else {
+      document.getElementById('ctf-edit-id').value  = '';
+      document.getElementById('ctf-client-id').value = window._c360ClientId || '';
+      idPrev.textContent = await nextContactId();
+      ['ctf-name','ctf-role','ctf-email','ctf-phone','ctf-notes'].forEach(function(id){ sv(id,''); });
+      cb('ctf-primary', false);
+    }
+    ov.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  };
+
+  window.closeContactModal = function() {
+    var ov = document.getElementById('contact-modal-overlay'); if (!ov) return;
+    ov.classList.remove('open');
+    document.body.style.overflow = '';
+  };
+
+  window.saveContact = async function() {
+    function gv(id){ var n=document.getElementById(id); return n ? n.value.trim() : ''; }
+    var editId   = document.getElementById('ctf-edit-id').value;
+    var clientId = document.getElementById('ctf-client-id').value;
+    var name     = gv('ctf-name');
+    if (!name)     { await window.lpAlert('Name is required.', { variant:'warn' }); return; }
+    if (!clientId) { await window.lpAlert('No company context. Open a customer first.', { variant:'warn' }); return; }
+
+    var payload = {
+      client_id:  clientId,
+      name:       name,
+      role_title: gv('ctf-role')  || null,
+      email:      gv('ctf-email') || null,
+      phone:      gv('ctf-phone') || null,
+      is_primary: !!document.getElementById('ctf-primary').checked,
+      notes:      gv('ctf-notes') || null,
+      updated_at: new Date().toISOString()
+    };
+    var btn = document.getElementById('ctf-save-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      // If marking primary, demote other primaries for this client
+      if (payload.is_primary) {
+        try { await window.db.update('contacts', '?client_id=eq.' + clientId, { is_primary: false }); } catch(_){}
+      }
+      if (editId) {
+        await window.db.update('contacts', '?id=eq.' + editId, payload);
+        if (window.toast) window.toast('Contact updated.', 'success');
+      } else {
+        payload.id = await nextContactId();
+        try {
+          await window.db.insert('contacts', payload);
+        } catch(e) {
+          var msg = e.message || '';
+          if (/23505|duplicate|unique/.test(msg)) {
+            var num = parseInt(payload.id.replace('CON-',''),10)||0;
+            payload.id = 'CON-' + ('000' + (num+1)).slice(-3);
+            await window.db.insert('contacts', payload);
+          } else { throw e; }
+        }
+        if (window.toast) window.toast('Contact ' + payload.id + ' added.', 'success');
+      }
+      window.closeContactModal();
+      if (window.loadCompanyContacts) window.loadCompanyContacts(clientId);
+    } catch(e) {
+      console.error('[CRM] saveContact:', e);
+      var det = e.message || String(e);
+      var friendly = det;
+      if (/relation.*exist/i.test(det)) friendly = 'The contacts table does not exist yet. Run the Phase 1 migration SQL.';
+      if (window.toast) window.toast('Error: ' + friendly, 'error');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Save Contact'; }
+    }
+  };
+
+  window.deleteContact = async function(id, name) {
+    if (!(await window.lpConfirm('Delete contact "' + (name||id) + '"?', { title:'Delete contact', confirmLabel:'Delete', destructive:true }))) return;
+    try {
+      await window.db.delete('contacts', '?id=eq.' + id);
+      if (window.toast) window.toast('Contact deleted.', 'success');
+      if (window._c360ClientId && window.loadCompanyContacts) window.loadCompanyContacts(window._c360ClientId);
+    } catch(e) {
+      if (window.toast) window.toast('Error: ' + (e.message||e), 'error');
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Pipeline page event wiring
+  // ─────────────────────────────────────────────────────────────────────
+  function _bindPipeControls() {
+    var s = document.getElementById('pipe-search');
+    if (s) s.addEventListener('input', function(){ _pipeState.search = this.value.trim().toLowerCase(); renderPipeline(); });
+    var o = document.getElementById('pipe-owner-filter');
+    if (o) o.addEventListener('change', function(){ _pipeState.owner = this.value; renderPipeline(); });
+    var t = document.getElementById('pipe-type-filter');
+    if (t) t.addEventListener('change', function(){ _pipeState.type = this.value; renderPipeline(); });
+    var h = document.getElementById('pipe-hide-closed');
+    if (h) h.addEventListener('change', function(){ _pipeState.hideClosed = !!this.checked; renderPipeline(); });
+    var vk = document.getElementById('pipe-view-kanban');
+    var vl = document.getElementById('pipe-view-list');
+    function setView(v) {
+      _pipeView = v;
+      var isK = v === 'kanban';
+      if (vk) { vk.style.background = isK ? 'var(--gold)' : 'transparent'; vk.style.color = isK ? 'var(--navy)' : 'var(--muted)'; }
+      if (vl) { vl.style.background = !isK ? 'var(--gold)' : 'transparent'; vl.style.color = !isK ? 'var(--navy)' : 'var(--muted)'; }
+      document.getElementById('pipe-kanban').style.display = isK ? '' : 'none';
+      document.getElementById('pipe-list').style.display   = isK ? 'none' : '';
+      renderPipeline();
+    }
+    if (vk) vk.addEventListener('click', function(){ setView('kanban'); });
+    if (vl) vl.addEventListener('click', function(){ setView('list');   });
+  }
+
+  window.loadPipelinePage = async function() {
+    if (!PIPE_STAGES.length) await loadPipelineMeta();
+    await reloadDeals();
+  };
+
+  // Initial async load so KPIs + any mid-nav land fast
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function(){ _bindPipeControls(); setTimeout(function(){ loadPipelineMeta().then(reloadDeals); }, 600); });
+  } else {
+    _bindPipeControls();
+    setTimeout(function(){ loadPipelineMeta().then(reloadDeals); }, 600);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //  Pricing ↔ CRM glue
+  // ─────────────────────────────────────────────────────────────────────
+  // Populate the pricing "Link to Customer" dropdown whenever the pricing
+  // tool is opened. We hook via a setTimeout poll because the tool might
+  // be opened multiple times and we want fresh customer data.
+  window._populateQuoteClientDropdown = function(preselectId) {
+    var sel = document.getElementById('quoteClientId');
+    if (!sel) return;
+    var clients = (window.CLIENTS||[]).slice().sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
+    var current = preselectId || sel.value;
+    sel.innerHTML = '<option value="">— Standalone quote (no customer) —</option>' + clients.map(function(c){
+      return '<option value="' + c.id + '">' + (c.company ? c.company.replace(/</g,'&lt;') : c.id) + '</option>';
+    }).join('');
+    if (current) sel.value = current;
+    window._onQuoteClientChange();
+  };
+
+  window._onQuoteClientChange = async function() {
+    var sel     = document.getElementById('quoteClientId');
+    var dealSel = document.getElementById('quoteDealId');
+    var nameInp = document.getElementById('customerName');
+    if (!sel || !dealSel) return;
+    var clientId = sel.value;
+    if (!clientId) {
+      dealSel.innerHTML = '<option value="">— No deal —</option>';
+      dealSel.disabled = true;
+      return;
+    }
+    // Mirror the picked customer into the free-text field so it prints on the quote header
+    var c = (window.CLIENTS||[]).find(function(x){ return x.id === clientId; });
+    if (c && nameInp && (!nameInp.value || nameInp.dataset.autoFilled === '1')) {
+      nameInp.value = c.company || '';
+      nameInp.dataset.autoFilled = '1';
+      if (typeof window.updateSummary === 'function') window.updateSummary();
+    }
+    // Load deals for this client into the deal dropdown
+    dealSel.disabled = false;
+    dealSel.innerHTML = '<option value="">— No deal —</option><option value="">Loading…</option>';
+    try {
+      var rows = await window.db.select('deals', '?client_id=eq.' + clientId + '&order=created_at.desc');
+      var opts = '<option value="">— No deal —</option>' + (rows||[]).map(function(d){
+        return '<option value="' + d.id + '">' + d.id + ' · ' + (d.name||'').replace(/</g,'&lt;') + '</option>';
+      }).join('');
+      dealSel.innerHTML = opts;
+    } catch(e) {
+      dealSel.innerHTML = '<option value="">— No deal —</option>';
+    }
+  };
+
+  // Hook into showToolCalc so the dropdown is populated on open
+  (function wrapShowToolCalc(){
+    var orig = window.showToolCalc;
+    if (typeof orig !== 'function') {
+      // Poll until it exists
+      var tries = 0;
+      var iv = setInterval(function(){
+        tries++;
+        if (typeof window.showToolCalc === 'function') {
+          clearInterval(iv);
+          wrapShowToolCalc();
+        } else if (tries > 60) {
+          clearInterval(iv);
+        }
+      }, 100);
+      return;
+    }
+    window.showToolCalc = function(name) {
+      var r = orig.apply(this, arguments);
+      if (name === 'pricing') {
+        setTimeout(function(){ window._populateQuoteClientDropdown(); }, 150);
+      }
+      return r;
+    };
+  })();
+
+  // Create Deal from Quote
+  window.createDealFromQuote = async function(quoteId) {
+    if (!quoteId) return;
+    try {
+      var rows = await window.db.select('pricing_quotes', '?id=eq.' + quoteId + '&limit=1');
+      var q = rows && rows[0]; if (!q) { window.toast && window.toast('Quote not found.', 'error'); return; }
+      if (!q.client_id) { await window.lpAlert('This quote is not linked to a customer. Open it and pick a customer first.', { variant:'warn' }); return; }
+      // Parse sell price if numeric-ish
+      var forecast = null;
+      if (q.sell_price) {
+        var m = String(q.sell_price).replace(/[^0-9.,]/g,'').replace(/,/g,'');
+        var n = parseFloat(m); if (!isNaN(n)) forecast = n;
+      }
+      window.closeSavedQuotes && window.closeSavedQuotes();
+      setTimeout(async function(){
+        await window.openDealModal(null, { client_id: q.client_id });
+        // Pre-fill name and forecast in the now-open modal
+        var nameInp  = document.getElementById('df-name');
+        var foreInp  = document.getElementById('df-forecast');
+        if (nameInp && !nameInp.value) nameInp.value = q.name || q.product || 'New deal';
+        if (foreInp && forecast != null) foreInp.value = forecast;
+        // Jump the stage to "Quote Sent" if it exists
+        var stageSel = document.getElementById('df-stage');
+        var qsent = (window.PIPE_STAGES||[]).find(function(s){ return /quote/i.test(s.name); });
+        if (stageSel && qsent) stageSel.value = qsent.id;
+        // Stash the quote id so saveDeal can link it after insert
+        window._pendingQuoteLink = q.id;
+      }, 240);
+    } catch(e) {
+      window.toast && window.toast('Could not create deal: ' + (e.message||e), 'error');
+    }
+  };
+
+  // After saveDeal succeeds, auto-link a pending quote
+  var _origSaveDeal = window.saveDeal;
+  window.saveDeal = async function() {
+    var wasNew = !document.getElementById('df-edit-id').value;
+    var pending = window._pendingQuoteLink;
+    await _origSaveDeal.apply(this, arguments);
+    if (wasNew && pending) {
+      // Find the newest deal for the current client
+      setTimeout(async function(){
+        try {
+          var latest = (window.DEALS||[])[0];
+          if (latest) await window.db.update('pricing_quotes', '?id=eq.' + pending, { deal_id: latest.id });
+          window._pendingQuoteLink = null;
+        } catch(_){}
+      }, 300);
+    }
   };
 })();
 </script>
@@ -11200,6 +12466,7 @@ window.loadBoms = async function initBoms() {
     if (name === 'overview' && typeof window.loadPendingBomApprovals === 'function') setTimeout(window.loadPendingBomApprovals, 300);
     if (name === 'overview' && typeof window.loadOverviewCurrentJobs === 'function') setTimeout(window.loadOverviewCurrentJobs, 100);
     if (name === 'overview' && typeof window.loadGndPortfolio === 'function') setTimeout(window.loadGndPortfolio, 350);
+    if (name === 'pipeline' && typeof window.loadPipelinePage === 'function') setTimeout(window.loadPipelinePage, 100);
     if (name === 'overview' && typeof window.loadOverviewMyRoster === 'function') setTimeout(window.loadOverviewMyRoster, 150);
     if (name === 'overview' && typeof window.loadOverviewAttendance === 'function') setTimeout(window.loadOverviewAttendance, 250);
     if (name === 'overview') setTimeout(function() {
