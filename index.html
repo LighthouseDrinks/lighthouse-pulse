@@ -9188,8 +9188,8 @@ window.loadBoms = async function initBoms() {
       <button class="btn btn-gold" onclick="window.openDealModal && window.openDealModal()" style="font-size:12px;">+ New Deal</button>
     </div>
 
-    <!-- Kanban board (horizontal scroll) -->
-    <div id="pipe-kanban" style="display:flex;gap:8px;padding:10px;overflow-x:auto;overflow-y:hidden;align-items:stretch;min-height:520px;scroll-snap-type:x proximity;"></div>
+    <!-- Kanban board: empty stages collapse to 44px rails, populated stages share remaining width fluidly -->
+    <div id="pipe-kanban" style="display:flex;gap:6px;padding:10px;overflow-x:auto;overflow-y:hidden;align-items:stretch;min-height:520px;"></div>
 
     <!-- List view -->
     <div id="pipe-list" style="display:none;padding:0 4px;">
@@ -10176,9 +10176,23 @@ window.loadBoms = async function initBoms() {
       var col   = stageColor(s);
       var deals = byStage[s.id] || [];
       var sum   = deals.reduce(function(a,d){ return a + (parseFloat(d.forecast_value)||0); }, 0);
+
+      if (!deals.length) {
+        // Collapsed rail: 44px wide, vertical text, still a valid drop target, click to expand (temporarily)
+        return '<div class="pipe-col pipe-col-empty" data-stage-id="' + esc(s.id) + '" '
+          + 'ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
+          + 'onclick="window._pipeExpandCol(\'' + esc(s.id) + '\')" '
+          + 'title="' + esc(s.name) + ' — click to expand" '
+          + 'style="flex:0 0 44px;min-width:44px;max-width:44px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:10px 0 8px;cursor:pointer;transition:background .15s,flex-basis .2s;">'
+          + '<div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;letter-spacing:0.1em;text-transform:uppercase;font-weight:700;color:' + col + ';white-space:nowrap;line-height:1.2;">' + esc(s.name) + '</div>'
+          + '<div style="font-size:9px;color:var(--muted);font-weight:700;background:var(--navy-mid);border:1px solid var(--navy-border);padding:2px 5px;border-radius:10px;">0</div>'
+          + '</div>';
+      }
+
+      var forceExpand = (window._pipeExpandedId === s.id) ? ' box-shadow:0 0 0 1px var(--gold-dim);' : '';
       var cardsHtml = deals.map(renderCard).join('');
       return '<div class="pipe-col" data-stage-id="' + esc(s.id) + '" ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
-        + 'style="flex:0 0 280px;min-width:280px;max-width:280px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;scroll-snap-align:start;transition:background .15s;">'
+        + 'style="flex:1 1 200px;min-width:200px;max-width:340px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s,flex-basis .2s;' + forceExpand + '">'
         + '<div style="padding:10px 12px;border-bottom:1px solid var(--navy-border);display:flex;align-items:flex-start;justify-content:space-between;gap:6px;">'
         +   '<div style="min-width:0;flex:1;">'
         +     '<div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;font-weight:700;color:' + col + ';line-height:1.2;">' + esc(s.name) + '</div>'
@@ -10193,25 +10207,55 @@ window.loadBoms = async function initBoms() {
     host.innerHTML = html;
   }
 
+  // Temporarily expand an empty rail (simulates a deal existing so the full column renders once)
+  window._pipeExpandCol = function(stageId) {
+    if (window._pipeExpandedId === stageId) {
+      window._pipeExpandedId = null;
+    } else {
+      window._pipeExpandedId = stageId;
+    }
+    // Nudge: render a "full" column skeleton by mutating the DOM directly (no data change)
+    var col = document.querySelector('.pipe-col[data-stage-id="' + stageId + '"]');
+    if (!col) return;
+    var s = STAGE_BY_ID[stageId]; if (!s) return;
+    if (window._pipeExpandedId === stageId) {
+      var color = stageColor(s);
+      col.classList.remove('pipe-col-empty');
+      col.style.cssText = 'flex:1 1 200px;min-width:200px;max-width:340px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + color + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s,flex-basis .2s;box-shadow:0 0 0 1px var(--gold-dim);';
+      col.onclick = null;
+      col.innerHTML =
+        '<div style="padding:10px 12px;border-bottom:1px solid var(--navy-border);display:flex;align-items:flex-start;justify-content:space-between;gap:6px;">'
+        + '<div style="min-width:0;flex:1;"><div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;font-weight:700;color:' + color + ';line-height:1.2;">' + esc(s.name) + '</div>'
+        + '<div style="font-size:10px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums;">0 · <span style="color:var(--text);">€0</span></div></div>'
+        + '<div style="font-size:9px;color:var(--muted);font-weight:700;background:var(--navy-mid);border:1px solid var(--navy-border);padding:2px 5px;border-radius:10px;flex:0 0 auto;">' + (s.default_probability||0) + '%</div></div>'
+        + '<div class="pipe-col-body" style="padding:8px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:60px;">'
+        + '<div style="font-size:10px;color:var(--muted);text-align:center;padding:14px 6px;opacity:0.7;border:1px dashed var(--navy-border);border-radius:4px;">Drop deal here, or click <span style="color:var(--gold);cursor:pointer;" onclick="event.stopPropagation();window._pipeExpandedId=null;window.renderPipeline();">collapse</span></div>'
+        + '</div>';
+    } else {
+      renderPipeline();
+    }
+  };
+
   function renderCard(d) {
     var client = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; }) || {};
     var nameTxt = d.name || 'Untitled deal';
     var ageDays = d.stage_entered_at ? Math.max(0, Math.floor((Date.now() - new Date(d.stage_entered_at).getTime())/86400000)) : null;
     var ageCol  = ageDays == null ? 'var(--muted)' : (ageDays > 30 ? 'var(--red)' : ageDays > 14 ? 'var(--amber)' : 'var(--muted)');
-    var ageTxt  = ageDays == null ? '—' : (ageDays + 'd');
+    var ageTxt  = ageDays == null ? '' : (ageDays + 'd');
+    var ownerBadge = d.owner_id ? '<span title="' + esc(d.owner_id) + '" style="width:16px;height:16px;border-radius:50%;background:var(--navy-border);color:var(--text);font-size:8px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;">' + esc(ownerInitials(d.owner_id)) + '</span>' : '';
     return '<div class="pipe-card" draggable="true" ondragstart="window._pipeDragStart(event,this)" ondragend="window._pipeDragEnd(event,this)" onclick="window.openDealDetail(\'' + esc(d.id) + '\')" '
-      + 'data-deal-id="' + esc(d.id) + '" '
-      + 'style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;padding:8px 10px;cursor:pointer;transition:border-color .15s,transform .05s,box-shadow .15s;" '
+      + 'data-deal-id="' + esc(d.id) + '" title="' + esc(nameTxt) + (client.company?' — '+esc(client.company):'') + '" '
+      + 'style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;padding:7px 9px;cursor:pointer;transition:border-color .15s,transform .05s,box-shadow .15s;" '
       + 'onmouseover="this.style.borderColor=\'var(--gold-dim)\';this.style.boxShadow=\'0 2px 8px rgba(0,0,0,0.3)\';" onmouseout="this.style.borderColor=\'var(--navy-border)\';this.style.boxShadow=\'none\';">'
-      + '<div style="font-size:12px;font-weight:700;color:var(--white);line-height:1.3;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">' + esc(nameTxt) + '</div>'
-      + '<div style="font-size:10px;color:var(--muted);margin-bottom:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(client.company || d.client_id || '—') + '</div>'
+      + '<div style="font-size:12px;font-weight:700;color:var(--white);line-height:1.3;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">' + esc(nameTxt) + '</div>'
+      + '<div style="font-size:10px;color:var(--muted);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(client.company || d.client_id || '—') + '</div>'
       + '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">'
-      +   '<div style="font-size:13px;font-weight:700;color:var(--gold);font-variant-numeric:tabular-nums;">' + fmtMoney(d.forecast_value, d.currency) + '</div>'
-      +   typeBadge(d.deal_type)
-      + '</div>'
-      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.04);">'
-      +   '<div style="font-size:9px;color:' + ageCol + ';font-weight:600;">' + ageTxt + ' in stage</div>'
-      +   (d.owner_id ? '<div title="' + esc(d.owner_id) + '" style="width:20px;height:20px;border-radius:50%;background:var(--navy-border);color:var(--text);font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;">' + esc(ownerInitials(d.owner_id)) + '</div>' : '<div></div>')
+      +   '<div style="font-size:12px;font-weight:700;color:var(--gold);font-variant-numeric:tabular-nums;">' + fmtMoney(d.forecast_value, d.currency) + '</div>'
+      +   '<div style="display:inline-flex;align-items:center;gap:5px;">'
+      +     (ageTxt ? '<span style="font-size:9px;color:' + ageCol + ';font-weight:600;">' + ageTxt + '</span>' : '')
+      +     ownerBadge
+      +     typeBadge(d.deal_type)
+      +   '</div>'
       + '</div>'
       + '</div>';
   }
