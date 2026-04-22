@@ -6255,11 +6255,25 @@ window.backToToolsGrid = function() {
         if (r.client_id && !r.deal_id) {
           createDealBtn = '<button onclick="window.createDealFromQuote(\'' + esc(r.id) + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">+ Deal</button>';
         }
+        // Sent stamp — only appears once the quote has actually been emailed.
+        // Shows "✉ Sent to <recipient> on <date>" in emerald green so it stands out.
+        var sentPill = '';
+        if (r.last_emailed_at) {
+          var sentDate = new Date(r.last_emailed_at).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'});
+          var sentTime = new Date(r.last_emailed_at).toLocaleTimeString('en-IE', {hour:'2-digit',minute:'2-digit'});
+          var sentTo   = r.last_emailed_to ? esc(r.last_emailed_to) : 'client';
+          var sentBy   = r.last_emailed_by ? (' by ' + esc(r.last_emailed_by)) : '';
+          sentPill = '<span title="Emailed ' + sentDate + ' ' + sentTime + sentBy + '" '
+                   + 'style="display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,0.12);'
+                   + 'border:1px solid rgba(34,197,94,0.45);color:#4ade80;font-size:9px;font-weight:700;'
+                   + 'padding:2px 6px;border-radius:3px;letter-spacing:0.04em;">'
+                   + '&#9993; Sent to ' + sentTo + ' &middot; ' + sentDate + '</span>';
+        }
         return '<div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--navy-border);">'
           + '<div style="flex:1;min-width:0;">'
           + '<div style="font-weight:700;color:var(--white);font-size:14px;margin-bottom:2px;">' + esc(r.name) + '</div>'
           + '<div style="font-size:11px;color:var(--muted);margin-bottom:2px;">' + sub + '</div>'
-          + (linkBadge ? '<div style="margin-bottom:4px;">' + linkBadge + '</div>' : '')
+          + (linkBadge || sentPill ? '<div style="margin-bottom:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;">' + linkBadge + sentPill + '</div>' : '')
           + '<div style="font-size:10px;color:var(--muted);opacity:0.7;">' + date + (r.created_by ? ' &nbsp;·&nbsp; ' + esc(r.created_by) : '') + '</div>'
           + '</div>'
           + '<div style="text-align:right;white-space:nowrap;min-width:70px;">'
@@ -6268,7 +6282,7 @@ window.backToToolsGrid = function() {
           + '</div>'
           + '<div style="display:flex;flex-direction:column;gap:6px;margin-left:8px;">'
           + '<button onclick="window.loadQuote(\'' + esc(r.id) + '\')" style="background:var(--gold);border:none;color:var(--navy);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;white-space:nowrap;">Load</button>'
-          + '<button onclick="window.openQuoteEmail(\'' + esc(r.id) + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">&#9993; Email</button>'
+          + '<button onclick="window.openQuoteEmail(\'' + esc(r.id) + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">&#9993; ' + (r.last_emailed_at ? 'Re-send' : 'Email') + '</button>'
           + createDealBtn
           + '<button onclick="window.deleteQuote(\'' + esc(r.id) + '\',\'' + esc(r.name).replace(/'/g,'\\\'') + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">Delete</button>'
           + '</div>'
@@ -6367,21 +6381,39 @@ window.backToToolsGrid = function() {
   }
 
   async function _logQuoteEmailActivity(comp) {
+    var nowIso = new Date().toISOString();
+    var sender = (window.CURRENT_USER && window.CURRENT_USER.display_name)
+              || (window.CURRENT_USER && window.CURRENT_USER.email)
+              || null;
+
+    // 1) Stamp the quote row itself so the Saved Quotes list can show
+    //    "✉ Sent to X on Y" without having to join against crm_activities.
+    try {
+      await window.db.update('pricing_quotes', '?id=eq.' + comp.ctx.quote.id, {
+        last_emailed_at: nowIso,
+        last_emailed_to: comp.to,
+        last_emailed_by: sender
+      });
+    } catch(e) {
+      // Columns may not exist yet in older environments — warn once, don't block.
+      if (window.console) console.warn('[Email Quote] stamp skipped (run the last_emailed_* ALTER):', e && e.message);
+    }
+
+    // 2) Drop an entry on the Company 360 timeline too.
     try {
       var cid = comp.ctx.quote.client_id;
       if (!cid) return;
       await window.db.insert('crm_activities', {
         entity_type: 'company',
         entity_id:   cid,
-        type:        'system',
+        type:        'email',
         subject:     '\u2709 Quote emailed: ' + (comp.ctx.quote.name || comp.ctx.quote.id),
         body:        'To: ' + comp.to + (comp.cc ? '  |  Cc: ' + comp.cc : '') + (comp.notes ? '\n\n' + comp.notes : ''),
         owner_id:    (window.CURRENT_USER && window.CURRENT_USER.app_user_id) || null,
-        occurred_at: new Date().toISOString(),
-        created_at:  new Date().toISOString()
+        occurred_at: nowIso,
+        created_at:  nowIso
       });
     } catch(e) {
-      // Best-effort; never block the user's email flow on telemetry.
       if (window.console) console.warn('[Email Quote] activity log skipped:', e && e.message);
     }
   }
@@ -6494,6 +6526,7 @@ window.backToToolsGrid = function() {
     await _logQuoteEmailActivity(c);
     window.toast('Email opened in your mail app — review and click Send.', 'success');
     setTimeout(window.closeQuoteEmail, 200);
+    setTimeout(_renderQuotesList, 400); // refresh Sent stamp on the list behind
   };
 
   window.sendQuoteEmailGmail = async function() {
@@ -6508,6 +6541,7 @@ window.backToToolsGrid = function() {
     await _logQuoteEmailActivity(c);
     window.toast('Gmail compose opened in a new tab — review and click Send.', 'success');
     setTimeout(window.closeQuoteEmail, 200);
+    setTimeout(_renderQuotesList, 400); // refresh Sent stamp on the list behind
   };
 })();
 </script>
