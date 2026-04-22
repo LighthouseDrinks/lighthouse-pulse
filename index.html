@@ -12891,7 +12891,7 @@ window.loadBoms = async function initBoms() {
   function healthDot(c) {
     // Simple heuristic: green if active job <90d, amber 90-180d, red 180d+ or churned
     if (c.lifecycle_stage === 'churned') return { color:'var(--red)', title:'Churned' };
-    var m = CUST_METRICS[c.id];
+    var m = (CUST_METRICS || {})[c.id];
     var last = m && m.lastJobDate;
     if (!last) return { color:'var(--muted)', title:'No jobs yet' };
     var days = Math.floor((Date.now() - new Date(last).getTime()) / 86400000);
@@ -12939,7 +12939,10 @@ window.loadBoms = async function initBoms() {
       ? '<a href="mailto:' + emailEsc + '" style="color:var(--gold);text-decoration:none;" onclick="event.stopPropagation()">' + emailEsc + '</a>'
       : '—';
     var cid = esc(c.id);
-    var m = CUST_METRICS[c.id] || {};
+    // Guard: CUST_METRICS is declared later in the IIFE (hoisting = undefined
+    // on first render). Without the ||{} the initial render throws "Cannot
+    // read properties of undefined (reading 'CLI-025')" and breaks downstream.
+    var m = (CUST_METRICS || {})[c.id] || {};
     var ltvTxt = m.ltv ? fmtLTV(m.ltv) + ' btls' : '—';
     var lastTxt = fmtDate(m.lastJobDate);
     var h = healthDot(c);
@@ -34369,35 +34372,69 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 <script>
 window._lpNewQuoteCustomer = function(ev) {
   try { if (ev && ev.preventDefault) ev.preventDefault(); } catch(_){}
-
-  // Audible proof the click landed — visible toast if available, else console.
   try { window.console && console.log('[+ New customer] click received'); } catch(_){}
 
-  // Tier 1 — the full glue path (auto-relinks the new customer to the quote).
+  // Helper — verify the modal is ACTUALLY visible after we tried to open it.
+  // If openClientModal returned without error but the DOM didn't react, this
+  // catches the silent "open failed" case (CSS override, missing element, etc).
+  function verifyOpen(label) {
+    setTimeout(function(){
+      var ov = document.getElementById('client-modal-overlay');
+      if (!ov) {
+        console.error('[+ New customer] ' + label + ' returned but #client-modal-overlay is missing from the DOM');
+        (window.toast || alert)('Customer modal element missing from page. Refresh and try again.');
+        return;
+      }
+      var hasOpen = ov.classList.contains('open');
+      var cs = window.getComputedStyle(ov);
+      console.log('[+ New customer] post-' + label + ' check:',
+        'hasOpenClass=' + hasOpen,
+        'display=' + cs.display,
+        'visibility=' + cs.visibility,
+        'zIndex=' + cs.zIndex,
+        'opacity=' + cs.opacity);
+      if (!hasOpen) {
+        console.warn('[+ New customer] ' + label + ' did not add .open class — something exited early.');
+        (window.toast || alert)('Customer modal did not open — see console for reason.');
+      } else if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) {
+        console.warn('[+ New customer] modal has .open but is hidden by CSS — display=' + cs.display + ' opacity=' + cs.opacity);
+        (window.toast || alert)('Customer modal opened but is being hidden by CSS. See console for details.');
+      }
+    }, 80);
+  }
+
+  // Tier 1 — full glue path (auto-relinks new customer to the quote).
   if (typeof window.quickAddCustomerForQuote === 'function') {
+    console.log('[+ New customer] tier 1: calling quickAddCustomerForQuote');
     try {
       window.quickAddCustomerForQuote();
+      verifyOpen('quickAddCustomerForQuote');
       return;
     } catch (err) {
       console.error('[+ New customer] quickAddCustomerForQuote threw:', err);
       // fall through
     }
+  } else {
+    console.warn('[+ New customer] tier 1 skipped: window.quickAddCustomerForQuote is not a function');
   }
 
-  // Tier 2 — just open the customer modal. No auto-relink, but the user can
-  // pick the new row from the dropdown once they've saved.
+  // Tier 2 — just open the customer modal, no auto-relink.
   if (typeof window.openClientModal === 'function') {
+    console.log('[+ New customer] tier 2: calling openClientModal directly');
     try {
       window.openClientModal();
       if (window.toast) {
         window.toast('After saving, re-open the customer dropdown to pick your new entry.', 'info');
       }
+      verifyOpen('openClientModal');
       return;
     } catch (err) {
       console.error('[+ New customer] openClientModal threw:', err);
       (window.toast || alert)('Could not open customer form: ' + (err && err.message || err));
       return;
     }
+  } else {
+    console.warn('[+ New customer] tier 2 skipped: window.openClientModal is not a function');
   }
 
   // Tier 3 — neither handler exists. Shout.
