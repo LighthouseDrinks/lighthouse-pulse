@@ -11424,16 +11424,43 @@ window.loadBoms = async function initBoms() {
   // Populate the pricing "Link to Customer" dropdown whenever the pricing
   // tool is opened. We hook via a setTimeout poll because the tool might
   // be opened multiple times and we want fresh customer data.
-  window._populateQuoteClientDropdown = function(preselectId) {
+  window._populateQuoteClientDropdown = async function(preselectId) {
     var sel = document.getElementById('quoteClientId');
     if (!sel) return;
-    var clients = (window.CLIENTS||[]).slice().sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
+
+    // If the in-memory cache is empty (pricing opened before Customers page
+    // has ever been visited), pull rows straight from the DB so the dropdown
+    // is never stuck on "— Pick a customer —" with nothing behind it.
+    var clients = (window.CLIENTS || []).slice();
+    if (!clients.length) {
+      try {
+        sel.innerHTML = '<option value="">Loading customers…</option>';
+        sel.disabled = true;
+        var rows = await window.db.select('clients', '?select=id,name&order=name.asc');
+        clients = (rows || []).map(function(r){ return { id: r.id, company: r.name }; });
+        // Also backfill the global cache so the next opener is instant
+        if (Array.isArray(window.CLIENTS) && !window.CLIENTS.length) {
+          (rows || []).forEach(function(r){
+            window.CLIENTS.push({ id: r.id, company: r.name, contact:'', email:'', phone:'', country:'', lifecycle_stage:'lead', referred_by:'', industry:'', website:'', address:'' });
+          });
+        }
+      } catch(e) {
+        console.error('[pricing] customer dropdown DB fallback failed:', e);
+        sel.disabled = false;
+        sel.innerHTML = '<option value="">— Pick a customer —</option>';
+        return;
+      }
+      sel.disabled = false;
+    }
+
+    clients.sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
     var current = preselectId || sel.value;
     sel.innerHTML = '<option value="">— Pick a customer —</option>' + clients.map(function(c){
-      return '<option value="' + c.id + '">' + (c.company ? c.company.replace(/</g,'&lt;') : c.id) + '</option>';
+      var label = c.company || c.id;
+      return '<option value="' + c.id + '">' + label.replace(/</g,'&lt;') + '</option>';
     }).join('');
     if (current) sel.value = current;
-    window._onQuoteClientChange();
+    if (typeof window._onQuoteClientChange === 'function') window._onQuoteClientChange();
   };
 
   // Quick-add a customer from inside the pricing tool without navigating away.
