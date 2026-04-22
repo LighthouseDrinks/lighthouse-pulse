@@ -6042,7 +6042,31 @@ window.backToToolsGrid = function() {
       <button class="modal-close" onclick="window.closeSavedQuotes()">✕</button>
     </div>
     <div style="margin:-6px 20px 10px;padding:6px 10px;border:1px dashed var(--gold-dim);border-radius:3px;background:rgba(201,168,76,0.06);font-size:10px;color:var(--gold);letter-spacing:0.06em;text-transform:uppercase;font-weight:700;text-align:center;">All quotes &mdash; Ex VAT &middot; Ex Excise Duty &middot; Ex Shipping</div>
-    <div id="saved-quotes-list" style="max-height:460px;overflow-y:auto;padding:4px 0;">
+
+    <!-- Filter bar — three compact controls + result count.
+         All filtering happens client-side in _renderQuotesList using
+         window._quoteFilterState. Persisted per-session via _quoteFilterState. -->
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:0 20px 10px;">
+      <input id="qf-search" type="text" placeholder="Search name, customer, product…"
+        oninput="window._onQuoteFilterChange && window._onQuoteFilterChange()"
+        style="flex:1;min-width:140px;background:var(--navy-med);border:1px solid var(--navy-border);color:var(--text);padding:6px 10px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
+      <select id="qf-customer" onchange="window._onQuoteFilterChange && window._onQuoteFilterChange()"
+        style="background:var(--navy-med);border:1px solid var(--navy-border);color:var(--text);padding:6px 8px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;max-width:180px;">
+        <option value="">All customers</option>
+      </select>
+      <select id="qf-status" onchange="window._onQuoteFilterChange && window._onQuoteFilterChange()"
+        style="background:var(--navy-med);border:1px solid var(--navy-border);color:var(--text);padding:6px 8px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
+        <option value="">All status</option>
+        <option value="draft">Draft (not sent)</option>
+        <option value="sent">Sent</option>
+        <option value="deal">Linked to deal</option>
+      </select>
+      <button type="button" onclick="window._clearQuoteFilters && window._clearQuoteFilters()"
+        title="Clear filters"
+        style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;font-weight:700;padding:6px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Reset</button>
+    </div>
+
+    <div id="saved-quotes-list" style="max-height:420px;overflow-y:auto;padding:4px 0;">
       <div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">Loading…</div>
     </div>
   </div>
@@ -6156,7 +6180,46 @@ window.backToToolsGrid = function() {
     ov.style.display = 'flex';
     setTimeout(function(){ ov.style.opacity = '1'; }, 10);
     document.body.style.overflow = 'hidden';
+    _populateQuoteFilterDropdowns();
     await _renderQuotesList();
+  };
+
+  // Populate the "All customers" dropdown from the current CLIENTS cache
+  // (or fetch fresh if empty). This mirrors the same fallback we use for
+  // the quote-creation dropdown, so the filter always has real data.
+  async function _populateQuoteFilterDropdowns() {
+    var sel = document.getElementById('qf-customer');
+    if (!sel) return;
+    var clients = (window.CLIENTS || []).slice();
+    if (!clients.length) {
+      try {
+        var rows = await window.db.select('clients', '?select=id,name&order=name.asc');
+        clients = (rows||[]).map(function(r){ return { id:r.id, company:r.name }; });
+      } catch(_){}
+    }
+    clients.sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
+    var current = sel.value;
+    sel.innerHTML = '<option value="">All customers</option>' + clients.map(function(c){
+      var lbl = (c.company || c.id).replace(/</g,'&lt;');
+      return '<option value="' + c.id + '">' + lbl + '</option>';
+    }).join('');
+    if (current) sel.value = current;
+  }
+
+  window._onQuoteFilterChange = function() {
+    window._quoteFilterState = {
+      search:   (document.getElementById('qf-search')   || {}).value || '',
+      customer: (document.getElementById('qf-customer') || {}).value || '',
+      status:   (document.getElementById('qf-status')   || {}).value || ''
+    };
+    _renderQuotesList();
+  };
+
+  window._clearQuoteFilters = function() {
+    var ids = ['qf-search','qf-customer','qf-status'];
+    ids.forEach(function(id){ var e = document.getElementById(id); if (e) e.value = ''; });
+    window._quoteFilterState = { search:'', customer:'', status:'' };
+    _renderQuotesList();
   };
 
   window.closeSavedQuotes = function() {
@@ -6168,7 +6231,11 @@ window.backToToolsGrid = function() {
   };
 
   // ── Save current quote ───────────────────────────────────────────────────
-  window.saveCurrentQuote = async function() {
+  // Two paths:
+  //   saveCurrentQuote()            → "Save as new quote"  (creates a root)
+  //   saveCurrentQuote({asRevision}) → "Save as revision"  (links to loaded root)
+  window.saveCurrentQuote = async function(opts) {
+    opts = opts || {};
     var customer = (document.getElementById('customerName') || {}).value || '';
     var product  = (document.getElementById('productName')  || {}).value || '';
     var clientId = (document.getElementById('quoteClientId')|| {}).value || '';
@@ -6212,9 +6279,48 @@ window.backToToolsGrid = function() {
     };
     if (clientId) payload.client_id = clientId;
     if (dealId)   payload.deal_id   = dealId;
+
+    // Revision path — build version metadata so the new row links back
+    // to the loaded quote's root and increments the version number.
+    if (opts.asRevision && window._loadedQuote && window._loadedQuote.rootId) {
+      payload.parent_quote_id = window._loadedQuote.rootId;
+      try {
+        // Find the highest version_num within this lineage (including root itself)
+        var lineage = await window.db.select('pricing_quotes',
+          '?or=(id.eq.' + window._loadedQuote.rootId + ',parent_quote_id.eq.' + window._loadedQuote.rootId + ')&select=version_num');
+        var maxV = 1;
+        (lineage||[]).forEach(function(r){ if ((r.version_num||1) > maxV) maxV = r.version_num||1; });
+        payload.version_num = maxV + 1;
+      } catch(verr) {
+        console.warn('[Quotes] version lookup failed, defaulting to v2:', verr);
+        payload.version_num = (window._loadedQuote.versionNum || 1) + 1;
+      }
+      // Keep the same display name for consistent grouping in the list
+      payload.name = window._loadedQuote.name || payload.name;
+    }
+
     try {
-      await window.db.insert('pricing_quotes', payload);
-      window.toast('Quote "' + name.trim() + '" saved.', 'success');
+      var inserted = await window.db.insert('pricing_quotes', payload);
+      var saved = (Array.isArray(inserted) && inserted[0]) ? inserted[0] : null;
+      if (opts.asRevision) {
+        // Advance the in-memory pointer so two quick saves in a row produce v2, v3, v4…
+        if (saved && saved.id) {
+          window._loadedQuote = {
+            id: saved.id,
+            rootId: saved.parent_quote_id || window._loadedQuote.rootId,
+            name: saved.name || payload.name,
+            versionNum: saved.version_num || payload.version_num
+          };
+          _updateSaveButtonsForLoaded();
+        }
+        window.toast('Saved as v' + (payload.version_num) + ' of "' + payload.name + '".', 'success');
+      } else {
+        // Fresh root — clear any previously loaded quote so subsequent saves
+        // don't accidentally chain onto it.
+        window._loadedQuote = null;
+        _updateSaveButtonsForLoaded();
+        window.toast('Quote "' + name.trim() + '" saved.', 'success');
+      }
     } catch(e) {
       console.error('[Quotes] save error:', e);
       var msg = e.message || '';
@@ -6240,7 +6346,73 @@ window.backToToolsGrid = function() {
       var esc = window.escapeHtml || function(s){ return String(s||''); };
       var CLIENTS = window.CLIENTS || [];
       var DEALS   = window.DEALS   || [];
-      container.innerHTML = rows.map(function(r) {
+
+      // ── Apply filters (customer + status) ────────────────────────────
+      // Filters are driven by the controls at the top of the modal body.
+      var fState = (window._quoteFilterState = window._quoteFilterState || { search:'', customer:'', status:'' });
+      var fSearch   = (fState.search   || '').toLowerCase();
+      var fCustomer = fState.customer  || '';
+      var fStatus   = fState.status    || '';
+
+      // Build a lookup of lineages for status calculation BEFORE filtering.
+      // (We need the latest-sent info per lineage to colour the status pill.)
+      var _allByRoot = {};
+      rows.forEach(function(r){
+        var root = r.parent_quote_id || r.id;
+        (_allByRoot[root] || (_allByRoot[root] = [])).push(r);
+      });
+
+      rows = rows.filter(function(r){
+        if (fCustomer && r.client_id !== fCustomer) return false;
+        if (fSearch) {
+          var hay = [r.name, r.customer, r.product, r.created_by].join(' ').toLowerCase();
+          if (hay.indexOf(fSearch) < 0) return false;
+        }
+        if (fStatus) {
+          var rootId = r.parent_quote_id || r.id;
+          var siblings = _allByRoot[rootId] || [r];
+          var anySent = siblings.some(function(s){ return !!s.last_emailed_at; });
+          var anyDeal = siblings.some(function(s){ return !!s.deal_id; });
+          // status values: 'draft' = never emailed, no deal
+          //                'sent'  = emailed at least once
+          //                'deal'  = linked to a deal (converted)
+          var actualStatus = anyDeal ? 'deal' : anySent ? 'sent' : 'draft';
+          if (actualStatus !== fStatus) return false;
+        }
+        return true;
+      });
+
+      // ── Group rows by lineage root so the list shows ONE row per quote
+      //    lineage (the latest version), with older versions available
+      //    in an expandable "history" block.
+      var grouped = {};
+      rows.forEach(function(r){
+        var rootId = r.parent_quote_id || r.id;
+        (grouped[rootId] || (grouped[rootId] = [])).push(r);
+      });
+
+      // For each lineage, sort descending by version_num (latest first) and
+      // pick the most recent one for primary display. Then flatten the
+      // lineages back into a chronological list ordered by the latest row's
+      // created_at, so the user sees their most-recently-touched quote on top.
+      var lineages = Object.keys(grouped).map(function(rid){
+        var versions = grouped[rid].slice().sort(function(a,b){
+          return (b.version_num||1) - (a.version_num||1);
+        });
+        return { rootId: rid, latest: versions[0], versions: versions };
+      }).sort(function(a,b){
+        return new Date(b.latest.created_at||0) - new Date(a.latest.created_at||0);
+      });
+
+      if (!lineages.length) {
+        container.innerHTML = '<div style="text-align:center;padding:48px 24px;color:var(--muted);font-size:13px;">No quotes match your filters.<br><span style="font-size:11px;opacity:0.7;">Clear filters to see all.</span></div>';
+        return;
+      }
+
+      container.innerHTML = lineages.map(function(lineage) {
+        var r = lineage.latest;
+        var isRevised = lineage.versions.length > 1;
+        var vNum = r.version_num || 1;
         var date = r.created_at ? new Date(r.created_at).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
         var sub  = [r.customer, r.product].filter(Boolean).map(esc).join(' — ') || '—';
         // CRM link badges
@@ -6274,12 +6446,46 @@ window.backToToolsGrid = function() {
                    + 'padding:2px 6px;border-radius:3px;letter-spacing:0.04em;">'
                    + '&#9993; Sent to ' + sentTo + ' &middot; ' + sentDate + '</span>';
         }
-        return '<div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--navy-border);">'
+        // Version badge — bold when revised, subtle when v1
+        var verBadge = isRevised
+          ? '<span title="' + lineage.versions.length + ' versions" style="display:inline-flex;align-items:center;gap:3px;background:rgba(201,168,76,0.15);border:1px solid var(--gold);color:var(--gold);font-size:9px;font-weight:800;letter-spacing:0.06em;padding:2px 7px;border-radius:3px;margin-right:6px;">v' + vNum + '</span>'
+          : '<span title="First version" style="display:inline-block;background:rgba(255,255,255,0.04);border:1px solid var(--navy-border);color:var(--muted);font-size:9px;font-weight:700;letter-spacing:0.06em;padding:2px 6px;border-radius:3px;margin-right:6px;">v1</span>';
+
+        // History expander — renders prior versions underneath when opened.
+        // Each row offers Load (snap the calc to that version) and a small
+        // price + sent stamp for context.
+        var historyBlock = '';
+        if (isRevised) {
+          var olderVersions = lineage.versions.slice(1); // skip the latest (already shown)
+          historyBlock = '<div id="qvhist-' + esc(r.id) + '" style="display:none;margin-top:8px;padding:8px 12px;background:var(--navy-med);border:1px solid var(--navy-border);border-radius:3px;">'
+            + '<div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Version history</div>'
+            + olderVersions.map(function(v){
+                var vd = v.created_at ? new Date(v.created_at).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
+                var vSent = v.last_emailed_at
+                  ? '<span style="color:#4ade80;font-weight:600;margin-left:8px;">&#9993; sent</span>'
+                  : '';
+                return '<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;border-top:1px solid var(--navy-border);font-size:11px;">'
+                     + '<span style="color:var(--gold);font-weight:700;min-width:32px;">v' + (v.version_num||1) + '</span>'
+                     + '<span style="flex:1;color:var(--muted);">' + vd + (v.created_by ? ' &middot; ' + esc(v.created_by) : '') + vSent + '</span>'
+                     + '<span style="color:var(--white);font-weight:700;font-variant-numeric:tabular-nums;">' + esc(v.sell_price||'—') + '</span>'
+                     + '<button onclick="event.stopPropagation();window.loadQuote(\'' + esc(v.id) + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;font-weight:700;padding:3px 9px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;" onmouseover="this.style.borderColor=\'var(--gold)\';this.style.color=\'var(--gold)\'" onmouseout="this.style.borderColor=\'var(--navy-border)\';this.style.color=\'var(--muted)\'">Load</button>'
+                     + '</div>';
+              }).join('')
+            + '</div>';
+        }
+
+        var histToggle = isRevised
+          ? '<button onclick="event.stopPropagation();var h=document.getElementById(\'qvhist-' + esc(r.id) + '\');if(h){h.style.display=(h.style.display===\'none\'?\'block\':\'none\');}" style="background:transparent;border:none;color:var(--muted);font-size:10px;font-weight:700;padding:0;cursor:pointer;font-family:Lato,sans-serif;text-decoration:underline;text-underline-offset:2px;">See ' + olderCount(lineage) + '</button>'
+          : '';
+        function olderCount(lin){ var n = lin.versions.length - 1; return n + ' older version' + (n===1?'':'s'); }
+
+        return '<div style="padding:14px 20px;border-bottom:1px solid var(--navy-border);">'
+          + '<div style="display:flex;align-items:center;gap:12px;">'
           + '<div style="flex:1;min-width:0;">'
-          + '<div style="font-weight:700;color:var(--white);font-size:14px;margin-bottom:2px;">' + esc(r.name) + '</div>'
+          + '<div style="font-weight:700;color:var(--white);font-size:14px;margin-bottom:2px;">' + verBadge + esc(r.name) + '</div>'
           + '<div style="font-size:11px;color:var(--muted);margin-bottom:2px;">' + sub + '</div>'
           + (linkBadge || sentPill ? '<div style="margin-bottom:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;">' + linkBadge + sentPill + '</div>' : '')
-          + '<div style="font-size:10px;color:var(--muted);opacity:0.7;">' + date + (r.created_by ? ' &nbsp;·&nbsp; ' + esc(r.created_by) : '') + '</div>'
+          + '<div style="font-size:10px;color:var(--muted);opacity:0.7;">' + date + (r.created_by ? ' &nbsp;·&nbsp; ' + esc(r.created_by) : '') + (histToggle ? ' &nbsp;·&nbsp; ' + histToggle : '') + '</div>'
           + '</div>'
           + '<div style="text-align:right;white-space:nowrap;min-width:70px;">'
           +   '<div style="font-size:1.5em;font-weight:900;color:var(--gold);font-family:Lato,sans-serif;">' + esc(r.sell_price||'—') + '</div>'
@@ -6291,6 +6497,8 @@ window.backToToolsGrid = function() {
           + createDealBtn
           + '<button onclick="window.deleteQuote(\'' + esc(r.id) + '\',\'' + esc(r.name).replace(/'/g,'\\\'') + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">Delete</button>'
           + '</div>'
+          + '</div>'
+          + historyBlock
           + '</div>';
       }).join('');
     } catch(e) {
@@ -6300,19 +6508,61 @@ window.backToToolsGrid = function() {
   }
 
   // ── Load a quote into the calculator ────────────────────────────────────
+  // Remembers the loaded quote's identity so the Save button can offer
+  // "Save as revision" in addition to "Save as new quote". The root id
+  // is the lineage anchor — any revision of revision points back to it.
   window.loadQuote = async function(id) {
     try {
       var rows = await window.db.select('pricing_quotes', '?id=eq.' + id);
       if (!rows || !rows[0] || !rows[0].data) { window.toast('Quote not found.', 'error'); return; }
+      var q = rows[0];
       window.closeSavedQuotes();
-      // Navigate to pricing calc if not already open
       if (window.showToolCalc) window.showToolCalc('pricing');
-      setTimeout(function(){ _setState(rows[0].data); }, 150);
-      window.toast('Quote "' + (rows[0].name||'') + '" loaded.', 'success');
+      setTimeout(function(){
+        _setState(q.data);
+        // Mark this quote as the "currently loaded" one so Save knows
+        // it can revise instead of creating a fresh root.
+        window._loadedQuote = {
+          id: q.id,
+          rootId: q.parent_quote_id || q.id,
+          name: q.name || '',
+          versionNum: q.version_num || 1
+        };
+        _updateSaveButtonsForLoaded();
+      }, 150);
+      window.toast('Quote "' + (q.name||'') + '" loaded — Save creates v' + ((q.version_num||1) + 1) + '.', 'success');
     } catch(e) {
       console.error('[Quotes] load error:', e);
       window.toast('Error loading quote: ' + (e.message||''), 'error');
     }
+  };
+
+  // Toggles visibility and labelling of the save buttons based on whether
+  // a quote is currently loaded (revision path) or not (fresh quote path).
+  function _updateSaveButtonsForLoaded() {
+    var newBtn  = document.getElementById('quote-save-new-btn');
+    var revBtn  = document.getElementById('quote-save-revision-btn');
+    var banner  = document.getElementById('quote-loaded-banner');
+    var lq = window._loadedQuote;
+    if (lq && revBtn) {
+      revBtn.style.display = '';
+      revBtn.innerHTML = '&#x21bb; Save as v' + ((lq.versionNum||1) + 1);
+      revBtn.title = 'Save changes as a new revision of "' + lq.name + '"';
+      if (banner) {
+        banner.style.display = '';
+        banner.innerHTML = 'Working on <strong style="color:var(--white);">' + (lq.name||'—') + '</strong> &middot; loaded as <strong style="color:var(--gold);">v' + (lq.versionNum||1) + '</strong>. Next save becomes v' + ((lq.versionNum||1)+1) + ', or <a href="#" onclick="window.clearLoadedQuote();return false;" style="color:var(--gold);text-decoration:underline;">start fresh</a>.';
+      }
+    } else {
+      if (revBtn) revBtn.style.display = 'none';
+      if (banner) banner.style.display = 'none';
+    }
+  }
+  window._updateSaveButtonsForLoaded = _updateSaveButtonsForLoaded;
+
+  window.clearLoadedQuote = function() {
+    window._loadedQuote = null;
+    _updateSaveButtonsForLoaded();
+    window.toast && window.toast('Cleared. Next save will create a new quote.', 'info');
   };
 
   // ── Delete a quote ───────────────────────────────────────────────────────
@@ -8871,12 +9121,20 @@ window.loadBoms = async function initBoms() {
 
   <!-- TOOLS CALCULATOR VIEW (shown when a tile is launched) -->
   <div id="tools-calc-view" style="display:none;">
+    <!-- "Currently loaded quote" banner — only shows when loadQuote() has
+         pulled a quote into the calculator. Gives the user a clear anchor
+         that their next Save becomes v(N+1) of that lineage, or a dismiss
+         link to break out and create a fresh quote instead. -->
+    <div id="quote-loaded-banner" style="display:none;margin:0 auto 4px;padding:8px 14px;background:rgba(201,168,76,0.08);border:1px solid var(--gold-dim);border-radius:3px;font-size:11px;color:var(--muted);max-width:1180px;line-height:1.5;"></div>
     <div class="wrapper" style="padding-bottom:0;padding-top:24px;display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:10px;margin-bottom:4px;">
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button type="button" onclick="window.openSavedQuotes()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:7px 16px;cursor:pointer;transition:border-color .15s,color .15s;" onmouseover="this.style.borderColor='var(--gold)';this.style.color='var(--gold)'" onmouseout="this.style.borderColor='var(--navy-border)';this.style.color='var(--muted)'">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="margin-right:5px;vertical-align:-1px;"><path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v13.5a.5.5 0 0 1-.777.416L8 13.101l-5.223 2.815A.5.5 0 0 1 2 15.5V2zm2-1a1 1 0 0 0-1 1v12.566l4.723-2.482a.5.5 0 0 1 .554 0L13 14.566V2a1 1 0 0 0-1-1H4z"/></svg>Saved Quotes
         </button>
-        <button type="button" onclick="window.saveCurrentQuote()" style="background:var(--gold);border:1px solid var(--gold);color:var(--navy);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:7px 16px;cursor:pointer;transition:opacity .15s;" onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+        <button type="button" id="quote-save-revision-btn" onclick="window.saveCurrentQuote({asRevision:true})" style="display:none;background:transparent;border:1px solid var(--gold);color:var(--gold);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:7px 16px;cursor:pointer;transition:background-color .15s;" onmouseover="this.style.backgroundColor='rgba(201,168,76,0.1)'" onmouseout="this.style.backgroundColor='transparent'">
+          &#x21bb; Save as revision
+        </button>
+        <button type="button" id="quote-save-new-btn" onclick="window.saveCurrentQuote()" style="background:var(--gold);border:1px solid var(--gold);color:var(--navy);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:7px 16px;cursor:pointer;transition:opacity .15s;" onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="margin-right:5px;vertical-align:-1px;"><path d="M2 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H9.5a1 1 0 0 0-1 1v7.293l2.646-2.647a.5.5 0 0 1 .708.708l-3.5 3.5a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L7.5 9.293V2a2 2 0 0 1 2-2H14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h2.5a.5.5 0 0 1 0 1H2z"/></svg>Save Quote
         </button>
       </div>
@@ -9614,6 +9872,19 @@ window.loadBoms = async function initBoms() {
   <!-- KPI strip -->
   <div id="pipe-kpi-strip" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:14px;"></div>
 
+  <!-- Stage colour legend — mirrors the same palette as the Kanban columns.
+       Populated by JS (renderStageLegend) so it stays in sync if stages are
+       renamed in Supabase. Collapses into a single "Legend" pill that
+       expands on click so it never competes with the actual board for space. -->
+  <div id="pipe-legend-wrap" style="margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <button id="pipe-legend-toggle" type="button" onclick="window.togglePipeLegend && window.togglePipeLegend()"
+      style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;font-weight:700;letter-spacing:0.09em;text-transform:uppercase;padding:5px 10px 5px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;display:inline-flex;align-items:center;gap:6px;">
+      <svg id="pipe-legend-chev" width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="transition:transform .15s;"><path d="M3.204 5h9.592L8 10.481 3.204 5zm-.753.659 4.796 5.48a1 1 0 0 0 1.506 0l4.796-5.48c.566-.647.106-1.659-.753-1.659H3.204a1 1 0 0 0-.753 1.659z"/></svg>
+      Stage legend
+    </button>
+    <div id="pipe-legend" style="display:none;flex:1 1 auto;align-items:center;gap:6px;flex-wrap:wrap;"></div>
+  </div>
+
   <div class="card" style="padding:0;overflow:hidden;">
     <!-- Toolbar -->
     <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--navy-border);">
@@ -9741,10 +10012,10 @@ window.loadBoms = async function initBoms() {
         <select id="cf-lifecycle" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;">
           <option value="lead" selected>Lead (no deal yet)</option>
           <option value="prospect">Prospect (in pipeline)</option>
-          <option value="client">Client (done a job)</option>
-          <option value="churned">Churned</option>
+          <option value="client" data-restrict-new="1">Client (done a job)</option>
+          <option value="churned" data-restrict-new="1">Churned</option>
         </select>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px;">Auto-updates when you open a deal or run a job. Manual override is fine.</div>
+        <div id="cf-lifecycle-hint" style="font-size:10px;color:var(--muted);margin-top:4px;">New customers start as Lead or Prospect. Client status is earned automatically when a deal is marked Won &mdash; or when a job is run for them.</div>
       </div>
       <div class="mfield">
         <label>Country *</label>
@@ -9865,7 +10136,7 @@ window.loadBoms = async function initBoms() {
       <div id="c360-kpis" style="display:flex;gap:14px;flex-wrap:wrap;"></div>
       <div style="display:flex;gap:8px;align-items:center;">
         <button id="c360-edit-btn" class="btn btn-outline" style="font-size:12px;">Edit</button>
-        <button id="c360-new-deal-btn" class="btn btn-gold" disabled style="opacity:0.6;cursor:not-allowed;font-size:12px;" title="Deals CRUD arrives in Phase 2">+ New Deal</button>
+        <button id="c360-new-deal-btn" class="btn btn-gold" onclick="window.openDealModal && window.openDealModal(null, { client_id: window._c360ClientId })" style="font-size:12px;">+ New Deal</button>
       </div>
     </div>
   </div>
@@ -10719,20 +10990,62 @@ window.loadBoms = async function initBoms() {
   function renderCard(d) {
     var client = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; }) || {};
     var nameTxt = d.name || 'Untitled deal';
+    var st = STAGE_BY_ID[d.stage_id];
+    var isClosed = st && (st.is_won || st.is_lost);
+
+    // Age-in-stage — HubSpot-style staleness signal. We only show it on
+    // active (non-closed) stages because a Won/Lost deal sitting for 40 days
+    // isn't a problem. Thresholds: <14d grey, 14-30d amber, >30d red.
     var ageDays = d.stage_entered_at ? Math.max(0, Math.floor((Date.now() - new Date(d.stage_entered_at).getTime())/86400000)) : null;
-    var ageCol  = ageDays == null ? 'var(--muted)' : (ageDays > 30 ? 'var(--red)' : ageDays > 14 ? 'var(--amber)' : 'var(--muted)');
-    var ageTxt  = ageDays == null ? '' : (ageDays + 'd');
+    var ageBadge = '';
+    if (!isClosed && ageDays != null) {
+      var ageCol, ageBg, ageLbl, ageTitle;
+      if (ageDays > 30) {
+        ageCol = 'var(--red)';
+        ageBg  = 'rgba(224,87,87,0.12)';
+        ageLbl = ageDays + 'd';
+        ageTitle = 'Stuck — in this stage for ' + ageDays + ' days. Nudge or move it.';
+      } else if (ageDays > 14) {
+        ageCol = 'var(--amber)';
+        ageBg  = 'rgba(232,156,58,0.12)';
+        ageLbl = ageDays + 'd';
+        ageTitle = 'Cooling off — ' + ageDays + ' days in this stage';
+      } else if (ageDays >= 1) {
+        ageCol = 'var(--muted)';
+        ageBg  = 'rgba(255,255,255,0.03)';
+        ageLbl = ageDays + 'd';
+        ageTitle = 'Entered this stage ' + ageDays + ' day' + (ageDays===1?'':'s') + ' ago';
+      } else {
+        ageCol = 'var(--green)';
+        ageBg  = 'rgba(61,186,120,0.12)';
+        ageLbl = 'new';
+        ageTitle = 'Just moved into this stage';
+      }
+      ageBadge = '<span title="' + esc(ageTitle) + '" style="display:inline-flex;align-items:center;gap:3px;background:' + ageBg + ';border:1px solid ' + ageCol + ';color:' + ageCol + ';font-size:9px;font-weight:700;letter-spacing:0.04em;padding:1px 5px;border-radius:3px;line-height:1.4;">'
+               +   '<svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>'
+               +   esc(ageLbl)
+               + '</span>';
+    }
+
     var ownerBadge = d.owner_id ? '<span title="' + esc(d.owner_id) + '" style="width:16px;height:16px;border-radius:50%;background:var(--navy-border);color:var(--text);font-size:8px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;">' + esc(ownerInitials(d.owner_id)) + '</span>' : '';
+
+    // Accent the card's left border when it's gone red — draws the eye
+    // straight to the deals that need attention.
+    var cardBorder = (!isClosed && ageDays != null && ageDays > 30) ? 'var(--red)' : 'var(--navy-border)';
+    var cardStyle  = (!isClosed && ageDays != null && ageDays > 30) ? 'border-left:3px solid var(--red);padding-left:7px;' : '';
+
     return '<div class="pipe-card" draggable="true" ondragstart="window._pipeDragStart(event,this)" ondragend="window._pipeDragEnd(event,this)" onclick="window.openDealDetail(\'' + esc(d.id) + '\')" '
       + 'data-deal-id="' + esc(d.id) + '" title="' + esc(nameTxt) + (client.company?' — '+esc(client.company):'') + '" '
-      + 'style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;padding:7px 9px;cursor:pointer;transition:border-color .15s,transform .05s,box-shadow .15s;" '
-      + 'onmouseover="this.style.borderColor=\'var(--gold-dim)\';this.style.boxShadow=\'0 2px 8px rgba(0,0,0,0.3)\';" onmouseout="this.style.borderColor=\'var(--navy-border)\';this.style.boxShadow=\'none\';">'
-      + '<div style="font-size:12px;font-weight:700;color:var(--white);line-height:1.3;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">' + esc(nameTxt) + '</div>'
+      + 'style="background:var(--navy-mid);border:1px solid ' + cardBorder + ';border-radius:4px;padding:7px 9px;' + cardStyle + 'cursor:pointer;transition:border-color .15s,transform .05s,box-shadow .15s;" '
+      + 'onmouseover="this.style.borderColor=\'var(--gold-dim)\';this.style.boxShadow=\'0 2px 8px rgba(0,0,0,0.3)\';" onmouseout="this.style.borderColor=\'' + cardBorder + '\';this.style.boxShadow=\'none\';">'
+      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-bottom:3px;">'
+      +   '<div style="font-size:12px;font-weight:700;color:var(--white);line-height:1.3;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;flex:1;min-width:0;">' + esc(nameTxt) + '</div>'
+      +   ageBadge
+      + '</div>'
       + '<div style="font-size:10px;color:var(--muted);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(client.company || d.client_id || '—') + '</div>'
       + '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">'
       +   '<div style="font-size:12px;font-weight:700;color:var(--gold);font-variant-numeric:tabular-nums;">' + fmtMoney(d.forecast_value, d.currency) + '</div>'
       +   '<div style="display:inline-flex;align-items:center;gap:5px;">'
-      +     (ageTxt ? '<span style="font-size:9px;color:' + ageCol + ';font-weight:600;">' + ageTxt + '</span>' : '')
       +     ownerBadge
       +     typeBadge(d.deal_type)
       +   '</div>'
@@ -10765,10 +11078,59 @@ window.loadBoms = async function initBoms() {
 
   function renderPipeline() {
     renderKpiStrip();
+    renderStageLegend();
     if (_pipeView === 'kanban') renderKanban();
     else                          renderList();
   }
   window.renderPipeline = renderPipeline;
+
+  // Stage colour legend — one pill per configured stage, coloured the same
+  // way the Kanban columns are (stageColor()). Rendered once per pipeline
+  // refresh so it auto-updates if stages are edited in Supabase.
+  function renderStageLegend() {
+    var host = document.getElementById('pipe-legend');
+    if (!host || !PIPE_STAGES.length) return;
+    host.innerHTML = PIPE_STAGES.map(function(s){
+      var col = stageColor(s);
+      var icon = s.is_won  ? ' <svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor" style="margin-right:2px;vertical-align:-1px;"><path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.235.235 0 0 1 .02-.022z"/></svg>'
+               : s.is_lost ? ' <svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor" style="margin-right:2px;vertical-align:-1px;"><path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854z"/></svg>'
+               : '';
+      return '<span title="Probability: ' + (s.default_probability||0) + '%" style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,0.03);border:1px solid ' + col + ';color:' + col + ';font-size:10px;font-weight:700;letter-spacing:0.05em;padding:4px 9px;border-radius:3px;white-space:nowrap;">'
+           +   '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:' + col + ';"></span>'
+           +   (icon || '') + esc(s.name)
+           +   '<span style="opacity:0.55;font-weight:500;margin-left:2px;">' + (s.default_probability||0) + '%</span>'
+           + '</span>';
+    }).join('');
+  }
+
+  // Persist legend open/closed across sessions for each user's preference.
+  window.togglePipeLegend = function() {
+    var el = document.getElementById('pipe-legend');
+    var chev = document.getElementById('pipe-legend-chev');
+    if (!el) return;
+    var open = el.style.display !== 'none';
+    if (open) {
+      el.style.display = 'none';
+      if (chev) chev.style.transform = '';
+      try { localStorage.setItem('lp.pipe.legend.open', '0'); } catch(_){}
+    } else {
+      el.style.display = 'flex';
+      if (chev) chev.style.transform = 'rotate(-90deg)';
+      try { localStorage.setItem('lp.pipe.legend.open', '1'); } catch(_){}
+    }
+  };
+
+  // Restore legend preference on first render
+  try {
+    if (localStorage.getItem('lp.pipe.legend.open') === '1') {
+      setTimeout(function(){
+        var el = document.getElementById('pipe-legend');
+        var chev = document.getElementById('pipe-legend-chev');
+        if (el) el.style.display = 'flex';
+        if (chev) chev.style.transform = 'rotate(-90deg)';
+      }, 60);
+    }
+  } catch(_){}
 
   // ─────────────────────────────────────────────────────────────────────
   //  Drag & drop
@@ -12916,13 +13278,21 @@ window.loadBoms = async function initBoms() {
   var STAGE_COLORS = { lead:'var(--muted)', prospect:'var(--blue)', customer:'var(--green)', client:'var(--green)', churned:'var(--red)' };
 
   function healthDot(c) {
-    // Simple heuristic: green if active job <90d, amber 90-180d, red 180d+ or churned
+    // Health signal:
+    //   • Churned      → red
+    //   • Active/open job now       → green (they're live with us today)
+    //   • Last completed <=90d ago  → green (recent delivery)
+    //   • 90–180d      → amber
+    //   • 180d+        → red (stale)
+    //   • Nothing      → muted
     if (c.lifecycle_stage === 'churned') return { color:'var(--red)', title:'Churned' };
     var m = (CUST_METRICS || {})[c.id];
-    var last = m && m.lastJobDate;
+    if (!m) return { color:'var(--muted)', title:'No jobs yet' };
+    if (m.openJobs > 0) return { color:'var(--green)', title:'Active — ' + m.openJobs + ' open job' + (m.openJobs===1?'':'s') };
+    var last = m.lastCompletedDate;
     if (!last) return { color:'var(--muted)', title:'No jobs yet' };
     var days = Math.floor((Date.now() - new Date(last).getTime()) / 86400000);
-    if (days <= 90)  return { color:'var(--green)', title:'Active (job ' + days + 'd ago)' };
+    if (days <= 90)  return { color:'var(--green)', title:'Recent (last job ' + days + 'd ago)' };
     if (days <= 180) return { color:'var(--amber)', title:'Cooling (last job ' + days + 'd ago)' };
     return { color:'var(--red)', title:'Stale (last job ' + days + 'd ago)' };
   }
@@ -12971,7 +13341,20 @@ window.loadBoms = async function initBoms() {
     // read properties of undefined (reading 'CLI-025')" and breaks downstream.
     var m = (CUST_METRICS || {})[c.id] || {};
     var ltvTxt = m.ltv ? fmtLTV(m.ltv) + ' btls' : '—';
-    var lastTxt = fmtDate(m.lastJobDate);
+
+    // "Last Job" column now prefers forward-looking info when an active job
+    // exists, falling back to historical when it doesn't:
+    //   • Active/upcoming → "Bottling 15 Nov" in gold
+    //   • Completed only  → "15 Oct 2025" in grey
+    //   • Nothing         → "—"
+    var lastTxt = '—';
+    if (m.nextActiveJob && m.nextActiveJob.date) {
+      var stageLbl = m.nextActiveJob.stage || 'Scheduled';
+      var shortStage = (stageLbl.length > 12) ? stageLbl.slice(0,12) : stageLbl;
+      lastTxt = '<span title="Open job · ' + esc(stageLbl) + '" style="color:var(--gold);font-weight:700;">' + esc(shortStage) + ' ' + fmtDate(m.nextActiveJob.date) + '</span>';
+    } else if (m.lastCompletedDate) {
+      lastTxt = '<span title="Most recent completed job" style="color:var(--muted);">' + fmtDate(m.lastCompletedDate) + '</span>';
+    }
     var h = healthDot(c);
     var gnd = (c.referred_by === 'GND');
     var gndBadge = gnd ? '<span title="Referred by GND" style="display:inline-block;background:rgba(74,158,221,0.15);border:1px solid rgba(74,158,221,0.4);color:var(--blue);font-size:9px;font-weight:700;letter-spacing:0.06em;padding:1px 6px;border-radius:3px;margin-left:6px;vertical-align:middle;">&#9733; GND</span>' : '';
@@ -13142,6 +13525,33 @@ window.loadBoms = async function initBoms() {
     // Safety net: any previous save cycle may have left the button disabled.
     if (saveBtn) saveBtn.disabled = false;
     function sv(id,v){ var e=el(id); if(e) e.value=(v===null||v===undefined)?'':v; }
+
+    // Lifecycle dropdown access control:
+    //   • NEW customer → only Lead/Prospect selectable (Client/Churned disabled).
+    //     "Client" is an *earned* status — it auto-flips when a deal hits Won
+    //     or a job is run. Allowing free manual selection dilutes that rule.
+    //   • EDIT existing → all options enabled so admins can correct data
+    //     (rare, but necessary for migrations and genuine mistakes).
+    var lsSel = el('cf-lifecycle');
+    var lsHint = el('cf-lifecycle-hint');
+    if (lsSel) {
+      Array.prototype.forEach.call(lsSel.options, function(opt){
+        var restricted = opt.getAttribute('data-restrict-new') === '1';
+        if (!editId && restricted) {
+          opt.disabled = true;
+          opt.style.color = 'var(--muted)';
+        } else {
+          opt.disabled = false;
+          opt.style.color = '';
+        }
+      });
+    }
+    if (lsHint) {
+      lsHint.innerHTML = editId
+        ? 'You can correct the stage for an existing record, but Pulse will auto-promote to <strong style="color:var(--text);">Client</strong> the moment a deal is Won or a job runs.'
+        : 'New customers start as <strong style="color:var(--text);">Lead</strong> or <strong style="color:var(--text);">Prospect</strong>. Client status is earned automatically when a deal is marked Won &mdash; or when a job is run for them.';
+    }
+
     if(editId){
       var c = CLIENTS.find(function(x){ return x.id===editId; });
       if(!c) return;
@@ -13237,6 +13647,18 @@ window.loadBoms = async function initBoms() {
     }
     var lifecycle = gv('cf-lifecycle') || 'lead';
     var country   = gv('cf-country')   || null;
+
+    // Server-side guard for the "Client status is earned" rule. Even if
+    // someone injects a different value via devtools, we snap them back
+    // to 'lead' on create. Edits are allowed to retain existing client
+    // status (admins need to correct data sometimes), but can't freshly
+    // promote a lead to client without going through a deal.
+    if (!editId && (lifecycle === 'client' || lifecycle === 'churned')) {
+      window.toast && window.toast('New customers are created as Lead or Prospect. Client status is earned when a deal is Won.', 'info');
+      lifecycle = 'prospect';
+      var lsSel = el('cf-lifecycle');
+      if (lsSel) lsSel.value = 'prospect';
+    }
 
     var dbPayload = {
       name:            company,
@@ -13448,7 +13870,16 @@ window.loadBoms = async function initBoms() {
     try { loadCustomerMetrics(); } catch(e) { console.error('[Clients] loadCustomerMetrics error:', e); }
   }
 
-  // Per-customer derived metrics cache: { [clientId]: { ltv:number, lastJobDate:string|null, openJobs:int } }
+  // Per-customer derived metrics cache:
+  //   { [clientId]: {
+  //       ltv, openJobs, totalJobs,
+  //       lastCompletedDate: date of most recent *completed* job (past activity),
+  //       nextActiveJob:    { date, stage } — soonest in-progress/upcoming job (forward-looking)
+  //   } }
+  // The old single "lastJobDate" was ambiguous because a job scheduled for
+  // 2027 would show as "Last Job: 2027" — confusing. We now split past from
+  // future so the Customers page can render "Bottling 15 Nov" (upcoming work)
+  // in gold, or "Last: 15 Oct" (historical) in grey, with clear intent.
   var CUST_METRICS = {};
   async function loadCustomerMetrics() {
     try {
@@ -13456,19 +13887,39 @@ window.loadBoms = async function initBoms() {
       var next = {};
       (jobs || []).forEach(function(j){
         if (!j.client_id) return;
-        var m = next[j.client_id] || (next[j.client_id] = { ltv:0, lastJobDate:null, openJobs:0, totalJobs:0 });
+        var m = next[j.client_id] || (next[j.client_id] = {
+          ltv: 0, openJobs: 0, totalJobs: 0,
+          lastCompletedDate: null,
+          nextActiveJob: null
+        });
         m.totalJobs++;
-        // Naive LTV proxy: sum of bottle_target for completed jobs (no billed-revenue field exists)
+
+        var schedDate = j.scheduled_date || null;
+        var createdDate = j.created_at ? String(j.created_at).slice(0,10) : null;
+        var effectiveDate = schedDate || createdDate;
+
         if (j.stage === 'Complete') {
           m.ltv += parseFloat(j.bottle_target || 0);
+          // Track most recent completed job
+          if (effectiveDate && (!m.lastCompletedDate || effectiveDate > m.lastCompletedDate)) {
+            m.lastCompletedDate = effectiveDate;
+          }
         } else {
+          // Any non-complete stage counts as active/open (Prep, In Progress,
+          // Scheduled, etc). Surface the one with the soonest scheduled date
+          // so the Customers page can show "Bottling: 15 Nov" as active.
           m.openJobs++;
+          if (schedDate) {
+            if (!m.nextActiveJob || schedDate < m.nextActiveJob.date) {
+              m.nextActiveJob = { date: schedDate, stage: j.stage || 'Scheduled' };
+            }
+          } else if (!m.nextActiveJob) {
+            // No scheduled date — still show it as in-progress using created_at
+            m.nextActiveJob = { date: createdDate, stage: j.stage || 'In Progress' };
+          }
         }
-        var d = j.scheduled_date || (j.created_at ? String(j.created_at).slice(0,10) : null);
-        if (d && (!m.lastJobDate || d > m.lastJobDate)) m.lastJobDate = d;
       });
       CUST_METRICS = next;
-      // Re-render with enriched values
       try { renderClients(); } catch(_){}
     } catch(e) {
       console.warn('[Clients] loadCustomerMetrics failed:', e.message);
