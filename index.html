@@ -18198,7 +18198,15 @@ window.loadVesselRegister = async function() {
       _clList.forEach(function(c){ _clMap[c.id] = (c.name || '').toLowerCase(); });
       _vrAllContainers.forEach(function(c){
         var nm = _clMap[c.client_id] || '';
-        c._isClientVessel = !!c.is_client_vessel || (nm && nm.indexOf('lighthouse') < 0);
+        // A container is only a client vessel if we can POSITIVELY identify its
+        // client as non-Lighthouse. Rows with a null/unknown client, or whose
+        // client resolves to Lighthouse, are LH-fleet by default — never count
+        // them toward "client-owned vessels on site".
+        var explicitFlag   = !!c.is_client_vessel;
+        var knownNonLH     = !!(c.client_id && nm && nm.indexOf('lighthouse') < 0);
+        var knownLighthouse= !!(c.client_id && nm && nm.indexOf('lighthouse') >= 0);
+        // If the saved flag says client-vessel but the client IS Lighthouse, trust the client (data fix).
+        c._isClientVessel = (explicitFlag && !knownLighthouse) || knownNonLH;
       });
     } catch(e) {}
   } catch(e) { _vrAllContainers = []; }
@@ -18219,7 +18227,13 @@ window.loadVesselRegister = async function() {
   se('vr-kpi-value', fleetVal > 0 ? fmt(fleetVal) : '—');
 
   // Client-owned vessels on site (separate from LH fleet KPIs)
-  var clientVesselCount = _vrAllContainers.filter(function(c){ return c._isClientVessel; }).length;
+  //   - must be explicitly identified as a non-Lighthouse client's vessel
+  //   - must be live (not archived) and currently holding liquid (on-site ≠ historical)
+  var clientVesselCount = _vrAllContainers.filter(function(c){
+    if (!c._isClientVessel) return false;
+    if (c.archived) return false;
+    return parseFloat(c.current_litres || 0) > 0;
+  }).length;
   var cvBanner = document.getElementById('vr-client-vessels-banner');
   var cvCount  = document.getElementById('vr-client-vessels-count');
   if (cvCount)  cvCount.textContent = String(clientVesselCount);
