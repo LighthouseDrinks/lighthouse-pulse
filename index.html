@@ -34364,81 +34364,214 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 })();
 </script>
 
-<!-- Fallback handler for the "+ New" customer button inside the pricing tool.
-     Defined as a plain window.* function so the button's inline onclick
-     (onclick="window._lpNewQuoteCustomer && window._lpNewQuoteCustomer(event)")
-     fires no matter what IIFE state the rest of the page is in.
-     Tries three tiers: glue function → openClientModal → visible error. -->
+<!-- Standalone "+ New Customer" mini-modal for the pricing tool.
+     Does NOT rely on the main customer modal or any IIFE — it builds its own
+     form on the fly, talks directly to window.db, and refreshes the quote's
+     customer dropdown itself. This guarantees the flow works regardless of
+     what state the rest of the page is in. -->
 <script>
+(function(){
+  // Inject the overlay + form on demand so it never exists in the DOM until
+  // first use (keeps initial HTML clean).
+  function ensureQuickModal() {
+    if (document.getElementById('lp-quick-cust-overlay')) return;
+    var wrap = document.createElement('div');
+    wrap.id = 'lp-quick-cust-overlay';
+    wrap.setAttribute('style',
+      'display:none;position:fixed;inset:0;background:rgba(13,27,42,0.92);' +
+      'z-index:10100;align-items:flex-start;justify-content:center;padding:40px 20px;' +
+      'overflow-y:auto;');
+    wrap.innerHTML =
+        '<div id="lp-quick-cust-box" style="background:var(--navy-card,#16263d);border:1px solid var(--navy-border,#22334f);border-top:3px solid var(--gold,#c9a84c);max-width:480px;width:96%;font-family:Lato,sans-serif;" onclick="event.stopPropagation()">'
+      +   '<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--navy-border,#22334f);">'
+      +     '<div>'
+      +       '<div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted,#8a9bb1);font-weight:700;margin-bottom:4px;">Pricing Calculator</div>'
+      +       '<div style="font-size:18px;color:var(--white,#fff);font-weight:700;">New Customer</div>'
+      +     '</div>'
+      +     '<button type="button" onclick="window._lpQuickCustClose()" style="background:transparent;border:none;color:var(--muted,#8a9bb1);font-size:22px;cursor:pointer;padding:0 6px;line-height:1;">&times;</button>'
+      +   '</div>'
+      +   '<div style="padding:18px 20px;">'
+      +     '<div style="margin-bottom:12px;"><label style="display:block;margin-bottom:4px;font-size:10px;color:var(--muted,#8a9bb1);letter-spacing:0.1em;text-transform:uppercase;font-weight:700;">Company Name *</label>'
+      +       '<input id="lpqc-company" type="text" placeholder="e.g. Kinsale Spirit Co" style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--navy-med,#0d1c30);border:1px solid var(--navy-border,#22334f);color:var(--white,#fff);border-radius:3px;font-size:13px;font-family:Lato,sans-serif;"></div>'
+      +     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">'
+      +       '<div><label style="display:block;margin-bottom:4px;font-size:10px;color:var(--muted,#8a9bb1);letter-spacing:0.1em;text-transform:uppercase;font-weight:700;">Contact Name</label>'
+      +         '<input id="lpqc-contact" type="text" placeholder="e.g. Colin Blair" style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--navy-med,#0d1c30);border:1px solid var(--navy-border,#22334f);color:var(--white,#fff);border-radius:3px;font-size:13px;font-family:Lato,sans-serif;"></div>'
+      +       '<div><label style="display:block;margin-bottom:4px;font-size:10px;color:var(--muted,#8a9bb1);letter-spacing:0.1em;text-transform:uppercase;font-weight:700;">Country</label>'
+      +         '<input id="lpqc-country" type="text" list="lp-country-list" placeholder="Ireland" style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--navy-med,#0d1c30);border:1px solid var(--navy-border,#22334f);color:var(--white,#fff);border-radius:3px;font-size:13px;font-family:Lato,sans-serif;"></div>'
+      +     '</div>'
+      +     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">'
+      +       '<div><label style="display:block;margin-bottom:4px;font-size:10px;color:var(--muted,#8a9bb1);letter-spacing:0.1em;text-transform:uppercase;font-weight:700;">Email</label>'
+      +         '<input id="lpqc-email" type="email" placeholder="colin@kinsalespirit.com" style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--navy-med,#0d1c30);border:1px solid var(--navy-border,#22334f);color:var(--white,#fff);border-radius:3px;font-size:13px;font-family:Lato,sans-serif;"></div>'
+      +       '<div><label style="display:block;margin-bottom:4px;font-size:10px;color:var(--muted,#8a9bb1);letter-spacing:0.1em;text-transform:uppercase;font-weight:700;">Phone</label>'
+      +         '<input id="lpqc-phone" type="tel" placeholder="+353 ..." style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--navy-med,#0d1c30);border:1px solid var(--navy-border,#22334f);color:var(--white,#fff);border-radius:3px;font-size:13px;font-family:Lato,sans-serif;"></div>'
+      +     '</div>'
+      +     '<div style="margin-bottom:14px;">'
+      +       '<label style="display:block;margin-bottom:4px;font-size:10px;color:var(--muted,#8a9bb1);letter-spacing:0.1em;text-transform:uppercase;font-weight:700;">Referred By</label>'
+      +       '<select id="lpqc-referred" style="width:100%;box-sizing:border-box;padding:8px 10px;background:var(--navy-med,#0d1c30);border:1px solid var(--navy-border,#22334f);color:var(--white,#fff);border-radius:3px;font-size:13px;font-family:Lato,sans-serif;">'
+      +         '<option value="">Direct</option><option value="GND">GND</option><option value="Referral">Referral</option><option value="Inbound">Inbound</option>'
+      +       '</select>'
+      +     '</div>'
+      +     '<div style="margin-bottom:14px;padding:8px 12px;background:rgba(201,168,76,0.08);border-left:2px solid var(--gold,#c9a84c);border-radius:2px;font-size:11px;color:var(--muted,#8a9bb1);line-height:1.5;">'
+      +       'Saved as a <strong style="color:var(--white,#fff);">Lead</strong> in your master Customer list. They become a Client automatically once a deal is marked Won.'
+      +     '</div>'
+      +     '<div id="lpqc-err" style="display:none;margin-bottom:12px;padding:8px 12px;background:rgba(220,38,38,0.12);border:1px solid #dc2626;color:#fca5a5;border-radius:3px;font-size:12px;"></div>'
+      +     '<div style="display:flex;justify-content:flex-end;gap:10px;padding-top:12px;border-top:1px solid var(--navy-border,#22334f);">'
+      +       '<button type="button" onclick="window._lpQuickCustClose()" style="background:transparent;border:1px solid var(--navy-border,#22334f);color:var(--muted,#8a9bb1);font-size:12px;font-weight:700;padding:8px 18px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;">Cancel</button>'
+      +       '<button id="lpqc-save" type="button" onclick="window._lpQuickCustSave()" style="background:var(--gold,#c9a84c);border:none;color:var(--navy,#0d1c30);font-size:12px;font-weight:700;padding:8px 22px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;">Save &amp; Link</button>'
+      +     '</div>'
+      +   '</div>';
+    wrap.addEventListener('click', function(ev){ if (ev.target === wrap) window._lpQuickCustClose(); });
+    document.body.appendChild(wrap);
+  }
+
+  // Auto-generate a client ID in CLI-### format. We fetch max(id) from
+  // Supabase rather than trusting whatever's cached, so race conditions
+  // with other users adding customers in parallel are less likely.
+  async function nextClientId() {
+    try {
+      var rows = await window.db.select('clients', '?select=id');
+      var nums = (rows||[])
+        .map(function(r){ return parseInt(String(r.id||'').replace(/^CLI-/,''),10) || 0; })
+        .filter(function(n){ return n > 0; });
+      var mx = nums.length ? Math.max.apply(null, nums) : 0;
+      return 'CLI-' + ('000' + (mx+1)).slice(-3);
+    } catch(e) {
+      console.warn('[+ New customer] nextClientId fallback:', e);
+      return 'CLI-' + Date.now().toString().slice(-6);
+    }
+  }
+
+  window._lpQuickCustOpen = function() {
+    ensureQuickModal();
+    var ov = document.getElementById('lp-quick-cust-overlay');
+    if (!ov) return;
+    // Reset form
+    ['lpqc-company','lpqc-contact','lpqc-country','lpqc-email','lpqc-phone'].forEach(function(id){
+      var e = document.getElementById(id); if (e) e.value = '';
+    });
+    var rf = document.getElementById('lpqc-referred');  if (rf) rf.value = '';
+    var err = document.getElementById('lpqc-err');      if (err) err.style.display = 'none';
+    var save = document.getElementById('lpqc-save');    if (save) { save.disabled = false; save.innerHTML = 'Save &amp; Link'; }
+    ov.style.display = 'flex';
+    setTimeout(function(){
+      var first = document.getElementById('lpqc-company'); if (first) first.focus();
+    }, 60);
+  };
+
+  window._lpQuickCustClose = function() {
+    var ov = document.getElementById('lp-quick-cust-overlay');
+    if (ov) ov.style.display = 'none';
+  };
+
+  window._lpQuickCustSave = async function() {
+    var err  = document.getElementById('lpqc-err');
+    var save = document.getElementById('lpqc-save');
+    function showErr(msg){
+      if (err) { err.textContent = msg; err.style.display = 'block'; }
+      else alert(msg);
+    }
+    var company = (document.getElementById('lpqc-company').value||'').trim();
+    if (!company) { showErr('Company name is required.'); return; }
+
+    // IMPORTANT: column names match the real `clients` table schema —
+    // `name` (not company) and `contact_name` (not contact). Getting these
+    // wrong causes a silent PostgREST 400 and the insert vanishes.
+    var payload = {
+      name:            company,
+      contact_name:    (document.getElementById('lpqc-contact').value||'').trim() || null,
+      country:         (document.getElementById('lpqc-country').value||'').trim() || null,
+      email:           (document.getElementById('lpqc-email').value||'').trim() || null,
+      phone:           (document.getElementById('lpqc-phone').value||'').trim() || null,
+      lifecycle_stage: 'lead',
+      referred_by:     (document.getElementById('lpqc-referred').value||'') || 'Direct'
+    };
+
+    if (save) { save.disabled = true; save.innerHTML = 'Saving&hellip;'; }
+    try {
+      payload.id = await nextClientId();
+      try {
+        await window.db.insert('clients', payload);
+      } catch(insertErr) {
+        // Retry once on unique-key collision (ghost ID from a parallel save)
+        var msg = (insertErr && insertErr.message) || '';
+        if (msg.indexOf('23505') !== -1 || /duplicate|unique/i.test(msg)) {
+          var n = parseInt(String(payload.id||'').replace(/^CLI-/,''),10) || 0;
+          payload.id = 'CLI-' + ('000'+(n+1)).slice(-3);
+          await window.db.insert('clients', payload);
+        } else { throw insertErr; }
+      }
+
+      // Refresh the cached CLIENTS array if the main app maintains one.
+      if (typeof window._reloadClientsFromDB === 'function') {
+        try { await window._reloadClientsFromDB(); } catch(_){}
+      } else if (typeof window.reloadClientsFromDB === 'function') {
+        try { await window.reloadClientsFromDB(); } catch(_){}
+      } else if (Array.isArray(window.CLIENTS)) {
+        window.CLIENTS.push(payload);
+      }
+
+      // Repopulate the pricing tool's customer dropdown and auto-select it.
+      if (typeof window._populateQuoteClientDropdown === 'function') {
+        window._populateQuoteClientDropdown(payload.id);
+      } else {
+        // Absolute last resort — stuff an <option> in directly.
+        var sel = document.getElementById('quoteClientId');
+        if (sel) {
+          var opt = document.createElement('option');
+          opt.value = payload.id;
+          opt.textContent = company;
+          sel.appendChild(opt);
+          sel.value = payload.id;
+          if (typeof window._onQuoteClientChange === 'function') window._onQuoteClientChange();
+        }
+      }
+
+      if (window.toast) window.toast('Lead "' + company + '" added to Customers and linked to this quote.', 'success');
+      window._lpQuickCustClose();
+    } catch(e) {
+      console.error('[+ New customer] save failed:', e);
+      showErr('Save failed: ' + (e && e.message || e));
+      if (save) { save.disabled = false; save.innerHTML = 'Save &amp; Link'; }
+    }
+  };
+
+  // Keep the diagnostic-heavy handler for context, but now it routes to the
+  // standalone mini-modal first. The old openClientModal path is kept as a
+  // last-ditch fallback in case someone wants the full customer form.
+})();
+
 window._lpNewQuoteCustomer = function(ev) {
   try { if (ev && ev.preventDefault) ev.preventDefault(); } catch(_){}
   try { window.console && console.log('[+ New customer] click received'); } catch(_){}
 
-  // Helper — verify the modal is ACTUALLY visible after we tried to open it.
-  // If openClientModal returned without error but the DOM didn't react, this
-  // catches the silent "open failed" case (CSS override, missing element, etc).
-  function verifyOpen(label) {
-    setTimeout(function(){
-      var ov = document.getElementById('client-modal-overlay');
-      if (!ov) {
-        console.error('[+ New customer] ' + label + ' returned but #client-modal-overlay is missing from the DOM');
-        (window.toast || alert)('Customer modal element missing from page. Refresh and try again.');
-        return;
-      }
-      var hasOpen = ov.classList.contains('open');
-      var cs = window.getComputedStyle(ov);
-      console.log('[+ New customer] post-' + label + ' check:',
-        'hasOpenClass=' + hasOpen,
-        'display=' + cs.display,
-        'visibility=' + cs.visibility,
-        'zIndex=' + cs.zIndex,
-        'opacity=' + cs.opacity);
-      if (!hasOpen) {
-        console.warn('[+ New customer] ' + label + ' did not add .open class — something exited early.');
-        (window.toast || alert)('Customer modal did not open — see console for reason.');
-      } else if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) {
-        console.warn('[+ New customer] modal has .open but is hidden by CSS — display=' + cs.display + ' opacity=' + cs.opacity);
-        (window.toast || alert)('Customer modal opened but is being hidden by CSS. See console for details.');
-      }
-    }, 80);
-  }
-
-  // Tier 1 — full glue path (auto-relinks new customer to the quote).
-  if (typeof window.quickAddCustomerForQuote === 'function') {
-    console.log('[+ New customer] tier 1: calling quickAddCustomerForQuote');
+  // Preferred path: the standalone mini-modal we just defined above. It has
+  // zero external dependencies beyond window.db, so it works regardless of
+  // what state other scripts are in.
+  if (typeof window._lpQuickCustOpen === 'function') {
     try {
-      window.quickAddCustomerForQuote();
-      verifyOpen('quickAddCustomerForQuote');
+      window._lpQuickCustOpen();
       return;
     } catch (err) {
-      console.error('[+ New customer] quickAddCustomerForQuote threw:', err);
-      // fall through
+      console.error('[+ New customer] standalone modal threw:', err);
+      // fall through to the legacy paths
     }
-  } else {
-    console.warn('[+ New customer] tier 1 skipped: window.quickAddCustomerForQuote is not a function');
   }
 
-  // Tier 2 — just open the customer modal, no auto-relink.
+  // Fallback 1 — the original glue function.
+  if (typeof window.quickAddCustomerForQuote === 'function') {
+    try { window.quickAddCustomerForQuote(); return; }
+    catch (err) { console.error('[+ New customer] quickAddCustomerForQuote threw:', err); }
+  }
+
+  // Fallback 2 — the full customer modal.
   if (typeof window.openClientModal === 'function') {
-    console.log('[+ New customer] tier 2: calling openClientModal directly');
     try {
       window.openClientModal();
-      if (window.toast) {
-        window.toast('After saving, re-open the customer dropdown to pick your new entry.', 'info');
-      }
-      verifyOpen('openClientModal');
+      if (window.toast) window.toast('After saving, re-open the customer dropdown to pick your new entry.', 'info');
       return;
-    } catch (err) {
-      console.error('[+ New customer] openClientModal threw:', err);
-      (window.toast || alert)('Could not open customer form: ' + (err && err.message || err));
-      return;
-    }
-  } else {
-    console.warn('[+ New customer] tier 2 skipped: window.openClientModal is not a function');
+    } catch (err) { console.error('[+ New customer] openClientModal threw:', err); }
   }
 
-  // Tier 3 — neither handler exists. Shout.
-  console.warn('[+ New customer] no handler on window — glue scripts failed to load');
   (window.toast || alert)('Customer form is not loaded. Hard-refresh the page (Ctrl+F5) and try again.');
 };
 </script>
