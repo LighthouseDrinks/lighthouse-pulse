@@ -18426,6 +18426,10 @@ window._clientAbbrev = function(name) {
 // Figure out the next sequential number for a client's client-owned vessels.
 // Format: {ABBREV}-CV-{NNN}. Checks the in-memory liquid cache first, falls back to 1.
 window._nextClientVesselRef = function(clientId, clientName) {
+  // Failsafe: never generate a client-vessel ref for a Lighthouse client — this
+  // only gets called when we've decided it's a client vessel, so the client
+  // shouldn't be Lighthouse. If somehow it is, bail out to avoid "LIGHTH-CV-*".
+  if ((clientName || '').toLowerCase().indexOf('lighthouse') >= 0) return '';
   var abbrev = window._clientAbbrev(clientName);
   var prefix = abbrev + '-CV-';
   var cache = (typeof _bl !== 'undefined' && _bl && _bl.length) ? _bl
@@ -18445,11 +18449,10 @@ window._nextClientVesselRef = function(clientId, clientName) {
 
 // Toggle between LH-fleet vessel UI and auto-generated client-vessel reference
 // based on the selected Owner/Client. Lighthouse = fleet register; anyone else = client vessel.
+// DOM-first, no cache dependencies. Lighthouse is ALWAYS the default on load.
 window._blacClientChange = function() {
   var sel = document.getElementById('blac-client');
   if (!sel) return;
-  var clientId = sel.value;
-  var isClientVessel = !!(clientId && window._cmIsLighthouseClient && !window._cmIsLighthouseClient(clientId, sel));
   var lhWrap    = document.getElementById('blac-lh-vessel-wrap');
   var cvWrap    = document.getElementById('blac-client-vessel-wrap');
   var banner    = document.getElementById('blac-client-vessel-banner');
@@ -18457,13 +18460,26 @@ window._blacClientChange = function() {
   var cvDisp    = document.getElementById('blac-client-vessel-ref-display');
   var hidRef    = document.getElementById('blac-reference');
   var vesselSel = document.getElementById('blac-vessel-select');
+
+  // Read the currently-displayed option text directly — this is the source of truth.
+  var opt      = sel.options[sel.selectedIndex];
+  var clientTx = (opt && opt.text ? opt.text : '').toLowerCase();
+  var clientId = sel.value || '';
+
+  // Default: LH mode. Only flip to client-vessel mode when we're CERTAIN the
+  // selected option is a non-Lighthouse client (text populated AND doesn't contain "lighthouse").
+  var isClientVessel = false;
+  if (clientId && clientTx && clientTx.indexOf('lighthouse') < 0) {
+    isClientVessel = true;
+  }
+
   if (lhWrap)  lhWrap.style.display  = isClientVessel ? 'none' : '';
   if (cvWrap)  cvWrap.style.display  = isClientVessel ? '' : 'none';
   if (banner)  banner.style.display  = isClientVessel ? 'flex' : 'none';
+
   if (isClientVessel) {
     if (vesselSel) vesselSel.value = '';
-    var clientName = (sel.options[sel.selectedIndex] && sel.options[sel.selectedIndex].text) || '';
-    var autoRef = window._nextClientVesselRef(clientId, clientName);
+    var autoRef = window._nextClientVesselRef(clientId, opt.text);
     if (cvHid)  cvHid.value  = autoRef;
     if (cvDisp) cvDisp.textContent = autoRef;
     if (hidRef) hidRef.value = autoRef;
@@ -19685,25 +19701,23 @@ window.openContainerModal = async function(editId) {
 };
 
 // Auto-derive whether this is a client vessel based on the selected Owner/Client.
-// Rule: if the selected client is "Lighthouse Drinks" (or any client whose name contains
-// "lighthouse"), this is an LH-fleet vessel. Any other client = client-owned vessel.
-// Checks multiple caches + falls back to reading the select option text from the DOM
-// so it works across all forms regardless of which cache is populated.
+// Rule: any client whose name contains "lighthouse" = LH-fleet vessel. Anyone else = client vessel.
+// DOM-first: reads the selected option's displayed text. No cache dependency.
 window._cmIsLighthouseClient = function(clientId, selectEl) {
   if (!clientId) return true; // nothing picked yet → treat as default (LH) to avoid flash
-  // Try all known caches
-  var caches = [];
-  if (typeof _clients !== 'undefined' && _clients)             caches.push(_clients);
-  if (typeof _blClients !== 'undefined' && _blClients)         caches.push(_blClients);
-  if (window.CLIENTS && window.CLIENTS.length)                 caches.push(window.CLIENTS);
-  for (var i = 0; i < caches.length; i++) {
-    var c = caches[i].find(function(x){ return x.id === clientId; });
-    if (c) return (c.name || '').toLowerCase().indexOf('lighthouse') >= 0;
-  }
-  // DOM fallback — read the selected option's text
+  // Primary: read the currently-selected option text from the DOM
   if (selectEl && selectEl.options && selectEl.selectedIndex >= 0) {
     var txt = (selectEl.options[selectEl.selectedIndex].text || '').toLowerCase();
     if (txt) return txt.indexOf('lighthouse') >= 0;
+  }
+  // Secondary: scan known caches
+  var caches = [];
+  if (typeof _clients !== 'undefined' && _clients)     caches.push(_clients);
+  if (window._blClients)                               caches.push(window._blClients);
+  if (window.CLIENTS && window.CLIENTS.length)         caches.push(window.CLIENTS);
+  for (var i = 0; i < caches.length; i++) {
+    var c = caches[i].find(function(x){ return x.id === clientId; });
+    if (c) return (c.name || '').toLowerCase().indexOf('lighthouse') >= 0;
   }
   // Default safe: treat as LH so we don't force client-vessel mode on a missing cache
   return true;
@@ -29029,8 +29043,10 @@ window.saveAdjModal = async function() {
 
   async function loadBlData() {
     _blClients = await window.db.select('clients', '?order=name.asc');
+    window._blClients = _blClients;
     var _blRaw = await window.db.select('liquid_containers', '?order=type.asc,reference.asc');
     _bl = (_blRaw || []).filter(function(c){ return !c.archived; });
+    window._bl = _bl;
     // Also keep vessel register data fresh so vessel dropdowns work everywhere
     try { window._vrVessels = await window.db.select('vessels', '?order=id.asc&select=*'); } catch(e) { window._vrVessels = window._vrVessels || []; }
     try { window._vrAllContainers = _bl.map(function(c){ return { id:c.id, reference:c.reference, type:c.type, spirit_type:c.spirit_type, current_litres:c.current_litres, current_lpa:c.current_lpa, status:c.status, vessel_id:c.vessel_id }; }); } catch(e) {}
