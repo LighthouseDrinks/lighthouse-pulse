@@ -20499,6 +20499,20 @@ window.saveTransfer = async function() {
   var dstTotal = dests.reduce(function(s,x){ return s+(x.litres_received||0); },0);
   var waste    = Math.max(0, srcTotal - dstTotal);
 
+  // LH → Client gatekeeper: confirm before releasing LH liquid into client-owned vessels.
+  if (typeof window._confirmLhOutflowIfNeeded === 'function') {
+    var _okOutflow = await window._confirmLhOutflowIfNeeded(
+      sources.map(function(s){
+        var c = _liquid.find(function(x){ return x.id === s.container_id; });
+        return { cont: c, litres: s.litres_actual, lpa: s.lpa_actual };
+      }),
+      dests.map(function(d){
+        return { cont: _liquid.find(function(x){ return x.id === d.container_id; }) };
+      })
+    );
+    if (!_okOutflow) return;
+  }
+
   try {
     var tf = await supaMut('POST','liquid_transfers','',{
       transfer_date:gv('tf-date'),
@@ -29085,27 +29099,90 @@ window.saveAdjModal = async function() {
   // context: 'source' — show volume, ABV, spirit (empty containers labelled EMPTY, no spirit)
   //          'dest'   — show available headspace and fill %
   //          'short'  — reference + type + Empty/volume only
+  // Quick check: is this container's client a non-Lighthouse (i.e. client-owned vessel)?
+  // Uses the is_client_vessel flag when present, falls back to client name lookup so
+  // legacy records (saved before the flag existed) still get tagged correctly.
+  // Exposed on window so save handlers outside this IIFE (e.g. saveTransfer) can use it.
+  window._isClientOwnedContainer = function(c) {
+    if (!c) return false;
+    if (c.is_client_vessel) return true;
+    if (!c.client_id) return false;
+    var list = (typeof _clients !== 'undefined' && _clients) ? _clients
+             : (window._blClients || window.CLIENTS || []);
+    var cl = list.find ? list.find(function(x){ return x.id === c.client_id; }) : null;
+    if (!cl) return false;
+    return (cl.name || '').toLowerCase().indexOf('lighthouse') < 0;
+  };
+  var _isClientOwnedContainer = window._isClientOwnedContainer;
+
+  // Resolve a client's display name from any available cache.
+  window._clientNameById = function(clientId) {
+    if (!clientId) return '';
+    var caches = [];
+    if (typeof _clients !== 'undefined' && _clients) caches.push(_clients);
+    if (window._blClients) caches.push(window._blClients);
+    if (window.CLIENTS && window.CLIENTS.length) caches.push(window.CLIENTS);
+    for (var i = 0; i < caches.length; i++) {
+      var cl = caches[i].find ? caches[i].find(function(x){ return x.id === clientId; }) : null;
+      if (cl) return cl.name || '';
+    }
+    return '';
+  };
+
+  // ── LH-outflow gatekeeper ────────────────────────────────────────────────────
+  // Called before saving a blend/transfer. If any Lighthouse-owned source is
+  // contributing to any client-owned destination, we show an explicit confirm
+  // so the operator knows those litres will come off the LH stock value
+  // (they are effectively sold/outbound to the client). Returns a Promise<bool>;
+  // resolves true immediately if there's no LH→client movement.
+  //
+  //   sources: [{cont, litres, lpa}]   (lpa optional — used for the message)
+  //   dests:   [{cont}]                 (just the destination container objects)
+  window._confirmLhOutflowIfNeeded = async function(sources, dests) {
+    sources = sources || []; dests = dests || [];
+    var clientDests = dests.filter(function(d){ return d && d.cont && _isClientOwnedContainer(d.cont); });
+    if (!clientDests.length) return true; // no client destinations → nothing leaving LH
+    var lhSources = sources.filter(function(s){ return s && s.cont && !_isClientOwnedContainer(s.cont); });
+    if (!lhSources.length) return true;   // sources are all client liquid already
+    // Summarise for the dialog
+    var outLpa = lhSources.reduce(function(sum, s){ return sum + (parseFloat(s.lpa||0) || 0); }, 0);
+    var outL   = lhSources.reduce(function(sum, s){ return sum + (parseFloat(s.litres||0) || 0); }, 0);
+    var clientNames = Array.from(new Set(clientDests.map(function(d){
+      return window._clientNameById(d.cont.client_id) || d.cont.reference || 'Client vessel';
+    })));
+    var refs = lhSources.map(function(s){ return s.cont.reference; }).join(', ');
+    var lpaStr = outLpa > 0 ? outLpa.toFixed(2) + ' LPA' : outL.toFixed(1) + ' L';
+    var msg = 'You are moving ' + lpaStr + ' of Lighthouse-owned liquid (' + refs + ') into client-owned vessel(s):\n  ' + clientNames.join(', ')
+      + '\n\nOnce saved, those litres come off Lighthouse stock value and are recorded as outbound to the client (treated as sold).'
+      + '\n\nThis is a permanent stock movement — reversing it requires a separate blend/transfer.\n\nContinue?';
+    if (typeof window.lpConfirm === 'function') {
+      return await window.lpConfirm(msg, { title: 'LH Liquid → Client Vessel', confirmLabel: 'Yes, record as sold', destructive: true });
+    }
+    return window.confirm(msg);
+  };
+
   function _containerLabel(c, context) {
     var l    = parseFloat(c.current_litres || 0);
     var cap  = parseFloat(c.capacity_litres || 0);
     var tLbl = _TYPE_LABELS[c.type] || (c.type || '—');
     var isEmpty = l <= 0;
     var ref  = c.vessel_id || c.reference; // prefer vessel register ID when linked
+    var cvPrefix = _isClientOwnedContainer(c) ? '◆ CLIENT  ' : '';
 
     if (context === 'short') {
-      return ref + '  [' + tLbl + ']  ' + (isEmpty ? 'EMPTY' : l.toFixed(0) + 'L');
+      return cvPrefix + ref + '  [' + tLbl + ']  ' + (isEmpty ? 'EMPTY' : l.toFixed(0) + 'L');
     }
     if (context === 'dest') {
       var free = cap > 0 ? (cap - l).toFixed(0) + 'L free  (' + Math.round(l / cap * 100) + '% full)' : l.toFixed(0) + 'L used';
-      return ref + '  [' + tLbl + ']  ' + free;
+      return cvPrefix + ref + '  [' + tLbl + ']  ' + free;
     }
     // 'source' (default)
     if (isEmpty) {
-      return ref + '  [' + tLbl + ']  EMPTY';
+      return cvPrefix + ref + '  [' + tLbl + ']  EMPTY';
     }
     var abvS = c.abv ? ' @ ' + parseFloat(c.abv).toFixed(1) + '%' : '';
     var sp   = c.spirit_type ? '  ·  ' + _fmtSpirit(c.spirit_type) : '';
-    return ref + '  [' + tLbl + ']  ' + l.toFixed(0) + 'L' + abvS + sp;
+    return cvPrefix + ref + '  [' + tLbl + ']  ' + l.toFixed(0) + 'L' + abvS + sp;
   }
   window._containerLabel = _containerLabel;
 
@@ -31268,6 +31345,12 @@ window.saveAdjModal = async function() {
       if (destCap > 0 && totalL > destCap) {
         window.toast && window.toast('Blend total ' + totalL.toFixed(1) + 'L exceeds base vessel capacity of ' + destCap.toFixed(0) + 'L.', 'error'); return;
       }
+      // LH → Client gatekeeper: if LH liquid is heading into a client-owned base vessel, confirm it's a sale.
+      var _okOutflow = await window._confirmLhOutflowIfNeeded(
+        sources.filter(function(s){ return !s.isBase; }),
+        [{ cont: destCont }]
+      );
+      if (!_okOutflow) return;
       try {
         if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
         for (var i = 0; i < sources.length; i++) {
@@ -31351,6 +31434,10 @@ window.saveAdjModal = async function() {
     if (capBad.length) {
       window.toast && window.toast('Destination capacity exceeded: ' + capBad.map(function(d){ return d.cont.reference; }).join(', '), 'error'); return;
     }
+
+    // LH → Client gatekeeper: if any LH-owned source contributes to a client-owned destination, confirm sale.
+    var _okOutflow = await window._confirmLhOutflowIfNeeded(sources, dests);
+    if (!_okOutflow) return;
 
     try {
       if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
@@ -31913,6 +32000,14 @@ window.saveAdjModal = async function() {
     var srcTotal = sources.reduce(function(s,x){ return s+(x.litres_actual||0); }, 0);
     var dstTotal = dests.reduce(function(s,x){ return s+(x.litres_received||0); }, 0);
     var waste = Math.max(0, srcTotal - dstTotal);  // already computed via wasteV
+
+    // LH → Client gatekeeper: confirm before releasing LH liquid into client-owned vessels.
+    var _okOutflow = await window._confirmLhOutflowIfNeeded(
+      sources.map(function(s){ return { cont: s.cont, litres: s.litres_actual, lpa: s.lpa_actual }; }),
+      dests.map(function(d){ return { cont: _bl.find(function(c){ return c.id === d.container_id; }) }; })
+    );
+    if (!_okOutflow) return;
+
     var btn = document.getElementById('btf-save-btn');
     try {
       if (btn) { btn.disabled=true; btn.textContent='Saving…'; }
