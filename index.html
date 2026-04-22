@@ -4215,25 +4215,16 @@ window.copyInviteLink = function() {
       </div>
       <div class="mfield">
         <label>Owner / Client *</label>
-        <select id="cm-client"></select>
+        <select id="cm-client" onchange="window._cmUpdateOwnership()"></select>
       </div>
-      <div class="mfield" style="grid-column:1/-1;">
-        <label>Vessel Ownership *</label>
-        <div id="cm-ownership-toggle" style="display:flex;gap:8px;margin-top:2px;">
-          <button type="button" id="cm-own-lh" class="btn btn-outline" style="flex:1;font-size:12px;padding:8px 12px;background:rgba(201,168,76,0.12);border-color:var(--gold);color:var(--gold);" onclick="window._cmSetOwnership('lighthouse')">
-            Lighthouse Vessel
-          </button>
-          <button type="button" id="cm-own-client" class="btn btn-outline" style="flex:1;font-size:12px;padding:8px 12px;" onclick="window._cmSetOwnership('client')">
-            Client-Owned Vessel
-          </button>
-        </div>
-        <div id="cm-ownership-hint" class="field-hint" style="margin-top:4px;">Liquid sits in a vessel from our fleet register.</div>
-        <input type="hidden" id="cm-is-client-vessel" value="0">
+      <div class="mfield" id="cm-ownership-indicator" style="grid-column:1/-1;display:none;padding:10px 14px;background:rgba(232,152,58,0.08);border:1px solid rgba(232,152,58,0.28);border-radius:4px;align-items:center;gap:10px;">
+        <span style="font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--amber,#e8983a);font-weight:700;">Client Vessel</span>
+        <span id="cm-ownership-indicator-text" style="font-size:12px;color:var(--muted);flex:1;">This liquid is in the client's own vessel. It will not be added to our fleet register.</span>
       </div>
       <div class="mfield" id="cm-client-vessel-label-field" style="grid-column:1/-1;display:none;">
-        <label>Client's Vessel Reference</label>
+        <label>Client's Vessel Reference <span style="color:var(--muted);font-weight:400;">(optional)</span></label>
         <input type="text" id="cm-client-vessel-label" placeholder="e.g. Their Cask #12, Customer IBC 3">
-        <div class="field-hint">The client's own label for the vessel. Not added to our vessel register.</div>
+        <div class="field-hint">The client's own label for the vessel, if useful.</div>
       </div>
       <div class="mfield">
         <label>Capacity (Litres)</label>
@@ -18189,6 +18180,17 @@ window.loadVesselRegister = async function() {
 
   try {
     _vrAllContainers = await supa('liquid_containers', '?archived=is.false&select=id,reference,type,spirit_type,current_litres,current_lpa,status,vessel_id,fill_date,is_client_vessel,client_vessel_label,client_id&order=reference.asc');
+    // Annotate each row with derived client-vessel flag (works for legacy records too)
+    try {
+      var _clMap = {};
+      var _clList = (typeof _clients !== 'undefined' && _clients && _clients.length)
+        ? _clients : (window.CLIENTS || []);
+      _clList.forEach(function(c){ _clMap[c.id] = (c.name || '').toLowerCase(); });
+      _vrAllContainers.forEach(function(c){
+        var nm = _clMap[c.client_id] || '';
+        c._isClientVessel = !!c.is_client_vessel || (nm && nm.indexOf('lighthouse') < 0);
+      });
+    } catch(e) {}
   } catch(e) { _vrAllContainers = []; }
 
   // Populate vessel dropdown in Add Container form
@@ -18207,7 +18209,7 @@ window.loadVesselRegister = async function() {
   se('vr-kpi-value', fleetVal > 0 ? fmt(fleetVal) : '—');
 
   // Client-owned vessels on site (separate from LH fleet KPIs)
-  var clientVesselCount = _vrAllContainers.filter(function(c){ return c.is_client_vessel; }).length;
+  var clientVesselCount = _vrAllContainers.filter(function(c){ return c._isClientVessel; }).length;
   var cvBanner = document.getElementById('vr-client-vessels-banner');
   var cvCount  = document.getElementById('vr-client-vessels-count');
   if (cvCount)  cvCount.textContent = String(clientVesselCount);
@@ -18230,7 +18232,10 @@ window._vrGotoClientVessels = function() {
     for (var i = 0; i < rows.length; i++) {
       var cid = rows[i].getAttribute('data-cid');
       var rec = (window._liquid || []).find(function(c){ return c.id === cid; });
-      if (rec && rec.is_client_vessel) { rows[i].scrollIntoView({ behavior:'smooth', block:'center' }); break; }
+      if (!rec) continue;
+      var rNm = ((window.clientName && window.clientName(rec.client_id)) || '').toLowerCase();
+      var rIs = !!rec.is_client_vessel || (rNm && rNm.indexOf('lighthouse') < 0);
+      if (rIs) { rows[i].scrollIntoView({ behavior:'smooth', block:'center' }); break; }
     }
   }, 200);
 };
@@ -18283,7 +18288,7 @@ window._vrRenderUnlinked = function() {
   var ubody = document.getElementById('vr-unlinked-tbody');
   var countEl = document.getElementById('vr-unlinked-count');
   if (!ubody) return;
-  var unlinked = _vrAllContainers.filter(function(c){ return !c.vessel_id && !c.is_client_vessel; });
+  var unlinked = _vrAllContainers.filter(function(c){ return !c.vessel_id && !c._isClientVessel; });
   if (countEl) countEl.textContent = unlinked.length ? '(' + unlinked.length + ' unlinked)' : '(all linked)';
   if (!unlinked.length) {
     ubody.innerHTML = '<tr><td colspan="8" style="color:var(--green);text-align:center;padding:20px;font-size:12px;">✓ All active liquid batches are linked to a vessel.</td></tr>';
@@ -19469,7 +19474,9 @@ window.renderLiquid = function() {
     } else {
       statusPill = '<span style="font-size:10px;font-weight:700;letter-spacing:0.05em;padding:3px 8px;background:rgba(61,186,120,0.11);color:var(--green,#3dba78);border:1px solid rgba(61,186,120,0.28);border-radius:3px;text-transform:uppercase;">Active</span>';
     }
-    var clientVesselBadge = c.is_client_vessel
+    var _cnameRaw = (clientName(c.client_id) || '').toLowerCase();
+    var _isClientVessel = c.is_client_vessel || (_cnameRaw && _cnameRaw.indexOf('lighthouse') < 0);
+    var clientVesselBadge = _isClientVessel
       ? '<span title="' + esc(c.client_vessel_label || 'Client-owned vessel') + '" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;letter-spacing:0.08em;padding:2px 6px;background:rgba(232,152,58,0.14);color:var(--amber,#e8983a);border:1px solid rgba(232,152,58,0.32);border-radius:3px;vertical-align:middle;">CLIENT VESSEL</span>'
       : '';
     return '<tr class="mob-data-row liq-row" data-cid="' + cid + '">'
@@ -19587,7 +19594,6 @@ window.openContainerModal = async function(editId) {
       sv('cm-filldate', c.fill_date||''); sv('cm-ola', c.ola||''); sv('cm-notes', c.notes||'');
       sv('cm-supplier', c.supplier_id||'');
       sv('cm-client-vessel-label', c.client_vessel_label||'');
-      window._cmSetOwnership(c.is_client_vessel ? 'client' : 'lighthouse');
     }
   } else {
     ['cm-reference','cm-capacity','cm-location','cm-spirit','cm-cbw','cm-abv','cm-litres',
@@ -19595,35 +19601,32 @@ window.openContainerModal = async function(editId) {
      'cm-client-vessel-label'].forEach(function(id){
       var e = gid(id); if(e) e.value = '';
     });
-    window._cmSetOwnership('lighthouse');
   }
+  window._cmUpdateOwnership();
   if (window.handleCMTypeChange) window.handleCMTypeChange();
   if (window.calcCMAngelShare) window.calcCMAngelShare();
   ov.classList.add('open'); document.body.style.overflow = 'hidden';
 };
 
-window._cmSetOwnership = function(mode) {
-  var isClient = (mode === 'client');
-  var flag  = document.getElementById('cm-is-client-vessel');
-  var lhBtn = document.getElementById('cm-own-lh');
-  var cBtn  = document.getElementById('cm-own-client');
-  var lbl   = document.getElementById('cm-client-vessel-label-field');
-  var hint  = document.getElementById('cm-ownership-hint');
-  if (flag) flag.value = isClient ? '1' : '0';
-  if (lhBtn) {
-    lhBtn.style.background   = isClient ? 'transparent'         : 'rgba(201,168,76,0.12)';
-    lhBtn.style.borderColor  = isClient ? 'var(--navy-border)'  : 'var(--gold)';
-    lhBtn.style.color        = isClient ? 'var(--text)'         : 'var(--gold)';
-  }
-  if (cBtn) {
-    cBtn.style.background   = isClient ? 'rgba(232,152,58,0.14)' : 'transparent';
-    cBtn.style.borderColor  = isClient ? 'var(--amber,#e8983a)'  : 'var(--navy-border)';
-    cBtn.style.color        = isClient ? 'var(--amber,#e8983a)'  : 'var(--text)';
-  }
-  if (lbl)  lbl.style.display = isClient ? '' : 'none';
-  if (hint) hint.textContent = isClient
-    ? 'Liquid is stored in the client\'s own vessel at our warehouse — not added to our fleet register.'
-    : 'Liquid sits in a vessel from our fleet register.';
+// Auto-derive whether this is a client vessel based on the selected Owner/Client.
+// Rule: if the selected client is "Lighthouse Drinks" (or any client whose name contains
+// "lighthouse"), this is an LH-fleet vessel. Any other client = client-owned vessel.
+window._cmIsLighthouseClient = function(clientId) {
+  if (!clientId) return false;
+  var list = (typeof _clients !== 'undefined' && _clients) ? _clients : (window.CLIENTS || []);
+  var c = list.find(function(x){ return x.id === clientId; });
+  if (!c) return false;
+  return (c.name || '').toLowerCase().indexOf('lighthouse') >= 0;
+};
+
+window._cmUpdateOwnership = function() {
+  var clientEl = document.getElementById('cm-client');
+  var clientId = clientEl ? clientEl.value : '';
+  var isClientVessel = clientId && !window._cmIsLighthouseClient(clientId);
+  var indicator = document.getElementById('cm-ownership-indicator');
+  var labelField = document.getElementById('cm-client-vessel-label-field');
+  if (indicator)  indicator.style.display  = isClientVessel ? 'flex' : 'none';
+  if (labelField) labelField.style.display = isClientVessel ? '' : 'none';
 };
 
 window.handleCMTypeChange = function() {
@@ -19933,7 +19936,7 @@ window.saveContainer = async function() {
   var cmCap    = parseFloat(gv('cm-capacity'))||0;
   var cmStatus = cmLitres <= 0 ? 'empty' : (cmCap > 0 && cmLitres >= cmCap ? 'full' : 'partially_full');
   var cmType   = gv('cm-type');
-  var isClientVessel = gv('cm-is-client-vessel') === '1';
+  var isClientVessel = !!(gv('cm-client') && !window._cmIsLighthouseClient(gv('cm-client')));
   var payload = {
     type:cmType, reference:gv('cm-reference'), client_id:gv('cm-client'),
     capacity_litres:gv('cm-capacity')||null, location:gv('cm-location')||null,
