@@ -15182,11 +15182,10 @@ window.loadBoms = async function initBoms() {
           <div class="field-hint">Select a registered vessel or "+ Register New" to enter the vessel code.</div>
         </div>
         <div class="mfield" id="blac-client-vessel-wrap" style="display:none;">
-          <label>Client's Vessel Reference *</label>
-          <input type="text" id="blac-client-vessel-ref" placeholder="e.g. Customer Cask #12, Client IBC 3"
-            oninput="var r=document.getElementById('blac-reference');if(r)r.value=this.value.trim().toUpperCase();"
-            style="font-family:monospace;font-size:15px;font-weight:700;width:100%;box-sizing:border-box;background:var(--navy-dark);border:1px solid var(--amber,#e8983a);color:var(--amber,#e8983a);padding:8px 12px;border-radius:4px;">
-          <div class="field-hint">The client's own label for the vessel. Not added to our fleet register.</div>
+          <label>Client Vessel Reference (auto)</label>
+          <div id="blac-client-vessel-ref-display" style="font-family:monospace;font-size:15px;font-weight:700;width:100%;box-sizing:border-box;background:rgba(232,152,58,0.06);border:1px solid rgba(232,152,58,0.28);color:var(--amber,#e8983a);padding:8px 12px;border-radius:4px;letter-spacing:0.06em;">—</div>
+          <input type="hidden" id="blac-client-vessel-ref">
+          <div class="field-hint">Auto-generated from client + type. Prevents inconsistent naming.</div>
         </div>
         <div class="mfield">
           <label>Owner / Client *</label>
@@ -18410,17 +18409,52 @@ window._vrPopulateVesselDropdown = function(typeFilter) {
   window._blacVesselSelectChange();
 };
 
-// Toggle between LH-fleet vessel UI and free-text client-vessel reference
+// Build a short uppercase abbreviation from a client name: e.g. "Boann Distillery" → "BOANN"
+window._clientAbbrev = function(name) {
+  var s = (name || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!s) return 'CLIENT';
+  if (s.length <= 6) return s;
+  // Take first word's first 6 chars, or build from initials if multi-word
+  var words = (name || '').toUpperCase().split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    var init = words.map(function(w){ return (w[0] || ''); }).join('').replace(/[^A-Z0-9]/g, '');
+    if (init.length >= 3) return init.slice(0, 5);
+  }
+  return s.slice(0, 6);
+};
+
+// Figure out the next sequential number for a client's client-owned vessels.
+// Format: {ABBREV}-CV-{NNN}. Checks the in-memory liquid cache first, falls back to 1.
+window._nextClientVesselRef = function(clientId, clientName) {
+  var abbrev = window._clientAbbrev(clientName);
+  var prefix = abbrev + '-CV-';
+  var cache = (typeof _bl !== 'undefined' && _bl && _bl.length) ? _bl
+            : (typeof _liquid !== 'undefined' && _liquid && _liquid.length) ? _liquid
+            : (window._vrAllContainers || []);
+  var maxN = 0;
+  cache.forEach(function(c){
+    if (!c || c.client_id !== clientId) return;
+    var ref = String(c.reference || '').toUpperCase();
+    if (ref.indexOf(prefix) === 0) {
+      var n = parseInt(ref.slice(prefix.length), 10) || 0;
+      if (n > maxN) maxN = n;
+    }
+  });
+  return prefix + String(maxN + 1).padStart(3, '0');
+};
+
+// Toggle between LH-fleet vessel UI and auto-generated client-vessel reference
 // based on the selected Owner/Client. Lighthouse = fleet register; anyone else = client vessel.
 window._blacClientChange = function() {
   var sel = document.getElementById('blac-client');
   if (!sel) return;
   var clientId = sel.value;
-  var isClientVessel = !!(clientId && window._cmIsLighthouseClient && !window._cmIsLighthouseClient(clientId));
+  var isClientVessel = !!(clientId && window._cmIsLighthouseClient && !window._cmIsLighthouseClient(clientId, sel));
   var lhWrap    = document.getElementById('blac-lh-vessel-wrap');
   var cvWrap    = document.getElementById('blac-client-vessel-wrap');
   var banner    = document.getElementById('blac-client-vessel-banner');
-  var cvInput   = document.getElementById('blac-client-vessel-ref');
+  var cvHid     = document.getElementById('blac-client-vessel-ref');
+  var cvDisp    = document.getElementById('blac-client-vessel-ref-display');
   var hidRef    = document.getElementById('blac-reference');
   var vesselSel = document.getElementById('blac-vessel-select');
   if (lhWrap)  lhWrap.style.display  = isClientVessel ? 'none' : '';
@@ -18428,9 +18462,14 @@ window._blacClientChange = function() {
   if (banner)  banner.style.display  = isClientVessel ? 'flex' : 'none';
   if (isClientVessel) {
     if (vesselSel) vesselSel.value = '';
-    if (hidRef && cvInput) hidRef.value = (cvInput.value || '').trim().toUpperCase();
+    var clientName = (sel.options[sel.selectedIndex] && sel.options[sel.selectedIndex].text) || '';
+    var autoRef = window._nextClientVesselRef(clientId, clientName);
+    if (cvHid)  cvHid.value  = autoRef;
+    if (cvDisp) cvDisp.textContent = autoRef;
+    if (hidRef) hidRef.value = autoRef;
   } else {
-    if (cvInput) cvInput.value = '';
+    if (cvHid)  cvHid.value  = '';
+    if (cvDisp) cvDisp.textContent = '—';
     // Restore ref from whatever is currently selected/entered in the LH vessel UI
     if (window._blacVesselSelectChange) window._blacVesselSelectChange();
   }
@@ -19648,18 +19687,32 @@ window.openContainerModal = async function(editId) {
 // Auto-derive whether this is a client vessel based on the selected Owner/Client.
 // Rule: if the selected client is "Lighthouse Drinks" (or any client whose name contains
 // "lighthouse"), this is an LH-fleet vessel. Any other client = client-owned vessel.
-window._cmIsLighthouseClient = function(clientId) {
-  if (!clientId) return false;
-  var list = (typeof _clients !== 'undefined' && _clients) ? _clients : (window.CLIENTS || []);
-  var c = list.find(function(x){ return x.id === clientId; });
-  if (!c) return false;
-  return (c.name || '').toLowerCase().indexOf('lighthouse') >= 0;
+// Checks multiple caches + falls back to reading the select option text from the DOM
+// so it works across all forms regardless of which cache is populated.
+window._cmIsLighthouseClient = function(clientId, selectEl) {
+  if (!clientId) return true; // nothing picked yet → treat as default (LH) to avoid flash
+  // Try all known caches
+  var caches = [];
+  if (typeof _clients !== 'undefined' && _clients)             caches.push(_clients);
+  if (typeof _blClients !== 'undefined' && _blClients)         caches.push(_blClients);
+  if (window.CLIENTS && window.CLIENTS.length)                 caches.push(window.CLIENTS);
+  for (var i = 0; i < caches.length; i++) {
+    var c = caches[i].find(function(x){ return x.id === clientId; });
+    if (c) return (c.name || '').toLowerCase().indexOf('lighthouse') >= 0;
+  }
+  // DOM fallback — read the selected option's text
+  if (selectEl && selectEl.options && selectEl.selectedIndex >= 0) {
+    var txt = (selectEl.options[selectEl.selectedIndex].text || '').toLowerCase();
+    if (txt) return txt.indexOf('lighthouse') >= 0;
+  }
+  // Default safe: treat as LH so we don't force client-vessel mode on a missing cache
+  return true;
 };
 
 window._cmUpdateOwnership = function() {
   var clientEl = document.getElementById('cm-client');
   var clientId = clientEl ? clientEl.value : '';
-  var isClientVessel = clientId && !window._cmIsLighthouseClient(clientId);
+  var isClientVessel = clientId && !window._cmIsLighthouseClient(clientId, clientEl);
   var indicator = document.getElementById('cm-ownership-indicator');
   var labelField = document.getElementById('cm-client-vessel-label-field');
   if (indicator)  indicator.style.display  = isClientVessel ? 'flex' : 'none';
@@ -29492,15 +29545,16 @@ window.saveAdjModal = async function() {
   window.saveBLACContainers = async function() {
     var gv = function(id){ var e = document.getElementById(id); return e ? e.value.trim() : ''; };
     var type = gv('blac-type');
+    var clientEl = document.getElementById('blac-client');
     var clientId = gv('blac-client');
     if (!clientId)                  { window.toast && window.toast('Please select a client.', 'error'); return; }
-    var isClientVessel = !!(window._cmIsLighthouseClient && !window._cmIsLighthouseClient(clientId));
-    // For client vessels, prefer the free-text field
+    var isClientVessel = !!(window._cmIsLighthouseClient && !window._cmIsLighthouseClient(clientId, clientEl));
+    // For client vessels, use the auto-generated reference
     var ref = isClientVessel
       ? (gv('blac-client-vessel-ref') || '').toUpperCase()
       : gv('blac-reference').toUpperCase();
     if (!ref) {
-      window.toast && window.toast(isClientVessel ? 'Please enter the client\'s vessel reference.' : 'Vessel code is required.', 'error');
+      window.toast && window.toast(isClientVessel ? 'Could not auto-generate reference — try reselecting the client.' : 'Vessel code is required.', 'error');
       return;
     }
     var CAPS = { ibc: 1000, blue_drum: 200, tank: 12500 };
@@ -29532,6 +29586,11 @@ window.saveAdjModal = async function() {
     var qty     = parseInt(gv('blac-quantity')) || 1;
     var prefix  = gv('blac-prefix') || ref;
     var startN  = parseInt(gv('blac-start-num')) || 1;
+    // For client vessels, override bulk naming to use ABBREV-CV- with auto-incrementing counter
+    if (isClientVessel) {
+      var m = ref.match(/^(.*-CV-)(\d+)$/);
+      if (m) { prefix = m[1]; startN = parseInt(m[2], 10) || 1; }
+    }
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
     var btn = document.getElementById('blac-save-btn');
@@ -29580,6 +29639,7 @@ window.saveAdjModal = async function() {
       if (saveBtn && saveBtn.parentNode) saveBtn.parentNode.insertBefore(banner, saveBtn);
       setTimeout(function(){ if (banner.parentNode) banner.parentNode.removeChild(banner); }, 8000);
       ['blac-reference','blac-location','blac-spirit','blac-cbw','blac-abv','blac-litres','blac-lpa','blac-lpa-price','blac-filldate','blac-ola','blac-cask-litres','blac-cask-lpa','blac-notes','blac-prefix','blac-client-vessel-ref'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
+      var _cvDisp = document.getElementById('blac-client-vessel-ref-display'); if (_cvDisp) _cvDisp.textContent = '—';
       var vsEl = document.getElementById('blac-vessel-status'); if (vsEl) vsEl.textContent = '';
       var vsNR = document.getElementById('blac-vessel-new-row'); if (vsNR) vsNR.style.display = 'none';
       var vsSel = document.getElementById('blac-vessel-select'); if (vsSel) vsSel.value = '';
