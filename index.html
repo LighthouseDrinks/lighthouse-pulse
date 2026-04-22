@@ -4217,6 +4217,24 @@ window.copyInviteLink = function() {
         <label>Owner / Client *</label>
         <select id="cm-client"></select>
       </div>
+      <div class="mfield" style="grid-column:1/-1;">
+        <label>Vessel Ownership *</label>
+        <div id="cm-ownership-toggle" style="display:flex;gap:8px;margin-top:2px;">
+          <button type="button" id="cm-own-lh" class="btn btn-outline" style="flex:1;font-size:12px;padding:8px 12px;background:rgba(201,168,76,0.12);border-color:var(--gold);color:var(--gold);" onclick="window._cmSetOwnership('lighthouse')">
+            Lighthouse Vessel
+          </button>
+          <button type="button" id="cm-own-client" class="btn btn-outline" style="flex:1;font-size:12px;padding:8px 12px;" onclick="window._cmSetOwnership('client')">
+            Client-Owned Vessel
+          </button>
+        </div>
+        <div id="cm-ownership-hint" class="field-hint" style="margin-top:4px;">Liquid sits in a vessel from our fleet register.</div>
+        <input type="hidden" id="cm-is-client-vessel" value="0">
+      </div>
+      <div class="mfield" id="cm-client-vessel-label-field" style="grid-column:1/-1;display:none;">
+        <label>Client's Vessel Reference</label>
+        <input type="text" id="cm-client-vessel-label" placeholder="e.g. Their Cask #12, Customer IBC 3">
+        <div class="field-hint">The client's own label for the vessel. Not added to our vessel register.</div>
+      </div>
       <div class="mfield">
         <label>Capacity (Litres)</label>
         <input type="number" id="cm-capacity" placeholder="e.g. 200" min="0" step="0.1">
@@ -14393,6 +14411,14 @@ window.loadBoms = async function initBoms() {
       </div>
     </div>
 
+    <!-- Client-owned vessels on site indicator -->
+    <div id="vr-client-vessels-banner" style="display:none;margin-bottom:14px;padding:10px 14px;background:rgba(232,152,58,0.08);border:1px solid rgba(232,152,58,0.28);border-radius:4px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span style="font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--amber,#e8983a);font-weight:700;">Client-owned vessels on site</span>
+      <span id="vr-client-vessels-count" style="font-size:14px;font-weight:800;color:var(--white);">0</span>
+      <span style="font-size:11px;color:var(--muted);flex:1;">Not included in fleet KPIs above. Liquid records tagged "CLIENT VESSEL" on the Liquid tab.</span>
+      <button onclick="window._vrGotoClientVessels()" class="btn btn-outline" style="font-size:11px;padding:5px 12px;border-color:var(--amber,#e8983a);color:var(--amber,#e8983a);">View on Liquid tab</button>
+    </div>
+
     <!-- Filter bar -->
     <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">
       <select id="vr-filter-type" onchange="window._vrApplyFilter()" style="font-size:12px;padding:6px 10px;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);border-radius:3px;">
@@ -18162,7 +18188,7 @@ window.loadVesselRegister = async function() {
   }
 
   try {
-    _vrAllContainers = await supa('liquid_containers', '?archived=is.false&select=id,reference,type,spirit_type,current_litres,current_lpa,status,vessel_id,fill_date&order=reference.asc');
+    _vrAllContainers = await supa('liquid_containers', '?archived=is.false&select=id,reference,type,spirit_type,current_litres,current_lpa,status,vessel_id,fill_date,is_client_vessel,client_vessel_label,client_id&order=reference.asc');
   } catch(e) { _vrAllContainers = []; }
 
   // Populate vessel dropdown in Add Container form
@@ -18180,8 +18206,33 @@ window.loadVesselRegister = async function() {
   se('vr-kpi-avail', avail || '0');
   se('vr-kpi-value', fleetVal > 0 ? fmt(fleetVal) : '—');
 
+  // Client-owned vessels on site (separate from LH fleet KPIs)
+  var clientVesselCount = _vrAllContainers.filter(function(c){ return c.is_client_vessel; }).length;
+  var cvBanner = document.getElementById('vr-client-vessels-banner');
+  var cvCount  = document.getElementById('vr-client-vessels-count');
+  if (cvCount)  cvCount.textContent = String(clientVesselCount);
+  if (cvBanner) cvBanner.style.display = clientVesselCount > 0 ? 'flex' : 'none';
+
   window._vrRender(_vrVessels);
   window._vrRenderUnlinked();
+};
+
+window._vrGotoClientVessels = function() {
+  if (window.navToInvTab) {
+    var sbnav = document.getElementById('sbnav-inventory');
+    window.navToInvTab('liquid', sbnav);
+  }
+  setTimeout(function(){
+    var search = document.getElementById('liq-filter-search');
+    if (search) { search.value = ''; }
+    var rows = document.querySelectorAll('#liq-tbody tr.liq-row');
+    // Scroll to first client-vessel row if present
+    for (var i = 0; i < rows.length; i++) {
+      var cid = rows[i].getAttribute('data-cid');
+      var rec = (window._liquid || []).find(function(c){ return c.id === cid; });
+      if (rec && rec.is_client_vessel) { rows[i].scrollIntoView({ behavior:'smooth', block:'center' }); break; }
+    }
+  }, 200);
 };
 
 window._vrRender = function(vessels) {
@@ -18232,7 +18283,7 @@ window._vrRenderUnlinked = function() {
   var ubody = document.getElementById('vr-unlinked-tbody');
   var countEl = document.getElementById('vr-unlinked-count');
   if (!ubody) return;
-  var unlinked = _vrAllContainers.filter(function(c){ return !c.vessel_id; });
+  var unlinked = _vrAllContainers.filter(function(c){ return !c.vessel_id && !c.is_client_vessel; });
   if (countEl) countEl.textContent = unlinked.length ? '(' + unlinked.length + ' unlinked)' : '(all linked)';
   if (!unlinked.length) {
     ubody.innerHTML = '<tr><td colspan="8" style="color:var(--green);text-align:center;padding:20px;font-size:12px;">✓ All active liquid batches are linked to a vessel.</td></tr>';
@@ -19418,9 +19469,12 @@ window.renderLiquid = function() {
     } else {
       statusPill = '<span style="font-size:10px;font-weight:700;letter-spacing:0.05em;padding:3px 8px;background:rgba(61,186,120,0.11);color:var(--green,#3dba78);border:1px solid rgba(61,186,120,0.28);border-radius:3px;text-transform:uppercase;">Active</span>';
     }
+    var clientVesselBadge = c.is_client_vessel
+      ? '<span title="' + esc(c.client_vessel_label || 'Client-owned vessel') + '" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;letter-spacing:0.08em;padding:2px 6px;background:rgba(232,152,58,0.14);color:var(--amber,#e8983a);border:1px solid rgba(232,152,58,0.32);border-radius:3px;vertical-align:middle;">CLIENT VESSEL</span>'
+      : '';
     return '<tr class="mob-data-row liq-row" data-cid="' + cid + '">'
       + '<td style="width:32px;padding:8px;"><input type="checkbox" class="liq-row-cb" data-cid="' + cid + '" data-ref="' + (c.reference||'') + '" onclick="window.liqRowCheck(this)" style="cursor:pointer;accent-color:var(--gold);"></td>'
-      + '<td style="font-weight:700;color:var(--white);">' + ref + '</td>'
+      + '<td style="font-weight:700;color:var(--white);">' + ref + clientVesselBadge + '</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + typ + '</td>'
       + '<td class="mob-hide" style="font-size:12px;">' + cname + '</td>'
       + '<td class="mob-hide">' + spirit + '</td>'
@@ -19532,16 +19586,44 @@ window.openContainerModal = async function(editId) {
       sv('cm-lpa-value', c.lpa_price && c.current_lpa ? (parseFloat(c.current_lpa)*parseFloat(c.lpa_price)).toFixed(2) : '');
       sv('cm-filldate', c.fill_date||''); sv('cm-ola', c.ola||''); sv('cm-notes', c.notes||'');
       sv('cm-supplier', c.supplier_id||'');
+      sv('cm-client-vessel-label', c.client_vessel_label||'');
+      window._cmSetOwnership(c.is_client_vessel ? 'client' : 'lighthouse');
     }
   } else {
     ['cm-reference','cm-capacity','cm-location','cm-spirit','cm-cbw','cm-abv','cm-litres',
-     'cm-lpa','cm-lpa-price','cm-lpa-value','cm-filldate','cm-ola','cm-notes','cm-supplier'].forEach(function(id){
+     'cm-lpa','cm-lpa-price','cm-lpa-value','cm-filldate','cm-ola','cm-notes','cm-supplier',
+     'cm-client-vessel-label'].forEach(function(id){
       var e = gid(id); if(e) e.value = '';
     });
+    window._cmSetOwnership('lighthouse');
   }
   if (window.handleCMTypeChange) window.handleCMTypeChange();
   if (window.calcCMAngelShare) window.calcCMAngelShare();
   ov.classList.add('open'); document.body.style.overflow = 'hidden';
+};
+
+window._cmSetOwnership = function(mode) {
+  var isClient = (mode === 'client');
+  var flag  = document.getElementById('cm-is-client-vessel');
+  var lhBtn = document.getElementById('cm-own-lh');
+  var cBtn  = document.getElementById('cm-own-client');
+  var lbl   = document.getElementById('cm-client-vessel-label-field');
+  var hint  = document.getElementById('cm-ownership-hint');
+  if (flag) flag.value = isClient ? '1' : '0';
+  if (lhBtn) {
+    lhBtn.style.background   = isClient ? 'transparent'         : 'rgba(201,168,76,0.12)';
+    lhBtn.style.borderColor  = isClient ? 'var(--navy-border)'  : 'var(--gold)';
+    lhBtn.style.color        = isClient ? 'var(--text)'         : 'var(--gold)';
+  }
+  if (cBtn) {
+    cBtn.style.background   = isClient ? 'rgba(232,152,58,0.14)' : 'transparent';
+    cBtn.style.borderColor  = isClient ? 'var(--amber,#e8983a)'  : 'var(--navy-border)';
+    cBtn.style.color        = isClient ? 'var(--amber,#e8983a)'  : 'var(--text)';
+  }
+  if (lbl)  lbl.style.display = isClient ? '' : 'none';
+  if (hint) hint.textContent = isClient
+    ? 'Liquid is stored in the client\'s own vessel at our warehouse — not added to our fleet register.'
+    : 'Liquid sits in a vessel from our fleet register.';
 };
 
 window.handleCMTypeChange = function() {
@@ -19851,6 +19933,7 @@ window.saveContainer = async function() {
   var cmCap    = parseFloat(gv('cm-capacity'))||0;
   var cmStatus = cmLitres <= 0 ? 'empty' : (cmCap > 0 && cmLitres >= cmCap ? 'full' : 'partially_full');
   var cmType   = gv('cm-type');
+  var isClientVessel = gv('cm-is-client-vessel') === '1';
   var payload = {
     type:cmType, reference:gv('cm-reference'), client_id:gv('cm-client'),
     capacity_litres:gv('cm-capacity')||null, location:gv('cm-location')||null,
@@ -19864,8 +19947,11 @@ window.saveContainer = async function() {
     fill_number: cmType === 'cask' ? (parseInt(gv('cm-fill-number'))||null) : null,
     previous_contents: cmType === 'cask' ? (gv('cm-prev-contents')||null) : null,
     notes:gv('cm-notes')||null,
-    supplier_id:gv('cm-supplier')||null
+    supplier_id:gv('cm-supplier')||null,
+    is_client_vessel: isClientVessel,
+    client_vessel_label: isClientVessel ? (gv('cm-client-vessel-label')||null) : null
   };
+  if (isClientVessel) payload.vessel_id = null;
   var btn = document.getElementById('container-save-btn');
   btn.disabled = true; btn.textContent = 'Saving…';
   var oldCont = editId ? _liquid.find(function(c){ return c.id === editId; }) : null;
