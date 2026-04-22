@@ -2889,14 +2889,22 @@ window._inviteRole='';
 
 // ── Central email helper — routes through Supabase Edge Function ──
 // Edge Function must be deployed with: supabase functions deploy send-email --no-verify-jwt
+// Supports (all optional except to/subject/html): from, cc, replyTo, bcc.
+// The Edge Function forwards any extra fields straight to Resend's /emails API
+// so if cc/replyTo don't land, it's the edge function that needs its allow-list
+// widened — not a client-side bug.
 window.sendEmail = async function(opts) {
   var resendKey = (window._resendKey||'').trim();
   if (!resendKey) throw new Error('No Resend API key. Add it in Settings → System.');
   var from = opts.from || ('Pulse by Lighthouse Drinks <'+(window._fromEmail||'noreply@lighthousedrinks.com')+'>');
+  var payload = { to: opts.to, subject: opts.subject, html: opts.html, from: from, resendKey: resendKey };
+  if (opts.cc)      payload.cc       = opts.cc;
+  if (opts.bcc)     payload.bcc      = opts.bcc;
+  if (opts.replyTo) payload.reply_to = opts.replyTo;
   var res = await fetch('https://anhawgzgxoywophqbmji.supabase.co/functions/v1/swift-function', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs' },
-    body: JSON.stringify({ to: opts.to, subject: opts.subject, html: opts.html, from: from, resendKey: resendKey })
+    body: JSON.stringify(payload)
   });
   var data = await res.json();
   if (!res.ok) throw new Error(data.message || data.name || data.error || 'Email failed');
@@ -6055,7 +6063,7 @@ window.backToToolsGrid = function() {
       <div style="margin-bottom:14px;padding:10px 12px;background:rgba(201,168,76,0.07);border:1px solid var(--gold-dim);border-radius:4px;font-size:12px;">
         <div><span style="color:var(--gold);font-weight:700;letter-spacing:0.08em;text-transform:uppercase;font-size:10px;">From</span>
           <span id="eq-from" style="margin-left:10px;color:var(--white);font-weight:700;">you@lighthousedrinks.com</span></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px;opacity:0.85;line-height:1.45;">Opens in your mail app &mdash; the email is sent from your own mailbox, so it lands in your <strong>Sent</strong> folder and replies come straight back to you.</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px;opacity:0.85;line-height:1.45;">Sent directly from Pulse via our verified <strong>lighthousedrinks.com</strong> domain. Replies come straight back to your inbox.</div>
       </div>
 
       <label style="display:block;margin-bottom:4px;font-size:10px;color:var(--muted);letter-spacing:0.1em;text-transform:uppercase;font-weight:700;">To *</label>
@@ -6075,12 +6083,9 @@ window.backToToolsGrid = function() {
         <pre id="eq-preview" style="white-space:pre-wrap;padding:10px 12px;background:var(--navy-med);border:1px solid var(--navy-border);border-radius:4px;font-family:'Courier New',monospace;font-size:11px;color:var(--white);max-height:180px;overflow-y:auto;line-height:1.55;margin:0;"></pre>
       </div>
 
-      <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;padding-top:12px;border-top:1px solid var(--navy-border);flex-wrap:wrap;">
-        <button type="button" onclick="window.sendQuoteEmailGmail()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;font-weight:700;padding:8px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.04em;white-space:nowrap;" title="Opens a Gmail compose window in a new tab using your signed-in Google account.">Open in Gmail web</button>
-        <div style="display:flex;gap:10px;">
-          <button onclick="window.closeQuoteEmail()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;font-weight:700;padding:8px 18px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;">Cancel</button>
-          <button id="eq-send-btn" onclick="window.sendQuoteEmail()" class="btn-gold" style="font-size:12px;font-weight:700;padding:8px 18px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;">&#9993; Open in mail app</button>
-        </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;padding-top:12px;border-top:1px solid var(--navy-border);flex-wrap:wrap;">
+        <button onclick="window.closeQuoteEmail()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;font-weight:700;padding:8px 18px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;">Cancel</button>
+        <button id="eq-send-btn" onclick="window.sendQuoteEmail()" class="btn-gold" style="font-size:12px;font-weight:700;padding:8px 22px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;">&#9993; Send quote</button>
       </div>
     </div>
   </div>
@@ -6330,6 +6335,13 @@ window.backToToolsGrid = function() {
   // Secondary button offers Gmail web compose for browser-based Gmail users.
   var _emailQuoteContext = null;
 
+  // Very small HTML-escape so the cover note can't inject markup into the email.
+  function _eqHtml(s){
+    return String(s==null?'':s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
   function _composeQuoteEmail() {
     var ctx = _emailQuoteContext;
     if (!ctx) return null;
@@ -6359,25 +6371,79 @@ window.backToToolsGrid = function() {
     recipientFirst = recipientFirst ? (recipientFirst.charAt(0).toUpperCase() + recipientFirst.slice(1)) : 'there';
     var signer = ctx.fromName || ((ctx.fromEmail || '').split('@')[0]) || '';
 
-    var lines = [];
-    lines.push('Hi ' + recipientFirst + ',');
-    lines.push('');
-    if (notes) {
-      lines.push(notes);
-      lines.push('');
-    } else {
-      lines.push('Please find our quote below. Happy to walk through any of the line items or tweak as needed.');
-      lines.push('');
+    // ── Parse numerics from the quote once so we can reuse below ─────────
+    var q = ctx.quote;
+    var sellNum = parseFloat(String(q.sell_price||'').replace(/[^0-9.]/g,''));
+    var qtyNum  = parseInt(String((q.data && q.data.runQty) || '').replace(/[^0-9]/g,''), 10);
+    var totalStr = '';
+    if (!isNaN(sellNum) && !isNaN(qtyNum) && qtyNum > 0) {
+      totalStr = '\u20AC' + (sellNum * qtyNum).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
-    lines.push(ctx.preview);
-    lines.push('');
-    lines.push('Any questions — just hit reply.');
-    lines.push('');
-    lines.push('Best,');
-    if (signer) lines.push(signer);
-    lines.push('Lighthouse Drinks');
 
-    return { to: to, cc: cc, subject: subject, body: lines.join('\n'), notes: notes, ctx: ctx };
+    // ── Build the HTML body (rendered cleanly in Gmail/Outlook/Apple Mail) ─
+    var coverHtml;
+    if (notes) {
+      // Preserve paragraph breaks from the textarea.
+      coverHtml = notes.split(/\n\s*\n/).map(function(p){
+        return '<p style="margin:0 0 12px;">' + _eqHtml(p).replace(/\n/g,'<br>') + '</p>';
+      }).join('');
+    } else {
+      coverHtml = '<p style="margin:0 0 12px;">Please find our quote below. Happy to walk through any of the line items or tweak as needed.</p>';
+    }
+
+    var rows = [];
+    if (q.customer)   rows.push(_eqRow('Customer',       _eqHtml(q.customer)));
+    if (q.product)    rows.push(_eqRow('Product',        _eqHtml(q.product)));
+    if (qtyNum > 0)   rows.push(_eqRow('Run size',       qtyNum.toLocaleString('en-IE') + ' bottles'));
+    if (q.sell_price) rows.push(_eqRow('Price / bottle', '<span style="color:#c9a84c;font-size:17px;font-weight:800;">' + _eqHtml(q.sell_price) + '</span>'));
+    if (totalStr)     rows.push(_eqRow('Total run value', totalStr));
+
+    var html =
+        '<div style="font-family:Arial,Helvetica,sans-serif;color:#2d3748;max-width:640px;line-height:1.55;font-size:14px;">'
+      +   '<p style="margin:0 0 12px;">Hi ' + _eqHtml(recipientFirst) + ',</p>'
+      +   coverHtml
+      +   '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:18px 0;width:100%;max-width:500px;">'
+      +     '<tr><td style="padding:10px 14px;background:#0b2540;color:#c9a84c;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;font-weight:700;border:1px solid #c9a84c;border-bottom:none;">Quote</td></tr>'
+      +     '<tr><td style="padding:0;border:1px solid #c9a84c;">'
+      +       '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;font-size:14px;">'
+      +         rows.join('')
+      +       '</table>'
+      +     '</td></tr>'
+      +     '<tr><td style="padding:6px 14px;background:#faf6ea;color:#c9a84c;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;text-align:center;font-weight:700;border:1px solid #c9a84c;border-top:none;">Ex VAT &middot; Ex Excise Duty &middot; Ex Shipping</td></tr>'
+      +   '</table>'
+      +   '<p style="margin:0 0 12px;font-size:12px;color:#a0aec0;">Quote ref: ' + _eqHtml(q.name || q.id) + '</p>'
+      +   '<p style="margin:0 0 12px;">Any questions &mdash; just hit reply.</p>'
+      +   '<p style="margin:0;">Best,<br>' + _eqHtml(signer) + '<br><span style="color:#718096;">Lighthouse Drinks</span></p>'
+      + '</div>';
+
+    // Plain-text preview kept for the in-modal preview box + audit trail.
+    var textLines = [];
+    textLines.push('Hi ' + recipientFirst + ',');
+    textLines.push('');
+    if (notes) { textLines.push(notes); textLines.push(''); }
+    else { textLines.push('Please find our quote below. Happy to walk through any of the line items or tweak as needed.'); textLines.push(''); }
+    textLines.push(ctx.preview);
+    textLines.push('');
+    textLines.push('Any questions — just hit reply.');
+    textLines.push('');
+    textLines.push('Best,');
+    if (signer) textLines.push(signer);
+    textLines.push('Lighthouse Drinks');
+
+    return {
+      to: to, cc: cc, subject: subject,
+      html: html, body: textLines.join('\n'),
+      notes: notes, ctx: ctx
+    };
+  }
+
+  // Renders one name/value row inside the HTML quote table.
+  function _eqRow(label, valueHtml) {
+    return '<tr><td style="padding:8px 14px;color:#718096;width:42%;border-bottom:1px solid #edf2f7;">'
+      + _eqHtml(label)
+      + '</td><td style="padding:8px 14px;font-weight:700;color:#1a202c;border-bottom:1px solid #edf2f7;">'
+      + valueHtml
+      + '</td></tr>';
   }
 
   async function _logQuoteEmailActivity(comp) {
@@ -6511,37 +6577,79 @@ window.backToToolsGrid = function() {
     // behind this one. It will restore overflow when that modal closes.
   };
 
+  // Send server-side via Resend (replaces the mailto handoff).
+  // From = logged-in user's @lighthousedrinks.com address so it arrives as a
+  // personal mail from them; Reply-To is set to the same so replies land in
+  // their Gmail inbox directly. If the current user isn't on the verified
+  // domain, Resend would reject — we catch that up front and surface a
+  // friendly error rather than leaking the raw API response.
   window.sendQuoteEmail = async function() {
     var c = _composeQuoteEmail();
     if (!c) return;
-    var qs = 'subject=' + encodeURIComponent(c.subject) + '&body=' + encodeURIComponent(c.body);
-    if (c.cc) qs = 'cc=' + encodeURIComponent(c.cc) + '&' + qs;
-    var url = 'mailto:' + encodeURIComponent(c.to).replace(/%40/g, '@') + '?' + qs;
 
-    if (url.length > 2000) {
-      window.toast('Email is long — some mail clients may truncate. Consider shortening the cover note.', 'warn');
+    if (!(window._resendKey && window._resendKey.trim())) {
+      window.toast('Resend isn\'t configured yet. Add the API key in Settings → System.', 'error');
+      return;
     }
 
-    window.location.href = url;
-    await _logQuoteEmailActivity(c);
-    window.toast('Email opened in your mail app — review and click Send.', 'success');
-    setTimeout(window.closeQuoteEmail, 200);
-    setTimeout(_renderQuotesList, 400); // refresh Sent stamp on the list behind
-  };
+    var userEmail = (window.CURRENT_USER && window.CURRENT_USER.email || '').trim();
+    var userName  = (window.CURRENT_USER && window.CURRENT_USER.display_name || '').trim();
+    var isLhDomain = /@lighthousedrinks\.com$/i.test(userEmail);
 
-  window.sendQuoteEmailGmail = async function() {
-    var c = _composeQuoteEmail();
-    if (!c) return;
-    var url = 'https://mail.google.com/mail/?view=cm&fs=1'
-      + '&to=' + encodeURIComponent(c.to)
-      + (c.cc ? '&cc=' + encodeURIComponent(c.cc) : '')
-      + '&su=' + encodeURIComponent(c.subject)
-      + '&body=' + encodeURIComponent(c.body);
-    window.open(url, '_blank', 'noopener');
-    await _logQuoteEmailActivity(c);
-    window.toast('Gmail compose opened in a new tab — review and click Send.', 'success');
-    setTimeout(window.closeQuoteEmail, 200);
-    setTimeout(_renderQuotesList, 400); // refresh Sent stamp on the list behind
+    if (!isLhDomain) {
+      window.toast(
+        'Your account email (' + (userEmail||'unknown') + ') isn\'t on the verified lighthousedrinks.com domain — Resend will reject the send.',
+        'error'
+      );
+      return;
+    }
+
+    // RFC-ish From header: "Display Name <email>". Quote the name if it has commas.
+    var nameForHeader = userName.replace(/["\\]/g,'');
+    var fromHeader = nameForHeader
+      ? (/[,<>]/.test(nameForHeader) ? '"' + nameForHeader + '"' : nameForHeader) + ' <' + userEmail + '>'
+      : userEmail;
+
+    // Disable the Send button + show spinner while we're in-flight.
+    var btn = document.getElementById('eq-send-btn');
+    var originalHtml;
+    if (btn) {
+      originalHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.style.opacity = '0.7';
+      btn.style.cursor  = 'wait';
+      btn.innerHTML = 'Sending&hellip;';
+    }
+
+    try {
+      var sendOpts = {
+        to:      c.to,
+        subject: c.subject,
+        html:    c.html,
+        from:    fromHeader,
+        replyTo: userEmail
+      };
+      if (c.cc) sendOpts.cc = c.cc;
+
+      await window.sendEmail(sendOpts);
+
+      await _logQuoteEmailActivity(c);
+      window.toast('Quote sent to ' + c.to + '.', 'success');
+
+      setTimeout(window.closeQuoteEmail, 150);
+      setTimeout(_renderQuotesList, 350); // refresh Sent stamp on the list behind
+    } catch(e) {
+      console.error('[Email Quote] send failed:', e);
+      var msg = (e && e.message) || 'Unknown error';
+      window.toast('Send failed: ' + msg, 'error');
+
+      if (btn) {
+        btn.disabled = false;
+        btn.style.opacity = '';
+        btn.style.cursor  = '';
+        btn.innerHTML = originalHtml;
+      }
+    }
   };
 })();
 </script>
@@ -9043,7 +9151,7 @@ window.loadBoms = async function initBoms() {
             <select id="quoteClientId" onchange="window._onQuoteClientChange && window._onQuoteClientChange()" style="flex:1;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
               <option value="">— Pick a customer —</option>
             </select>
-            <button type="button" onclick="window.quickAddCustomerForQuote && window.quickAddCustomerForQuote()" title="Add a new customer without leaving this screen" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:0 12px;cursor:pointer;border-radius:3px;white-space:nowrap;">+ New</button>
+            <button type="button" id="quote-add-customer-btn" title="Add a new customer without leaving this screen" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:0 12px;cursor:pointer;border-radius:3px;white-space:nowrap;">+ New</button>
           </div>
           <div style="font-size:10px;color:var(--muted);margin-top:4px;">Every quote is filed under a customer. If they're new, hit <strong style="color:var(--text);">+ New</strong>.</div>
         </div>
@@ -34250,6 +34358,68 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     }
   };
 
+})();
+</script>
+
+<!-- Late-bound fallback for the "+ New" customer button inside the pricing tool.
+     Earlier we tried an inline onclick that depended on window.quickAddCustomerForQuote
+     being attached by a big IIFE. If anything earlier in that IIFE threw, the attach
+     never happened and the button went silent. This block binds directly, runs last,
+     logs every branch clearly, and falls back to openClientModal on its own so the
+     user at least gets the modal even if the auto-relink glue is missing. -->
+<script>
+(function(){
+  function bindQuoteAddCustomerBtn() {
+    var btn = document.getElementById('quote-add-customer-btn');
+    if (!btn) return;
+    if (btn._lpBound) return; // idempotent
+    btn._lpBound = true;
+
+    btn.addEventListener('click', function(ev){
+      ev.preventDefault();
+
+      // Preferred path: the glue function wires in the auto-relink watcher.
+      if (typeof window.quickAddCustomerForQuote === 'function') {
+        try {
+          window.quickAddCustomerForQuote();
+          return;
+        } catch (err) {
+          console.error('[+ New customer] quickAddCustomerForQuote threw:', err);
+          // fall through to the bare-bones fallback
+        }
+      }
+
+      // Fallback: open the standard Customer modal. No auto-relink, but
+      // after saving the user can just pick the new row from the dropdown.
+      if (typeof window.openClientModal === 'function') {
+        try {
+          window.openClientModal();
+          if (window.toast) {
+            window.toast('After saving, re-open the customer dropdown to pick your new entry.', 'info');
+          }
+          return;
+        } catch (err) {
+          console.error('[+ New customer] openClientModal threw:', err);
+          (window.toast || alert)('Could not open customer form: ' + (err && err.message || err));
+          return;
+        }
+      }
+
+      // Worst case: nothing is wired up. Tell the user instead of dying silently.
+      (window.toast || alert)('Customer form is not loaded. Please refresh the page and try again.');
+      console.warn('[+ New customer] neither quickAddCustomerForQuote nor openClientModal are defined on window');
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bindQuoteAddCustomerBtn);
+  } else {
+    bindQuoteAddCustomerBtn();
+  }
+  // Re-bind if the button gets re-rendered (defensive — currently it's static
+  // markup but this costs us nothing and guarantees the button stays live).
+  setTimeout(bindQuoteAddCustomerBtn, 500);
+  setTimeout(bindQuoteAddCustomerBtn, 2000);
 })();
 </script>
 
