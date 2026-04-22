@@ -6121,6 +6121,21 @@ window.backToToolsGrid = function() {
     var product  = (document.getElementById('productName')  || {}).value || '';
     var clientId = (document.getElementById('quoteClientId')|| {}).value || '';
     var dealId   = (document.getElementById('quoteDealId')  || {}).value || '';
+
+    // Enforce: every quote belongs to a customer. This keeps the quote history
+    // clean (findable from Company 360) and makes sure Sales sees who was
+    // quoted what. If the customer doesn't exist yet, the "+ New" button
+    // next to the dropdown opens a quick-add modal.
+    if (!clientId) {
+      await window.lpAlert(
+        'Pick the customer this quote is for.\n\nIf they\'re not in Pulse yet, use the "+ New" button next to the customer picker to add them without leaving this screen.',
+        { title: 'Customer required', variant: 'warn' }
+      );
+      var sel = document.getElementById('quoteClientId');
+      if (sel) { try { sel.focus(); } catch(_){} }
+      return;
+    }
+
     var defName  = [customer, product].filter(Boolean).join(' — ') || 'Untitled Quote';
     var name = await window.lpPrompt('Name this quote:', defName, { title: 'Save Quote', placeholder: 'e.g. Acme Spirits — Single Malt Reserve' });
     if (!name || !name.trim()) return;
@@ -6643,6 +6658,18 @@ async function saveJob(){
       dbPayload.id = newId;
       await db.insert('jobs', dbPayload);
       toast('Job ' + newId + ' created.');
+      // Auto-promote the linked customer to "Client" — they've done at least
+      // one job with us, which is our definition of a Client. Only flip if
+      // they aren't already tagged as Client or Churned (respect churn).
+      if (clientId) {
+        try {
+          await db.update('clients',
+            '?id=eq.' + clientId + '&lifecycle_stage=in.(lead,prospect,customer)',
+            { lifecycle_stage: 'client', became_client_at: new Date().toISOString() }
+          );
+          if (window._reloadClientsFromDB) window._reloadClientsFromDB();
+        } catch(_) { /* best effort */ }
+      }
     }
     closeJobModal();
     renderJobs();
@@ -8714,13 +8741,16 @@ window.loadBoms = async function initBoms() {
       <div class="card-title"><span class="section-num">0</span> Quote Details</div>
       <div class="quote-header">
         <div class="field-group">
-          <label>Link to Customer <span style="font-size:10px;color:var(--muted);font-weight:400;">(optional)</span></label>
-          <select id="quoteClientId" onchange="window._onQuoteClientChange && window._onQuoteClientChange()" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;">
-            <option value="">— Standalone quote (no customer) —</option>
-          </select>
-          <div style="font-size:10px;color:var(--muted);margin-top:4px;">Pick an existing customer to link this quote to a company &amp; deal.</div>
+          <label>Customer <span style="color:var(--gold);">*</span></label>
+          <div style="display:flex;gap:6px;align-items:stretch;">
+            <select id="quoteClientId" onchange="window._onQuoteClientChange && window._onQuoteClientChange()" style="flex:1;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
+              <option value="">— Pick a customer —</option>
+            </select>
+            <button type="button" onclick="window.quickAddCustomerForQuote && window.quickAddCustomerForQuote()" title="Add a new customer without leaving this screen" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:0 12px;cursor:pointer;border-radius:3px;white-space:nowrap;">+ New</button>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px;">Every quote is filed under a customer. If they're new, hit <strong style="color:var(--text);">+ New</strong>.</div>
         </div>
-        <div class="field-group">
+        <div class="field-group" style="display:none;">
           <label>Customer Name</label>
           <input type="text" id="customerName" placeholder="e.g. Acme Spirits Ltd" oninput="updateSummary()">
         </div>
@@ -9226,6 +9256,9 @@ window.loadBoms = async function initBoms() {
 <div class="wrapper">
   <div class="page-label">Sales &amp; CRM</div>
   <div class="page-heading">Customers</div>
+  <div style="font-size:12px;color:var(--muted);margin:-4px 0 14px;max-width:760px;line-height:1.6;">
+    Everyone we keep on file. <strong style="color:var(--text);">Lead</strong> = no active deal yet. <strong style="color:var(--text);">Prospect</strong> = in the pipeline. <strong style="color:var(--text);">Client</strong> = done at least one job with us. Pulse updates the label automatically when a deal opens or a job runs.
+  </div>
 
   <!-- Country summary strip -->
   <div id="cust-country-strip" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;font-size:11px;"></div>
@@ -9236,7 +9269,6 @@ window.loadBoms = async function initBoms() {
       <button class="cust-tab active" data-stage="all"      style="background:transparent;border:none;border-bottom:2px solid var(--gold);color:var(--white);font-size:12px;font-weight:700;padding:10px 14px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;white-space:nowrap;">All <span class="cust-tab-count" style="color:var(--muted);font-weight:400;margin-left:4px;"></span></button>
       <button class="cust-tab"        data-stage="lead"     style="background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-size:12px;font-weight:700;padding:10px 14px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;white-space:nowrap;">Leads <span class="cust-tab-count" style="font-weight:400;margin-left:4px;"></span></button>
       <button class="cust-tab"        data-stage="prospect" style="background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-size:12px;font-weight:700;padding:10px 14px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;white-space:nowrap;">Prospects <span class="cust-tab-count" style="font-weight:400;margin-left:4px;"></span></button>
-      <button class="cust-tab"        data-stage="customer" style="background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-size:12px;font-weight:700;padding:10px 14px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;white-space:nowrap;">Customers <span class="cust-tab-count" style="font-weight:400;margin-left:4px;"></span></button>
       <button class="cust-tab"        data-stage="client"   style="background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-size:12px;font-weight:700;padding:10px 14px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;white-space:nowrap;">Clients <span class="cust-tab-count" style="font-weight:400;margin-left:4px;"></span></button>
       <button class="cust-tab"        data-stage="churned"  style="background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-size:12px;font-weight:700;padding:10px 14px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;white-space:nowrap;">Churned <span class="cust-tab-count" style="font-weight:400;margin-left:4px;"></span></button>
     </div>
@@ -9298,12 +9330,12 @@ window.loadBoms = async function initBoms() {
       <div class="mfield">
         <label>Lifecycle Stage</label>
         <select id="cf-lifecycle" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;">
-          <option value="lead">Lead</option>
-          <option value="prospect">Prospect</option>
-          <option value="customer">Customer</option>
-          <option value="client" selected>Client</option>
+          <option value="lead" selected>Lead (no deal yet)</option>
+          <option value="prospect">Prospect (in pipeline)</option>
+          <option value="client">Client (done a job)</option>
           <option value="churned">Churned</option>
         </select>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px;">Auto-updates when you open a deal or run a job. Manual override is fine.</div>
       </div>
       <div class="mfield">
         <label>Country *</label>
@@ -10988,11 +11020,50 @@ window.loadBoms = async function initBoms() {
     if (!sel) return;
     var clients = (window.CLIENTS||[]).slice().sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
     var current = preselectId || sel.value;
-    sel.innerHTML = '<option value="">— Standalone quote (no customer) —</option>' + clients.map(function(c){
+    sel.innerHTML = '<option value="">— Pick a customer —</option>' + clients.map(function(c){
       return '<option value="' + c.id + '">' + (c.company ? c.company.replace(/</g,'&lt;') : c.id) + '</option>';
     }).join('');
     if (current) sel.value = current;
     window._onQuoteClientChange();
+  };
+
+  // Quick-add a customer from inside the pricing tool without navigating away.
+  // Opens the standard Customer modal (reusing all its fields + validation),
+  // then watches the Customers cache for the new record to appear so we can
+  // refresh the dropdown and auto-select it.
+  window.quickAddCustomerForQuote = function() {
+    if (typeof window.openClientModal !== 'function') {
+      window.toast && window.toast('Customer modal not ready yet — try again in a moment.', 'error');
+      return;
+    }
+    var beforeIds = {};
+    (window.CLIENTS || []).forEach(function(c){ beforeIds[c.id] = 1; });
+    window._quickAddCustomerSnapshot = beforeIds;
+    window.openClientModal(); // no id => add-new mode
+    // Start a short watcher loop. reloadClientsFromDB() is called by saveClient
+    // on success, so CLIENTS gets refreshed; we then diff against the snapshot.
+    var tries = 0;
+    function tick() {
+      tries++;
+      var snap = window._quickAddCustomerSnapshot || {};
+      var fresh = (window.CLIENTS || []).find(function(c){ return !snap[c.id]; });
+      if (fresh) {
+        window._quickAddCustomerSnapshot = null;
+        window._populateQuoteClientDropdown(fresh.id);
+        // Flash a confirmation on the picker
+        var sel = document.getElementById('quoteClientId');
+        if (sel) {
+          sel.style.transition = 'box-shadow .3s';
+          sel.style.boxShadow = '0 0 0 2px var(--gold)';
+          setTimeout(function(){ sel.style.boxShadow = ''; }, 1200);
+        }
+        window.toast && window.toast('Linked ' + (fresh.company || fresh.id) + ' to this quote.', 'success');
+        return;
+      }
+      if (tries < 60) setTimeout(tick, 500); // watch for 30s max
+      else window._quickAddCustomerSnapshot = null;
+    }
+    setTimeout(tick, 800);
   };
 
   window._onQuoteClientChange = async function() {
@@ -12389,8 +12460,8 @@ window.loadBoms = async function initBoms() {
     if (_saved === 'flat' || _saved === 'grouped') _custState.viewMode = _saved;
   } catch(_){}
 
-  var STAGE_LABELS = { lead:'Lead', prospect:'Prospect', customer:'Customer', client:'Client', churned:'Churned' };
-  var STAGE_COLORS = { lead:'var(--muted)', prospect:'var(--blue)', customer:'var(--amber)', client:'var(--green)', churned:'var(--red)' };
+  var STAGE_LABELS = { lead:'Lead', prospect:'Prospect', customer:'Client', client:'Client', churned:'Churned' };
+  var STAGE_COLORS = { lead:'var(--muted)', prospect:'var(--blue)', customer:'var(--green)', client:'var(--green)', churned:'var(--red)' };
 
   function healthDot(c) {
     // Simple heuristic: green if active job <90d, amber 90-180d, red 180d+ or churned
