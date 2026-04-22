@@ -15166,7 +15166,7 @@ window.loadBoms = async function initBoms() {
             <option value="tanker">Tanker</option>
           </select>
         </div>
-        <div class="mfield">
+        <div class="mfield" id="blac-lh-vessel-wrap">
           <label>Vessel *</label>
           <select id="blac-vessel-select" onchange="window._blacVesselSelectChange()" style="font-family:monospace;">
             <option value="">— Select vessel —</option>
@@ -15181,9 +15181,20 @@ window.loadBoms = async function initBoms() {
           <input type="hidden" id="blac-reference">
           <div class="field-hint">Select a registered vessel or "+ Register New" to enter the vessel code.</div>
         </div>
+        <div class="mfield" id="blac-client-vessel-wrap" style="display:none;">
+          <label>Client's Vessel Reference *</label>
+          <input type="text" id="blac-client-vessel-ref" placeholder="e.g. Customer Cask #12, Client IBC 3"
+            oninput="var r=document.getElementById('blac-reference');if(r)r.value=this.value.trim().toUpperCase();"
+            style="font-family:monospace;font-size:15px;font-weight:700;width:100%;box-sizing:border-box;background:var(--navy-dark);border:1px solid var(--amber,#e8983a);color:var(--amber,#e8983a);padding:8px 12px;border-radius:4px;">
+          <div class="field-hint">The client's own label for the vessel. Not added to our fleet register.</div>
+        </div>
         <div class="mfield">
           <label>Owner / Client *</label>
-          <select id="blac-client"></select>
+          <select id="blac-client" onchange="window._blacClientChange()"></select>
+        </div>
+        <div class="mfield" id="blac-client-vessel-banner" style="display:none;grid-column:1/-1;padding:10px 14px;background:rgba(232,152,58,0.08);border:1px solid rgba(232,152,58,0.28);border-radius:4px;align-items:center;gap:10px;">
+          <span style="font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--amber,#e8983a);font-weight:700;">Client Vessel</span>
+          <span style="font-size:12px;color:var(--muted);flex:1;">This liquid is in the client's own vessel. It will not be added to our fleet register.</span>
         </div>
         <div id="blac-capacity-wrap" class="mfield">
           <label>Capacity (Litres)</label>
@@ -18397,6 +18408,32 @@ window._vrPopulateVesselDropdown = function(typeFilter) {
 
   // Re-run change handler to sync hidden input
   window._blacVesselSelectChange();
+};
+
+// Toggle between LH-fleet vessel UI and free-text client-vessel reference
+// based on the selected Owner/Client. Lighthouse = fleet register; anyone else = client vessel.
+window._blacClientChange = function() {
+  var sel = document.getElementById('blac-client');
+  if (!sel) return;
+  var clientId = sel.value;
+  var isClientVessel = !!(clientId && window._cmIsLighthouseClient && !window._cmIsLighthouseClient(clientId));
+  var lhWrap    = document.getElementById('blac-lh-vessel-wrap');
+  var cvWrap    = document.getElementById('blac-client-vessel-wrap');
+  var banner    = document.getElementById('blac-client-vessel-banner');
+  var cvInput   = document.getElementById('blac-client-vessel-ref');
+  var hidRef    = document.getElementById('blac-reference');
+  var vesselSel = document.getElementById('blac-vessel-select');
+  if (lhWrap)  lhWrap.style.display  = isClientVessel ? 'none' : '';
+  if (cvWrap)  cvWrap.style.display  = isClientVessel ? '' : 'none';
+  if (banner)  banner.style.display  = isClientVessel ? 'flex' : 'none';
+  if (isClientVessel) {
+    if (vesselSel) vesselSel.value = '';
+    if (hidRef && cvInput) hidRef.value = (cvInput.value || '').trim().toUpperCase();
+  } else {
+    if (cvInput) cvInput.value = '';
+    // Restore ref from whatever is currently selected/entered in the LH vessel UI
+    if (window._blacVesselSelectChange) window._blacVesselSelectChange();
+  }
 };
 
 window._blacVesselSelectChange = function() {
@@ -29264,6 +29301,7 @@ window.saveAdjModal = async function() {
     // Populate vessel datalist
     if (window._vrPopulateVesselDropdown) window._vrPopulateVesselDropdown();
     handleBLACTypeChange();
+    if (window._blacClientChange) window._blacClientChange();
   }
 
 
@@ -29454,9 +29492,17 @@ window.saveAdjModal = async function() {
   window.saveBLACContainers = async function() {
     var gv = function(id){ var e = document.getElementById(id); return e ? e.value.trim() : ''; };
     var type = gv('blac-type');
-    var ref  = gv('blac-reference').toUpperCase();
-    if (!ref)                       { window.toast && window.toast('Vessel code is required.', 'error'); return; }
-    if (!gv('blac-client'))         { window.toast && window.toast('Please select a client.', 'error'); return; }
+    var clientId = gv('blac-client');
+    if (!clientId)                  { window.toast && window.toast('Please select a client.', 'error'); return; }
+    var isClientVessel = !!(window._cmIsLighthouseClient && !window._cmIsLighthouseClient(clientId));
+    // For client vessels, prefer the free-text field
+    var ref = isClientVessel
+      ? (gv('blac-client-vessel-ref') || '').toUpperCase()
+      : gv('blac-reference').toUpperCase();
+    if (!ref) {
+      window.toast && window.toast(isClientVessel ? 'Please enter the client\'s vessel reference.' : 'Vessel code is required.', 'error');
+      return;
+    }
     var CAPS = { ibc: 1000, blue_drum: 200, tank: 12500 };
     var capacity = CAPS[type] !== undefined ? CAPS[type] : (parseFloat(gv('blac-capacity')) || null);
     var isCask = type === 'cask';
@@ -29468,7 +29514,7 @@ window.saveAdjModal = async function() {
       : (parseFloat(gv('blac-lpa')) || (litres && abv ? litres * abv / 100 : 0));
     var status = autoStatus(litres, capacity);
     var payload = {
-      type: type, reference: ref, client_id: gv('blac-client'),
+      type: type, reference: ref, client_id: clientId,
       capacity_litres: capacity, location: gv('blac-location') || null,
       status: status,
       spirit_type:  gv('blac-spirit') || null,
@@ -29479,7 +29525,9 @@ window.saveAdjModal = async function() {
       lpa_price: parseFloat(gv('blac-lpa-price')) || null,
       fill_date: isCask ? (gv('blac-filldate') || null) : null,
       ola: ola,
-      notes: gv('blac-notes') || null
+      notes: gv('blac-notes') || null,
+      is_client_vessel: isClientVessel,
+      client_vessel_label: isClientVessel ? ref : null
     };
     var qty     = parseInt(gv('blac-quantity')) || 1;
     var prefix  = gv('blac-prefix') || ref;
@@ -29495,8 +29543,13 @@ window.saveAdjModal = async function() {
         var rowPayload = Object.assign({}, payload);
         var rowCode = total > 1 ? (prefix + String(startN + i).padStart(3, '0')).toUpperCase() : ref;
         rowPayload.reference = rowCode;
-        // Ensure vessel exists and link it
-        rowPayload.vessel_id = await _ensureVessel(rowCode, type, capacity, payload.location);
+        if (isClientVessel) {
+          // Client-owned vessels do not go into our fleet register
+          rowPayload.vessel_id = null;
+          rowPayload.client_vessel_label = rowCode;
+        } else {
+          rowPayload.vessel_id = await _ensureVessel(rowCode, type, capacity, payload.location);
+        }
         var ins = await window.db.insert('liquid_containers', rowPayload);
         if (ins && ins[0]) {
           savedItems.push({ id: ins[0].id, ref: rowCode });
@@ -29526,7 +29579,7 @@ window.saveAdjModal = async function() {
       var saveBtn = document.getElementById('blac-save-btn');
       if (saveBtn && saveBtn.parentNode) saveBtn.parentNode.insertBefore(banner, saveBtn);
       setTimeout(function(){ if (banner.parentNode) banner.parentNode.removeChild(banner); }, 8000);
-      ['blac-reference','blac-location','blac-spirit','blac-cbw','blac-abv','blac-litres','blac-lpa','blac-lpa-price','blac-filldate','blac-ola','blac-cask-litres','blac-cask-lpa','blac-notes','blac-prefix'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
+      ['blac-reference','blac-location','blac-spirit','blac-cbw','blac-abv','blac-litres','blac-lpa','blac-lpa-price','blac-filldate','blac-ola','blac-cask-litres','blac-cask-lpa','blac-notes','blac-prefix','blac-client-vessel-ref'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
       var vsEl = document.getElementById('blac-vessel-status'); if (vsEl) vsEl.textContent = '';
       var vsNR = document.getElementById('blac-vessel-new-row'); if (vsNR) vsNR.style.display = 'none';
       var vsSel = document.getElementById('blac-vessel-select'); if (vsSel) vsSel.value = '';
