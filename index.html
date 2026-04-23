@@ -18198,15 +18198,10 @@ window.loadVesselRegister = async function() {
       _clList.forEach(function(c){ _clMap[c.id] = (c.name || '').toLowerCase(); });
       _vrAllContainers.forEach(function(c){
         var nm = _clMap[c.client_id] || '';
-        // A container is only a client vessel if we can POSITIVELY identify its
-        // client as non-Lighthouse. Rows with a null/unknown client, or whose
-        // client resolves to Lighthouse, are LH-fleet by default — never count
-        // them toward "client-owned vessels on site".
-        var explicitFlag   = !!c.is_client_vessel;
-        var knownNonLH     = !!(c.client_id && nm && nm.indexOf('lighthouse') < 0);
-        var knownLighthouse= !!(c.client_id && nm && nm.indexOf('lighthouse') >= 0);
-        // If the saved flag says client-vessel but the client IS Lighthouse, trust the client (data fix).
-        c._isClientVessel = (explicitFlag && !knownLighthouse) || knownNonLH;
+        // Strict rule: only tag as client vessel when the client is POSITIVELY
+        // identified as non-Lighthouse. Lighthouse's own rows — even if they
+        // carry a stale is_client_vessel=true flag — are NEVER client vessels.
+        c._isClientVessel = !!(c.client_id && nm && nm.indexOf('lighthouse') < 0);
       });
     } catch(e) {}
   } catch(e) { _vrAllContainers = []; }
@@ -19581,7 +19576,14 @@ window.renderLiquid = function() {
       statusPill = '<span style="font-size:10px;font-weight:700;letter-spacing:0.05em;padding:3px 8px;background:rgba(61,186,120,0.11);color:var(--green,#3dba78);border:1px solid rgba(61,186,120,0.28);border-radius:3px;text-transform:uppercase;">Active</span>';
     }
     var _cnameRaw = (clientName(c.client_id) || '').toLowerCase();
-    var _isClientVessel = c.is_client_vessel || (_cnameRaw && _cnameRaw.indexOf('lighthouse') < 0);
+    // Strict rule: a container is a client vessel ONLY when it's linked to a client whose
+    // name does NOT contain "lighthouse". If the client resolves to Lighthouse, never tag —
+    // even if a stale `is_client_vessel=true` flag was saved. If the client is missing/unresolved,
+    // default to LH (no badge). This keeps Lighthouse's own fleet free of the client tag.
+    var _clientKnown    = !!(c.client_id && _cnameRaw);
+    var _clientIsLH     = _clientKnown && _cnameRaw.indexOf('lighthouse') >= 0;
+    var _clientIsNonLH  = _clientKnown && !_clientIsLH;
+    var _isClientVessel = _clientIsNonLH || (!!c.is_client_vessel && !_clientIsLH && !_clientKnown);
     var clientVesselBadge = _isClientVessel
       ? '<span title="' + esc(c.client_vessel_label || 'Client-owned vessel') + '" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;letter-spacing:0.08em;padding:2px 6px;background:rgba(232,152,58,0.14);color:var(--amber,#e8983a);border:1px solid rgba(232,152,58,0.32);border-radius:3px;vertical-align:middle;">CLIENT VESSEL</span>'
       : '';
@@ -29113,19 +29115,22 @@ window.saveAdjModal = async function() {
   // context: 'source' — show volume, ABV, spirit (empty containers labelled EMPTY, no spirit)
   //          'dest'   — show available headspace and fill %
   //          'short'  — reference + type + Empty/volume only
-  // Quick check: is this container's client a non-Lighthouse (i.e. client-owned vessel)?
-  // Uses the is_client_vessel flag when present, falls back to client name lookup so
-  // legacy records (saved before the flag existed) still get tagged correctly.
+  // Strict rule: a container is a client vessel ONLY when its client_id resolves
+  // to a client whose name does not contain "lighthouse". If the client IS
+  // Lighthouse, it's never a client vessel — even if a stale is_client_vessel
+  // flag says otherwise (the client link is the source of truth; Lighthouse is
+  // set up as a "client" row purely for record-keeping, not as an actual client).
   // Exposed on window so save handlers outside this IIFE (e.g. saveTransfer) can use it.
   window._isClientOwnedContainer = function(c) {
     if (!c) return false;
-    if (c.is_client_vessel) return true;
-    if (!c.client_id) return false;
+    if (!c.client_id) return false; // no link → treat as LH fleet by default
     var list = (typeof _clients !== 'undefined' && _clients) ? _clients
              : (window._blClients || window.CLIENTS || []);
     var cl = list.find ? list.find(function(x){ return x.id === c.client_id; }) : null;
     if (!cl) return false;
-    return (cl.name || '').toLowerCase().indexOf('lighthouse') < 0;
+    var nm = (cl.name || '').toLowerCase();
+    if (nm.indexOf('lighthouse') >= 0) return false; // Lighthouse is never a client vessel
+    return true;
   };
   var _isClientOwnedContainer = window._isClientOwnedContainer;
 
