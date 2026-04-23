@@ -2023,10 +2023,10 @@
       <div class="portal-sub">Current on-site stock held on your behalf, grouped by category.</div>
 
       <div style="background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.35);border-radius:6px;padding:14px 18px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;">
-        <div style="color:var(--white);font-size:13px;line-height:1.55;max-width:780px;">
+        <div style="color:var(--white);font-size:13px;line-height:1.55;max-width:820px;">
           <strong style="color:var(--gold);">Stock-take helper.</strong>
-          Enter your cost price against each line, then use <em>Export CSV</em> to take a point-in-time snapshot.
-          Your cost prices are saved in this browser only &mdash; they are not stored on Lighthouse servers and are never shared with anyone else.
+          Enter your cost price against each line &mdash; values save automatically and are restricted to your account, so they&rsquo;ll still be here next time you sign in (from any device).
+          Hit <em>Export CSV</em> to take a point-in-time stock-take snapshot.
         </div>
         <button id="portal-dg-export" class="btn btn-gold" style="white-space:nowrap;" onclick="window.exportPortalDryGoodsCSV()">Export CSV</button>
       </div>
@@ -3195,25 +3195,58 @@ async function loadPortalContact(clientId) {
 }
 
 // ── Portal: Dry Goods (grouped by category, with client-entered cost prices) ─
-// Cost prices live in localStorage ONLY — keyed by client_id + sku_id — so the
-// values are visible to the logged-in client but never written to our database.
-window._portalDgCostKey = function(clientId, skuId) {
-  return 'lp_portal_dg_cost::' + clientId + '::' + skuId;
-};
-window._portalDgGetCost = function(clientId, skuId) {
-  try { return localStorage.getItem(window._portalDgCostKey(clientId, skuId)) || ''; }
-  catch(e) { return ''; }
-};
-window._portalDgSetCost = function(clientId, skuId, value) {
-  try {
-    var key = window._portalDgCostKey(clientId, skuId);
-    if (value === '' || value == null) localStorage.removeItem(key);
-    else localStorage.setItem(key, String(value));
-  } catch(e) {}
+// Cost prices are persisted in the client_dg_cost_prices table, scoped by RLS
+// so only the owning client (and staff) can read/write their own values. They
+// are cached in memory per session for instant recalculation.
+window._portalDgCostCache = {};  // { skuId: "12.34" }
+window._portalDgSaveTimers = {}; // { skuId: setTimeout handle }
+window._portalDgLastLoad   = null;
+
+window._portalDgGetCost = function(_clientId, skuId) {
+  var v = window._portalDgCostCache[skuId];
+  return (v == null || v === '') ? '' : String(v);
 };
 
-// Hold the last-loaded dataset for the export button
-window._portalDgLastLoad = null;
+// Debounced upsert into client_dg_cost_prices. Empty values delete the row.
+window._portalDgSetCost = function(clientId, skuId, value) {
+  window._portalDgCostCache[skuId] = (value === '' || value == null) ? '' : String(value);
+  if (window._portalDgSaveTimers[skuId]) clearTimeout(window._portalDgSaveTimers[skuId]);
+  window._portalDgSaveTimers[skuId] = setTimeout(function() {
+    window._portalDgPersistCost(clientId, skuId, value);
+  }, 450);
+};
+
+window._portalDgPersistCost = async function(clientId, skuId, value) {
+  var statusEl = document.getElementById('portal-dg-save-status');
+  var setStatus = function(txt, col) {
+    if (!statusEl) return;
+    statusEl.textContent = txt;
+    statusEl.style.color = col || 'var(--muted)';
+  };
+  setStatus('Saving…', 'var(--muted)');
+  try {
+    var qs = '?client_id=eq.' + clientId + '&sku_id=eq.' + skuId;
+    if (value === '' || value == null) {
+      await db.delete('client_dg_cost_prices', qs);
+    } else {
+      var existing = await db.select('client_dg_cost_prices', qs + '&select=id&limit=1');
+      if (existing && existing.length) {
+        await db.update('client_dg_cost_prices', qs, { cost_price: Number(value) });
+      } else {
+        await db.insert('client_dg_cost_prices', [{
+          client_id: clientId,
+          sku_id: skuId,
+          cost_price: Number(value)
+        }]);
+      }
+    }
+    setStatus('Saved ✓', 'var(--green)');
+    setTimeout(function() { setStatus('Cost prices save automatically', 'var(--muted)'); }, 1400);
+  } catch(e) {
+    window.logError('portalDgPersistCost', e);
+    setStatus('Save failed — check connection', 'var(--red)');
+  }
+};
 
 window.loadPortalDryGoods = async function(clientId) {
   var body = document.getElementById('portal-dg-body');
@@ -3242,6 +3275,18 @@ window.loadPortalDryGoods = async function(clientId) {
       onSite[b.sku_id] = (onSite[b.sku_id] || 0) + Number(b.quantity_remaining || 0);
     });
 
+    // Load saved cost prices into cache (RLS restricts to this client automatically)
+    window._portalDgCostCache = {};
+    try {
+      var savedCosts = await db.select('client_dg_cost_prices',
+        '?client_id=eq.' + clientId + '&select=sku_id,cost_price');
+      (savedCosts || []).forEach(function(r) {
+        if (r && r.sku_id != null) window._portalDgCostCache[r.sku_id] = String(r.cost_price);
+      });
+    } catch(e) {
+      window.logError('loadPortalDryGoods:costs', e);
+    }
+
     // Group SKUs by category (stable order: name asc, "Uncategorised" last)
     var groups = {};
     skus.forEach(function(s) {
@@ -3255,7 +3300,16 @@ window.loadPortalDryGoods = async function(clientId) {
       return a.localeCompare(b);
     });
 
-    // Build HTML
+    // Shared colgroup so every category table aligns on the same columns.
+    // Description fills, the rest are fixed-width.
+    var COLGROUP = '<colgroup>'
+      +   '<col>'                      // Description (auto/fluid)
+      +   '<col style="width:140px;">' // On Site
+      +   '<col style="width:180px;">' // Cost Price input
+      +   '<col style="width:160px;">' // Line Value
+      + '</colgroup>';
+    var TABLE_CSS = 'table-layout:fixed;width:100%;';
+
     var html = '';
     var exportGroups = [];
     catNames.forEach(function(cat) {
@@ -3267,11 +3321,12 @@ window.loadPortalDryGoods = async function(clientId) {
         +   '<span id="portal-dg-catsub-' + esc(cat.replace(/[^A-Za-z0-9]/g,'_')) + '" style="color:var(--muted);font-size:11px;font-weight:500;letter-spacing:0.04em;">—</span>'
         + '</div>'
         + '<div class="card" style="overflow:auto;">'
-        +   '<table class="data-table">'
+        +   '<table class="data-table" style="' + TABLE_CSS + '">'
+        +     COLGROUP
         +     '<thead><tr>'
         +       '<th>Description</th>'
         +       '<th style="text-align:right;">On Site</th>'
-        +       '<th style="text-align:right;width:140px;">Cost Price (€)</th>'
+        +       '<th style="text-align:right;">Cost Price (€)</th>'
         +       '<th style="text-align:right;">Line Value</th>'
         +     '</tr></thead>'
         +     '<tbody>';
@@ -3281,14 +3336,14 @@ window.loadPortalDryGoods = async function(clientId) {
         var desc = esc(s.description || '—');
         var qtyCol = qty > 0 ? 'var(--white)' : 'var(--muted)';
         html += '<tr data-sku-id="' + esc(s.id) + '">'
-          +   '<td style="color:var(--white);">' + desc + '</td>'
+          +   '<td style="color:var(--white);white-space:normal;word-break:break-word;">' + desc + '</td>'
           +   '<td style="text-align:right;color:' + qtyCol + ';font-weight:600;">' + qty.toLocaleString() + '</td>'
           +   '<td style="text-align:right;">'
           +     '<input type="number" min="0" step="0.01" value="' + esc(cost) + '" '
           +       'data-sku-id="' + esc(s.id) + '" '
           +       'onchange="window._portalDgOnCostChange(this)" '
           +       'oninput="window._portalDgOnCostChange(this)" '
-          +       'style="width:120px;text-align:right;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:6px 8px;border-radius:4px;font-size:13px;" '
+          +       'style="width:140px;text-align:right;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:6px 8px;border-radius:4px;font-size:13px;" '
           +       'placeholder="0.00">'
           +   '</td>'
           +   '<td style="text-align:right;" class="portal-dg-line-value" data-sku-id="' + esc(s.id) + '" data-qty="' + qty + '">—</td>'
@@ -3299,16 +3354,19 @@ window.loadPortalDryGoods = async function(clientId) {
       exportGroups.push({ name: cat, rows: catRows });
     });
 
-    // Grand total row
-    html += '<div class="card" style="padding:14px 18px;display:flex;justify-content:space-between;align-items:center;margin-top:8px;">'
-      + '<span style="color:var(--muted);font-size:12px;letter-spacing:0.06em;text-transform:uppercase;">Total stock value (your entered cost prices)</span>'
-      + '<span id="portal-dg-grand" style="color:var(--gold);font-weight:700;font-size:18px;">—</span>'
+    // Autosave status + grand total row
+    html += '<div class="card" style="padding:14px 18px;display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:16px;flex-wrap:wrap;">'
+      + '<span id="portal-dg-save-status" style="color:var(--muted);font-size:12px;letter-spacing:0.04em;">Cost prices save automatically</span>'
+      + '<span style="display:flex;align-items:baseline;gap:12px;">'
+      +   '<span style="color:var(--muted);font-size:12px;letter-spacing:0.06em;text-transform:uppercase;">Total stock value</span>'
+      +   '<span id="portal-dg-grand" style="color:var(--gold);font-weight:700;font-size:18px;">—</span>'
+      + '</span>'
       + '</div>';
 
     body.innerHTML = html;
     window._portalDgLastLoad = { clientId: clientId, groups: exportGroups };
 
-    // Initial total recalculation for any pre-entered cost prices
+    // Initial total recalculation using cached (DB-loaded) cost prices
     window._portalDgRecalcAll();
   } catch(e) {
     window.logError('loadPortalDryGoods', e);
