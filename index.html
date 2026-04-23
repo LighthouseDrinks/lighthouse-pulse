@@ -3196,13 +3196,35 @@ async function loadPortalContact(clientId) {
 window._resendKey = '';
 
 window.openInviteModal = function() {
-  // Populate client dropdown
+  // Populate client dropdown — try in-memory cache first, then fall back to
+  // fetching from Supabase so the list works even before the Customers page
+  // has been opened in this session.
   var sel = document.getElementById('inv-client-select');
-  if (sel && window._clients && window._clients.length) {
+  function fillClientOptions(list) {
+    if (!sel) return;
     sel.innerHTML = '<option value="">— Select client —</option>';
-    window._clients.filter(function(cl){return !cl.is_internal;}).sort(function(a,b){return (a.name||'').localeCompare(b.name||'');}).forEach(function(cl){
-      var opt=document.createElement('option'); opt.value=cl.id; opt.textContent=cl.name; sel.appendChild(opt);
-    });
+    (list || []).filter(function(cl){return !cl.is_internal;})
+      .sort(function(a,b){return (a.name||'').localeCompare(b.name||'');})
+      .forEach(function(cl){
+        var opt = document.createElement('option');
+        opt.value = cl.id; opt.textContent = cl.name; sel.appendChild(opt);
+      });
+  }
+  if (sel) {
+    if (window._clients && window._clients.length) {
+      fillClientOptions(window._clients);
+    } else {
+      sel.innerHTML = '<option value="">— Loading clients… —</option>';
+      db.select('clients', '?select=id,name,is_internal&order=name.asc')
+        .then(function(rows) {
+          window._clients = rows || [];
+          fillClientOptions(window._clients);
+        })
+        .catch(function(e) {
+          window.logError('openInviteModal:loadClients', e);
+          fillClientOptions([]);
+        });
+    }
   }
   // Reset form
   var fields = ['inv-first-name','inv-last-name','inv-email'];
@@ -3240,9 +3262,24 @@ window.closeInviteModal = function() {
 
 window.selectInviteRole = function(role) {
   var cr=document.getElementById('inv-client-row');
-  if(cr) cr.style.display=(role==='client')?'':'none';
+  if(cr){
+    // Use !important-equivalent inline style + the .show class to win over the
+    // CSS rule `.invite-client-row { display: none }`.
+    if(role==='client'){ cr.classList.add('show');    cr.style.display='block'; }
+    else               { cr.classList.remove('show'); cr.style.display='none';  }
+  }
   var rtr=document.getElementById('inv-reports-to-row');
-  if(rtr) rtr.style.display=(role===''||role==='client')?'none':'';
+  if(rtr) rtr.style.display=(role===''||role==='client')?'none':'block';
+  // Reflect client vs staff context in the modal copy.
+  var titleEl=document.querySelector('#invite-modal-overlay .invite-modal-title');
+  var subEl  =document.querySelector('#invite-modal-overlay .invite-modal-sub');
+  if(role==='client'){
+    if(titleEl) titleEl.textContent='Invite Client to Portal';
+    if(subEl)   subEl.textContent  ="They'll receive an email with a signup link. Once registered they'll see only their own data: jobs, BOMs, inventory, quotes, documents and profile.";
+  } else {
+    if(titleEl) titleEl.textContent='Invite New Employee';
+    if(subEl)   subEl.textContent  ="Fill in the details below. They'll receive an email with a signup link. Their name, email and role will be pre-set when they join.";
+  }
   window._inviteRole=role;
 };
 window._inviteRole='';
