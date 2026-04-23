@@ -3699,11 +3699,14 @@ window.openPortalBomModal = async function(reviseId) {
   document.getElementById('pbm-submit').disabled = false;
   var files = document.getElementById('pbm-files'); if (files) files.value = '';
 
-  // Populate liquid register dropdown
+  // Populate liquid register dropdown — filtered to the client's assigned
+  // liquid products (managed by Lighthouse warehouse/liquid manager).
   try {
     var liqSel = document.getElementById('pbm-liquid');
     if (window.populateLiquidProductSelect) {
-      await window.populateLiquidProductSelect(liqSel, null, true);
+      // Force a fresh read in case staff added a product since login
+      await window.getLiquidProducts(true);
+      await window.populateLiquidProductSelect(liqSel, null, true, clientId);
     } else {
       liqSel.innerHTML = '<option value="">— Liquid register unavailable —</option>';
     }
@@ -16572,8 +16575,15 @@ window.loadBoms = async function initBoms() {
         <input type="hidden" id="lp-old-name">
         <div class="mfield" style="margin-bottom:16px;">
           <label>Product Name *</label>
-          <input type="text" id="lp-name" placeholder="e.g. 3 YO Single Malt Ex Sherry" style="font-size:14px;">
+          <input type="text" id="lp-name" placeholder="e.g. Fercullen Falls, 3 YO Single Malt Ex Sherry" style="font-size:14px;">
           <div class="field-hint">Use a consistent, agreed format — this name appears everywhere in the system</div>
+        </div>
+        <div class="mfield" style="margin-bottom:16px;">
+          <label>Assigned Client</label>
+          <select id="lp-client" style="font-size:14px;">
+            <option value="">— Shared / Lighthouse (not client-specific) —</option>
+          </select>
+          <div class="field-hint">When set, only this client sees the product in their portal BOM picker. Leave blank for shared/internal liquids.</div>
         </div>
         <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">
           <button onclick="window.closeLPModal()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;padding:8px 18px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Cancel</button>
@@ -16588,12 +16598,13 @@ window.loadBoms = async function initBoms() {
         <thead>
           <tr>
             <th>Product Name</th>
+            <th style="min-width:180px;">Assigned Client</th>
             <th class="mob-hide" style="min-width:120px;">Added</th>
             <th style="min-width:80px;"></th>
           </tr>
         </thead>
         <tbody id="lp-tbody">
-          <tr><td colspan="3" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr>
+          <tr><td colspan="4" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -21487,14 +21498,26 @@ function renderLiquidProducts(rows) {
   var active = rows.filter(function(r){ return r.is_active !== false; });
   var archived = rows.filter(function(r){ return r.is_active === false; });
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:32px;">No liquid products yet — click <strong>+ Add Liquid Product</strong> to create the first entry.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:32px;">No liquid products yet — click <strong>+ Add Liquid Product</strong> to create the first entry.</td></tr>';
     return;
   }
   var canEdit = window.canDo && window.canDo('liquid_products_edit');
+  // Build a clientId -> name map from the warm CLIENTS cache (fallback empty)
+  var clientMap = {};
+  (window.CLIENTS || window._clients || []).forEach(function(c){
+    if (!c) return;
+    clientMap[c.id] = c.company || c.name || c.id;
+  });
+  function clientCell(cid) {
+    if (!cid) return '<span style="color:var(--muted);font-style:italic;font-size:11px;">Shared / Lighthouse</span>';
+    var name = clientMap[cid] || cid;
+    return '<span style="display:inline-block;background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.3);color:var(--gold);font-size:10px;font-weight:700;letter-spacing:0.04em;padding:3px 9px;border-radius:3px;">' + escapeHtml(name) + '</span>';
+  }
   var html = '';
   active.forEach(function(r) {
     html += '<tr>'
       + '<td style="font-weight:600;color:var(--white);">' + escapeHtml(r.name) + '</td>'
+      + '<td>' + clientCell(r.client_id) + '</td>'
       + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + (r.created_at ? fmtDate(r.created_at) : '—') + '</td>'
       + '<td style="text-align:right;">';
     if (canEdit) {
@@ -21504,10 +21527,11 @@ function renderLiquidProducts(rows) {
     html += '</td></tr>';
   });
   if (archived.length) {
-    html += '<tr><td colspan="3" style="padding:12px 0 4px;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);border-top:1px solid var(--navy-border);">Archived</td></tr>';
+    html += '<tr><td colspan="4" style="padding:12px 0 4px;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);border-top:1px solid var(--navy-border);">Archived</td></tr>';
     archived.forEach(function(r) {
       html += '<tr style="opacity:0.45;">'
         + '<td style="font-style:italic;color:var(--muted);">' + escapeHtml(r.name) + '</td>'
+        + '<td>' + clientCell(r.client_id) + '</td>'
         + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + (r.created_at ? fmtDate(r.created_at) : '—') + '</td>'
         + '<td style="text-align:right;">';
       if (canEdit) {
@@ -21524,17 +21548,36 @@ window.openLPModal = function(editId) {
   var title = document.getElementById('lp-modal-title');
   var nameIn = document.getElementById('lp-name');
   var idIn = document.getElementById('lp-edit-id');
+  var clientSel = document.getElementById('lp-client');
   if (!modal) return;
   idIn.value = editId || '';
   nameIn.value = '';
   title.textContent = editId ? 'Edit Product' : 'Add Product';
   var oldNameIn = document.getElementById('lp-old-name');
   if (oldNameIn) oldNameIn.value = '';
+
+  // Populate client dropdown from warm cache (alphabetical, Lighthouse pinned first)
+  if (clientSel) {
+    var clients = (window.CLIENTS || window._clients || []).slice().filter(Boolean);
+    clients.sort(function(a,b){
+      var aLh = ((a.company||a.name||'').toLowerCase().indexOf('lighthouse')>-1) ? 0 : 1;
+      var bLh = ((b.company||b.name||'').toLowerCase().indexOf('lighthouse')>-1) ? 0 : 1;
+      if (aLh !== bLh) return aLh - bLh;
+      return (a.company||a.name||'').localeCompare(b.company||b.name||'');
+    });
+    clientSel.innerHTML = '<option value="">— Shared / Lighthouse (not client-specific) —</option>'
+      + clients.map(function(c){
+          return '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.company || c.name || c.id) + '</option>';
+        }).join('');
+    clientSel.value = '';
+  }
+
   if (editId) {
     var existing = (window._liquidProducts || []).find(function(r){ return r.id === editId; });
     if (existing) {
       nameIn.value = existing.name;
       if (oldNameIn) oldNameIn.value = existing.name;
+      if (clientSel) clientSel.value = existing.client_id || '';
     }
   }
   modal.style.display = 'flex';
@@ -21548,13 +21591,15 @@ window.closeLPModal = function() {
 
 window.saveLiquidProduct = async function() {
   if (!(window.canDo && window.canDo('liquid_products_edit'))) { window.toast && window.toast('You do not have permission to edit liquid products.', 'error'); return; }
-  var name    = (document.getElementById('lp-name')    ||{}).value.trim();
-  var editId  = (document.getElementById('lp-edit-id') ||{}).value.trim();
-  var oldName = (document.getElementById('lp-old-name')||{}).value.trim();
+  var name     = (document.getElementById('lp-name')    ||{}).value.trim();
+  var editId   = (document.getElementById('lp-edit-id') ||{}).value.trim();
+  var oldName  = (document.getElementById('lp-old-name')||{}).value.trim();
+  var clientId = (document.getElementById('lp-client')  ||{}).value;
+  clientId = clientId ? clientId.trim() : '';
   if (!name) { toast('Product name is required', 'warn'); return; }
   try {
     if (editId) {
-      await window.db.update('liquid_products', '?id=eq.' + editId, { name: name });
+      await window.db.update('liquid_products', '?id=eq.' + editId, { name: name, client_id: clientId || null });
       // Cascade rename to all liquid_containers using the old name
       if (oldName && oldName !== name) {
         try {
@@ -21568,7 +21613,7 @@ window.saveLiquidProduct = async function() {
         toast('Product updated');
       }
     } else {
-      await window.db.insert('liquid_products', { name: name });
+      await window.db.insert('liquid_products', { name: name, client_id: clientId || null });
       toast('Product added');
     }
     window.closeLPModal();
@@ -21620,14 +21665,24 @@ window.getLiquidProducts = async function(forceRefresh) {
   return rows;
 };
 
-// Populate any <select> element with active liquid products
-// Pass currentValue to pre-select; pass allowBlank to include empty option
+// Populate any <select> element with active liquid products.
+// Pass currentValue to pre-select; pass allowBlank to include empty option.
+// Pass clientId to restrict the list to products assigned to that client — used
+// by the client portal so each customer only sees liquids Lighthouse has
+// approved for them (no cross-client visibility). Staff-side callers omit
+// clientId and see every product in the register.
 // If currentValue doesn't match any product (legacy free-text), adds it as a
 // highlighted option so the user can see it and migrate to the standard name.
-window.populateLiquidProductSelect = async function(selectEl, currentValue, allowBlank) {
+window.populateLiquidProductSelect = async function(selectEl, currentValue, allowBlank, clientId) {
   if (!selectEl) return;
   var products = await window.getLiquidProducts();
-  var html = allowBlank ? '<option value="">— Select liquid product —</option>' : '';
+  if (clientId) {
+    products = products.filter(function(p){ return p.client_id === clientId; });
+  }
+  var emptyLabel = clientId
+    ? '— Select a liquid product —'
+    : '— Select liquid product —';
+  var html = allowBlank ? '<option value="">' + emptyLabel + '</option>' : '';
   var matched = false;
   products.forEach(function(p) {
     var sel = (currentValue && currentValue === p.name) ? ' selected' : '';
@@ -21637,6 +21692,10 @@ window.populateLiquidProductSelect = async function(selectEl, currentValue, allo
   // Legacy value not in register — show as a warning option so user knows to update
   if (currentValue && !matched) {
     html += '<option value="' + escapeHtml(currentValue) + '" selected style="color:#e57c00;">⚠ ' + escapeHtml(currentValue) + ' (not in register — please update)</option>';
+  }
+  // Client-side: if the list is empty, give a helpful hint
+  if (clientId && !products.length && !currentValue) {
+    html += '<option value="" disabled>No liquid products assigned yet — contact your Lighthouse coordinator</option>';
   }
   selectEl.innerHTML = html;
 };
