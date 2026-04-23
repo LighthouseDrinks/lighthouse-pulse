@@ -2897,25 +2897,49 @@ async function loadPortalData(clientId) {
     }).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px;">No BOMs on file.</td></tr>';
   } catch(e) { window.logError('loadPortalData:boms', e); }
 
-  // Dry goods table
+  // Dry goods table — joins dry_goods_skus (holds client_id) to dry_goods_batches
+  // (holds the actual stock). Groups batches by SKU so the client sees one row
+  // per product with total received + remaining.
   try {
-    var dg = await db.select('dry_goods_deliveries', '?client_id=eq.' + clientId + '&order=delivery_date.desc&select=*,dry_goods_categories(name)');
+    var skus = await db.select('dry_goods_skus',
+      '?client_id=eq.' + clientId + '&is_active=eq.true'
+      + '&select=id,description,dry_goods_categories(name)');
     var tb3 = document.getElementById('portal-dg-tbody');
-    if (tb3) tb3.innerHTML = dg.length ? dg.map(function(d) {
-      var rem  = Number(d.quantity_remaining || 0);
-      var tot  = Number(d.quantity_received  || 0);
-      var col  = rem / tot > 0.5 ? 'var(--green)' : rem / tot > 0.2 ? 'var(--amber)' : 'var(--red)';
-      var desc = esc(d.description || '—');
-      var cat  = esc(d.dry_goods_categories ? d.dry_goods_categories.name : '—');
-      var date = d.delivery_date ? new Date(d.delivery_date).toLocaleDateString('en-IE') : '—';
-      return '<tr>'
-        + '<td style="color:var(--white);">' + desc + '</td>'
-        + '<td>' + cat + '</td>'
-        + '<td>' + tot.toLocaleString() + '</td>'
-        + '<td><span style="color:' + col + ';font-weight:600;">' + rem.toLocaleString() + '</span></td>'
-        + '<td>' + date + '</td>'
-        + '</tr>';
-    }).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No dry goods on file.</td></tr>';
+    if (!skus.length) {
+      if (tb3) tb3.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No dry goods on file.</td></tr>';
+    } else {
+      var skuIds = skus.map(function(s){ return s.id; });
+      var batches = await db.select('dry_goods_batches',
+        '?sku_id=in.(' + skuIds.join(',') + ')&order=delivery_date.asc');
+      // Aggregate batches by sku
+      var agg = {};
+      (batches || []).forEach(function(b) {
+        if (!agg[b.sku_id]) agg[b.sku_id] = { received: 0, remaining: 0, lastDate: null };
+        agg[b.sku_id].received  += Number(b.quantity_received  || b.quantity || 0);
+        agg[b.sku_id].remaining += Number(b.quantity_remaining || 0);
+        var d = b.delivery_date ? new Date(b.delivery_date) : null;
+        if (d && (!agg[b.sku_id].lastDate || d > agg[b.sku_id].lastDate)) {
+          agg[b.sku_id].lastDate = d;
+        }
+      });
+      var rows = skus.map(function(s) {
+        var a = agg[s.id] || { received: 0, remaining: 0, lastDate: null };
+        var col = a.received > 0 && a.remaining / a.received > 0.5 ? 'var(--green)'
+                : a.received > 0 && a.remaining / a.received > 0.2 ? 'var(--amber)'
+                : 'var(--red)';
+        var desc = esc(s.description || '—');
+        var cat  = esc(s.dry_goods_categories ? s.dry_goods_categories.name : '—');
+        var date = a.lastDate ? a.lastDate.toLocaleDateString('en-IE') : '—';
+        return '<tr>'
+          + '<td style="color:var(--white);">' + desc + '</td>'
+          + '<td>' + cat + '</td>'
+          + '<td>' + a.received.toLocaleString() + '</td>'
+          + '<td><span style="color:' + col + ';font-weight:600;">' + a.remaining.toLocaleString() + '</span></td>'
+          + '<td>' + date + '</td>'
+          + '</tr>';
+      });
+      if (tb3) tb3.innerHTML = rows.join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No dry goods on file.</td></tr>';
+    }
   } catch(e) { window.logError('loadPortalData:dryGoods', e); }
 
   // Liquid containers table — owner is always the logged-in client, so we
@@ -3114,20 +3138,28 @@ async function loadPortalDocuments(clientId) {
   var esc = window.escapeHtml;
   var docs = [];
   try {
-    var dg = await db.select('dry_goods_deliveries',
-      '?client_id=eq.' + clientId + '&select=description,delivery_date,docket_url,created_at');
-    (dg || []).forEach(function(d) {
-      if (d.docket_url) {
-        docs.push({
-          name: (d.description || 'Delivery Docket'),
-          type: 'Delivery Docket',
-          date: d.delivery_date || d.created_at,
-          source: 'Dry Goods',
-          url: d.docket_url
-        });
-      }
-    });
-  } catch(e) { /* table may not have docket_url on this schema — skip silently */ }
+    var skus = await db.select('dry_goods_skus',
+      '?client_id=eq.' + clientId + '&select=id,description');
+    if (skus && skus.length) {
+      var skuIds = skus.map(function(s){ return s.id; });
+      var skuMap = {};
+      skus.forEach(function(s){ skuMap[s.id] = s.description; });
+      var batches = await db.select('dry_goods_batches',
+        '?sku_id=in.(' + skuIds.join(',') + ')&order=delivery_date.desc'
+        + '&select=sku_id,delivery_date,docket_url,created_at');
+      (batches || []).forEach(function(b) {
+        if (b.docket_url) {
+          docs.push({
+            name: (skuMap[b.sku_id] || 'Delivery Docket'),
+            type: 'Delivery Docket',
+            date: b.delivery_date || b.created_at,
+            source: 'Dry Goods',
+            url: b.docket_url
+          });
+        }
+      });
+    }
+  } catch(e) { window.logError('loadPortalDocuments:batches', e); }
 
   // Sort newest first
   docs.sort(function(a, b) {
