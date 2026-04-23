@@ -18199,9 +18199,10 @@ window.loadVesselRegister = async function() {
       _vrAllContainers.forEach(function(c){
         var nm = _clMap[c.client_id] || '';
         // Strict rule: only tag as client vessel when the client is POSITIVELY
-        // identified as non-Lighthouse. Lighthouse's own rows — even if they
-        // carry a stale is_client_vessel=true flag — are NEVER client vessels.
-        c._isClientVessel = !!(c.client_id && nm && nm.indexOf('lighthouse') < 0);
+        // identified AND is not an LH-housed client (Lighthouse or Fero Drinks —
+        // Fero's liquid always sits in LH-registered vessels). Stale is_client_vessel
+        // flags on LH-housed rows are ignored; the client link is the source of truth.
+        c._isClientVessel = !!(c.client_id && nm && !window._isLhHousedClientName(nm));
       });
     } catch(e) {}
   } catch(e) { _vrAllContainers = []; }
@@ -18253,7 +18254,7 @@ window._vrGotoClientVessels = function() {
       var rec = (window._liquid || []).find(function(c){ return c.id === cid; });
       if (!rec) continue;
       var rNm = ((window.clientName && window.clientName(rec.client_id)) || '').toLowerCase();
-      var rIs = !!rec.is_client_vessel || (rNm && rNm.indexOf('lighthouse') < 0);
+      var rIs = !!(rNm && !window._isLhHousedClientName(rNm));
       if (rIs) { rows[i].scrollIntoView({ behavior:'smooth', block:'center' }); break; }
     }
   }, 200);
@@ -18432,13 +18433,23 @@ window._clientAbbrev = function(name) {
   return s.slice(0, 6);
 };
 
+// Which clients have their liquid always stored in Lighthouse-registered vessels?
+// Lighthouse itself (obviously) + Fero Drinks (liquid always lives in LH fleet vessels).
+// These clients are NEVER tagged as client vessels — they use the LH vessel register.
+// Any other client is a client-owned-vessel client.
+window._isLhHousedClientName = function(name) {
+  var n = (name || '').toLowerCase();
+  if (!n) return false;
+  return n.indexOf('lighthouse') >= 0 || n.indexOf('fero') >= 0;
+};
+
 // Figure out the next sequential number for a client's client-owned vessels.
 // Format: {ABBREV}-CV-{NNN}. Checks the in-memory liquid cache first, falls back to 1.
 window._nextClientVesselRef = function(clientId, clientName) {
-  // Failsafe: never generate a client-vessel ref for a Lighthouse client — this
-  // only gets called when we've decided it's a client vessel, so the client
-  // shouldn't be Lighthouse. If somehow it is, bail out to avoid "LIGHTH-CV-*".
-  if ((clientName || '').toLowerCase().indexOf('lighthouse') >= 0) return '';
+  // Failsafe: never generate a client-vessel ref for an LH-housed client (Lighthouse/Fero).
+  // This only gets called when we've decided it's a client vessel, so the client
+  // shouldn't be LH-housed. Bail out to avoid "LIGHTH-CV-*" / "FERO-CV-*".
+  if (window._isLhHousedClientName(clientName)) return '';
   var abbrev = window._clientAbbrev(clientName);
   var prefix = abbrev + '-CV-';
   var cache = (typeof _bl !== 'undefined' && _bl && _bl.length) ? _bl
@@ -18476,9 +18487,10 @@ window._blacClientChange = function() {
   var clientId = sel.value || '';
 
   // Default: LH mode. Only flip to client-vessel mode when we're CERTAIN the
-  // selected option is a non-Lighthouse client (text populated AND doesn't contain "lighthouse").
+  // selected option is a non-LH-housed client (Lighthouse/Fero both live in the
+  // LH fleet; anyone else gets the client-vessel treatment).
   var isClientVessel = false;
-  if (clientId && clientTx && clientTx.indexOf('lighthouse') < 0) {
+  if (clientId && clientTx && !window._isLhHousedClientName(clientTx)) {
     isClientVessel = true;
   }
 
@@ -19576,12 +19588,12 @@ window.renderLiquid = function() {
       statusPill = '<span style="font-size:10px;font-weight:700;letter-spacing:0.05em;padding:3px 8px;background:rgba(61,186,120,0.11);color:var(--green,#3dba78);border:1px solid rgba(61,186,120,0.28);border-radius:3px;text-transform:uppercase;">Active</span>';
     }
     var _cnameRaw = (clientName(c.client_id) || '').toLowerCase();
-    // Strict rule: a container is a client vessel ONLY when it's linked to a client whose
-    // name does NOT contain "lighthouse". If the client resolves to Lighthouse, never tag —
-    // even if a stale `is_client_vessel=true` flag was saved. If the client is missing/unresolved,
-    // default to LH (no badge). This keeps Lighthouse's own fleet free of the client tag.
+    // Strict rule: a container is a client vessel ONLY when linked to a non-LH-housed client.
+    // LH-housed = Lighthouse (our own fleet) OR Fero Drinks (Fero liquid always lives in LH vessels).
+    // Stale is_client_vessel flags on LH-housed rows are ignored. Missing/unresolved client
+    // defaults to LH (no badge).
     var _clientKnown    = !!(c.client_id && _cnameRaw);
-    var _clientIsLH     = _clientKnown && _cnameRaw.indexOf('lighthouse') >= 0;
+    var _clientIsLH     = _clientKnown && window._isLhHousedClientName(_cnameRaw);
     var _clientIsNonLH  = _clientKnown && !_clientIsLH;
     var _isClientVessel = _clientIsNonLH || (!!c.is_client_vessel && !_clientIsLH && !_clientKnown);
     var clientVesselBadge = _isClientVessel
@@ -19716,15 +19728,17 @@ window.openContainerModal = async function(editId) {
   ov.classList.add('open'); document.body.style.overflow = 'hidden';
 };
 
-// Auto-derive whether this is a client vessel based on the selected Owner/Client.
-// Rule: any client whose name contains "lighthouse" = LH-fleet vessel. Anyone else = client vessel.
+// Auto-derive whether this container uses an LH-fleet vessel (vs. a client-owned one),
+// based on the selected Owner/Client. LH-housed = Lighthouse + Fero (Fero liquid always
+// lives in LH-registered vessels). Anyone else is a client-owned-vessel client.
+// Function name kept for backwards compatibility — "lighthouse" here means "LH-housed".
 // DOM-first: reads the selected option's displayed text. No cache dependency.
 window._cmIsLighthouseClient = function(clientId, selectEl) {
   if (!clientId) return true; // nothing picked yet → treat as default (LH) to avoid flash
   // Primary: read the currently-selected option text from the DOM
   if (selectEl && selectEl.options && selectEl.selectedIndex >= 0) {
     var txt = (selectEl.options[selectEl.selectedIndex].text || '').toLowerCase();
-    if (txt) return txt.indexOf('lighthouse') >= 0;
+    if (txt) return window._isLhHousedClientName(txt);
   }
   // Secondary: scan known caches
   var caches = [];
@@ -19733,7 +19747,7 @@ window._cmIsLighthouseClient = function(clientId, selectEl) {
   if (window.CLIENTS && window.CLIENTS.length)         caches.push(window.CLIENTS);
   for (var i = 0; i < caches.length; i++) {
     var c = caches[i].find(function(x){ return x.id === clientId; });
-    if (c) return (c.name || '').toLowerCase().indexOf('lighthouse') >= 0;
+    if (c) return window._isLhHousedClientName(c.name);
   }
   // Default safe: treat as LH so we don't force client-vessel mode on a missing cache
   return true;
@@ -29115,11 +29129,9 @@ window.saveAdjModal = async function() {
   // context: 'source' — show volume, ABV, spirit (empty containers labelled EMPTY, no spirit)
   //          'dest'   — show available headspace and fill %
   //          'short'  — reference + type + Empty/volume only
-  // Strict rule: a container is a client vessel ONLY when its client_id resolves
-  // to a client whose name does not contain "lighthouse". If the client IS
-  // Lighthouse, it's never a client vessel — even if a stale is_client_vessel
-  // flag says otherwise (the client link is the source of truth; Lighthouse is
-  // set up as a "client" row purely for record-keeping, not as an actual client).
+  // Strict rule: a container is a client vessel ONLY when linked to a non-LH-housed client.
+  // LH-housed clients (Lighthouse Drinks + Fero Drinks) ALWAYS store liquid in LH-registered
+  // vessels, so their containers are never "client vessels" — no matter what stale flags say.
   // Exposed on window so save handlers outside this IIFE (e.g. saveTransfer) can use it.
   window._isClientOwnedContainer = function(c) {
     if (!c) return false;
@@ -29128,8 +29140,7 @@ window.saveAdjModal = async function() {
              : (window._blClients || window.CLIENTS || []);
     var cl = list.find ? list.find(function(x){ return x.id === c.client_id; }) : null;
     if (!cl) return false;
-    var nm = (cl.name || '').toLowerCase();
-    if (nm.indexOf('lighthouse') >= 0) return false; // Lighthouse is never a client vessel
+    if (window._isLhHousedClientName(cl.name)) return false;
     return true;
   };
   var _isClientOwnedContainer = window._isClientOwnedContainer;
