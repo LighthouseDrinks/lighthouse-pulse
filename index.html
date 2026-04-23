@@ -1930,7 +1930,8 @@
     <div class="portal-nav-item active" onclick="window.showPortalPage('portal-summary', this)">Summary</div>
     <div class="portal-nav-item" onclick="window.showPortalPage('portal-jobs', this)">Jobs</div>
     <div class="portal-nav-item" onclick="window.showPortalPage('portal-boms', this)">BOMs / Specs</div>
-    <div class="portal-nav-item" onclick="window.showPortalPage('portal-inventory', this)">Inventory</div>
+    <div class="portal-nav-item" onclick="window.showPortalPage('portal-dry-goods', this)">Dry Goods</div>
+    <div class="portal-nav-item" onclick="window.showPortalPage('portal-liquid', this)">Liquid Inventory</div>
     <div class="portal-nav-item" onclick="window.showPortalPage('portal-quotes', this)">Quotes</div>
     <div class="portal-nav-item" onclick="window.showPortalPage('portal-documents', this)">Documents</div>
     <div class="portal-nav-item" onclick="window.showPortalPage('portal-profile', this)">Profile</div>
@@ -2015,25 +2016,32 @@
     </div>
   </div>
 
-  <!-- Portal: Inventory -->
-  <div class="portal-page" id="portal-inventory">
+  <!-- Portal: Dry Goods -->
+  <div class="portal-page" id="portal-dry-goods">
     <div class="wrapper">
-      <div class="portal-heading">Your Inventory</div>
-      <div class="portal-sub">Dry goods stock and liquid containers held on your behalf</div>
+      <div class="portal-heading">Dry Goods On Site</div>
+      <div class="portal-sub">Current on-site stock held on your behalf, grouped by category.</div>
 
-      <div class="page-label" style="margin-bottom:8px;margin-top:0;">Dry Goods</div>
-      <div class="card" style="overflow:auto;margin-bottom:28px;">
-        <table class="data-table">
-          <thead><tr>
-            <th>Description</th><th>Category</th><th>Received</th><th>Remaining</th><th>Delivery Date</th>
-          </tr></thead>
-          <tbody id="portal-dg-tbody">
-            <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>
-          </tbody>
-        </table>
+      <div style="background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.35);border-radius:6px;padding:14px 18px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;">
+        <div style="color:var(--white);font-size:13px;line-height:1.55;max-width:780px;">
+          <strong style="color:var(--gold);">Stock-take helper.</strong>
+          Enter your cost price against each line, then use <em>Export CSV</em> to take a point-in-time snapshot.
+          Your cost prices are saved in this browser only &mdash; they are not stored on Lighthouse servers and are never shared with anyone else.
+        </div>
+        <button id="portal-dg-export" class="btn btn-gold" style="white-space:nowrap;" onclick="window.exportPortalDryGoodsCSV()">Export CSV</button>
       </div>
 
-      <div class="page-label" style="margin-bottom:8px;">Liquid Containers</div>
+      <div id="portal-dg-body">
+        <div class="card" style="padding:24px;text-align:center;color:var(--muted);">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Portal: Liquid Inventory -->
+  <div class="portal-page" id="portal-liquid">
+    <div class="wrapper">
+      <div class="portal-heading">Liquid On Site</div>
+      <div class="portal-sub">Liquid containers held on your behalf. Client-owned vessels are tagged with the amber <strong>CLIENT VESSEL</strong> marker.</div>
       <div class="card" style="overflow:auto;">
         <table class="data-table">
           <thead><tr>
@@ -2897,49 +2905,11 @@ async function loadPortalData(clientId) {
     }).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px;">No BOMs on file.</td></tr>';
   } catch(e) { window.logError('loadPortalData:boms', e); }
 
-  // Dry goods table — joins dry_goods_skus (holds client_id) to dry_goods_batches
-  // (holds the actual stock). Groups batches by SKU so the client sees one row
-  // per product with total received + remaining.
+  // Dry goods — grouped by category, showing LIVE on-site quantity only.
+  // Client can enter their own cost price per SKU; prices are persisted in
+  // localStorage keyed to client_id so they never touch Lighthouse servers.
   try {
-    var skus = await db.select('dry_goods_skus',
-      '?client_id=eq.' + clientId + '&is_active=eq.true'
-      + '&select=id,description,dry_goods_categories(name)');
-    var tb3 = document.getElementById('portal-dg-tbody');
-    if (!skus.length) {
-      if (tb3) tb3.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No dry goods on file.</td></tr>';
-    } else {
-      var skuIds = skus.map(function(s){ return s.id; });
-      var batches = await db.select('dry_goods_batches',
-        '?sku_id=in.(' + skuIds.join(',') + ')&order=delivery_date.asc');
-      // Aggregate batches by sku
-      var agg = {};
-      (batches || []).forEach(function(b) {
-        if (!agg[b.sku_id]) agg[b.sku_id] = { received: 0, remaining: 0, lastDate: null };
-        agg[b.sku_id].received  += Number(b.quantity_received  || b.quantity || 0);
-        agg[b.sku_id].remaining += Number(b.quantity_remaining || 0);
-        var d = b.delivery_date ? new Date(b.delivery_date) : null;
-        if (d && (!agg[b.sku_id].lastDate || d > agg[b.sku_id].lastDate)) {
-          agg[b.sku_id].lastDate = d;
-        }
-      });
-      var rows = skus.map(function(s) {
-        var a = agg[s.id] || { received: 0, remaining: 0, lastDate: null };
-        var col = a.received > 0 && a.remaining / a.received > 0.5 ? 'var(--green)'
-                : a.received > 0 && a.remaining / a.received > 0.2 ? 'var(--amber)'
-                : 'var(--red)';
-        var desc = esc(s.description || '—');
-        var cat  = esc(s.dry_goods_categories ? s.dry_goods_categories.name : '—');
-        var date = a.lastDate ? a.lastDate.toLocaleDateString('en-IE') : '—';
-        return '<tr>'
-          + '<td style="color:var(--white);">' + desc + '</td>'
-          + '<td>' + cat + '</td>'
-          + '<td>' + a.received.toLocaleString() + '</td>'
-          + '<td><span style="color:' + col + ';font-weight:600;">' + a.remaining.toLocaleString() + '</span></td>'
-          + '<td>' + date + '</td>'
-          + '</tr>';
-      });
-      if (tb3) tb3.innerHTML = rows.join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No dry goods on file.</td></tr>';
-    }
+    await window.loadPortalDryGoods(clientId);
   } catch(e) { window.logError('loadPortalData:dryGoods', e); }
 
   // Liquid containers table — owner is always the logged-in client, so we
@@ -3223,6 +3193,248 @@ async function loadPortalContact(clientId) {
     render(null, null, null);
   }
 }
+
+// ── Portal: Dry Goods (grouped by category, with client-entered cost prices) ─
+// Cost prices live in localStorage ONLY — keyed by client_id + sku_id — so the
+// values are visible to the logged-in client but never written to our database.
+window._portalDgCostKey = function(clientId, skuId) {
+  return 'lp_portal_dg_cost::' + clientId + '::' + skuId;
+};
+window._portalDgGetCost = function(clientId, skuId) {
+  try { return localStorage.getItem(window._portalDgCostKey(clientId, skuId)) || ''; }
+  catch(e) { return ''; }
+};
+window._portalDgSetCost = function(clientId, skuId, value) {
+  try {
+    var key = window._portalDgCostKey(clientId, skuId);
+    if (value === '' || value == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, String(value));
+  } catch(e) {}
+};
+
+// Hold the last-loaded dataset for the export button
+window._portalDgLastLoad = null;
+
+window.loadPortalDryGoods = async function(clientId) {
+  var body = document.getElementById('portal-dg-body');
+  var esc = window.escapeHtml;
+  if (!body) return;
+  if (!clientId) { body.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--muted);">No client context.</div>'; return; }
+
+  try {
+    var skus = await db.select('dry_goods_skus',
+      '?client_id=eq.' + clientId + '&is_active=eq.true'
+      + '&select=id,description,dry_goods_categories(id,name)&order=description.asc');
+
+    if (!skus || !skus.length) {
+      body.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--muted);">No dry goods on file.</div>';
+      window._portalDgLastLoad = { clientId: clientId, groups: [] };
+      return;
+    }
+
+    var skuIds = skus.map(function(s){ return s.id; });
+    var batches = await db.select('dry_goods_batches',
+      '?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,quantity_remaining');
+
+    // Aggregate remaining qty (= live on-site) per sku
+    var onSite = {};
+    (batches || []).forEach(function(b) {
+      onSite[b.sku_id] = (onSite[b.sku_id] || 0) + Number(b.quantity_remaining || 0);
+    });
+
+    // Group SKUs by category (stable order: name asc, "Uncategorised" last)
+    var groups = {};
+    skus.forEach(function(s) {
+      var cat = s.dry_goods_categories && s.dry_goods_categories.name ? s.dry_goods_categories.name : 'Uncategorised';
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(s);
+    });
+    var catNames = Object.keys(groups).sort(function(a,b){
+      if (a === 'Uncategorised') return 1;
+      if (b === 'Uncategorised') return -1;
+      return a.localeCompare(b);
+    });
+
+    // Build HTML
+    var html = '';
+    var exportGroups = [];
+    catNames.forEach(function(cat) {
+      var rows = groups[cat];
+      var catRows = [];
+      html += '<div style="margin-bottom:24px;">'
+        + '<div class="page-label" style="margin:0 0 8px 0;display:flex;justify-content:space-between;align-items:baseline;gap:12px;">'
+        +   '<span>' + esc(cat) + '</span>'
+        +   '<span id="portal-dg-catsub-' + esc(cat.replace(/[^A-Za-z0-9]/g,'_')) + '" style="color:var(--muted);font-size:11px;font-weight:500;letter-spacing:0.04em;">—</span>'
+        + '</div>'
+        + '<div class="card" style="overflow:auto;">'
+        +   '<table class="data-table">'
+        +     '<thead><tr>'
+        +       '<th>Description</th>'
+        +       '<th style="text-align:right;">On Site</th>'
+        +       '<th style="text-align:right;width:140px;">Cost Price (€)</th>'
+        +       '<th style="text-align:right;">Line Value</th>'
+        +     '</tr></thead>'
+        +     '<tbody>';
+      rows.forEach(function(s) {
+        var qty  = Number(onSite[s.id] || 0);
+        var cost = window._portalDgGetCost(clientId, s.id);
+        var desc = esc(s.description || '—');
+        var qtyCol = qty > 0 ? 'var(--white)' : 'var(--muted)';
+        html += '<tr data-sku-id="' + esc(s.id) + '">'
+          +   '<td style="color:var(--white);">' + desc + '</td>'
+          +   '<td style="text-align:right;color:' + qtyCol + ';font-weight:600;">' + qty.toLocaleString() + '</td>'
+          +   '<td style="text-align:right;">'
+          +     '<input type="number" min="0" step="0.01" value="' + esc(cost) + '" '
+          +       'data-sku-id="' + esc(s.id) + '" '
+          +       'onchange="window._portalDgOnCostChange(this)" '
+          +       'oninput="window._portalDgOnCostChange(this)" '
+          +       'style="width:120px;text-align:right;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:6px 8px;border-radius:4px;font-size:13px;" '
+          +       'placeholder="0.00">'
+          +   '</td>'
+          +   '<td style="text-align:right;" class="portal-dg-line-value" data-sku-id="' + esc(s.id) + '" data-qty="' + qty + '">—</td>'
+          + '</tr>';
+        catRows.push({ id: s.id, description: s.description || '', qty: qty });
+      });
+      html += '</tbody></table></div></div>';
+      exportGroups.push({ name: cat, rows: catRows });
+    });
+
+    // Grand total row
+    html += '<div class="card" style="padding:14px 18px;display:flex;justify-content:space-between;align-items:center;margin-top:8px;">'
+      + '<span style="color:var(--muted);font-size:12px;letter-spacing:0.06em;text-transform:uppercase;">Total stock value (your entered cost prices)</span>'
+      + '<span id="portal-dg-grand" style="color:var(--gold);font-weight:700;font-size:18px;">—</span>'
+      + '</div>';
+
+    body.innerHTML = html;
+    window._portalDgLastLoad = { clientId: clientId, groups: exportGroups };
+
+    // Initial total recalculation for any pre-entered cost prices
+    window._portalDgRecalcAll();
+  } catch(e) {
+    window.logError('loadPortalDryGoods', e);
+    body.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--red);">Could not load dry goods. Please refresh.</div>';
+  }
+};
+
+window._portalDgOnCostChange = function(input) {
+  if (!input) return;
+  var skuId = input.getAttribute('data-sku-id');
+  var ctx   = window._portalDgLastLoad;
+  if (!ctx || !skuId) return;
+  var raw   = input.value;
+  var num   = raw === '' ? null : Number(raw);
+  if (num != null && (isNaN(num) || num < 0)) { input.value = ''; num = null; }
+  window._portalDgSetCost(ctx.clientId, skuId, num == null ? '' : num);
+  window._portalDgRecalcAll();
+};
+
+window._portalDgRecalcAll = function() {
+  var ctx = window._portalDgLastLoad;
+  if (!ctx) return;
+  var catTotals = {};
+  var grand = 0;
+
+  ctx.groups.forEach(function(g) {
+    var gTotal = 0;
+    g.rows.forEach(function(r) {
+      var costStr = window._portalDgGetCost(ctx.clientId, r.id);
+      var cost    = costStr === '' ? 0 : Number(costStr);
+      if (isNaN(cost) || cost < 0) cost = 0;
+      var lineVal = cost > 0 ? r.qty * cost : 0;
+      gTotal += lineVal;
+
+      var cell = document.querySelector('.portal-dg-line-value[data-sku-id="' + r.id + '"]');
+      if (cell) {
+        if (costStr === '' || cost === 0) {
+          cell.textContent = '—';
+          cell.style.color = 'var(--muted)';
+        } else {
+          cell.textContent = '€' + lineVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          cell.style.color = 'var(--white)';
+        }
+      }
+    });
+    catTotals[g.name] = gTotal;
+    grand += gTotal;
+
+    var subId = 'portal-dg-catsub-' + g.name.replace(/[^A-Za-z0-9]/g,'_');
+    var subEl = document.getElementById(subId);
+    if (subEl) {
+      subEl.textContent = gTotal > 0
+        ? 'Subtotal €' + gTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : g.rows.length + ' line' + (g.rows.length === 1 ? '' : 's');
+    }
+  });
+
+  var grandEl = document.getElementById('portal-dg-grand');
+  if (grandEl) {
+    grandEl.textContent = grand > 0
+      ? '€' + grand.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : '—';
+  }
+};
+
+window.exportPortalDryGoodsCSV = function() {
+  var ctx = window._portalDgLastLoad;
+  if (!ctx || !ctx.groups || !ctx.groups.length) {
+    if (window.toastMsg) window.toastMsg('Nothing to export yet.', 'error');
+    return;
+  }
+  function csvEsc(v) {
+    if (v == null) return '';
+    var s = String(v);
+    if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+  var today = new Date();
+  var stamp = today.toISOString().slice(0,10);
+  var clientName = (window.CURRENT_USER && window.CURRENT_USER.client_name) || 'Client';
+
+  var lines = [];
+  lines.push('Lighthouse Drinks — Dry Goods Stock-Take');
+  lines.push('Client,' + csvEsc(clientName));
+  lines.push('Snapshot date,' + stamp);
+  lines.push('');
+  lines.push(['Category','Description','On Site','Cost Price (EUR)','Line Value (EUR)'].join(','));
+
+  var grand = 0;
+  ctx.groups.forEach(function(g) {
+    var gTotal = 0;
+    g.rows.forEach(function(r) {
+      var costStr = window._portalDgGetCost(ctx.clientId, r.id);
+      var cost    = costStr === '' ? '' : Number(costStr);
+      var lineVal = cost === '' ? '' : (r.qty * cost);
+      if (typeof lineVal === 'number' && !isNaN(lineVal)) gTotal += lineVal;
+      lines.push([
+        csvEsc(g.name),
+        csvEsc(r.description),
+        r.qty,
+        cost === '' ? '' : Number(cost).toFixed(2),
+        lineVal === '' ? '' : Number(lineVal).toFixed(2)
+      ].join(','));
+    });
+    lines.push([csvEsc(g.name + ' subtotal'), '', '', '', gTotal ? gTotal.toFixed(2) : ''].join(','));
+    grand += gTotal;
+  });
+  lines.push('');
+  lines.push(['TOTAL','','','', grand ? grand.toFixed(2) : ''].join(','));
+
+  var csv = lines.join('\r\n');
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  a.href   = url;
+  a.download = 'dry-goods-stocktake_' + clientName.replace(/[^A-Za-z0-9]+/g,'-') + '_' + stamp + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 0);
+  if (window.toastMsg) window.toastMsg('Stock-take CSV downloaded.', 'success');
+};
 
 // ── Invite modal ─────────────────────────────────────────────────────────────
 window._resendKey = '';
