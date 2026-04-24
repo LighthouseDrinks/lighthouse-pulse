@@ -18067,7 +18067,15 @@ window.loadBoms = async function initBoms() {
   function showPage(name, navEl) {
     if (name === 'overview' && typeof window.loadMyTasks === 'function') setTimeout(window.loadMyTasks, 200);
     if (name === 'overview' && typeof window.loadPendingBomApprovals === 'function') setTimeout(window.loadPendingBomApprovals, 300);
-    if (name === 'overview' && typeof window.loadOverviewCurrentJobs === 'function') setTimeout(window.loadOverviewCurrentJobs, 100);
+    if (name === 'overview') {
+      // Always reload jobs when navigating to Overview so the Current Jobs card
+      // is never stale. loadJobs() calls loadOverviewCurrentJobs() once the
+      // data is ready, avoiding the old 100ms fixed-timer race condition.
+      setTimeout(function() {
+        if (typeof window.loadJobs === 'function') window.loadJobs();
+        else if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
+      }, 50);
+    }
     if (name === 'overview' && typeof window.loadGndPortfolio === 'function') setTimeout(window.loadGndPortfolio, 350);
     if (name === 'pipeline' && typeof window.loadPipelinePage === 'function') setTimeout(window.loadPipelinePage, 100);
     if (name === 'my-tasks' && typeof window.loadMyTasksPage === 'function') setTimeout(window.loadMyTasksPage, 100);
@@ -25893,6 +25901,7 @@ window.saveAdjModal = async function() {
   var _jobStageFilter = 'all';
   var _staffMap = {}; // uuid -> display_name
   var _bomDone = {}; // job_id -> true if BOM task completed
+  var _loadJobsInFlight = false; // prevents concurrent loadJobs() race
   var _scDone  = {}; // job_id -> true if supply-chain signed off
   var _lsDone  = {}; // job_id -> true if liquid signed off
   var _qaDone  = {}; // job_id -> true if quality check exists
@@ -25931,6 +25940,18 @@ window.saveAdjModal = async function() {
 
   // ── Load jobs ────────────────────────────────────────────────────────────────
   async function loadJobs() {
+    // Prevent two fetches from running simultaneously — the second caller simply
+    // returns; the first will call loadOverviewCurrentJobs() when it completes.
+    if (_loadJobsInFlight) return;
+    _loadJobsInFlight = true;
+    try {
+      await _doLoadJobs();
+    } finally {
+      _loadJobsInFlight = false;
+    }
+  }
+
+  async function _doLoadJobs() {
     // Load staff map for name lookups
     if (!Object.keys(_staffMap).length) {
       try {
