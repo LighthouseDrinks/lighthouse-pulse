@@ -2134,14 +2134,20 @@
   <div class="portal-page" id="portal-quotes">
     <div class="wrapper">
       <div class="portal-heading">Your Quotes</div>
-      <div class="portal-sub">Pricing quotes issued by Lighthouse Drinks. All figures are <strong>Ex VAT · Ex Excise · Ex Shipping</strong>.</div>
+      <div class="portal-sub">Pricing quotes issued by Lighthouse Drinks. All figures are <strong>Ex VAT · Ex Excise · Ex Shipping</strong>. Hit <em>Download</em> on any row to open a print-ready copy — use your browser's <em>Save as PDF</em> to keep a copy.</div>
       <div class="card" style="overflow:auto;">
         <table class="data-table">
           <thead><tr>
-            <th>Quote</th><th>Version</th><th>Created</th><th>Total (Ex VAT · Ex Excise · Ex Shipping)</th><th>Last Emailed</th>
+            <th>Quote</th>
+            <th style="text-align:right;">Run Size</th>
+            <th style="text-align:right;">Price / Bottle</th>
+            <th style="text-align:right;">Total</th>
+            <th>Created</th>
+            <th>Emailed</th>
+            <th style="text-align:right;">Download</th>
           </tr></thead>
           <tbody id="portal-quotes-tbody">
-            <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>
+            <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -4184,41 +4190,174 @@ async function loadPortalQuotes(clientId) {
   var tb = document.getElementById('portal-quotes-tbody');
   if (!tb) return;
   var esc = window.escapeHtml;
+
+  function _qCurrency(n) {
+    if (n == null || isNaN(n)) return '—';
+    return '\u20AC' + Number(n).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function _qParseMoney(v) {
+    if (v == null) return NaN;
+    var n = parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
+    return isNaN(n) ? NaN : n;
+  }
+
   try {
     var rows = await db.select('pricing_quotes',
       '?client_id=eq.' + clientId + '&order=created_at.desc');
     if (!rows || !rows.length) {
-      tb.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No quotes issued yet.</td></tr>';
+      tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No quotes issued yet.</td></tr>';
       return;
     }
+
+    // Keep rows cached so the Download button can rebuild the printable quote
+    // without another network round-trip.
+    window._portalQuotesCache = {};
+    rows.forEach(function(r){ window._portalQuotesCache[r.id] = r; });
+
     tb.innerHTML = rows.map(function(r) {
+      var d       = r.data || {};
       var name    = esc(r.name || '—');
+      var product = esc(r.product || d.product || '');
       var version = 'v' + (r.version_num || 1);
       var created = r.created_at ? new Date(r.created_at).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
-      var total   = (r.data && (r.data.sellPrice || r.data.sell_price || r.data.totalExVat))
-                      ? esc(r.data.sellPrice || r.data.sell_price || r.data.totalExVat)
-                      : (r.sell_price ? esc(r.sell_price) : '—');
-      var sent    = '<span style="color:var(--muted);">Not sent</span>';
+
+      var qty     = parseInt(String(d.runQty || d.run_qty || '').replace(/[^0-9]/g,''), 10);
+      var sell    = _qParseMoney(r.sell_price || d.sellPrice || d.sell_price);
+      var totalN  = (!isNaN(sell) && !isNaN(qty) && qty > 0) ? sell * qty : NaN;
+
+      var runTxt   = (!isNaN(qty) && qty > 0) ? qty.toLocaleString('en-IE') + ' <span style="color:var(--muted);font-size:11px;">btl</span>' : '—';
+      var priceTxt = !isNaN(sell) ? _qCurrency(sell) : '—';
+      var totalTxt = !isNaN(totalN) ? '<span style="color:var(--gold);font-weight:700;">' + _qCurrency(totalN) + '</span>' : '—';
+
+      var sent = '<span style="color:var(--muted);">Not sent</span>';
       if (r.last_emailed_at) {
-        var d = new Date(r.last_emailed_at);
-        var dateStr = d.toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
-        var timeStr = d.toLocaleTimeString('en-IE', { hour: '2-digit', minute: '2-digit' });
-        sent = '<span style="color:var(--green);">Sent</span>'
-             + ' <span style="color:var(--muted);font-size:11px;">' + dateStr + ' ' + timeStr + '</span>';
+        var when = new Date(r.last_emailed_at);
+        var dateStr = when.toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
+        sent = '<span style="color:var(--green);">\u2709 Sent</span>'
+             + ' <span style="color:var(--muted);font-size:11px;">' + dateStr + '</span>';
       }
+
+      var quoteCell = '<div style="color:var(--white);font-weight:600;line-height:1.35;">' + name + '</div>'
+        + (product ? '<div style="color:var(--muted);font-size:12px;margin-top:2px;">' + product + '</div>' : '')
+        + '<div style="margin-top:4px;"><span style="display:inline-block;background:rgba(201,168,76,0.14);border:1px solid rgba(201,168,76,0.4);color:var(--gold);font-size:10px;font-weight:700;letter-spacing:0.06em;padding:2px 8px;border-radius:10px;">' + version + '</span></div>';
+
       return '<tr>'
-        + '<td style="color:var(--white);font-weight:600;">' + name + '</td>'
-        + '<td><span style="color:var(--gold);">' + version + '</span></td>'
+        + '<td>' + quoteCell + '</td>'
+        + '<td style="text-align:right;">' + runTxt + '</td>'
+        + '<td style="text-align:right;">' + priceTxt + '</td>'
+        + '<td style="text-align:right;">' + totalTxt + '</td>'
         + '<td>' + created + '</td>'
-        + '<td>' + total + '</td>'
         + '<td>' + sent + '</td>'
+        + '<td style="text-align:right;">'
+        +   '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;" '
+        +     'onclick="window.portalDownloadQuote(\'' + esc(r.id) + '\')">\u2B07 Download</button>'
+        + '</td>'
         + '</tr>';
     }).join('');
   } catch(e) {
     window.logError('loadPortalQuotes', e);
-    tb.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px;">No quotes available.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No quotes available.</td></tr>';
   }
 }
+
+// Opens a print-ready, branded quote in a new window. The client can then
+// hit Ctrl/Cmd+P and pick "Save as PDF" to keep their own copy.
+window.portalDownloadQuote = function(quoteId) {
+  var q = (window._portalQuotesCache || {})[quoteId];
+  if (!q) {
+    if (window.toastMsg) window.toastMsg('Quote not found — please refresh.', 'error');
+    return;
+  }
+  var d = q.data || {};
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+  function money(n) {
+    if (n == null || isNaN(n)) return '—';
+    return '\u20AC' + Number(n).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function parseMoney(v) {
+    if (v == null) return NaN;
+    var n = parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
+    return isNaN(n) ? NaN : n;
+  }
+
+  var qty     = parseInt(String(d.runQty || d.run_qty || '').replace(/[^0-9]/g,''), 10);
+  var sell    = parseMoney(q.sell_price || d.sellPrice || d.sell_price);
+  var totalN  = (!isNaN(sell) && !isNaN(qty) && qty > 0) ? sell * qty : NaN;
+
+  var clientName = (window.CURRENT_USER && window.CURRENT_USER.client_name) || q.customer || '';
+  var created    = q.created_at ? new Date(q.created_at).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+  var version    = 'v' + (q.version_num || 1);
+
+  var rows = [];
+  function row(label, value) {
+    if (value == null || value === '') return;
+    rows.push('<tr><td style="padding:10px 14px;color:#718096;width:45%;font-size:13px;border-bottom:1px solid #e2e8f0;">' + esc(label) + '</td>'
+            + '<td style="padding:10px 14px;color:#1a202c;font-weight:600;font-size:13px;border-bottom:1px solid #e2e8f0;">' + value + '</td></tr>');
+  }
+  row('Customer',        esc(clientName || '—'));
+  row('Product',         esc(q.product || d.product || '—'));
+  if (!isNaN(qty) && qty > 0) row('Run size', qty.toLocaleString('en-IE') + ' bottles');
+  if (!isNaN(sell))           row('Price per bottle', '<span style="color:#c9a84c;font-size:16px;font-weight:800;">' + money(sell) + '</span>');
+  if (!isNaN(totalN))         row('Total run value',  '<span style="color:#c9a84c;font-size:16px;font-weight:800;">' + money(totalN) + '</span>');
+  row('Quote reference', esc(q.name || q.id));
+  row('Version',         version);
+  row('Issued',          created);
+
+  var html = '<!doctype html><html><head><meta charset="utf-8">'
+    + '<title>' + esc(q.name || 'Quote') + ' — Lighthouse Drinks</title>'
+    + '<style>'
+    +   '@page { margin: 18mm; }'
+    +   'body { margin:0; font-family:Arial,Helvetica,sans-serif; color:#2d3748; background:#f8fafc; }'
+    +   '.sheet { max-width:720px; margin:28px auto; background:#fff; padding:36px 40px; box-shadow:0 6px 22px rgba(0,0,0,0.08); border:1px solid #e2e8f0; border-radius:6px; }'
+    +   '.brand { display:flex; align-items:center; justify-content:space-between; border-bottom:2px solid #c9a84c; padding-bottom:14px; margin-bottom:22px; }'
+    +   '.brand-name { font-size:22px; font-weight:800; color:#0b2540; letter-spacing:-0.01em; }'
+    +   '.brand-tag { font-size:10px; letter-spacing:0.18em; text-transform:uppercase; color:#c9a84c; font-weight:700; margin-top:4px; }'
+    +   '.doc-label { font-size:10px; letter-spacing:0.18em; text-transform:uppercase; color:#718096; font-weight:700; }'
+    +   '.doc-ref { font-size:14px; font-weight:700; color:#1a202c; margin-top:2px; }'
+    +   'table.data { width:100%; border-collapse:collapse; margin-bottom:18px; }'
+    +   '.pill { display:inline-block; background:#faf6ea; border:1px solid #c9a84c; color:#c9a84c; font-size:10px; font-weight:700; letter-spacing:0.1em; text-transform:uppercase; padding:4px 10px; border-radius:10px; margin-right:6px; }'
+    +   '.terms { margin-top:18px; padding:12px 14px; background:#faf6ea; border:1px dashed #c9a84c; border-radius:4px; color:#8a6d1e; font-size:11px; font-weight:700; text-align:center; letter-spacing:0.04em; }'
+    +   '.footer { margin-top:28px; border-top:1px solid #e2e8f0; padding-top:14px; font-size:11px; color:#718096; line-height:1.55; }'
+    +   '.no-print { text-align:center; margin:22px 0; }'
+    +   '.btn { background:#c9a84c; color:#0b2540; border:none; font-weight:700; padding:10px 22px; border-radius:4px; font-size:13px; cursor:pointer; letter-spacing:0.03em; }'
+    +   '@media print { .no-print { display:none; } body { background:#fff; } .sheet { box-shadow:none; border:none; margin:0; padding:0; max-width:none; } }'
+    + '</style></head><body>'
+    + '<div class="no-print"><button class="btn" onclick="window.print()">\u2B07 Save as PDF / Print</button></div>'
+    + '<div class="sheet">'
+    +   '<div class="brand">'
+    +     '<div>'
+    +       '<div class="brand-name">Lighthouse Drinks</div>'
+    +       '<div class="brand-tag">Quote</div>'
+    +     '</div>'
+    +     '<div style="text-align:right;">'
+    +       '<div class="doc-label">Reference</div>'
+    +       '<div class="doc-ref">' + esc(q.name || q.id) + '</div>'
+    +       '<div style="margin-top:6px;"><span class="pill">' + version + '</span><span class="pill">' + esc(created) + '</span></div>'
+    +     '</div>'
+    +   '</div>'
+    +   '<table class="data">'
+    +     rows.join('')
+    +   '</table>'
+    +   '<div class="terms">Ex VAT &middot; Ex Excise Duty &middot; Ex Shipping</div>'
+    +   '<div class="footer">'
+    +     'This quote reflects the configuration recorded at the time of issue. If you\'d like to adjust run size, components, or tweak any line item, reply to the email that delivered this quote or contact your Lighthouse account manager &mdash; we\'ll issue a new revision.'
+    +   '</div>'
+    + '</div>'
+    + '</body></html>';
+
+  var w = window.open('', '_blank', 'width=820,height=900,scrollbars=yes');
+  if (!w) {
+    if (window.toastMsg) window.toastMsg('Please allow pop-ups to download your quote.', 'error');
+    return;
+  }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+};
 
 // ── Portal: Documents (aggregation only — no new table) ──────────────────────
 // Pulls any URL fields already stored on the client's rows into one table.
