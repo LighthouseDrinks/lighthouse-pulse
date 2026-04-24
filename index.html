@@ -2054,10 +2054,10 @@
       <div class="card" style="overflow:auto;">
         <table class="data-table">
           <thead><tr>
-            <th>Job ID</th><th>Product</th><th>Qty</th><th>Status</th><th>Bottling Date</th><th>Notes</th>
+            <th>Job ID</th><th>Product</th><th>Target Qty</th><th>Status</th><th>Scheduled Date</th><th>Notes</th><th></th>
           </tr></thead>
           <tbody id="portal-jobs-tbody">
-            <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>
+            <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -2410,6 +2410,23 @@
       .pbm-grid, .pbm-grid-3 { grid-template-columns: 1fr; }
     }
   </style>
+  <!-- ══ PORTAL: READ-ONLY JOB VIEW MODAL ═══════════════════════════════════════ -->
+  <div id="portal-job-view-overlay" style="display:none;position:fixed;inset:0;z-index:630;background:rgba(5,12,20,0.92);align-items:center;justify-content:center;padding:16px;box-sizing:border-box;" onclick="if(event.target===this)window.closePortalJobView()">
+    <div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:6px;max-width:680px;width:100%;max-height:92vh;display:flex;flex-direction:column;box-sizing:border-box;">
+      <div style="padding:22px 28px 16px;border-bottom:1px solid var(--navy-border);flex-shrink:0;display:flex;align-items:flex-start;justify-content:space-between;gap:16px;">
+        <div>
+          <div style="font-size:9px;letter-spacing:0.22em;text-transform:uppercase;color:var(--gold);margin-bottom:6px;font-weight:700;">Job Summary</div>
+          <div id="portal-jv-title" style="font-size:20px;font-weight:800;color:var(--white);line-height:1.25;"></div>
+          <div id="portal-jv-meta" style="font-size:11px;color:var(--muted);margin-top:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;"></div>
+        </div>
+        <button onclick="window.closePortalJobView()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:18px;width:32px;height:32px;cursor:pointer;border-radius:3px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">✕</button>
+      </div>
+      <div id="portal-jv-body" style="overflow-y:auto;flex:1;padding:0;">
+        <div style="padding:40px;text-align:center;color:var(--muted);">Loading…</div>
+      </div>
+    </div>
+  </div>
+
   <!-- ══ PORTAL: READ-ONLY BOM VIEW MODAL ══════════════════════════════════════ -->
   <div id="portal-bom-view-overlay" style="display:none;position:fixed;inset:0;z-index:630;background:rgba(5,12,20,0.92);align-items:center;justify-content:center;padding:16px;box-sizing:border-box;" onclick="if(event.target===this)window.closePortalBomView()">
     <div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:6px;max-width:740px;width:100%;max-height:92vh;display:flex;flex-direction:column;box-sizing:border-box;">
@@ -3470,22 +3487,52 @@ async function loadPortalData(clientId) {
         + '<td>' + badge + '</td>'
         + '<td>' + (s.desired_bottling_date ? new Date(s.desired_bottling_date).toLocaleDateString('en-IE') : '—') + '</td>'
         + '<td style="color:var(--muted);font-size:12px;">' + noteHtml + '</td>'
+        + '<td></td>'
         + '</tr>');
     });
+    // Stage style/label maps (mirrors main app — using hard-coded colours so no CSS vars needed in portal)
+    var _PSS = {
+      planning:  'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+      scheduled: 'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+      complete:  'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
+      on_hold:   'background:rgba(232,156,58,0.12);color:#e89c3a;border:1px solid rgba(232,156,58,0.25);',
+      cancelled: 'background:rgba(100,100,120,0.15);color:#888;border:1px solid rgba(100,100,120,0.3);',
+      'Intake':                'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+      'Job Prep':              'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+      'In Production':         'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+      'Scheduled':             'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+      'Complete':              'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
+      'Pre-Production Signoff':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);'
+    };
+    var _PSL = {
+      planning:'Planning', scheduled:'Scheduled', complete:'Complete', on_hold:'On Hold', cancelled:'Cancelled',
+      'Intake':'Planning', 'Job Prep':'Planning', 'In Production':'In Production',
+      'Scheduled':'Scheduled', 'Complete':'Complete', 'Pre-Production Signoff':'Pre-Production'
+    };
+    window._portalJobs = jobs; // store for view modal
     jobs.forEach(function(j) {
-      var col    = j.stage === 'Complete' ? 'var(--green)' : j.stage === 'In Progress' ? 'var(--gold)' : 'var(--muted)';
-      var stageLabel = j.stage === 'Draft' ? 'Draft (awaiting Lighthouse)' : (j.stage || '—');
+      var stageSty = _PSS[j.stage] || _PSS.planning;
+      var stageLbl = _PSL[j.stage] || j.stage || 'Planning';
+      var stageBadge = '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:3px 10px;border-radius:3px;' + stageSty + '">' + esc(stageLbl) + '</span>';
+      var qty = j.job_target_type === 'Liquid'
+        ? (j.liquid_litres ? Number(j.liquid_litres).toLocaleString() + ' L' : '—')
+        : (j.bottle_target ? Number(j.bottle_target).toLocaleString() + ' btls'
+          : (j.qty_bottles ? Number(j.qty_bottles).toLocaleString() + ' btls' : '—'));
+      var dateStr = j.bottling_date || j.scheduled_date;
+      var displayDate = dateStr ? new Date(dateStr).toLocaleDateString('en-IE') : '—';
+      var viewBtn = '<button onclick="window.openPortalJobView(\'' + esc(j.id) + '\')" style="background:var(--gold);color:#0a1520;border:none;padding:5px 12px;font-size:11px;font-weight:700;border-radius:3px;cursor:pointer;white-space:nowrap;">View Job →</button>';
       rows.push('<tr>'
         + '<td><span class="job-num">' + esc(j.job_id || j.id) + '</span></td>'
         + '<td style="color:var(--white);font-weight:600;">' + esc(j.product_name || '—') + '</td>'
-        + '<td>' + (j.qty_bottles ? Number(j.qty_bottles).toLocaleString() : '—') + '</td>'
-        + '<td><span style="color:' + col + ';">' + esc(stageLabel) + '</span></td>'
-        + '<td>' + (j.bottling_date ? new Date(j.bottling_date).toLocaleDateString('en-IE') : '—') + '</td>'
+        + '<td>' + qty + '</td>'
+        + '<td>' + stageBadge + '</td>'
+        + '<td>' + displayDate + '</td>'
         + '<td style="color:var(--muted);font-size:12px;">' + esc(j.notes || '') + '</td>'
+        + '<td style="white-space:nowrap;">' + viewBtn + '</td>'
         + '</tr>');
     });
     if (tb) tb.innerHTML = rows.length ? rows.join('')
-      : '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No jobs on file. Click <strong>+ Request New Job</strong> to propose your first.</td></tr>';
+      : '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No jobs on file. Click <strong>+ Request New Job</strong> to propose your first.</td></tr>';
   } catch(e) { window.logError('loadPortalData:jobs', e); }
 
   // BOMs table — real approved + pending/rejected submissions
@@ -4434,6 +4481,113 @@ window.openPortalBomModal = async function(reviseId) {
 window.closePortalBomModal = function() {
   var ov = document.getElementById('portal-bom-overlay');
   if (ov) ov.style.display = 'none';
+};
+
+// ── Portal: Read-only Job viewer ─────────────────────────────────────────────
+window.closePortalJobView = function() {
+  var ov = document.getElementById('portal-job-view-overlay');
+  if (ov) ov.style.display = 'none';
+  document.body.style.overflow = '';
+};
+
+window.openPortalJobView = async function(jobId) {
+  var overlay = document.getElementById('portal-job-view-overlay');
+  var bodyEl  = document.getElementById('portal-jv-body');
+  var titleEl = document.getElementById('portal-jv-title');
+  var metaEl  = document.getElementById('portal-jv-meta');
+  if (!overlay) return;
+
+  overlay.style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+  if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Loading…</div>';
+
+  try {
+    // Try the already-loaded portal jobs first, otherwise fetch
+    var j = (window._portalJobs || []).find(function(x){ return x.id === jobId; });
+    if (!j) {
+      var rows = await window.db.select('jobs', '?id=eq.' + jobId + '&limit=1');
+      j = rows && rows[0];
+    }
+    if (!j) { if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Job not found.</div>'; return; }
+
+    var esc = window.escapeHtml || function(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+
+    var _PSS = {
+      planning:  'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+      scheduled: 'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+      complete:  'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
+      on_hold:   'background:rgba(232,156,58,0.12);color:#e89c3a;border:1px solid rgba(232,156,58,0.25);',
+      cancelled: 'background:rgba(100,100,120,0.15);color:#888;border:1px solid rgba(100,100,120,0.3);',
+      'Intake':'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+      'Job Prep':'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+      'In Production':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+      'Scheduled':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+      'Complete':'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
+      'Pre-Production Signoff':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);'
+    };
+    var _PSL = {
+      planning:'Planning', scheduled:'Scheduled', complete:'Complete', on_hold:'On Hold', cancelled:'Cancelled',
+      'Intake':'Planning','Job Prep':'Planning','In Production':'In Production',
+      'Scheduled':'Scheduled','Complete':'Complete','Pre-Production Signoff':'Pre-Production'
+    };
+
+    var stageSty = _PSS[j.stage] || _PSS.planning;
+    var stageLbl = _PSL[j.stage] || j.stage || 'Planning';
+    var jobRef   = j.job_id || j.id;
+
+    if (titleEl) titleEl.textContent = j.product_name || '—';
+    if (metaEl) metaEl.innerHTML =
+      '<span style="font-family:monospace;color:var(--gold);">' + esc(jobRef) + '</span>'
+      + '&nbsp;&nbsp;<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:3px 10px;border-radius:3px;' + stageSty + '">' + esc(stageLbl) + '</span>';
+
+    var LBL = 'padding:9px 16px;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);width:200px;vertical-align:top;border-bottom:1px solid var(--navy-border);';
+    var VAL = 'padding:9px 16px;font-size:13px;color:var(--white);border-bottom:1px solid var(--navy-border);';
+    var SEC = 'padding:8px 16px;font-size:9px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);background:rgba(201,168,76,0.06);border-bottom:1px solid var(--navy-border);';
+
+    function row(label, val) {
+      if (!val && val !== 0) return '';
+      return '<tr><td style="' + LBL + '">' + label + '</td><td style="' + VAL + '">' + val + '</td></tr>';
+    }
+    function sec(title) { return '<tr><td colspan="2" style="' + SEC + '">' + title + '</td></tr>'; }
+
+    var qty = j.job_target_type === 'Liquid'
+      ? (j.liquid_litres ? Number(j.liquid_litres).toLocaleString() + ' litres' : '')
+      : (j.bottle_target ? Number(j.bottle_target).toLocaleString() + ' bottles'
+        : (j.qty_bottles ? Number(j.qty_bottles).toLocaleString() + ' bottles' : ''));
+
+    var dateStr = j.bottling_date || j.scheduled_date;
+    var displayDate = dateStr ? new Date(dateStr).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
+
+    var createdDate = j.created_at ? new Date(j.created_at).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
+
+    // Fetch BOM name if linked
+    var bomName = '';
+    if (j.bom_id) {
+      try {
+        var bomRows = await window.db.select('boms', '?id=eq.' + j.bom_id + '&select=product_name&limit=1');
+        if (bomRows && bomRows[0]) bomName = bomRows[0].product_name || j.bom_id;
+      } catch(_e) { bomName = j.bom_id; }
+    }
+
+    var notes = j.notes || '';
+
+    var html = '<table style="width:100%;border-collapse:collapse;"><tbody>'
+      + sec('Job Details')
+      + row('Job Reference',   esc(jobRef))
+      + row('Product',         esc(j.product_name || '—'))
+      + row('Status',          '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:3px 10px;border-radius:3px;' + stageSty + '">' + esc(stageLbl) + '</span>')
+      + row('Target Quantity', esc(qty))
+      + row('Scheduled Date',  esc(displayDate))
+      + row('PO Reference',    esc(j.po_number || ''))
+      + row('Linked BOM',      esc(bomName))
+      + row('Job Created',     esc(createdDate))
+      + (notes ? sec('Notes') + row('Notes', esc(notes)) : '')
+      + '</tbody></table>';
+
+    if (bodyEl) bodyEl.innerHTML = html;
+  } catch(e) {
+    if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Error loading job: ' + (e.message||'unknown') + '</div>';
+  }
 };
 
 // ── Portal: Read-only BOM viewer ─────────────────────────────────────────────
