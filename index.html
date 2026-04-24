@@ -2419,7 +2419,10 @@
           <div id="portal-bv-title" style="font-size:20px;font-weight:800;color:var(--white);line-height:1.25;"></div>
           <div id="portal-bv-meta" style="font-size:11px;color:var(--muted);margin-top:5px;"></div>
         </div>
-        <button onclick="window.closePortalBomView()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:18px;width:32px;height:32px;cursor:pointer;border-radius:3px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">✕</button>
+        <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
+          <button id="portal-bv-print-btn" onclick="window.printPortalBom()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">&#128424; Print / Save PDF</button>
+          <button onclick="window.closePortalBomView()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:18px;width:32px;height:32px;cursor:pointer;border-radius:3px;display:flex;align-items:center;justify-content:center;">✕</button>
+        </div>
       </div>
       <div id="portal-bv-body" style="overflow-y:auto;flex:1;padding:0;">
         <div style="padding:40px;text-align:center;color:var(--muted);">Loading…</div>
@@ -4440,6 +4443,8 @@ window.closePortalBomView = function() {
   document.body.style.overflow = '';
 };
 
+window._portalBomPrintData = null;
+
 window.openPortalBomView = async function(bomId) {
   var overlay = document.getElementById('portal-bom-view-overlay');
   var bodyEl  = document.getElementById('portal-bv-body');
@@ -4456,6 +4461,8 @@ window.openPortalBomView = async function(bomId) {
     var b = rows && rows[0];
     if (!b) { if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">BOM not found.</div>'; return; }
 
+    var ai = b.additional_info || {};
+
     // Collect all SKU IDs that need resolving to descriptions
     var skuFields = ['liquid_sku_id','bottle_sku_id','cork_sku_id','ropp_sku_id','foil_sku_id',
       'front_label_sku_id','back_label_sku_id','neck_label_sku_id','shipper_sku_id',
@@ -4471,8 +4478,10 @@ window.openPortalBomView = async function(bomId) {
 
     function skuDesc(id) { return id ? (skuMap[id] || id) : ''; }
 
+    var productName = b.product_name || b.product || '—';
+
     // Header
-    if (titleEl) titleEl.textContent = b.product_name || b.product || '—';
+    if (titleEl) titleEl.textContent = productName;
     if (metaEl) {
       var statusBadge = b.bom_status === 'approved'
         ? '<span style="background:rgba(0,170,100,0.15);color:#3dba78;border:1px solid rgba(0,170,100,0.4);padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">APPROVED</span>'
@@ -4482,7 +4491,7 @@ window.openPortalBomView = async function(bomId) {
     }
 
     // Build read-only table rows
-    var LBL = 'padding:9px 16px;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);width:180px;vertical-align:top;border-bottom:1px solid var(--navy-border);';
+    var LBL = 'padding:9px 16px;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);width:200px;vertical-align:top;border-bottom:1px solid var(--navy-border);';
     var VAL = 'padding:9px 16px;font-size:13px;color:var(--white);border-bottom:1px solid var(--navy-border);';
     var SEC = 'padding:8px 16px;font-size:9px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);background:rgba(201,168,76,0.06);border-bottom:1px solid var(--navy-border);';
 
@@ -4499,6 +4508,9 @@ window.openPortalBomView = async function(bomId) {
       return '<tr><td style="' + LBL + '">' + label + '</td><td style="' + VAL + '">' + desc
         + '<span style="display:inline-block;font-size:9px;font-weight:700;color:var(--gold);background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.3);padding:1px 6px;border-radius:2px;letter-spacing:0.06em;vertical-align:middle;margin-left:8px;">' + skuId + '</span></td></tr>';
     }
+
+    var palletCfg = (ai.casesLayer && ai.layersPallet) ? ai.casesLayer + ' cases/layer × ' + ai.layersPallet + ' layers' : (ai.casesLayer || ai.layersPallet || '');
+    var notes = ai.notes || b.notes || '';
 
     var html = '<table style="width:100%;border-collapse:collapse;">'
       + '<tbody>'
@@ -4525,15 +4537,61 @@ window.openPortalBomView = async function(bomId) {
       + skuRow('Gift Tube',          b.gift_tube_sku_id)
       + skuRow('Tube Lid',           b.tube_lid_sku_id)
       + sec('Additional Information')
-      + row('Bottles per Shipper',   b.bottles_per_shipper)
-      + row('BPH Target',            b.bph)
-      + (b.notes ? row('Notes', b.notes) : '')
+      + row('Bottles per Shipper',     b.bottles_per_shipper)
+      + row('Label Barcode',           ai.labelBarcode)
+      + row('Shipper Barcode',         ai.shipperBarcode)
+      + row('Intended Market',         ai.intendedMarket)
+      + row('Duty Stamp',              ai.dutyStamp)
+      + row('Annex 2 Compliant',       ai.annex2)
+      + row('Lot Number Instructions', ai.lotNumber)
+      + row('Label Positioning',       ai.labelPosition)
+      + row('Pallet Type',             ai.pallet)
+      + row('Pallet Configuration',    palletCfg)
+      + row('Special Instructions',    notes)
       + '</tbody></table>';
 
     if (bodyEl) bodyEl.innerHTML = html;
+
+    // Store data for print function
+    window._portalBomPrintData = { productName: productName, id: b.id, html: html, status: b.bom_status, giVerified: b.gi_verified };
+
   } catch(e) {
     if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Error loading BOM: ' + (e.message||'unknown') + '</div>';
   }
+};
+
+window.printPortalBom = function() {
+  var d = window._portalBomPrintData;
+  if (!d) return;
+  var win = window.open('', '_blank', 'width=800,height=900');
+  if (!win) { alert('Please allow pop-ups to print.'); return; }
+  win.document.write('<!DOCTYPE html><html><head><title>BOM — ' + d.productName + '</title>'
+    + '<style>'
+    + 'body{font-family:Arial,sans-serif;margin:0;padding:32px;color:#111;background:#fff;}'
+    + 'h1{font-size:20px;margin:0 0 4px;}'
+    + '.meta{font-size:12px;color:#666;margin-bottom:24px;}'
+    + 'table{width:100%;border-collapse:collapse;}'
+    + 'td{padding:8px 12px;font-size:12px;border-bottom:1px solid #e0e0e0;vertical-align:top;}'
+    + 'td:first-child{width:200px;text-transform:uppercase;letter-spacing:0.06em;font-size:10px;color:#888;}'
+    + '.sec td{background:#f7f4ec;color:#7a6525;font-size:9px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;padding:6px 12px;border-bottom:1px solid #ddd;}'
+    + '.gi{color:#1a8a50;font-weight:700;}'
+    + '.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;border:1px solid #aaa;color:#555;}'
+    + '.sku-tag{display:inline-block;font-size:9px;font-weight:700;color:#7a6525;background:#fdf8ec;border:1px solid #d4b84a;padding:1px 5px;border-radius:2px;margin-left:6px;letter-spacing:0.05em;vertical-align:middle;}'
+    + '.footer{margin-top:32px;font-size:10px;color:#aaa;border-top:1px solid #eee;padding-top:12px;}'
+    + '@media print{body{padding:16px;}}'
+    + '</style></head><body>'
+    + '<p style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;margin:0 0 6px;font-weight:700;">Bill of Materials</p>'
+    + '<h1>' + d.productName + '</h1>'
+    + '<div class="meta"><span style="font-family:monospace;">' + d.id + '</span>'
+    + (d.giVerified ? '&nbsp;&nbsp;<span class="gi">&#10003; GI Verified</span>' : '') + '</div>'
+    + d.html.replace(/style="[^"]*color:var\([^)]+\)[^"]*"/g, '')
+             .replace(/style="[^"]*var\([^)]+\)[^"]*"/g, '')
+             .replace(/<span style="[^"]*gold[^"]*">/g, '<span class="sku-tag">')
+             .replace(/background:rgba\([^)]+\);/g, '')
+    + '<div class="footer">Printed from Lighthouse Pulse &nbsp;·&nbsp; ' + new Date().toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) + '</div>'
+    + '<script>window.onload=function(){window.print();}<\/script>'
+    + '</body></html>');
+  win.document.close();
 };
 
 window.submitPortalBom = async function() {
