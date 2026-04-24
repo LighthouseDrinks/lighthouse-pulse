@@ -2358,17 +2358,14 @@
           <input type="text" id="pjm-po" placeholder="e.g. PO-2026-0042" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:8px 10px;border-radius:4px;font-size:14px;">
         </div>
         <div style="grid-column:1/-1;">
-          <label style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;display:block;">Target *</label>
-          <div style="display:flex;gap:14px;margin-bottom:8px;">
-            <label style="display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px;cursor:pointer;">
-              <input type="radio" name="pjm-target-type" value="bottles" id="pjm-tt-bottles" checked onchange="window._pjmToggleTarget()"> Number of Bottles
-            </label>
-            <label style="display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px;cursor:pointer;">
-              <input type="radio" name="pjm-target-type" value="liquid" id="pjm-tt-liquid" onchange="window._pjmToggleTarget()"> Volume of Liquid (litres)
-            </label>
+          <label style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;display:block;">Number of Bottles *</label>
+          <input type="number" id="pjm-bottle-target" placeholder="e.g. 7000" min="1" oninput="window._pjmStockDebounce()" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:8px 10px;border-radius:4px;font-size:14px;">
+          <!-- Stock availability check panel -->
+          <div id="pjm-stock-panel" style="display:none;margin-top:12px;background:rgba(5,12,25,0.6);border:1px solid var(--navy-border);border-radius:5px;overflow:hidden;">
+            <div id="pjm-stock-summary" style="padding:8px 14px;border-bottom:1px solid var(--navy-border);font-size:11px;font-weight:700;"></div>
+            <div style="padding:6px 14px 4px;font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;border-bottom:1px solid rgba(201,168,76,0.15);">Component Stock Check</div>
+            <div id="pjm-stock-rows" style="padding:4px 14px 8px;"></div>
           </div>
-          <input type="number" id="pjm-bottle-target" placeholder="e.g. 7000" min="1" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:8px 10px;border-radius:4px;font-size:14px;">
-          <input type="number" id="pjm-litres-target" placeholder="e.g. 500" step="0.01" style="display:none;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:8px 10px;border-radius:4px;font-size:14px;">
         </div>
         <div>
           <label style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;display:block;">Desired Bottling Date</label>
@@ -4187,12 +4184,13 @@ window.openPortalJobModal = async function(reviseId) {
   document.getElementById('pjm-product').value = '';
   document.getElementById('pjm-po').value = '';
   document.getElementById('pjm-bottle-target').value = '';
-  document.getElementById('pjm-litres-target').value = '';
   document.getElementById('pjm-date').value = '';
   document.getElementById('pjm-approved-by').value = '';
   document.getElementById('pjm-notes').value = '';
   document.getElementById('pjm-status').textContent = '';
   document.getElementById('pjm-submit').disabled = false;
+  var _sp = document.getElementById('pjm-stock-panel');
+  if (_sp) _sp.style.display = 'none';
 
   // Load this client's APPROVED BOMs for the dropdown
   var sel = document.getElementById('pjm-bom');
@@ -4229,13 +4227,9 @@ window.openPortalJobModal = async function(reviseId) {
         if (s.bom_id) { sel.value = s.bom_id; window._pjmOnBomSelect(); }
         document.getElementById('pjm-po').value = s.po_number || '';
         if (s.qty_bottles) {
-          document.getElementById('pjm-tt-bottles').checked = true;
           document.getElementById('pjm-bottle-target').value = s.qty_bottles;
-        } else if (s.litres_target) {
-          document.getElementById('pjm-tt-liquid').checked = true;
-          document.getElementById('pjm-litres-target').value = s.litres_target;
+          window._pjmCheckStock();
         }
-        window._pjmToggleTarget();
         document.getElementById('pjm-date').value = s.desired_bottling_date || '';
         document.getElementById('pjm-approved-by').value = s.client_approved_by || '';
         document.getElementById('pjm-notes').value = s.notes || '';
@@ -4257,12 +4251,104 @@ window._pjmOnBomSelect = function() {
   var opt = sel.options[sel.selectedIndex];
   var name = opt && opt.getAttribute('data-product') || '';
   document.getElementById('pjm-product').value = name;
+  // Reset stock panel and re-check if a bottle target is already entered
+  var panel = document.getElementById('pjm-stock-panel');
+  if (panel) panel.style.display = 'none';
+  var btl = document.getElementById('pjm-bottle-target').value;
+  if (btl && parseInt(btl, 10) > 0) window._pjmCheckStock();
 };
 
-window._pjmToggleTarget = function() {
-  var bottles = document.getElementById('pjm-tt-bottles').checked;
-  document.getElementById('pjm-bottle-target').style.display = bottles ? '' : 'none';
-  document.getElementById('pjm-litres-target').style.display = bottles ? 'none' : '';
+// ── Portal job: live stock availability check ─────────────────────────────
+var _pjmStockTimer = null;
+window._pjmStockDebounce = function() {
+  clearTimeout(_pjmStockTimer);
+  _pjmStockTimer = setTimeout(window._pjmCheckStock, 700);
+};
+
+window._pjmCheckStock = async function() {
+  var bomId   = document.getElementById('pjm-bom').value;
+  var bottles = parseInt(document.getElementById('pjm-bottle-target').value, 10);
+  var panel   = document.getElementById('pjm-stock-panel');
+  var summary = document.getElementById('pjm-stock-summary');
+  var rowsEl  = document.getElementById('pjm-stock-rows');
+  if (!panel || !summary || !rowsEl) return;
+
+  if (!bomId || !bottles || bottles < 1) { panel.style.display = 'none'; return; }
+
+  var bom = (window._pjmBoms || []).find(function(b){ return b.id === bomId; });
+  if (!bom) { panel.style.display = 'none'; return; }
+
+  panel.style.display = 'block';
+  summary.innerHTML = '<span style="color:var(--muted);">Checking stock…</span>';
+  rowsEl.innerHTML  = '';
+
+  // Component → SKU field mapping. Shippers/dividers use per-shipper qty.
+  var bps = parseInt(bom.bottles_per_shipper, 10) || 12;
+  var shippers = Math.ceil(bottles / bps);
+  var COMPONENTS = [
+    { label: 'Bottle',             field: 'bottle_sku_id',       needed: bottles  },
+    { label: 'ROPP Capsule',       field: 'ropp_sku_id',         needed: bottles  },
+    { label: 'Cork',               field: 'cork_sku_id',         needed: bottles  },
+    { label: 'Foil / Heat Shrink', field: 'foil_sku_id',         needed: bottles  },
+    { label: 'Front Label',        field: 'front_label_sku_id',  needed: bottles  },
+    { label: 'Back Label',         field: 'back_label_sku_id',   needed: bottles  },
+    { label: 'Neck Label',         field: 'neck_label_sku_id',   needed: bottles  },
+    { label: 'String / Twine',     field: 'string_twine_sku_id', needed: bottles  },
+    { label: 'Monocarton',         field: 'monocarton_sku_id',   needed: bottles  },
+    { label: 'Gift Tube',          field: 'gift_tube_sku_id',    needed: bottles  },
+    { label: 'Tube Lid',           field: 'tube_lid_sku_id',     needed: bottles  },
+    { label: 'Shipper',            field: 'shipper_sku_id',      needed: shippers },
+    { label: 'Divider / Insert',   field: 'divider_sku_id',      needed: shippers }
+  ].filter(function(c){ return !!bom[c.field]; });
+
+  if (!COMPONENTS.length) {
+    summary.innerHTML = '<span style="color:var(--muted);">No dry goods SKUs linked to this BOM yet — Lighthouse will confirm component availability.</span>';
+    rowsEl.innerHTML = '';
+    return;
+  }
+
+  var skuIds = COMPONENTS.map(function(c){ return bom[c.field]; });
+
+  try {
+    var batches = await window.db.select('dry_goods_batches',
+      '?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,quantity_remaining');
+    var onSite = {};
+    (batches || []).forEach(function(b){
+      onSite[b.sku_id] = (onSite[b.sku_id] || 0) + Number(b.quantity_remaining || 0);
+    });
+
+    var anyShortfall = false;
+    rowsEl.innerHTML = COMPONENTS.map(function(c) {
+      var avail    = onSite[bom[c.field]] || 0;
+      var shortfall = c.needed - avail;
+      var ok        = shortfall <= 0;
+      if (!ok) anyShortfall = true;
+      var dot   = ok ? 'var(--green)' : '#e05757';
+      var valCol = ok ? 'var(--green)' : '#e05757';
+      var sfNote = ok ? '' : ' &nbsp;<span style="color:#e05757;font-weight:700;">▲ ' + Math.abs(shortfall).toLocaleString() + ' short</span>';
+      return '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);">'
+        + '<div style="width:7px;height:7px;min-width:7px;border-radius:50%;background:' + dot + ';"></div>'
+        + '<div style="flex:1;font-size:12px;color:var(--white);">' + c.label + '</div>'
+        + '<div style="font-size:11px;text-align:right;">'
+        +   'Need <strong style="color:var(--white);">' + c.needed.toLocaleString() + '</strong>'
+        +   ' &nbsp;·&nbsp; On site <strong style="color:' + valCol + ';">' + avail.toLocaleString() + '</strong>'
+        +   sfNote
+        + '</div>'
+        + '</div>';
+    }).join('');
+
+    if (anyShortfall) {
+      summary.style.cssText = 'padding:8px 14px;border-bottom:1px solid rgba(224,87,87,0.3);font-size:11px;font-weight:700;background:rgba(224,87,87,0.08);color:#e05757;';
+      summary.innerHTML = '&#9888; Some components have a shortfall — you can still submit and Lighthouse will follow up on procurement.';
+    } else {
+      summary.style.cssText = 'padding:8px 14px;border-bottom:1px solid rgba(74,199,132,0.25);font-size:11px;font-weight:700;background:rgba(74,199,132,0.07);color:var(--green);';
+      summary.innerHTML = '&#10003; All components have sufficient stock on site for ' + bottles.toLocaleString() + ' bottles.';
+    }
+  } catch(e) {
+    summary.style.cssText = 'padding:8px 14px;border-bottom:1px solid var(--navy-border);font-size:11px;color:var(--muted);';
+    summary.innerHTML = 'Could not load stock data — you can still submit your request.';
+    rowsEl.innerHTML = '';
+  }
 };
 
 window.submitPortalJob = async function() {
@@ -4270,14 +4356,12 @@ window.submitPortalJob = async function() {
   var clientId = user && user.client_id;
   if (!clientId) { alert('Your account isn\'t linked to a client.'); return; }
 
-  var bomId = document.getElementById('pjm-bom').value;
-  var po    = document.getElementById('pjm-po').value.trim();
-  var tt    = document.getElementById('pjm-tt-bottles').checked ? 'bottles' : 'liquid';
-  var btl   = document.getElementById('pjm-bottle-target').value;
-  var ltr   = document.getElementById('pjm-litres-target').value;
-  var date  = document.getElementById('pjm-date').value;
-  var appr  = document.getElementById('pjm-approved-by').value.trim();
-  var notes = document.getElementById('pjm-notes').value.trim();
+  var bomId   = document.getElementById('pjm-bom').value;
+  var po      = document.getElementById('pjm-po').value.trim();
+  var btl     = document.getElementById('pjm-bottle-target').value;
+  var date    = document.getElementById('pjm-date').value;
+  var appr    = document.getElementById('pjm-approved-by').value.trim();
+  var notes   = document.getElementById('pjm-notes').value.trim();
   var product = document.getElementById('pjm-product').value.trim();
   var reviseId = document.getElementById('pjm-revise-id').value;
   var statusEl = document.getElementById('pjm-status');
@@ -4287,8 +4371,7 @@ window.submitPortalJob = async function() {
   if (!bomId) missing.push('BOM');
   if (!po)    missing.push('PO Number');
   if (!appr)  missing.push('Approved By');
-  if (tt === 'bottles' && !btl) missing.push('Number of Bottles');
-  if (tt === 'liquid'  && !ltr) missing.push('Litres of Liquid');
+  if (!btl)   missing.push('Number of Bottles');
   if (missing.length) {
     statusEl.innerHTML = '<span style="color:#ff9c9c;">Missing: ' + missing.join(', ') + '</span>';
     return;
@@ -4303,8 +4386,8 @@ window.submitPortalJob = async function() {
       bom_id:                 bomId,
       product_name:           product,
       po_number:              po,
-      qty_bottles:            tt === 'bottles' ? parseInt(btl, 10) : null,
-      litres_target:          tt === 'liquid'  ? parseFloat(ltr)   : null,
+      qty_bottles:            parseInt(btl, 10),
+      litres_target:          null,
       desired_bottling_date:  date || null,
       client_approved_by:     appr,
       notes:                  notes || null,
