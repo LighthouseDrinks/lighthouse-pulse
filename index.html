@@ -2568,6 +2568,11 @@
           <div class="pbm-hint">Case size — drives case depletion</div>
         </div>
         <div>
+          <label class="pbm-label">Bottles per Hour (BPH)</label>
+          <input type="number" id="pbm-bph" class="pbm-input" placeholder="e.g. 1200" min="1">
+          <div class="pbm-hint">Line speed — used to estimate job duration on the schedule</div>
+        </div>
+        <div>
           <label class="pbm-label">Divider / Insert *</label>
           <select id="pbm-divider" class="pbm-select"><option value="">— Select divider —</option></select>
         </div>
@@ -4431,7 +4436,7 @@ window.openPortalBomModal = async function(reviseId) {
   document.getElementById('pbm-revise-id').value = reviseId || '';
   [
     'pbm-product','pbm-volume','pbm-abv','pbm-notes','pbm-colour-spec',
-    'pbm-bottles-per-shipper','pbm-label-barcode','pbm-shipper-barcode',
+    'pbm-bottles-per-shipper','pbm-bph','pbm-label-barcode','pbm-shipper-barcode',
     'pbm-intended-market','pbm-cases-layer','pbm-layers-pallet','pbm-label-position'
   ].forEach(function(id){
     var el = document.getElementById(id); if (el) el.value = '';
@@ -4526,6 +4531,7 @@ window.openPortalBomModal = async function(reviseId) {
           setV('pbm-colour-spec', s.colour_spec);
         }
         setV('pbm-bottles-per-shipper', s.bottles_per_shipper);
+        setV('pbm-bph',                s.bph);
         setV('pbm-label-barcode',  ai.labelBarcode);
         setV('pbm-shipper-barcode',ai.shipperBarcode);
         setV('pbm-intended-market',ai.intendedMarket);
@@ -4924,6 +4930,7 @@ window.submitPortalBom = async function() {
   var colour   = colourRaw === 'yes';
   var colSpec  = _gv('pbm-colour-spec');
   var bpShip   = _gi('pbm-bottles-per-shipper');
+  var bph      = _gi('pbm-bph');
 
   var additionalInfo = {
     labelBarcode:   _gv('pbm-label-barcode')   || null,
@@ -5013,6 +5020,7 @@ window.submitPortalBom = async function() {
       tube_lid_sku_id:      tlid || null,
       tin_sku_id:           tin || null,
       bottles_per_shipper:  bpShip,
+      bph:                  bph,
       chill_filtration:     chill,
       colouring:            colour,
       colour_spec:          colour ? (colSpec || null) : null,
@@ -18816,6 +18824,8 @@ window.approveBomSubmission = async function(id) {
     // Also fold in top-level notes as additional_info.notes (staff side stores it there)
     if (s.notes && !additionalInfo.notes) additionalInfo.notes = s.notes;
 
+    var approver = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.full_name || window.CURRENT_USER.email)) || 'Lighthouse';
+
     var bomPayload = {
       client_id:    s.client_id,
       product_name: s.product_name,
@@ -18845,7 +18855,11 @@ window.approveBomSubmission = async function(id) {
       colouring:           !!s.colouring,
       colour_spec:         s.colour_spec         || null,
       additional_info:     additionalInfo,
-      notes:               s.notes               || null
+      notes:               s.notes               || null,
+      // Set the BOM as approved and locked immediately — Lighthouse has already reviewed it
+      bom_status:          'approved',
+      locked_by:           approver,
+      approval_requested_at: null
     };
     // Unique-ish ID to avoid collisions with the native BOM ID scheme
     bomPayload.id = 'BOM-' + String(s.client_id).replace('CLI-','') + '-' + Date.now().toString(36).toUpperCase();
@@ -18857,6 +18871,8 @@ window.approveBomSubmission = async function(id) {
       approved_at: new Date().toISOString()
     });
     window.toast && window.toast('BOM approved and added to the main register.', 'success');
+    // Record in BOM history so the audit trail shows the portal-approval event
+    try { await window._bomRecordHistory(newBomId, 'approved', null, 'approved', approver); } catch(_he) {}
     window.loadApprovalsPage && window.loadApprovalsPage();
   } catch(e) {
     window.logError('approveBomSubmission', e);
