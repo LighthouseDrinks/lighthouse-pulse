@@ -18485,20 +18485,19 @@ window.loadApprovalsPage = async function() {
     jobBody0.innerHTML = '<div style="padding:40px 20px;color:var(--muted);text-align:center;">Fetching job requests…</div>';
   }
 
-  // Build a reliable {clientId → name} map from whatever source is available
+  // Always fetch a fresh {clientId → name} map directly from DB — never rely on cache timing
   var clientMap = {};
   try {
+    var _cs = await db.select('clients', '?select=id,name') || [];
+    _cs.forEach(function(c) { if (c && c.id) clientMap[c.id] = c.name || c.id; });
+  } catch(_e) {
+    // Fallback to whatever is in the window cache
     var _cl = Array.isArray(window.CLIENTS) ? window.CLIENTS : [];
     _cl.forEach(function(c) {
-      // window.CLIENTS objects use .id and .company (or .name)
       if (c && c.id) clientMap[c.id] = c.company || c.name || c.id;
     });
-    // If the array was empty or wasn't an id→name map, fetch direct from DB
-    if (!Object.keys(clientMap).length) {
-      var _cs = await db.select('clients', '?select=id,name') || [];
-      _cs.forEach(function(c) { if (c && c.id) clientMap[c.id] = c.name || c.id; });
-    }
-  } catch(_e) {}
+  }
+  window._approvalsClientMap = clientMap;
   function _cname(id) { return clientMap[id] || id; }
 
   // BOMs
@@ -18638,9 +18637,14 @@ window.viewBomSubmission = async function(id) {
     if (!r || !r[0]) return;
     var s = r[0];
     var ai = s.additional_info || {};
-    var cname = (window.CLIENTS && Array.isArray(window.CLIENTS))
-      ? ((window.CLIENTS.find(function(c){ return c.id === s.client_id; }) || {}).company || (window.CLIENTS.find(function(c){ return c.id === s.client_id; }) || {}).name || s.client_id)
-      : (window.CLIENTS && window.CLIENTS[s.client_id]) || s.client_id;
+    var cname = (window._approvalsClientMap && window._approvalsClientMap[s.client_id])
+      || s.client_id;
+    if (cname === s.client_id) {
+      try {
+        var _cr = await db.select('clients', '?id=eq.' + s.client_id + '&select=name&limit=1');
+        if (_cr && _cr[0] && _cr[0].name) cname = _cr[0].name;
+      } catch(_e) {}
+    }
 
     function skuLabel(v) { return v || '—'; }
 
@@ -18696,9 +18700,14 @@ window.viewJobSubmission = async function(id) {
     var r = await db.select('client_job_submissions', '?id=eq.' + id);
     if (!r || !r[0]) return;
     var s = r[0];
-    var cname = (window.CLIENTS && Array.isArray(window.CLIENTS))
-      ? ((window.CLIENTS.find(function(c){ return c.id === s.client_id; }) || {}).company || (window.CLIENTS.find(function(c){ return c.id === s.client_id; }) || {}).name || s.client_id)
-      : (window.CLIENTS && window.CLIENTS[s.client_id]) || s.client_id;
+    var cname = (window._approvalsClientMap && window._approvalsClientMap[s.client_id])
+      || s.client_id;
+    if (cname === s.client_id) {
+      try {
+        var _cr = await db.select('clients', '?id=eq.' + s.client_id + '&select=name&limit=1');
+        if (_cr && _cr[0] && _cr[0].name) cname = _cr[0].name;
+      } catch(_e) {}
+    }
 
     // Resolve BOM display name
     var bomDisplay = s.bom_id || '—';
