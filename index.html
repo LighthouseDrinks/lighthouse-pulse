@@ -18485,31 +18485,41 @@ window.loadApprovalsPage = async function() {
     jobBody0.innerHTML = '<div style="padding:40px 20px;color:var(--muted);text-align:center;">Fetching job requests…</div>';
   }
 
+  // Build a reliable {clientId → name} map from whatever source is available
+  var clientMap = {};
+  try {
+    var _cl = Array.isArray(window.CLIENTS) ? window.CLIENTS : [];
+    _cl.forEach(function(c) {
+      // window.CLIENTS objects use .id and .company (or .name)
+      if (c && c.id) clientMap[c.id] = c.company || c.name || c.id;
+    });
+    // If the array was empty or wasn't an id→name map, fetch direct from DB
+    if (!Object.keys(clientMap).length) {
+      var _cs = await db.select('clients', '?select=id,name') || [];
+      _cs.forEach(function(c) { if (c && c.id) clientMap[c.id] = c.name || c.id; });
+    }
+  } catch(_e) {}
+  function _cname(id) { return clientMap[id] || id; }
+
   // BOMs
   try {
     var bomSubs = await db.select('client_bom_submissions',
       '?status=eq.submitted&order=submitted_at.asc') || [];
-    var clients = window.CLIENTS || {};
-    // Fallback if clients cache empty
-    if (!Object.keys(clients).length) {
-      try {
-        var cs = await db.select('clients', '?select=id,name');
-        (cs || []).forEach(function(c) { clients[c.id] = c.name; });
-      } catch(_e) {}
-    }
     var bomBody = document.getElementById('approvals-boms-body');
     if (!bomSubs.length) {
       bomBody.innerHTML = '<div style="padding:40px 20px;color:var(--muted);text-align:center;">No BOMs awaiting approval.</div>';
     } else {
-      bomBody.innerHTML = '<table class="data-table" style="width:100%;"><thead><tr>'
+      bomBody.innerHTML = '<table class="data-table" style="width:100%;table-layout:fixed;"><colgroup>'
+        + '<col style="width:18%"><col style="width:22%"><col style="width:18%"><col style="width:7%"><col style="width:7%"><col style="width:10%"><col>'
+        + '</colgroup><thead><tr>'
         + '<th>Client</th><th>Product</th><th>Liquid</th><th>ABV</th><th>Vol</th><th>Submitted</th><th style="text-align:right;">Actions</th>'
         + '</tr></thead><tbody>' + bomSubs.map(function(s) {
-          var cname = clients[s.client_id] || s.client_id;
+          var cname = _cname(s.client_id);
           var submitted = s.submitted_at ? new Date(s.submitted_at).toLocaleDateString('en-IE') : '—';
           return '<tr>'
-            + '<td style="color:var(--white);font-weight:600;">' + esc(cname) + '</td>'
-            + '<td>' + esc(s.product_name || '—') + '</td>'
-            + '<td>' + esc(s.liquid_spec || '—') + '</td>'
+            + '<td style="color:var(--white);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(cname) + '</td>'
+            + '<td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.product_name || '—') + '</td>'
+            + '<td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.liquid_spec || '—') + '</td>'
             + '<td>' + (s.abv ? esc(s.abv) + '%' : '—') + '</td>'
             + '<td>' + (s.volume ? esc(s.volume) + 'cl' : '—') + '</td>'
             + '<td style="color:var(--muted);font-size:12px;">' + submitted + '</td>'
@@ -18533,23 +18543,24 @@ window.loadApprovalsPage = async function() {
     var jobSubs = await db.select('client_job_submissions',
       '?status=eq.submitted&order=submitted_at.asc') || [];
     var jobBody = document.getElementById('approvals-jobs-body');
-    var clients = window.CLIENTS || {};
     if (!jobSubs.length) {
       jobBody.innerHTML = '<div style="padding:40px 20px;color:var(--muted);text-align:center;">No job requests awaiting approval.</div>';
     } else {
-      jobBody.innerHTML = '<table class="data-table" style="width:100%;"><thead><tr>'
+      jobBody.innerHTML = '<table class="data-table" style="width:100%;table-layout:fixed;"><colgroup>'
+        + '<col style="width:18%"><col style="width:22%"><col style="width:12%"><col style="width:8%"><col style="width:12%"><col style="width:10%"><col>'
+        + '</colgroup><thead><tr>'
         + '<th>Client</th><th>Product</th><th>Target</th><th>PO</th><th>Desired Date</th><th>Submitted</th><th style="text-align:right;">Actions</th>'
         + '</tr></thead><tbody>' + jobSubs.map(function(s) {
-          var cname = clients[s.client_id] || s.client_id;
+          var cname = _cname(s.client_id);
           var target = s.qty_bottles ? Number(s.qty_bottles).toLocaleString() + ' btl'
             : (s.litres_target ? Number(s.litres_target).toLocaleString() + ' L' : '—');
           var submitted = s.submitted_at ? new Date(s.submitted_at).toLocaleDateString('en-IE') : '—';
           var desired   = s.desired_bottling_date ? new Date(s.desired_bottling_date).toLocaleDateString('en-IE') : '—';
           return '<tr>'
-            + '<td style="color:var(--white);font-weight:600;">' + esc(cname) + '</td>'
-            + '<td>' + esc(s.product_name || '—') + '</td>'
+            + '<td style="color:var(--white);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(cname) + '</td>'
+            + '<td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.product_name || '—') + '</td>'
             + '<td>' + target + '</td>'
-            + '<td>' + esc(s.po_number || '—') + '</td>'
+            + '<td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.po_number || '—') + '</td>'
             + '<td>' + desired + '</td>'
             + '<td style="color:var(--muted);font-size:12px;">' + submitted + '</td>'
             + '<td style="text-align:right;white-space:nowrap;">'
@@ -18625,7 +18636,9 @@ window.viewBomSubmission = async function(id) {
     if (!r || !r[0]) return;
     var s = r[0];
     var ai = s.additional_info || {};
-    var cname = (window.CLIENTS && window.CLIENTS[s.client_id]) || s.client_id;
+    var cname = (window.CLIENTS && Array.isArray(window.CLIENTS))
+      ? ((window.CLIENTS.find(function(c){ return c.id === s.client_id; }) || {}).company || (window.CLIENTS.find(function(c){ return c.id === s.client_id; }) || {}).name || s.client_id)
+      : (window.CLIENTS && window.CLIENTS[s.client_id]) || s.client_id;
 
     function skuLabel(v) { return v || '—'; }
 
@@ -18681,7 +18694,9 @@ window.viewJobSubmission = async function(id) {
     var r = await db.select('client_job_submissions', '?id=eq.' + id);
     if (!r || !r[0]) return;
     var s = r[0];
-    var cname = (window.CLIENTS && window.CLIENTS[s.client_id]) || s.client_id;
+    var cname = (window.CLIENTS && Array.isArray(window.CLIENTS))
+      ? ((window.CLIENTS.find(function(c){ return c.id === s.client_id; }) || {}).company || (window.CLIENTS.find(function(c){ return c.id === s.client_id; }) || {}).name || s.client_id)
+      : (window.CLIENTS && window.CLIENTS[s.client_id]) || s.client_id;
 
     // Resolve BOM display name
     var bomDisplay = s.bom_id || '—';
