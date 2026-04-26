@@ -18822,7 +18822,7 @@ window.rejectBomSubmission = async function(id) {
 
 window.approveJobSubmission = async function(id) {
   var confirmed = window.lpConfirm
-    ? await window.lpConfirm('Approve this job request? It will be created in Jobs as a Draft so production can fill in remaining details.', { confirmLabel: 'Approve', variant: 'success' })
+    ? await window.lpConfirm('Approve this job request? It will be created in Jobs and tasks assigned.', { confirmLabel: 'Approve', variant: 'success' })
     : confirm('Approve this job request?');
   if (!confirmed) return;
   try {
@@ -18830,42 +18830,74 @@ window.approveJobSubmission = async function(id) {
     if (!r || !r[0]) return;
     var s = r[0];
 
-    // Generate next job ID by querying DB for the current maximum
-    var newJobId = 'JOB-001';
+    // Generate next job ID matching the JOB-N format used by the new job modal
+    var newJobId = 'JOB-1';
     try {
-      var existing = await db.select('jobs', '?select=id&order=id.desc&limit=50') || [];
-      if (existing.length) {
-        var maxNum = Math.max.apply(null, existing.map(function(j){
-          return parseInt((j.id || '').replace(/[^0-9]/g, '') || '0', 10);
-        }));
-        newJobId = 'JOB-' + ('000' + (maxNum + 1)).slice(-3);
-      }
-    } catch(_e) {
-      newJobId = 'JOB-' + Date.now().toString(36).toUpperCase();
+      var existingIds = await db.select('jobs', '?select=id&order=id.desc&limit=50') || [];
+      var maxNum = 0;
+      existingIds.forEach(function(j) {
+        var m = String(j.id || '').match(/JOB-(\d+)/i);
+        if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+      });
+      newJobId = 'JOB-' + String(maxNum + 1);
+    } catch(_e) { newJobId = 'JOB-' + Date.now(); }
+
+    // Look up BOM for chill filtration / colouring / bottling ABV
+    var chillFiltration = false, colouring = false, bottlingAbv = null, dilution = false;
+    if (s.bom_id) {
+      try {
+        var bomRes = await db.select('boms', '?id=eq.' + s.bom_id + '&select=chill_filtration,colouring,colour_spec,bottling_abv&limit=1');
+        if (bomRes && bomRes[0]) {
+          chillFiltration = !!bomRes[0].chill_filtration;
+          colouring       = !!bomRes[0].colouring;
+          bottlingAbv     = bomRes[0].bottling_abv || null;
+          dilution        = !!bottlingAbv;
+        }
+      } catch(_e) {}
     }
+
+    // Accepted by — use logged-in user's display name
+    var cu = window.CURRENT_USER;
+    var acceptedBy = cu ? (cu.display_name || cu.full_name || cu.email || 'Lighthouse') : 'Lighthouse';
 
     var jobPayload = {
       id:                 newJobId,
       client_id:          s.client_id,
-      bom_id:             s.bom_id,
+      bom_id:             s.bom_id             || null,
       product_name:       s.product_name,
-      po_number:          s.po_number,
-      target_type:        s.qty_bottles ? 'Bottles' : 'Liquid',
-      bottle_target:      s.qty_bottles    || null,
-      liquid_litres:      s.litres_target  || null,
+      po_number:          s.po_number          || null,
+      job_target_type:    s.qty_bottles        ? 'bottles' : 'liquid',
+      bottle_target:      s.qty_bottles        || null,
+      liquid_litres:      s.litres_target      || null,
       scheduled_date:     s.desired_bottling_date || null,
-      client_approved_by: s.client_approved_by,
-      notes:              s.notes,
+      client_approved_by: s.client_approved_by || null,
+      accepted_by:        acceptedBy,
+      notes:              s.notes              || null,
       stage:              'planning',
-      job_origin:         'external'
+      job_origin:         'external',
+      chill_filtration:   chillFiltration,
+      colouring:          colouring,
+      bottling_abv:       bottlingAbv
     };
+
     await window.db.insert('jobs', jobPayload);
+
+    // Auto-queue at tail of bay waitlist
+    try { window._bayAutoQueuePlanning && await window._bayAutoQueuePlanning(); }
+    catch(qErr) { window.logError && window.logError('bayAutoQueuePlanning', qErr); }
+
+    // Mark submission approved
     await db.update('client_job_submissions', '?id=eq.' + id, {
       status: 'approved',
       approved_job_id: newJobId,
       approved_at: new Date().toISOString()
     });
-    window.toast && window.toast('Job approved and created in Draft state.', 'success');
+
+    // Create initial tasks and show task assignment popup
+    try { window.createInitialTasks && await window.createInitialTasks(newJobId, dilution, chillFiltration, colouring); }
+    catch(tErr) { window.logError && window.logError('createInitialTasks', tErr); }
+
+    window.toast && window.toast('Job ' + newJobId + ' created in Planning.', 'success');
     window.loadApprovalsPage && window.loadApprovalsPage();
   } catch(e) {
     window.logError('approveJobSubmission', e);
@@ -27320,6 +27352,7 @@ window.saveAdjModal = async function() {
     // Show task assignment popup
     await showTaskAssignmentPopup(jobId, taskDefs, staffList);
   }
+  window.createInitialTasks = createInitialTasks;
 
   // ── Task assignment popup ────────────────────────────────────────────────────
   function showTaskAssignmentPopup(jobId, taskDefs, staffList) {
