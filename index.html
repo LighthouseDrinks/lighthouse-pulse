@@ -18565,8 +18565,7 @@ window.loadApprovalsPage = async function() {
             + '<td>' + desired + '</td>'
             + '<td style="color:var(--muted);font-size:12px;">' + submitted + '</td>'
             + '<td style="text-align:right;white-space:nowrap;">'
-              + '<button class="btn btn-outline" style="font-size:11px;padding:4px 10px;" onclick="window.viewJobSubmission(\'' + esc(s.id) + '\')">View</button> '
-              + '<button class="btn btn-gold"    style="font-size:11px;padding:4px 10px;background:var(--green);border-color:var(--green);" onclick="window.approveJobSubmission(\'' + esc(s.id) + '\')">Approve</button> '
+              + '<button class="btn btn-outline" style="font-size:11px;padding:4px 10px;" onclick="window.viewJobSubmission(\'' + esc(s.id) + '\')">View / Approve</button> '
               + '<button class="btn btn-outline" style="font-size:11px;padding:4px 10px;border-color:#e84f4f;color:#e84f4f;" onclick="window.rejectJobSubmission(\'' + esc(s.id) + '\')">Reject</button>'
             + '</td>'
             + '</tr>';
@@ -18696,12 +18695,14 @@ window.viewBomSubmission = async function(id) {
 };
 
 window.viewJobSubmission = async function(id) {
+  var esc = window.escapeHtml;
   try {
     var r = await db.select('client_job_submissions', '?id=eq.' + id);
     if (!r || !r[0]) return;
     var s = r[0];
-    var cname = (window._approvalsClientMap && window._approvalsClientMap[s.client_id])
-      || s.client_id;
+    var isPending = s.status === 'submitted';
+
+    var cname = (window._approvalsClientMap && window._approvalsClientMap[s.client_id]) || s.client_id;
     if (cname === s.client_id) {
       try {
         var _cr = await db.select('clients', '?id=eq.' + s.client_id + '&select=name&limit=1');
@@ -18709,34 +18710,96 @@ window.viewJobSubmission = async function(id) {
       } catch(_e) {}
     }
 
-    // Resolve BOM display name
     var bomDisplay = s.bom_id || '—';
     if (s.bom_id) {
       try {
         var br = await window.db.select('boms', '?id=eq.' + s.bom_id + '&select=product_name,volume_cl,abv&limit=1');
         if (br && br[0]) {
-          var bom = br[0];
-          bomDisplay = bom.product_name || s.bom_id;
-          if (bom.volume_cl) bomDisplay += ' · ' + bom.volume_cl + 'cl';
-          if (bom.abv)       bomDisplay += ' · ' + bom.abv + '% ABV';
+          bomDisplay = br[0].product_name || s.bom_id;
+          if (br[0].volume_cl) bomDisplay += ' · ' + br[0].volume_cl + 'cl';
+          if (br[0].abv)       bomDisplay += ' · ' + br[0].abv + '% ABV';
         }
       } catch(_e) {}
     }
 
-    var rows = [
-      ['Client', cname],
-      ['Product', s.product_name || '—'],
-      ['BOM', bomDisplay],
-      ['PO Number', s.po_number || '—'],
-      ['Bottles', s.qty_bottles ? Number(s.qty_bottles).toLocaleString() : '—'],
-      ['Litres', s.litres_target ? Number(s.litres_target).toLocaleString() : '—'],
-      ['Desired Bottling Date', s.desired_bottling_date || '—'],
-      ['Approved By (Client)', s.client_approved_by || '—'],
-      ['Notes', s.notes || '—'],
-      ['Submitted', s.submitted_at ? new Date(s.submitted_at).toLocaleString('en-IE') : '—']
-    ];
-    _approvalsShowViewModal('Job Request · ' + (s.product_name || ''), rows, null);
+    var ro = function(label, val) {
+      return '<div style="display:flex;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px;">'
+        + '<div style="width:190px;color:var(--muted);flex-shrink:0;">' + esc(label) + '</div>'
+        + '<div style="color:var(--white);word-break:break-word;">' + esc(val == null ? '—' : String(val)) + '</div></div>';
+    };
+
+    var editableFields = isPending ? (
+      '<div style="margin-top:18px;padding-top:14px;border-top:2px solid rgba(201,168,76,0.3);">'
+      + '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:12px;">Confirm Details Before Approving</div>'
+      + '<div style="display:flex;flex-direction:column;gap:10px;">'
+      + '<div style="display:flex;align-items:center;gap:12px;">'
+        + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;">Number of Bottles</label>'
+        + '<input id="vjm-bottles" type="number" min="1" value="' + esc(s.qty_bottles != null ? String(s.qty_bottles) : '') + '" placeholder="e.g. 4000" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;">'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:12px;">'
+        + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;">Scheduled Date</label>'
+        + '<input id="vjm-date" type="date" value="' + esc(s.desired_bottling_date || '') + '" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;">'
+      + '</div>'
+      + '<div style="display:flex;align-items:flex-start;gap:12px;">'
+        + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;padding-top:6px;">Internal Notes</label>'
+        + '<textarea id="vjm-notes" rows="2" placeholder="Lighthouse internal notes (optional)" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;resize:vertical;">' + esc(s.notes || '') + '</textarea>'
+      + '</div>'
+      + '</div>'
+      + '</div>'
+    ) : '';
+
+    var actionBtns = isPending ? (
+      '<div style="display:flex;gap:10px;margin-top:18px;justify-content:flex-end;">'
+      + '<button onclick="this.closest(\'.apv-view-overlay\').remove()" style="background:none;border:1px solid var(--navy-border);color:var(--muted);padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;">Close</button>'
+      + '<button onclick="window.rejectJobSubmission(\'' + esc(id) + '\');this.closest(\'.apv-view-overlay\').remove();" style="background:none;border:1px solid #e84f4f;color:#e84f4f;padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;">Reject</button>'
+      + '<button id="vjm-approve-btn" onclick="window._vjmConfirmApprove(\'' + esc(id) + '\')" style="background:var(--green);border:1px solid var(--green);color:#fff;padding:8px 22px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;">Confirm &amp; Approve</button>'
+      + '</div>'
+    ) : (
+      '<div style="display:flex;justify-content:flex-end;margin-top:18px;">'
+      + '<button onclick="this.closest(\'.apv-view-overlay\').remove()" style="background:none;border:1px solid var(--navy-border);color:var(--muted);padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;">Close</button>'
+      + '</div>'
+    );
+
+    var ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:100020;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
+    ov.className = 'apv-view-overlay';
+    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:22px 26px;max-width:640px;width:100%;max-height:90vh;overflow-y:auto;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;">'
+        + '<div>'
+          + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">Job Request Review</div>'
+          + '<div style="font-family:Merriweather,serif;font-size:18px;color:var(--white);margin-top:4px;">' + esc(s.product_name || 'Job Request') + '</div>'
+        + '</div>'
+        + '<button style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;" onclick="this.closest(\'.apv-view-overlay\').remove()">&times;</button>'
+      + '</div>'
+      + ro('Client', cname)
+      + ro('BOM', bomDisplay)
+      + ro('PO Number', s.po_number || '—')
+      + ro('Submitted Bottles', s.qty_bottles ? Number(s.qty_bottles).toLocaleString() : '—')
+      + ro('Client Desired Date', s.desired_bottling_date || '—')
+      + ro('Approved By (Client)', s.client_approved_by || '—')
+      + ro('Client Notes', s.notes || '—')
+      + ro('Submitted', s.submitted_at ? new Date(s.submitted_at).toLocaleString('en-IE') : '—')
+      + editableFields
+      + actionBtns
+      + '</div>';
+    ov.onclick = function(e) { if (e.target === ov) ov.remove(); };
+    document.body.appendChild(ov);
   } catch(e) { window.logError('viewJobSubmission', e); }
+};
+
+window._vjmConfirmApprove = async function(id) {
+  var btn = document.getElementById('vjm-approve-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Approving…'; }
+  var bottlesEl = document.getElementById('vjm-bottles');
+  var dateEl    = document.getElementById('vjm-date');
+  var notesEl   = document.getElementById('vjm-notes');
+  var opts = {
+    bottleTarget:  bottlesEl  ? (parseInt(bottlesEl.value, 10) || null)  : null,
+    scheduledDate: dateEl     ? (dateEl.value || null)                    : null,
+    notes:         notesEl    ? (notesEl.value.trim() || null)            : null
+  };
+  document.querySelectorAll('.apv-view-overlay').forEach(function(el) { el.remove(); });
+  await window.approveJobSubmission(id, opts);
 };
 
 window.approveBomSubmission = async function(id) {
@@ -18820,15 +18883,24 @@ window.rejectBomSubmission = async function(id) {
   }
 };
 
-window.approveJobSubmission = async function(id) {
-  var confirmed = window.lpConfirm
-    ? await window.lpConfirm('Approve this job request? It will be created in Jobs and tasks assigned.', { confirmLabel: 'Approve', variant: 'success' })
-    : confirm('Approve this job request?');
-  if (!confirmed) return;
+window.approveJobSubmission = async function(id, opts) {
+  // When called from the review modal (_vjmConfirmApprove), opts carries corrected values
+  // and the confirm dialog is skipped. When called directly (e.g. programmatically), show it.
+  if (!opts) {
+    var confirmed = window.lpConfirm
+      ? await window.lpConfirm('Approve this job request? It will be created in Jobs and tasks assigned.', { confirmLabel: 'Approve', variant: 'success' })
+      : confirm('Approve this job request?');
+    if (!confirmed) return;
+  }
   try {
     var r = await db.select('client_job_submissions', '?id=eq.' + id);
     if (!r || !r[0]) return;
     var s = r[0];
+
+    // Use approver-confirmed values if provided, otherwise fall back to submission values
+    var confirmedBottles = (opts && opts.bottleTarget != null) ? opts.bottleTarget : (s.qty_bottles ? Math.round(Number(s.qty_bottles)) : null);
+    var confirmedDate    = (opts && opts.scheduledDate)        ? opts.scheduledDate : (s.desired_bottling_date || null);
+    var confirmedNotes   = (opts && opts.notes != null)        ? opts.notes         : (s.notes || null);
 
     // Generate next job ID matching the JOB-N format used by the new job modal
     var newJobId = 'JOB-1';
@@ -18866,13 +18938,13 @@ window.approveJobSubmission = async function(id) {
       bom_id:             s.bom_id             || null,
       product_name:       s.product_name,
       po_number:          s.po_number          || null,
-      job_target_type:    s.qty_bottles        ? 'bottles' : 'liquid',
-      bottle_target:      s.qty_bottles        || null,
-      liquid_litres:      s.litres_target      || null,
-      scheduled_date:     s.desired_bottling_date || null,
+      job_target_type:    confirmedBottles      ? 'bottles' : 'liquid',
+      bottle_target:      confirmedBottles      || null,
+      liquid_litres:      s.litres_target      ? parseFloat(s.litres_target) : null,
+      scheduled_date:     confirmedDate         || null,
       client_approved_by: s.client_approved_by || null,
       accepted_by:        acceptedBy,
-      notes:              s.notes              || null,
+      notes:              confirmedNotes        || null,
       stage:              'planning',
       job_origin:         'external',
       chill_filtration:   chillFiltration,
