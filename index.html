@@ -18968,82 +18968,172 @@ window.viewBomSubmission = async function(id) {
       } catch(_e) {}
     }
 
-    // Resolve all SKU IDs to display names in one batch
-    var skuIds = [
-      s.bottle_sku_id, s.ropp_sku_id, s.cork_sku_id, s.closure_sku_id,
-      s.foil_sku_id, s.label_front_sku_id, s.label_back_sku_id, s.label_neck_sku_id,
-      s.shipper_sku_id, s.divider_sku_id, s.string_twine_sku_id, s.monocarton_sku_id,
-      s.gift_tube_sku_id, s.tube_lid_sku_id, s.tin_sku_id
-    ].filter(Boolean);
-    var skuMap = {};
-    if (skuIds.length) {
-      try {
-        var skuRows = await db.select('dry_goods_skus',
-          '?id=in.(' + skuIds.join(',') + ')&select=id,description,volume,region');
-        (skuRows || []).forEach(function(sk) {
-          skuMap[sk.id] = (window.skuDisplayName && window.skuDisplayName(sk)) || sk.description || sk.id;
-        });
-      } catch(_e) {}
-    }
-    function skuName(v) { return v ? (skuMap[v] || v) : '—'; }
+    // Fetch all active SKUs for this client so we can populate dropdowns
+    var allSkus = [];
+    try {
+      allSkus = await db.select('dry_goods_skus',
+        '?client_id=eq.' + s.client_id + '&is_active=eq.true'
+        + '&select=id,description,volume,region,dry_goods_categories(name)&order=description.asc') || [];
+    } catch(_e) {}
 
-    var ro = function(label, val) {
-      return '<div style="display:flex;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px;">'
-        + '<div style="width:200px;color:var(--muted);flex-shrink:0;">' + esc(label) + '</div>'
-        + '<div style="color:var(--white);word-break:break-word;">' + esc(val == null ? '—' : String(val)) + '</div></div>';
-    };
-    var sec = function(title) {
-      return '<div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:16px 0 4px;padding-bottom:4px;border-bottom:1px solid rgba(201,168,76,0.25);">' + esc(title) + '</div>';
-    };
+    // Helper: build a <select> options string filtered by category keyword(s)
+    function skuOpts(currentId, keywords) {
+      var kws = Array.isArray(keywords) ? keywords : [keywords];
+      var filtered = allSkus.filter(function(sk) {
+        var cat = (sk.dry_goods_categories && sk.dry_goods_categories.name) || '';
+        return kws.some(function(kw){ return cat.toLowerCase().indexOf(kw.toLowerCase()) !== -1; });
+      });
+      var opts = '<option value="">— None —</option>';
+      filtered.forEach(function(sk) {
+        var label = (window.skuDisplayName && window.skuDisplayName(sk)) || sk.description || sk.id;
+        opts += '<option value="' + esc(sk.id) + '"' + (sk.id === currentId ? ' selected' : '') + '>' + esc(label) + '</option>';
+      });
+      return opts;
+    }
+
+    var INP = 'width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;box-sizing:border-box;';
+    var LBL = 'display:block;font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:0.04em;';
+    var FLD = 'display:flex;flex-direction:column;gap:0;';
+    var GRID2 = 'display:grid;grid-template-columns:1fr 1fr;gap:10px;';
+    var GRID3 = 'display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;';
+
+    function fi(id, label, val, type) {
+      type = type || 'text';
+      return '<div style="' + FLD + '">'
+        + '<label style="' + LBL + '">' + label + '</label>'
+        + '<input id="' + id + '" type="' + type + '" value="' + esc(val != null ? String(val) : '') + '" style="' + INP + '">'
+        + '</div>';
+    }
+    function fs(id, label, val, optHtml) {
+      return '<div style="' + FLD + '">'
+        + '<label style="' + LBL + '">' + label + '</label>'
+        + '<select id="' + id + '" style="' + INP + '">' + optHtml + '</select>'
+        + '</div>';
+    }
+    function fta(id, label, val) {
+      return '<div style="' + FLD + '">'
+        + '<label style="' + LBL + '">' + label + '</label>'
+        + '<textarea id="' + id + '" rows="2" style="' + INP + 'resize:vertical;">' + esc(val || '') + '</textarea>'
+        + '</div>';
+    }
+    function fsYN(id, label, val) {
+      return fs(id, label, null,
+        '<option value="yes"' + (val ? ' selected' : '') + '>Yes</option>'
+        + '<option value="no"' + (!val ? ' selected' : '') + '>No</option>');
+    }
+    function fsSku(id, label, currentId, keywords) {
+      return fs(id, label, null, skuOpts(currentId, keywords));
+    }
+    function sec(title) {
+      return '<div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:18px 0 10px;padding-bottom:5px;border-bottom:1px solid rgba(201,168,76,0.25);">' + esc(title) + '</div>';
+    }
 
     var attachHtml = '';
     if (s.attachments && s.attachments.length) {
       attachHtml = sec('Attachments')
         + s.attachments.map(function(a) {
-            return '<div style="padding:6px 0;font-size:13px;"><a href="' + esc(a.url) + '" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:none;">' + esc(a.name || 'file') + ' &rarr;</a></div>';
+            return '<div style="padding:4px 0;font-size:13px;"><a href="' + esc(a.url) + '" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:none;">' + esc(a.name || 'file') + ' &rarr;</a></div>';
           }).join('');
     }
 
-    var editableFields = isPending ? (
+    var editSection = isPending ? (
       '<div style="margin-top:18px;padding-top:14px;border-top:2px solid rgba(201,168,76,0.3);">'
-      + '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:12px;">Confirm Details Before Approving</div>'
-      + '<div style="display:flex;flex-direction:column;gap:10px;">'
-        + '<div style="display:flex;align-items:center;gap:12px;">'
-          + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;">Product Name</label>'
-          + '<input id="vbm-product" type="text" value="' + esc(s.product_name || '') + '" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;">'
-        + '</div>'
-        + '<div style="display:flex;align-items:center;gap:12px;">'
-          + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;">Bottle Size (cl)</label>'
-          + '<input id="vbm-volume" type="number" min="0" step="0.1" value="' + esc(s.volume != null ? String(s.volume) : '') + '" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;">'
-        + '</div>'
-        + '<div style="display:flex;align-items:center;gap:12px;">'
-          + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;">ABV (%)</label>'
-          + '<input id="vbm-abv" type="number" min="0" max="100" step="0.1" value="' + esc(s.abv != null ? String(s.abv) : '') + '" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;">'
-        + '</div>'
-        + '<div style="display:flex;align-items:center;gap:12px;">'
-          + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;">Chill Filtration</label>'
-          + '<select id="vbm-chill" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;">'
-            + '<option value="yes"' + (s.chill_filtration ? ' selected' : '') + '>Yes</option>'
-            + '<option value="no"'  + (!s.chill_filtration ? ' selected' : '') + '>No</option>'
-          + '</select>'
-        + '</div>'
-        + '<div style="display:flex;align-items:center;gap:12px;">'
-          + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;">Colouring (E150a)</label>'
-          + '<select id="vbm-colouring" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;">'
-            + '<option value="yes"' + (s.colouring ? ' selected' : '') + '>Yes</option>'
-            + '<option value="no"'  + (!s.colouring ? ' selected' : '') + '>No</option>'
-          + '</select>'
-        + '</div>'
-        + '<div style="display:flex;align-items:flex-start;gap:12px;">'
-          + '<label style="width:190px;font-size:13px;color:var(--muted);flex-shrink:0;padding-top:6px;">Internal Notes</label>'
-          + '<textarea id="vbm-notes" rows="2" placeholder="Lighthouse internal notes (optional)" style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:7px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;resize:vertical;">' + esc(s.notes || '') + '</textarea>'
-        + '</div>'
+      + '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:14px;">Review & Edit Before Approving</div>'
+
+      + sec('Product')
+      + '<div style="' + GRID2 + '">'
+        + fi('vbm-product',  'Product Name',   s.product_name)
+        + fi('vbm-volume',   'Bottle Size (cl)', s.volume, 'number')
       + '</div>'
+      + '<div style="' + GRID2 + 'margin-top:10px;">'
+        + fi('vbm-abv',     'ABV (%)',          s.abv, 'number')
+        + fta('vbm-notes',  'Internal Notes',   s.notes)
+      + '</div>'
+
+      + sec('Liquid')
+      + '<div style="display:flex;flex-direction:column;gap:10px;">'
+        + fta('vbm-liquid-spec', 'Liquid Specification', s.liquid_spec)
+        + '<div style="' + GRID3 + '">'
+          + fsYN('vbm-gi',        'GI Approved',       s.gi_verified)
+          + fsYN('vbm-chill',     'Chill Filtration',  s.chill_filtration)
+          + fsYN('vbm-colouring', 'Colouring (E150a)', s.colouring)
+        + '</div>'
+        + fi('vbm-colour-spec', 'Colour Specification (if applicable)', s.colour_spec)
+      + '</div>'
+
+      + sec('Bottle & Closure')
+      + '<div style="' + GRID2 + '">'
+        + fsSku('vbm-bottle', 'Bottle',           s.bottle_sku_id,              ['bottle'])
+        + fsSku('vbm-cork',   'Cork',             s.cork_sku_id||s.closure_sku_id, ['cork'])
+      + '</div>'
+      + '<div style="' + GRID2 + 'margin-top:10px;">'
+        + fsSku('vbm-ropp',  'ROPP Capsule',      s.ropp_sku_id,                ['ropp','capsule'])
+        + fsSku('vbm-foil',  'Foil / Heat Shrink', s.foil_sku_id,               ['foil'])
+      + '</div>'
+
+      + sec('Labels')
+      + '<div style="' + GRID3 + '">'
+        + fsSku('vbm-lf', 'Front Label',  s.label_front_sku_id, ['front label','front'])
+        + fsSku('vbm-lb', 'Back Label',   s.label_back_sku_id,  ['back label','back'])
+        + fsSku('vbm-ln', 'Neck Label',   s.label_neck_sku_id,  ['neck'])
+      + '</div>'
+
+      + sec('Packaging & Shipping')
+      + '<div style="' + GRID2 + '">'
+        + fsSku('vbm-shipper',  'Shipper',        s.shipper_sku_id,       ['shipper','outer'])
+        + fi('vbm-bps',         'Bottles per Shipper', s.bottles_per_shipper, 'number')
+      + '</div>'
+      + '<div style="' + GRID3 + 'margin-top:10px;">'
+        + fsSku('vbm-divider',  'Divider / Insert', s.divider_sku_id,     ['divider','insert'])
+        + fsSku('vbm-mono',     'Monocarton',        s.monocarton_sku_id, ['monocarton'])
+        + fsSku('vbm-string',   'String / Twine',    s.string_twine_sku_id, ['string','twine'])
+      + '</div>'
+      + '<div style="' + GRID3 + 'margin-top:10px;">'
+        + fsSku('vbm-gtube',   'Gift Tube',   s.gift_tube_sku_id, ['gift tube','tube'])
+        + fsSku('vbm-tlid',    'Tube Lid',    s.tube_lid_sku_id,  ['tube lid','lid'])
+        + fsSku('vbm-tin',     'Tin',         s.tin_sku_id,       ['tin'])
+      + '</div>'
+
+      + sec('Additional Information')
+      + '<div style="' + GRID2 + '">'
+        + fi('vbm-ai-lbarcode',  'Label Barcode',    ai.labelBarcode)
+        + fi('vbm-ai-sbarcode',  'Shipper Barcode',  ai.shipperBarcode)
+      + '</div>'
+      + '<div style="' + GRID2 + 'margin-top:10px;">'
+        + fi('vbm-ai-market',    'Intended Market',  ai.intendedMarket)
+        + fs('vbm-ai-duty', 'Duty Stamp',  null,
+            '<option value="">— Select —</option>'
+            + '<option value="Yes"'  + (ai.dutyStamp === 'Yes'  ? ' selected' : '') + '>Yes</option>'
+            + '<option value="No"'   + (ai.dutyStamp === 'No'   ? ' selected' : '') + '>No</option>')
+      + '</div>'
+      + '<div style="' + GRID2 + 'margin-top:10px;">'
+        + fs('vbm-ai-annex', 'Annex 2 Compliant', null,
+            '<option value="">— Select —</option>'
+            + '<option value="Yes"'   + (ai.annex2 === 'Yes'   ? ' selected' : '') + '>Yes</option>'
+            + '<option value="No"'    + (ai.annex2 === 'No'    ? ' selected' : '') + '>No</option>'
+            + '<option value="Unsure"'+ (ai.annex2 === 'Unsure'? ' selected' : '') + '>Unsure</option>')
+        + fs('vbm-ai-lot', 'Lot Number', null,
+            '<option value="">— Select —</option>'
+            + '<option value="Lighthouse Standard"' + (ai.lotNumber === 'Lighthouse Standard' ? ' selected' : '') + '>Lighthouse Standard</option>'
+            + '<option value="Client Provided"'     + (ai.lotNumber === 'Client Provided'     ? ' selected' : '') + '>Client Provided</option>')
+      + '</div>'
+      + '<div style="' + GRID3 + 'margin-top:10px;">'
+        + fs('vbm-ai-pallet', 'Pallet Type', null,
+            '<option value="">— Select —</option>'
+            + '<option value="Euro"'    + (ai.pallet === 'Euro'    ? ' selected' : '') + '>Euro</option>'
+            + '<option value="Standard"'+ (ai.pallet === 'Standard'? ' selected' : '') + '>Standard</option>')
+        + fi('vbm-ai-cperlayer',  'Cases per Layer',    ai.casesLayer)
+        + fi('vbm-ai-lperpallet', 'Layers per Pallet',  ai.layersPallet)
+      + '</div>'
+      + '<div style="margin-top:10px;">'
+        + fi('vbm-ai-lblpos', 'Label Positioning', ai.labelPosition)
+      + '</div>'
+
       + '</div>'
     ) : '';
 
     var actionBtns = isPending
-      ? '<div style="display:flex;gap:10px;margin-top:18px;justify-content:flex-end;">'
+      ? '<div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end;">'
           + '<button onclick="this.closest(\'.apv-view-overlay\').remove()" style="background:none;border:1px solid var(--navy-border);color:var(--muted);padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;">Close</button>'
           + '<button onclick="window.rejectBomSubmission(\'' + esc(id) + '\');this.closest(\'.apv-view-overlay\').remove();" style="background:none;border:1px solid #e84f4f;color:#e84f4f;padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;">Reject</button>'
           + '<button id="vbm-approve-btn" onclick="window._vbmConfirmApprove(\'' + esc(id) + '\')" style="background:var(--green);border:1px solid var(--green);color:#fff;padding:8px 22px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;">Confirm &amp; Approve</button>'
@@ -19055,58 +19145,17 @@ window.viewBomSubmission = async function(id) {
     var ov = document.createElement('div');
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:100020;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
     ov.className = 'apv-view-overlay';
-    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:22px 26px;max-width:660px;width:100%;max-height:90vh;overflow-y:auto;">'
+    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:22px 26px;max-width:720px;width:100%;max-height:92vh;overflow-y:auto;">'
       + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;">'
         + '<div>'
           + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">BOM Submission Review</div>'
           + '<div style="font-family:Merriweather,serif;font-size:18px;color:var(--white);margin-top:4px;">' + esc(s.product_name || 'BOM Review') + '</div>'
+          + '<div style="font-size:12px;color:var(--muted);margin-top:3px;">' + esc(cname) + ' &nbsp;·&nbsp; Submitted ' + (s.submitted_at ? new Date(s.submitted_at).toLocaleDateString('en-IE') : '—') + '</div>'
         + '</div>'
         + '<button style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;" onclick="this.closest(\'.apv-view-overlay\').remove()">&times;</button>'
       + '</div>'
-      + sec('Product')
-      + ro('Client',           cname)
-      + ro('Product Name',     s.product_name || '—')
-      + ro('Bottle Size',      s.volume ? s.volume + ' cl' : '—')
-      + ro('ABV',              s.abv ? s.abv + '%' : '—')
-      + ro('Submitted',        s.submitted_at ? new Date(s.submitted_at).toLocaleString('en-IE') : '—')
-      + sec('Liquid')
-      + ro('Liquid Specification', s.liquid_spec || '—')
-      + ro('GI Approved',          s.gi_verified ? 'Yes' : 'No')
-      + ro('Chill Filtration',     s.chill_filtration ? 'Yes' : 'No')
-      + ro('Colouring (E150a)',    s.colouring ? 'Yes' : 'No')
-      + (s.colouring && s.colour_spec ? ro('Colour Specification', s.colour_spec) : '')
-      + sec('Bottle & Closure')
-      + ro('Bottle',           skuName(s.bottle_sku_id))
-      + ro('ROPP Capsule',     skuName(s.ropp_sku_id))
-      + ro('Cork',             skuName(s.cork_sku_id || s.closure_sku_id))
-      + ro('Foil / Heat Shrink', skuName(s.foil_sku_id))
-      + sec('Labels')
-      + ro('Front Label',      skuName(s.label_front_sku_id))
-      + ro('Back Label',       skuName(s.label_back_sku_id))
-      + ro('Neck Label',       skuName(s.label_neck_sku_id))
-      + sec('Packaging & Shipping')
-      + ro('Shipper',              skuName(s.shipper_sku_id))
-      + ro('Bottles per Shipper',  s.bottles_per_shipper || '—')
-      + ro('Divider / Insert',     skuName(s.divider_sku_id))
-      + ro('String / Twine',       skuName(s.string_twine_sku_id))
-      + ro('Monocarton',           skuName(s.monocarton_sku_id))
-      + ro('Gift Tube',            skuName(s.gift_tube_sku_id))
-      + ro('Tube Lid',             skuName(s.tube_lid_sku_id))
-      + ro('Tin',                  skuName(s.tin_sku_id))
-      + sec('Additional Information')
-      + ro('Label Barcode',        ai.labelBarcode   || '—')
-      + ro('Shipper Barcode',      ai.shipperBarcode || '—')
-      + ro('Intended Market',      ai.intendedMarket || '—')
-      + ro('Duty Stamp',           ai.dutyStamp      || '—')
-      + ro('Annex 2 Compliant',    ai.annex2         || '—')
-      + ro('Lot Number',           ai.lotNumber      || '—')
-      + ro('Pallet Type',          ai.pallet         || '—')
-      + ro('Cases per Layer',      ai.casesLayer     || '—')
-      + ro('Layers per Pallet',    ai.layersPallet   || '—')
-      + ro('Label Positioning',    ai.labelPosition  || '—')
-      + (s.notes ? sec('Notes') + ro('Notes', s.notes) : '')
       + attachHtml
-      + editableFields
+      + editSection
       + actionBtns
       + '</div>';
     ov.onclick = function(e) { if (e.target === ov) ov.remove(); };
@@ -19117,19 +19166,44 @@ window.viewBomSubmission = async function(id) {
 window._vbmConfirmApprove = async function(id) {
   var btn = document.getElementById('vbm-approve-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Approving…'; }
-  var productEl  = document.getElementById('vbm-product');
-  var volumeEl   = document.getElementById('vbm-volume');
-  var abvEl      = document.getElementById('vbm-abv');
-  var chillEl    = document.getElementById('vbm-chill');
-  var colouringEl= document.getElementById('vbm-colouring');
-  var notesEl    = document.getElementById('vbm-notes');
+  function gv(elId) { var e = document.getElementById(elId); return e ? e.value.trim() : null; }
+  function gf(elId) { var v = gv(elId); return v ? (parseFloat(v) || null) : null; }
+  function gi(elId) { var v = gv(elId); return v ? (parseInt(v,10) || null) : null; }
   var opts = {
-    productName:     productEl   ? (productEl.value.trim() || null)              : null,
-    volume:          volumeEl    ? (parseFloat(volumeEl.value) || null)           : null,
-    abv:             abvEl       ? (parseFloat(abvEl.value) || null)              : null,
-    chillFiltration: chillEl     ? (chillEl.value === 'yes')                      : null,
-    colouring:       colouringEl ? (colouringEl.value === 'yes')                  : null,
-    notes:           notesEl     ? (notesEl.value.trim() || null)                 : null
+    productName:      gv('vbm-product')    || null,
+    volume:           gf('vbm-volume'),
+    abv:              gf('vbm-abv'),
+    chillFiltration:  gv('vbm-chill')      === 'yes',
+    colouring:        gv('vbm-colouring')  === 'yes',
+    notes:            gv('vbm-notes')      || null,
+    liquidSpec:       gv('vbm-liquid-spec')|| null,
+    giVerified:       gv('vbm-gi')         === 'yes',
+    colourSpec:       gv('vbm-colour-spec')|| null,
+    bottleSkuId:      gv('vbm-bottle')     || null,
+    corkSkuId:        gv('vbm-cork')       || null,
+    roppSkuId:        gv('vbm-ropp')       || null,
+    foilSkuId:        gv('vbm-foil')       || null,
+    labelFrontSkuId:  gv('vbm-lf')         || null,
+    labelBackSkuId:   gv('vbm-lb')         || null,
+    labelNeckSkuId:   gv('vbm-ln')         || null,
+    shipperSkuId:     gv('vbm-shipper')    || null,
+    bottlesPerShipper:gi('vbm-bps'),
+    dividerSkuId:     gv('vbm-divider')    || null,
+    monocartonSkuId:  gv('vbm-mono')       || null,
+    stringTwineSkuId: gv('vbm-string')     || null,
+    giftTubeSkuId:    gv('vbm-gtube')      || null,
+    tubeLidSkuId:     gv('vbm-tlid')       || null,
+    tinSkuId:         gv('vbm-tin')        || null,
+    aiLabelBarcode:   gv('vbm-ai-lbarcode')|| null,
+    aiShipperBarcode: gv('vbm-ai-sbarcode')|| null,
+    aiIntendedMarket: gv('vbm-ai-market')  || null,
+    aiDutyStamp:      gv('vbm-ai-duty')    || null,
+    aiAnnex2:         gv('vbm-ai-annex')   || null,
+    aiLotNumber:      gv('vbm-ai-lot')     || null,
+    aiPallet:         gv('vbm-ai-pallet')  || null,
+    aiCasesLayer:     gv('vbm-ai-cperlayer')   || null,
+    aiLayersPallet:   gv('vbm-ai-lperpallet')  || null,
+    aiLabelPosition:  gv('vbm-ai-lblpos')  || null
   };
   document.querySelectorAll('.apv-view-overlay').forEach(function(el) { el.remove(); });
   await window.approveBomSubmission(id, true, opts);
@@ -19254,20 +19328,48 @@ window.approveBomSubmission = async function(id, skipConfirm, opts) {
     var r = await db.select('client_bom_submissions', '?id=eq.' + id);
     if (!r || !r[0]) return;
     var s = r[0];
-    // Merge new + legacy column sources, preserving whatever the client sent.
-    var additionalInfo = s.additional_info || {};
-    // Also fold in top-level notes as additional_info.notes (staff side stores it there)
-    if (s.notes && !additionalInfo.notes) additionalInfo.notes = s.notes;
-
     var approver = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.full_name || window.CURRENT_USER.email)) || 'Lighthouse';
 
     // Use approver-confirmed values if provided from the review modal
-    var confirmedProduct = (opts && opts.productName)                  ? opts.productName      : s.product_name;
-    var confirmedVolume  = (opts && opts.volume  != null)              ? opts.volume            : s.volume;
-    var confirmedAbv     = (opts && opts.abv     != null)              ? opts.abv               : s.abv;
-    var confirmedChill   = (opts && opts.chillFiltration != null)      ? opts.chillFiltration   : !!s.chill_filtration;
-    var confirmedColour  = (opts && opts.colouring != null)            ? opts.colouring         : !!s.colouring;
-    var confirmedNotes   = (opts && opts.notes   != null)              ? opts.notes             : (s.notes || null);
+    var o = opts || {};
+    var confirmedProduct = o.productName      != null ? o.productName      : s.product_name;
+    var confirmedVolume  = o.volume           != null ? o.volume            : s.volume;
+    var confirmedAbv     = o.abv              != null ? o.abv               : s.abv;
+    var confirmedChill   = o.chillFiltration  != null ? o.chillFiltration   : !!s.chill_filtration;
+    var confirmedColour  = o.colouring        != null ? o.colouring         : !!s.colouring;
+    var confirmedNotes   = o.notes            != null ? o.notes             : (s.notes || null);
+    var confirmedLiqSpec = o.liquidSpec       != null ? o.liquidSpec        : (s.liquid_spec || null);
+    var confirmedGi      = o.giVerified       != null ? o.giVerified        : !!s.gi_verified;
+    var confirmedColSpec = o.colourSpec       != null ? o.colourSpec        : (s.colour_spec || null);
+    // SKUs
+    var confirmedBottle  = o.bottleSkuId      != null ? (o.bottleSkuId   || null) : (s.bottle_sku_id       || null);
+    var confirmedCork    = o.corkSkuId        != null ? (o.corkSkuId     || null) : (s.cork_sku_id || s.closure_sku_id || null);
+    var confirmedRopp    = o.roppSkuId        != null ? (o.roppSkuId     || null) : (s.ropp_sku_id         || null);
+    var confirmedFoil    = o.foilSkuId        != null ? (o.foilSkuId     || null) : (s.foil_sku_id         || null);
+    var confirmedLF      = o.labelFrontSkuId  != null ? (o.labelFrontSkuId||null) : (s.label_front_sku_id  || null);
+    var confirmedLB      = o.labelBackSkuId   != null ? (o.labelBackSkuId ||null) : (s.label_back_sku_id   || null);
+    var confirmedLN      = o.labelNeckSkuId   != null ? (o.labelNeckSkuId ||null) : (s.label_neck_sku_id   || null);
+    var confirmedShipper = o.shipperSkuId     != null ? (o.shipperSkuId  ||null) : (s.shipper_sku_id      || null);
+    var confirmedBPS     = o.bottlesPerShipper!= null ? o.bottlesPerShipper     : (s.bottles_per_shipper  || null);
+    var confirmedDiv     = o.dividerSkuId     != null ? (o.dividerSkuId  ||null) : (s.divider_sku_id      || null);
+    var confirmedMono    = o.monocartonSkuId  != null ? (o.monocartonSkuId||null): (s.monocarton_sku_id   || null);
+    var confirmedStr     = o.stringTwineSkuId != null ? (o.stringTwineSkuId||null):(s.string_twine_sku_id || null);
+    var confirmedGTube   = o.giftTubeSkuId    != null ? (o.giftTubeSkuId ||null) : (s.gift_tube_sku_id    || null);
+    var confirmedTLid    = o.tubeLidSkuId     != null ? (o.tubeLidSkuId  ||null) : (s.tube_lid_sku_id     || null);
+    var confirmedTin     = o.tinSkuId         != null ? (o.tinSkuId      ||null) : (s.tin_sku_id          || null);
+    // additional_info — merge opts over original
+    var additionalInfo = Object.assign({}, s.additional_info || {});
+    if (s.notes && !additionalInfo.notes) additionalInfo.notes = s.notes;
+    if (o.aiLabelBarcode   != null) additionalInfo.labelBarcode   = o.aiLabelBarcode   || additionalInfo.labelBarcode;
+    if (o.aiShipperBarcode != null) additionalInfo.shipperBarcode = o.aiShipperBarcode || additionalInfo.shipperBarcode;
+    if (o.aiIntendedMarket != null) additionalInfo.intendedMarket = o.aiIntendedMarket || additionalInfo.intendedMarket;
+    if (o.aiDutyStamp      != null) additionalInfo.dutyStamp      = o.aiDutyStamp      || additionalInfo.dutyStamp;
+    if (o.aiAnnex2         != null) additionalInfo.annex2         = o.aiAnnex2         || additionalInfo.annex2;
+    if (o.aiLotNumber      != null) additionalInfo.lotNumber      = o.aiLotNumber      || additionalInfo.lotNumber;
+    if (o.aiPallet         != null) additionalInfo.pallet         = o.aiPallet         || additionalInfo.pallet;
+    if (o.aiCasesLayer     != null) additionalInfo.casesLayer     = o.aiCasesLayer     || additionalInfo.casesLayer;
+    if (o.aiLayersPallet   != null) additionalInfo.layersPallet   = o.aiLayersPallet   || additionalInfo.layersPallet;
+    if (o.aiLabelPosition  != null) additionalInfo.labelPosition  = o.aiLabelPosition  || additionalInfo.labelPosition;
 
     var bomPayload = {
       client_id:    s.client_id,
@@ -19276,27 +19378,27 @@ window.approveBomSubmission = async function(id, skipConfirm, opts) {
       abv:          confirmedAbv,
       bottling_abv: confirmedAbv,
       liquid_sku_id: null,
-      liquid_spec:  s.liquid_spec,
-      gi_verified:  !!s.gi_verified,
-      bottle_sku_id:       s.bottle_sku_id       || null,
-      cork_sku_id:         s.cork_sku_id         || s.closure_sku_id || null,
-      ropp_sku_id:         s.ropp_sku_id         || null,
-      foil_sku_id:         s.foil_sku_id         || null,
-      front_label_sku_id:  s.label_front_sku_id  || null,
-      back_label_sku_id:   s.label_back_sku_id   || null,
-      neck_label_sku_id:   s.label_neck_sku_id   || null,
-      shipper_sku_id:      s.shipper_sku_id      || null,
-      divider_sku_id:      s.divider_sku_id      || null,
-      string_twine_sku_id: s.string_twine_sku_id || null,
-      monocarton_sku_id:   s.monocarton_sku_id   || null,
-      gift_tube_sku_id:    s.gift_tube_sku_id    || null,
-      tube_lid_sku_id:     s.tube_lid_sku_id     || null,
-      tin_sku_id:          s.tin_sku_id          || null,
-      bottles_per_shipper: s.bottles_per_shipper || null,
+      liquid_spec:  confirmedLiqSpec,
+      gi_verified:  confirmedGi,
+      bottle_sku_id:       confirmedBottle,
+      cork_sku_id:         confirmedCork,
+      ropp_sku_id:         confirmedRopp,
+      foil_sku_id:         confirmedFoil,
+      front_label_sku_id:  confirmedLF,
+      back_label_sku_id:   confirmedLB,
+      neck_label_sku_id:   confirmedLN,
+      shipper_sku_id:      confirmedShipper,
+      divider_sku_id:      confirmedDiv,
+      string_twine_sku_id: confirmedStr,
+      monocarton_sku_id:   confirmedMono,
+      gift_tube_sku_id:    confirmedGTube,
+      tube_lid_sku_id:     confirmedTLid,
+      tin_sku_id:          confirmedTin,
+      bottles_per_shipper: confirmedBPS,
       bph:                 s.bph                 || null,
       chill_filtration:    confirmedChill,
       colouring:           confirmedColour,
-      colour_spec:         s.colour_spec         || null,
+      colour_spec:         confirmedColSpec,
       additional_info:     additionalInfo,
       notes:               confirmedNotes,
       // Set the BOM as approved and locked immediately — Lighthouse has already reviewed it
