@@ -2693,6 +2693,248 @@
 const SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co';
 const SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
 
+// ── Email notification config ─────────────────────────────────────────────────
+// Piggybacks on the existing Resend / swift-function setup already in the app.
+// The Resend API key is read from window._resendKey (loaded from system_settings).
+// No additional setup required — if emails work elsewhere in Pulse, they work here.
+//
+// Lighthouse staff roles that receive new-submission alerts:
+const LH_NOTIFY_ROLES = ['client_coordinator', 'quality_compliance', 'managing_director'];
+
+// ── Email helper: fetch LH staff emails by role ───────────────────────────────
+window._lhNotifyEmails = async function() {
+  try {
+    var rows = await window.db.select('app_users',
+      '?role=in.(' + LH_NOTIFY_ROLES.join(',') + ')&select=email') || [];
+    return rows.map(function(r){ return r.email; }).filter(Boolean);
+  } catch(_e) { return []; }
+};
+
+// ── Email helper: fetch client user email from a submission's submitted_by ────
+window._clientEmailFromSubmission = async function(submittedBy, clientId) {
+  if (submittedBy) {
+    try {
+      var rows = await window.db.select('app_users', '?id=eq.' + submittedBy + '&select=email&limit=1') || [];
+      if (rows[0] && rows[0].email) return rows[0].email;
+    } catch(_e) {}
+  }
+  // Fall back to any portal user for this client
+  if (clientId) {
+    try {
+      var rows2 = await window.db.select('app_users', '?client_id=eq.' + clientId + '&role=eq.client&select=email&limit=1') || [];
+      if (rows2[0] && rows2[0].email) return rows2[0].email;
+    } catch(_e) {}
+  }
+  return null;
+};
+
+// ── Email helper: call the send-email edge function ───────────────────────────
+// Fire-and-forget — never throws so email errors never block the main action.
+window._sendEmail = async function(to, subject, html) {
+  try {
+    var toArr = Array.isArray(to) ? to : [to];
+    toArr = toArr.filter(Boolean);
+    if (!toArr.length) return;
+    if (!window.sendEmail) return;
+    await window.sendEmail({ to: toArr, subject: subject, html: html });
+  } catch(_e) {
+    console.warn('[email] send failed (non-blocking):', _e && _e.message);
+  }
+};
+
+// ── Shared email chrome (header + footer wrapper) ─────────────────────────────
+window._emailWrap = function(bodyHtml) {
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>'
+    + 'body{margin:0;padding:0;background:#0d1b2a;font-family:\'Helvetica Neue\',Arial,sans-serif;}'
+    + '.wrap{max-width:600px;margin:40px auto;background:#0f2035;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);}'
+    + '.header{background:#0a1520;padding:28px 32px 20px;border-bottom:3px solid #c9a84c;}'
+    + '.header-logo{font-size:11px;letter-spacing:0.25em;text-transform:uppercase;color:#c9a84c;font-weight:700;margin-bottom:6px;}'
+    + '.header-title{font-size:22px;color:#ffffff;font-weight:700;line-height:1.3;}'
+    + '.body{padding:28px 32px;}'
+    + '.kv{display:flex;gap:12px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:13px;}'
+    + '.kv-label{color:#8fa6c0;min-width:150px;flex-shrink:0;}'
+    + '.kv-val{color:#e8edf2;word-break:break-word;}'
+    + '.section-head{font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;margin:20px 0 8px;}'
+    + '.badge{display:inline-block;padding:3px 10px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;}'
+    + '.badge-green{background:rgba(61,186,120,0.18);color:#3dba78;border:1px solid rgba(61,186,120,0.4);}'
+    + '.badge-red{background:rgba(232,79,79,0.18);color:#ff7e7e;border:1px solid rgba(232,79,79,0.4);}'
+    + '.badge-amber{background:rgba(242,178,24,0.18);color:#f2b218;border:1px solid rgba(242,178,24,0.4);}'
+    + '.action-box{margin:24px 0 8px;padding:16px 20px;background:rgba(201,168,76,0.08);border-left:3px solid #c9a84c;border-radius:0 4px 4px 0;font-size:13px;color:#d4c89a;line-height:1.6;}'
+    + '.rejection-box{margin:24px 0 8px;padding:16px 20px;background:rgba(232,79,79,0.08);border-left:3px solid #e84f4f;border-radius:0 4px 4px 0;font-size:13px;color:#ffb5b5;line-height:1.6;}'
+    + '.footer{background:#080f18;padding:18px 32px;border-top:1px solid rgba(255,255,255,0.06);font-size:11px;color:#4a6070;text-align:center;line-height:1.6;}'
+    + 'a{color:#c9a84c;text-decoration:none;}'
+    + '</style></head><body>'
+    + '<div class="wrap">'
+    + bodyHtml
+    + '<div class="footer">Lighthouse Drinks · Ireland<br>This is an automated message — please do not reply directly to this email.</div>'
+    + '</div></body></html>';
+};
+
+// ── Email templates ───────────────────────────────────────────────────────────
+function _esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function _kv(label, val) {
+  if (!val && val !== 0) return '';
+  return '<div class="kv"><span class="kv-label">' + label + '</span><span class="kv-val">' + val + '</span></div>';
+}
+
+window._emailTpl = {
+
+  // Client submits a BOM — confirmation to client
+  bomSubmittedClient: function(productName, clientName, volume, abv) {
+    return window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Drinks · Client Portal</div>'
+        + '<div class="header-title">BOM Submitted for Approval</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">Your Bill of Materials has been received and is being reviewed by the Lighthouse team.</p>'
+        + '<div class="section-head">Submission Details</div>'
+        + _kv('Product', _esc(productName))
+        + _kv('Bottle Size', volume ? _esc(volume) + ' cl' : null)
+        + _kv('ABV', abv ? _esc(abv) + '%' : null)
+        + _kv('Status', '<span class="badge badge-amber">Pending Approval</span>')
+        + '<div class="action-box">Our team will review your BOM and be in touch. You can track its status at any time in the <strong>BOMs</strong> tab of your client portal.</div>'
+      + '</div>'
+    );
+  },
+
+  // Client submits a BOM — alert to LH staff
+  bomSubmittedStaff: function(productName, clientName, volume, abv) {
+    return window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Drinks · Approvals</div>'
+        + '<div class="header-title">New BOM Submission</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">A client has submitted a new Bill of Materials for approval.</p>'
+        + '<div class="section-head">Submission Details</div>'
+        + _kv('Client', _esc(clientName))
+        + _kv('Product', _esc(productName))
+        + _kv('Bottle Size', volume ? _esc(volume) + ' cl' : null)
+        + _kv('ABV', abv ? _esc(abv) + '%' : null)
+        + _kv('Status', '<span class="badge badge-amber">Awaiting Review</span>')
+        + '<div class="action-box">Log in to <strong>Lighthouse Pulse → Approvals</strong> to review and approve or return this submission.</div>'
+      + '</div>'
+    );
+  },
+
+  // BOM approved — notification to client
+  bomApprovedClient: function(productName, approverName) {
+    return window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Drinks · Client Portal</div>'
+        + '<div class="header-title">BOM Approved ✓</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">Great news — your Bill of Materials has been approved and is now on record.</p>'
+        + '<div class="section-head">Details</div>'
+        + _kv('Product', _esc(productName))
+        + _kv('Approved By', _esc(approverName))
+        + _kv('Status', '<span class="badge badge-green">Approved</span>')
+        + '<div class="action-box">Your BOM is now ready for production planning. You can view it at any time in the <strong>BOMs</strong> tab of your client portal. When you\'re ready, you can submit a Job Request against this BOM.</div>'
+      + '</div>'
+    );
+  },
+
+  // BOM rejected — notification to client
+  bomRejectedClient: function(productName, reason) {
+    return window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Drinks · Client Portal</div>'
+        + '<div class="header-title">BOM Returned for Revision</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">Your BOM submission has been reviewed and returned with the following feedback.</p>'
+        + '<div class="section-head">Details</div>'
+        + _kv('Product', _esc(productName))
+        + _kv('Status', '<span class="badge badge-red">Returned</span>')
+        + (reason ? '<div class="section-head">Feedback from Lighthouse</div><div class="rejection-box">' + _esc(reason) + '</div>' : '')
+        + '<div class="action-box">Please address the points above and resubmit. You can revise your BOM directly in the <strong>BOMs</strong> tab of your client portal.</div>'
+      + '</div>'
+    );
+  },
+
+  // Client submits a Job Request — confirmation to client
+  jobSubmittedClient: function(productName, bottles, desiredDate, poNumber) {
+    return window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Drinks · Client Portal</div>'
+        + '<div class="header-title">Job Request Submitted</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">Your production job request has been received and is awaiting Lighthouse approval.</p>'
+        + '<div class="section-head">Request Details</div>'
+        + _kv('Product', _esc(productName))
+        + _kv('Bottles Requested', bottles ? Number(bottles).toLocaleString() : null)
+        + _kv('Desired Date', desiredDate ? new Date(desiredDate).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : null)
+        + _kv('PO Number', _esc(poNumber))
+        + _kv('Status', '<span class="badge badge-amber">Pending Approval</span>')
+        + '<div class="action-box">Our production team will review your request and confirm the schedule. Track progress in the <strong>Jobs</strong> tab of your client portal.</div>'
+      + '</div>'
+    );
+  },
+
+  // Client submits a Job Request — alert to LH staff
+  jobSubmittedStaff: function(productName, clientName, bottles, desiredDate, poNumber) {
+    return window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Drinks · Approvals</div>'
+        + '<div class="header-title">New Job Request</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">A client has submitted a new production job request for approval.</p>'
+        + '<div class="section-head">Request Details</div>'
+        + _kv('Client', _esc(clientName))
+        + _kv('Product', _esc(productName))
+        + _kv('Bottles', bottles ? Number(bottles).toLocaleString() : null)
+        + _kv('Desired Date', desiredDate ? new Date(desiredDate).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : null)
+        + _kv('PO Number', _esc(poNumber))
+        + _kv('Status', '<span class="badge badge-amber">Awaiting Approval</span>')
+        + '<div class="action-box">Log in to <strong>Lighthouse Pulse → Approvals</strong> to review, edit, and approve or reject this request.</div>'
+      + '</div>'
+    );
+  },
+
+  // Job approved — notification to client
+  jobApprovedClient: function(productName, jobId, scheduledDate, approverName) {
+    return window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Drinks · Client Portal</div>'
+        + '<div class="header-title">Job Request Approved ✓</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">Your production job request has been approved and added to the schedule.</p>'
+        + '<div class="section-head">Job Details</div>'
+        + _kv('Product', _esc(productName))
+        + _kv('Job Reference', jobId ? '<span style="font-family:monospace;color:#c9a84c;">' + _esc(jobId) + '</span>' : null)
+        + _kv('Scheduled Date', scheduledDate ? new Date(scheduledDate).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : null)
+        + _kv('Approved By', _esc(approverName))
+        + _kv('Status', '<span class="badge badge-green">In Production Queue</span>')
+        + '<div class="action-box">Your job is now in the production queue. You can track its progress and view full details in the <strong>Jobs</strong> tab of your client portal.</div>'
+      + '</div>'
+    );
+  },
+
+  // Job rejected — notification to client
+  jobRejectedClient: function(productName, reason) {
+    return window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Drinks · Client Portal</div>'
+        + '<div class="header-title">Job Request Returned</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">Your job request has been reviewed and returned with the following feedback.</p>'
+        + '<div class="section-head">Details</div>'
+        + _kv('Product', _esc(productName))
+        + _kv('Status', '<span class="badge badge-red">Returned</span>')
+        + (reason ? '<div class="section-head">Feedback from Lighthouse</div><div class="rejection-box">' + _esc(reason) + '</div>' : '')
+        + '<div class="action-box">Please review the feedback above and resubmit your request. You can revise and resubmit in the <strong>Jobs</strong> tab of your client portal.</div>'
+      + '</div>'
+    );
+  }
+
+};
+
 // ── Centralised error logger ──────────────────────────────────────────────────
 // All catch blocks should call logError() rather than being silent or ad-hoc.
 // In the future this can be wired to a monitoring service (e.g. Sentry).
@@ -4417,6 +4659,18 @@ window.submitPortalJob = async function() {
       try { await window.db.update('client_job_submissions', '?id=eq.' + reviseId, { status: 'superseded' }); } catch(_e) {}
     }
 
+    // ── Emails (fire-and-forget) ──────────────────────────────────────────────
+    try {
+      var _clientName = (user && user.client_name) || 'Client';
+      var _tplC = window._emailTpl.jobSubmittedClient(product, parseInt(btl,10), date, po);
+      var _tplS = window._emailTpl.jobSubmittedStaff(product, _clientName, parseInt(btl,10), date, po);
+      if (user && user.email) window._sendEmail(user.email, 'Job Request Submitted — ' + product, _tplC);
+      window._lhNotifyEmails().then(function(staffEmails) {
+        if (staffEmails.length) window._sendEmail(staffEmails, 'New Job Request — ' + product + ' · ' + _clientName, _tplS);
+      });
+    } catch(_me) {}
+    // ─────────────────────────────────────────────────────────────────────────
+
     statusEl.innerHTML = '<span style="color:var(--green);">Submitted ✓ Lighthouse have been notified.</span>';
     window.toast && window.toast('Job request submitted for approval.', 'success');
     setTimeout(function() {
@@ -5038,6 +5292,18 @@ window.submitPortalBom = async function() {
     if (reviseId) {
       try { await window.db.update('client_bom_submissions', '?id=eq.' + reviseId, { status: 'superseded' }); } catch(_e) {}
     }
+
+    // ── Emails (fire-and-forget) ──────────────────────────────────────────────
+    try {
+      var _clientName = (user && user.client_name) || 'Client';
+      var _tplC = window._emailTpl.bomSubmittedClient(product, _clientName, volume, abv);
+      var _tplS = window._emailTpl.bomSubmittedStaff(product, _clientName, volume, abv);
+      if (user && user.email) window._sendEmail(user.email, 'BOM Submitted — ' + product, _tplC);
+      window._lhNotifyEmails().then(function(staffEmails) {
+        if (staffEmails.length) window._sendEmail(staffEmails, 'New BOM Submission — ' + product + ' · ' + _clientName, _tplS);
+      });
+    } catch(_me) {}
+    // ─────────────────────────────────────────────────────────────────────────
 
     statusEl.innerHTML = '<span style="color:var(--green);">Submitted ✓ Lighthouse have been notified.</span>';
     window.toast && window.toast('BOM submitted for approval.', 'success');
@@ -18874,6 +19140,18 @@ window.approveBomSubmission = async function(id) {
     window.toast && window.toast('BOM approved and added to the main register.', 'success');
     // Record in BOM history so the audit trail shows the portal-approval event
     try { await window._bomRecordHistory(newBomId, 'approved', null, 'approved', approver); } catch(_he) {}
+    // ── Email: notify client ──────────────────────────────────────────────────
+    try {
+      var _clientEmail = await window._clientEmailFromSubmission(s.submitted_by, s.client_id);
+      if (_clientEmail) {
+        window._sendEmail(
+          _clientEmail,
+          'BOM Approved — ' + s.product_name,
+          window._emailTpl.bomApprovedClient(s.product_name, approver)
+        );
+      }
+    } catch(_me) {}
+    // ─────────────────────────────────────────────────────────────────────────
     window.loadApprovalsPage && window.loadApprovalsPage();
   } catch(e) {
     window.logError('approveBomSubmission', e);
@@ -18893,6 +19171,21 @@ window.rejectBomSubmission = async function(id) {
       rejected_at: new Date().toISOString()
     });
     window.toast && window.toast('BOM rejected. Client notified.', 'success');
+    // ── Email: notify client ──────────────────────────────────────────────────
+    try {
+      var _rjSub = await db.select('client_bom_submissions', '?id=eq.' + id + '&limit=1') || [];
+      if (_rjSub[0]) {
+        var _ce = await window._clientEmailFromSubmission(_rjSub[0].submitted_by, _rjSub[0].client_id);
+        if (_ce) {
+          window._sendEmail(
+            _ce,
+            'BOM Returned — ' + (_rjSub[0].product_name || 'Your Submission'),
+            window._emailTpl.bomRejectedClient(_rjSub[0].product_name, reason.trim())
+          );
+        }
+      }
+    } catch(_me) {}
+    // ─────────────────────────────────────────────────────────────────────────
     window.loadApprovalsPage && window.loadApprovalsPage();
   } catch(e) {
     window.logError('rejectBomSubmission', e);
@@ -18995,6 +19288,20 @@ window.approveJobSubmission = async function(id, opts) {
     try { window.createInitialTasks && await window.createInitialTasks(newJobId, dilution, chillFiltration, colouring); }
     catch(tErr) { window.logError && window.logError('createInitialTasks', tErr); }
 
+    // ── Email: notify client ──────────────────────────────────────────────────
+    try {
+      var _approver = acceptedBy;
+      var _clientEmail2 = await window._clientEmailFromSubmission(s.submitted_by, s.client_id);
+      if (_clientEmail2) {
+        window._sendEmail(
+          _clientEmail2,
+          'Job Request Approved — ' + s.product_name,
+          window._emailTpl.jobApprovedClient(s.product_name, newJobId, confirmedDate, _approver)
+        );
+      }
+    } catch(_me) {}
+    // ─────────────────────────────────────────────────────────────────────────
+
     window.toast && window.toast('Job ' + newJobId + ' created in Planning.', 'success');
     window.loadApprovalsPage && window.loadApprovalsPage();
   } catch(e) {
@@ -19015,6 +19322,21 @@ window.rejectJobSubmission = async function(id) {
       rejected_at: new Date().toISOString()
     });
     window.toast && window.toast('Job request rejected. Client notified.', 'success');
+    // ── Email: notify client ──────────────────────────────────────────────────
+    try {
+      var _rjJob = await db.select('client_job_submissions', '?id=eq.' + id + '&limit=1') || [];
+      if (_rjJob[0]) {
+        var _ce2 = await window._clientEmailFromSubmission(_rjJob[0].submitted_by, _rjJob[0].client_id);
+        if (_ce2) {
+          window._sendEmail(
+            _ce2,
+            'Job Request Returned — ' + (_rjJob[0].product_name || 'Your Request'),
+            window._emailTpl.jobRejectedClient(_rjJob[0].product_name, reason.trim())
+          );
+        }
+      }
+    } catch(_me) {}
+    // ─────────────────────────────────────────────────────────────────────────
     window.loadApprovalsPage && window.loadApprovalsPage();
   } catch(e) {
     window.logError('rejectJobSubmission', e);
