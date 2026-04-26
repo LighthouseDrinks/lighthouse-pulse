@@ -18846,8 +18846,7 @@ window.loadApprovalsPage = async function() {
             + '<td>' + (s.volume ? esc(s.volume) + 'cl' : '—') + '</td>'
             + '<td style="color:var(--muted);font-size:12px;">' + submitted + '</td>'
             + '<td style="text-align:right;white-space:nowrap;">'
-              + '<button class="btn btn-outline" style="font-size:11px;padding:4px 10px;" onclick="window.viewBomSubmission(\'' + esc(s.id) + '\')">View</button> '
-              + '<button class="btn btn-gold"    style="font-size:11px;padding:4px 10px;background:var(--green);border-color:var(--green);" onclick="window.approveBomSubmission(\'' + esc(s.id) + '\')">Approve</button> '
+              + '<button class="btn btn-outline" style="font-size:11px;padding:4px 10px;" onclick="window.viewBomSubmission(\'' + esc(s.id) + '\')">View / Approve</button> '
               + '<button class="btn btn-outline" style="font-size:11px;padding:4px 10px;border-color:#e84f4f;color:#e84f4f;" onclick="window.rejectBomSubmission(\'' + esc(s.id) + '\')">Reject</button>'
             + '</td>'
             + '</tr>';
@@ -18953,13 +18952,15 @@ function _approvalsShowViewModal(title, rows, attachments) {
 }
 
 window.viewBomSubmission = async function(id) {
+  var esc = window.escapeHtml;
   try {
     var r = await db.select('client_bom_submissions', '?id=eq.' + id);
     if (!r || !r[0]) return;
     var s = r[0];
     var ai = s.additional_info || {};
-    var cname = (window._approvalsClientMap && window._approvalsClientMap[s.client_id])
-      || s.client_id;
+    var isPending = s.status === 'submitted';
+
+    var cname = (window._approvalsClientMap && window._approvalsClientMap[s.client_id]) || s.client_id;
     if (cname === s.client_id) {
       try {
         var _cr = await db.select('clients', '?id=eq.' + s.client_id + '&select=name&limit=1');
@@ -18967,53 +18968,118 @@ window.viewBomSubmission = async function(id) {
       } catch(_e) {}
     }
 
-    function skuLabel(v) { return v || '—'; }
+    // Resolve all SKU IDs to display names in one batch
+    var skuIds = [
+      s.bottle_sku_id, s.ropp_sku_id, s.cork_sku_id, s.closure_sku_id,
+      s.foil_sku_id, s.label_front_sku_id, s.label_back_sku_id, s.label_neck_sku_id,
+      s.shipper_sku_id, s.divider_sku_id, s.string_twine_sku_id, s.monocarton_sku_id,
+      s.gift_tube_sku_id, s.tube_lid_sku_id, s.tin_sku_id
+    ].filter(Boolean);
+    var skuMap = {};
+    if (skuIds.length) {
+      try {
+        var skuRows = await db.select('dry_goods_skus',
+          '?id=in.(' + skuIds.join(',') + ')&select=id,description,volume,region');
+        (skuRows || []).forEach(function(sk) {
+          skuMap[sk.id] = (window.skuDisplayName && window.skuDisplayName(sk)) || sk.description || sk.id;
+        });
+      } catch(_e) {}
+    }
+    function skuName(v) { return v ? (skuMap[v] || v) : '—'; }
 
-    var rows = [
-      ['Client',               cname],
-      ['Product',              s.product_name || '—'],
-      ['Bottle Size',          s.volume ? s.volume + 'cl' : '—'],
-      ['ABV',                  s.abv ? s.abv + '%' : '—'],
-      ['Liquid',               s.liquid_spec || '—'],
-      ['GI Approved',          s.gi_verified ? 'Yes' : 'No'],
-      ['Chill Filtration',     s.chill_filtration ? 'Yes' : 'No'],
-      ['Colouring (E150a)',    s.colouring ? 'Yes' : 'No'],
-      ['Colour Specification', s.colour_spec || '—'],
-      ['— Bottle & Closure —', ''],
-      ['Bottle SKU',           skuLabel(s.bottle_sku_id)],
-      ['ROPP Capsule',         skuLabel(s.ropp_sku_id)],
-      ['Cork',                 skuLabel(s.cork_sku_id || s.closure_sku_id)],
-      ['Foil / Heat Shrink',   skuLabel(s.foil_sku_id)],
-      ['— Labels —',           ''],
-      ['Front Label',          skuLabel(s.label_front_sku_id)],
-      ['Back Label',           skuLabel(s.label_back_sku_id)],
-      ['Neck Label',           skuLabel(s.label_neck_sku_id)],
-      ['— Packaging & Shipping —', ''],
-      ['Shipper',              skuLabel(s.shipper_sku_id)],
-      ['Bottles per Shipper',  s.bottles_per_shipper || '—'],
-      ['Divider / Insert',     skuLabel(s.divider_sku_id)],
-      ['String / Twine',       skuLabel(s.string_twine_sku_id)],
-      ['Monocarton',           skuLabel(s.monocarton_sku_id)],
-      ['Gift Tube',            skuLabel(s.gift_tube_sku_id)],
-      ['Tube Lid',             skuLabel(s.tube_lid_sku_id)],
-      ['Tin',                  skuLabel(s.tin_sku_id)],
-      ['— Additional Information —', ''],
-      ['Label Barcode',        ai.labelBarcode   || '—'],
-      ['Shipper Barcode',      ai.shipperBarcode || '—'],
-      ['Intended Market',      ai.intendedMarket || '—'],
-      ['Duty Stamp',           ai.dutyStamp      || '—'],
-      ['Annex 2 Compliant',    ai.annex2         || '—'],
-      ['Lot Number',           ai.lotNumber      || '—'],
-      ['Pallet Type',          ai.pallet         || '—'],
-      ['Cases per Layer',      ai.casesLayer     || '—'],
-      ['Layers per Pallet',    ai.layersPallet   || '—'],
-      ['Label Positioning',    ai.labelPosition  || '—'],
-      ['— Meta —',             ''],
-      ['Notes',                s.notes || '—'],
-      ['Submitted',            s.submitted_at ? new Date(s.submitted_at).toLocaleString('en-IE') : '—']
-    ];
-    _approvalsShowViewModal('BOM · ' + (s.product_name || ''), rows, s.attachments);
+    var ro = function(label, val) {
+      return '<div style="display:flex;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px;">'
+        + '<div style="width:200px;color:var(--muted);flex-shrink:0;">' + esc(label) + '</div>'
+        + '<div style="color:var(--white);word-break:break-word;">' + esc(val == null ? '—' : String(val)) + '</div></div>';
+    };
+    var sec = function(title) {
+      return '<div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:16px 0 4px;padding-bottom:4px;border-bottom:1px solid rgba(201,168,76,0.25);">' + esc(title) + '</div>';
+    };
+
+    var attachHtml = '';
+    if (s.attachments && s.attachments.length) {
+      attachHtml = sec('Attachments')
+        + s.attachments.map(function(a) {
+            return '<div style="padding:6px 0;font-size:13px;"><a href="' + esc(a.url) + '" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:none;">' + esc(a.name || 'file') + ' &rarr;</a></div>';
+          }).join('');
+    }
+
+    var actionBtns = isPending
+      ? '<div style="display:flex;gap:10px;margin-top:18px;justify-content:flex-end;">'
+          + '<button onclick="this.closest(\'.apv-view-overlay\').remove()" style="background:none;border:1px solid var(--navy-border);color:var(--muted);padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;">Close</button>'
+          + '<button onclick="window.rejectBomSubmission(\'' + esc(id) + '\');this.closest(\'.apv-view-overlay\').remove();" style="background:none;border:1px solid #e84f4f;color:#e84f4f;padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;">Reject</button>'
+          + '<button id="vbm-approve-btn" onclick="window._vbmConfirmApprove(\'' + esc(id) + '\')" style="background:var(--green);border:1px solid var(--green);color:#fff;padding:8px 22px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;">Confirm &amp; Approve</button>'
+        + '</div>'
+      : '<div style="display:flex;justify-content:flex-end;margin-top:18px;">'
+          + '<button onclick="this.closest(\'.apv-view-overlay\').remove()" style="background:none;border:1px solid var(--navy-border);color:var(--muted);padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;">Close</button>'
+        + '</div>';
+
+    var ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:100020;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
+    ov.className = 'apv-view-overlay';
+    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:22px 26px;max-width:660px;width:100%;max-height:90vh;overflow-y:auto;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;">'
+        + '<div>'
+          + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">BOM Submission Review</div>'
+          + '<div style="font-family:Merriweather,serif;font-size:18px;color:var(--white);margin-top:4px;">' + esc(s.product_name || 'BOM Review') + '</div>'
+        + '</div>'
+        + '<button style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;" onclick="this.closest(\'.apv-view-overlay\').remove()">&times;</button>'
+      + '</div>'
+      + sec('Product')
+      + ro('Client',           cname)
+      + ro('Product Name',     s.product_name || '—')
+      + ro('Bottle Size',      s.volume ? s.volume + ' cl' : '—')
+      + ro('ABV',              s.abv ? s.abv + '%' : '—')
+      + ro('Submitted',        s.submitted_at ? new Date(s.submitted_at).toLocaleString('en-IE') : '—')
+      + sec('Liquid')
+      + ro('Liquid Specification', s.liquid_spec || '—')
+      + ro('GI Approved',          s.gi_verified ? 'Yes' : 'No')
+      + ro('Chill Filtration',     s.chill_filtration ? 'Yes' : 'No')
+      + ro('Colouring (E150a)',    s.colouring ? 'Yes' : 'No')
+      + (s.colouring && s.colour_spec ? ro('Colour Specification', s.colour_spec) : '')
+      + sec('Bottle & Closure')
+      + ro('Bottle',           skuName(s.bottle_sku_id))
+      + ro('ROPP Capsule',     skuName(s.ropp_sku_id))
+      + ro('Cork',             skuName(s.cork_sku_id || s.closure_sku_id))
+      + ro('Foil / Heat Shrink', skuName(s.foil_sku_id))
+      + sec('Labels')
+      + ro('Front Label',      skuName(s.label_front_sku_id))
+      + ro('Back Label',       skuName(s.label_back_sku_id))
+      + ro('Neck Label',       skuName(s.label_neck_sku_id))
+      + sec('Packaging & Shipping')
+      + ro('Shipper',              skuName(s.shipper_sku_id))
+      + ro('Bottles per Shipper',  s.bottles_per_shipper || '—')
+      + ro('Divider / Insert',     skuName(s.divider_sku_id))
+      + ro('String / Twine',       skuName(s.string_twine_sku_id))
+      + ro('Monocarton',           skuName(s.monocarton_sku_id))
+      + ro('Gift Tube',            skuName(s.gift_tube_sku_id))
+      + ro('Tube Lid',             skuName(s.tube_lid_sku_id))
+      + ro('Tin',                  skuName(s.tin_sku_id))
+      + sec('Additional Information')
+      + ro('Label Barcode',        ai.labelBarcode   || '—')
+      + ro('Shipper Barcode',      ai.shipperBarcode || '—')
+      + ro('Intended Market',      ai.intendedMarket || '—')
+      + ro('Duty Stamp',           ai.dutyStamp      || '—')
+      + ro('Annex 2 Compliant',    ai.annex2         || '—')
+      + ro('Lot Number',           ai.lotNumber      || '—')
+      + ro('Pallet Type',          ai.pallet         || '—')
+      + ro('Cases per Layer',      ai.casesLayer     || '—')
+      + ro('Layers per Pallet',    ai.layersPallet   || '—')
+      + ro('Label Positioning',    ai.labelPosition  || '—')
+      + (s.notes ? sec('Notes') + ro('Notes', s.notes) : '')
+      + attachHtml
+      + actionBtns
+      + '</div>';
+    ov.onclick = function(e) { if (e.target === ov) ov.remove(); };
+    document.body.appendChild(ov);
   } catch(e) { window.logError('viewBomSubmission', e); }
+};
+
+window._vbmConfirmApprove = async function(id) {
+  var btn = document.getElementById('vbm-approve-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Approving…'; }
+  document.querySelectorAll('.apv-view-overlay').forEach(function(el) { el.remove(); });
+  await window.approveBomSubmission(id, true);
 };
 
 window.viewJobSubmission = async function(id) {
@@ -19124,11 +19190,13 @@ window._vjmConfirmApprove = async function(id) {
   await window.approveJobSubmission(id, opts);
 };
 
-window.approveBomSubmission = async function(id) {
-  var confirmed = window.lpConfirm
-    ? await window.lpConfirm('Approve this BOM submission? It will be copied into the main BOMs table and the client will see it as Approved.', { confirmLabel: 'Approve', variant: 'success' })
-    : confirm('Approve this BOM submission?');
-  if (!confirmed) return;
+window.approveBomSubmission = async function(id, skipConfirm) {
+  if (!skipConfirm) {
+    var confirmed = window.lpConfirm
+      ? await window.lpConfirm('Approve this BOM submission? It will be copied into the main BOMs table and the client will see it as Approved.', { confirmLabel: 'Approve', variant: 'success' })
+      : confirm('Approve this BOM submission?');
+    if (!confirmed) return;
+  }
   try {
     var r = await db.select('client_bom_submissions', '?id=eq.' + id);
     if (!r || !r[0]) return;
