@@ -13692,7 +13692,7 @@ window.loadBoms = async function initBoms() {
     </div>
 
     <!-- Kanban board: empty stages collapse to 44px rails, populated stages share remaining width fluidly -->
-    <div id="pipe-kanban" style="display:flex;gap:6px;padding:10px;overflow-x:auto;overflow-y:hidden;align-items:stretch;min-height:520px;"></div>
+    <div id="pipe-kanban" style="display:block;padding:10px;min-height:520px;"></div>
 
     <!-- List view -->
     <div id="pipe-list" style="display:none;padding:0 4px;">
@@ -13702,10 +13702,10 @@ window.loadBoms = async function initBoms() {
           <th style="min-width:200px;">Deal</th>
           <th>Company</th>
           <th>Stage</th>
-          <th>Type</th>
           <th>Forecast</th>
           <th>Owner</th>
-          <th>Expected Close</th>
+          <th>Close Date</th>
+          <th>Follow-up</th>
         </tr></thead>
         <tbody id="pipe-list-tbody"></tbody>
       </table>
@@ -14545,9 +14545,14 @@ window.loadBoms = async function initBoms() {
     if (stage.is_won)  return 'var(--green)';
     if (stage.is_lost) return 'var(--red)';
     var n = stage.name || '';
-    if (/Verbal|Sample|Quote/i.test(n)) return 'var(--gold)';
-    return 'var(--blue)';
+    if (/nurture/i.test(n))            return '#6b8cba';
+    if (/negotiation/i.test(n))        return 'var(--gold)';
+    if (/quoted?/i.test(n))            return 'var(--gold)';
+    if (/scoping/i.test(n))            return 'var(--blue)';
+    if (/qualified/i.test(n))          return '#4ab5e0';
+    return 'var(--muted)';
   }
+  function isNurture(stage) { return !!(stage && /nurture/i.test(stage.name)); }
   function typeBadge(t) {
     if (t === 'repeat')   return '<span style="display:inline-block;background:rgba(201,168,76,0.12);border:1px solid var(--gold-dim);color:var(--gold);font-size:9px;font-weight:700;letter-spacing:0.06em;padding:2px 6px;border-radius:3px;">REPEAT</span>';
     return '<span style="display:inline-block;background:rgba(74,158,221,0.12);border:1px solid rgba(74,158,221,0.4);color:var(--blue);font-size:9px;font-weight:700;letter-spacing:0.06em;padding:2px 6px;border-radius:3px;">NEW</span>';
@@ -14758,30 +14763,26 @@ window.loadBoms = async function initBoms() {
     }
 
     // ── POPULATED STATE ───────────────────────────────────────────────
-    // Regular Kanban — one column per stage loaded from PIPE_STAGES. Empty stages render as narrow
-    // "stubs" (just a header, no body) so they stay discoverable as drop
-    // targets without dominating the layout.
+    // Layout: 5 active stage columns | Won/Lost compact strip below | Nurture sidecar
     var byStage = {};
     PIPE_STAGES.forEach(function(s){ byStage[s.id] = []; });
     list.forEach(function(d){ if (byStage[d.stage_id]) byStage[d.stage_id].push(d); });
 
-    var html = PIPE_STAGES.map(function(s){
+    var activeStages  = PIPE_STAGES.filter(function(s){ return !s.is_won && !s.is_lost && !isNurture(s); });
+    var nurtureStage  = PIPE_STAGES.find(function(s){ return isNurture(s); });
+    var wonStage      = PIPE_STAGES.find(function(s){ return s.is_won; });
+    var lostStage     = PIPE_STAGES.find(function(s){ return s.is_lost; });
+
+    function makeCol(s) {
       var col   = stageColor(s);
       var deals = byStage[s.id] || [];
       var sum   = deals.reduce(function(a,d){ return a + (parseFloat(d.forecast_value)||0); }, 0);
       var isEmpty = deals.length === 0;
-
       var bodyHtml = isEmpty
         ? '<div style="font-size:10px;color:var(--muted);text-align:center;padding:16px 6px;opacity:0.55;border:1px dashed var(--navy-border);border-radius:4px;margin:4px;">Drop deal here</div>'
         : deals.map(renderCard).join('');
-
-      // Empty columns shrink, populated columns grow (still capped so they don't go massive)
-      var flexBasis = isEmpty ? '160px' : '220px';
-      var minWidth  = isEmpty ? '150px' : '200px';
-      var maxWidth  = isEmpty ? '180px' : '320px';
-
       return '<div class="pipe-col' + (isEmpty ? ' pipe-col-empty' : '') + '" data-stage-id="' + esc(s.id) + '" ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
-        + 'style="flex:1 1 ' + flexBasis + ';min-width:' + minWidth + ';max-width:' + maxWidth + ';background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s;' + (isEmpty?'opacity:0.75;':'') + '">'
+        + 'style="flex:1 1 200px;min-width:180px;max-width:300px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s;">'
         + '<div style="padding:10px 12px;border-bottom:1px solid var(--navy-border);display:flex;align-items:flex-start;justify-content:space-between;gap:6px;">'
         +   '<div style="min-width:0;flex:1;">'
         +     '<div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;font-weight:700;color:' + col + ';line-height:1.2;">' + esc(s.name) + '</div>'
@@ -14791,9 +14792,79 @@ window.loadBoms = async function initBoms() {
         + '</div>'
         + '<div class="pipe-col-body" style="padding:6px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:60px;">' + bodyHtml + '</div>'
         + '</div>';
-    }).join('');
+    }
 
-    host.innerHTML = html;
+    // Active stage columns
+    var colsHtml = '<div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;align-items:flex-start;">'
+      + activeStages.map(makeCol).join('')
+      + '</div>';
+
+    // Won / Lost summary strip
+    function makeClosedStrip(s) {
+      if (!s) return '';
+      var col   = stageColor(s);
+      var deals = byStage[s.id] || [];
+      var sum   = deals.reduce(function(a,d){ return a + (parseFloat(d.forecast_value)||0); }, 0);
+      var dealCards = deals.length
+        ? '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">' + deals.map(function(d){
+            var nameTxt = d.name || 'Untitled';
+            var client  = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; }) || {};
+            return '<div onclick="window.openDealDetail(\'' + esc(d.id) + '\')" style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;padding:6px 10px;cursor:pointer;min-width:140px;max-width:200px;flex:1 1 140px;">'
+              + '<div style="font-size:11px;font-weight:700;color:var(--white);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(nameTxt) + '</div>'
+              + '<div style="font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(client.company||d.client_id||'—') + '</div>'
+              + '<div style="font-size:11px;font-weight:700;color:' + col + ';margin-top:4px;">' + fmtMoney(d.forecast_value,d.currency) + '</div>'
+              + '</div>';
+          }).join('') + '</div>'
+        : '';
+      return '<div class="pipe-col" data-stage-id="' + esc(s.id) + '" ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
+        + 'style="background:var(--navy-card);border:1px solid var(--navy-border);border-left:3px solid ' + col + ';border-radius:5px;padding:10px 14px;flex:1 1 200px;min-width:160px;transition:background .15s;">'
+        + '<div style="display:flex;align-items:center;gap:10px;">'
+        +   '<div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;font-weight:700;color:' + col + ';">' + esc(s.name) + '</div>'
+        +   '<div style="font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums;">' + deals.length + ' deal' + (deals.length===1?'':'s') + ' · ' + fmtMoneyFull(sum,'EUR') + '</div>'
+        + '</div>'
+        + dealCards
+        + '</div>';
+    }
+
+    var stripHtml = (wonStage || lostStage)
+      ? '<div style="margin-top:12px;">'
+        + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px;">Closed</div>'
+        + '<div style="display:flex;gap:10px;flex-wrap:wrap;">'
+        + makeClosedStrip(wonStage)
+        + makeClosedStrip(lostStage)
+        + '</div>'
+        + '</div>'
+      : '';
+
+    // Nurture sidecar
+    var nurtureHtml = '';
+    if (nurtureStage) {
+      var nCol   = stageColor(nurtureStage);
+      var nDeals = byStage[nurtureStage.id] || [];
+      var nCards = nDeals.length
+        ? nDeals.map(function(d){
+            var client = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; }) || {};
+            var prevSt = d.pre_nurture_stage_id ? STAGE_BY_ID[d.pre_nurture_stage_id] : null;
+            var resumeBtn = prevSt
+              ? '<button onclick="event.stopPropagation();window._ddCurrentId=\'' + esc(d.id) + '\';window._ddChangeStage(\'' + esc(prevSt.id) + '\')" style="background:transparent;border:1px solid ' + stageColor(prevSt) + ';color:' + stageColor(prevSt) + ';font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Resume → ' + esc(prevSt.name) + '</button>'
+              : '';
+            return '<div onclick="window.openDealDetail(\'' + esc(d.id) + '\')" style="background:var(--navy-mid);border:1px solid var(--navy-border);border-left:3px solid ' + nCol + ';border-radius:4px;padding:8px 10px;cursor:pointer;">'
+              + '<div style="font-size:12px;font-weight:700;color:var(--white);">' + esc(d.name||'Untitled') + '</div>'
+              + '<div style="font-size:10px;color:var(--muted);margin:2px 0 6px;">' + esc(client.company||d.client_id||'—') + ' · ' + fmtMoney(d.forecast_value,d.currency) + '</div>'
+              + resumeBtn
+              + '</div>';
+          }).join('')
+        : '<div style="font-size:10px;color:var(--muted);text-align:center;padding:16px 6px;opacity:0.55;border:1px dashed var(--navy-border);border-radius:4px;">No deals in Nurture</div>';
+
+      nurtureHtml = '<div style="margin-top:12px;">'
+        + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:' + nCol + ';font-weight:700;margin-bottom:8px;">Nurture <span style="color:var(--muted);font-weight:400;letter-spacing:0;">— stalled deals, preserved for re-engagement</span></div>'
+        + '<div class="pipe-col" data-stage-id="' + esc(nurtureStage.id) + '" ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
+        +   'style="background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + nCol + ';border-radius:5px;padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;min-height:60px;transition:background .15s;">'
+        + nCards
+        + '</div></div>';
+    }
+
+    host.innerHTML = colsHtml + stripHtml + nurtureHtml;
   }
 
   function renderCard(d) {
@@ -14870,17 +14941,21 @@ window.loadBoms = async function initBoms() {
       tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px;">No deals match your filters.</td></tr>';
       return;
     }
+    var today = new Date(); today.setHours(0,0,0,0);
     tbody.innerHTML = list.map(function(d){
       var client = (window.CLIENTS||[]).find(function(c){ return c.id===d.client_id; }) || {};
       var st = STAGE_BY_ID[d.stage_id];
+      var fuDate = d.follow_up_date ? new Date(d.follow_up_date) : null;
+      var fuStr = fuDate ? fmtDate(d.follow_up_date) : '—';
+      var fuStyle = (fuDate && fuDate < today) ? 'color:var(--red);font-weight:700;' : 'color:var(--muted);';
       return '<tr style="cursor:pointer;" onclick="window.openDealDetail(\'' + esc(d.id) + '\')">'
-        + '<td style="color:var(--white);font-weight:700;">' + esc(d.name||'—') + '</td>'
+        + '<td style="color:var(--white);font-weight:700;">' + esc(d.name||'—') + '<div style="font-size:10px;color:var(--muted);font-weight:400;">' + esc(d.id) + '</div></td>'
         + '<td>' + esc(client.company || d.client_id || '—') + '</td>'
         + '<td>' + stagePill(st) + '</td>'
-        + '<td>' + typeBadge(d.deal_type) + '</td>'
-        + '<td style="color:var(--white);font-weight:700;">' + fmtMoneyFull(d.forecast_value, d.currency) + '</td>'
+        + '<td style="color:var(--white);font-weight:700;font-variant-numeric:tabular-nums;">' + fmtMoneyFull(d.forecast_value, d.currency) + '</td>'
         + '<td style="color:var(--muted);">' + esc(d.owner_id||'—') + '</td>'
         + '<td style="color:var(--muted);">' + fmtDate(d.expected_close_date) + '</td>'
+        + '<td style="' + fuStyle + '">' + fuStr + '</td>'
         + '</tr>';
     }).join('');
   }
@@ -14974,20 +15049,41 @@ window.loadBoms = async function initBoms() {
     if (!deal || deal.stage_id === stageId) return;
 
     var st = STAGE_BY_ID[stageId];
-    var payload = { stage_id: stageId, stage_entered_at: new Date().toISOString() };
-    if (st && st.is_won) { payload.closed_at = new Date().toISOString(); payload.closed_reason = 'Won'; }
-    if (st && st.is_lost) { payload.closed_at = new Date().toISOString(); }
 
-    // Optimistic update
+    // Require reason before dropping onto Lost
+    var lostReason = null;
+    if (st && st.is_lost) {
+      lostReason = await _showLostReasonModal();
+      if (lostReason === null) return;
+    }
+
+    // Prompt for blocker when dropping onto Nurture
+    var nurtureNote = null;
+    if (isNurture(st)) {
+      nurtureNote = await window.lpPrompt('What is the specific blocker?', '', { title: 'Move to Nurture', placeholder: 'Blocker + expected re-engagement date or trigger' });
+      if (nurtureNote === null) return;
+    }
+
+    var payload = { stage_id: stageId, stage_entered_at: new Date().toISOString() };
+    if (st && st.is_won)  { payload.closed_at = new Date().toISOString(); payload.closed_reason = 'Won'; }
+    if (st && st.is_lost) { payload.closed_at = new Date().toISOString(); payload.closed_reason = lostReason; }
+    if (isNurture(st)) {
+      payload.pre_nurture_stage_id = deal.stage_id;
+      if (nurtureNote) payload.notes = (deal.notes ? deal.notes + '\n\n' : '') + '[Nurture blocker] ' + nurtureNote;
+    }
+    if (isNurture(STAGE_BY_ID[deal.stage_id]) && !isNurture(st)) {
+      payload.pre_nurture_stage_id = null;
+    }
+
     var prevStage = deal.stage_id;
     deal.stage_id = stageId;
     deal.stage_entered_at = payload.stage_entered_at;
+    if (payload.pre_nurture_stage_id !== undefined) deal.pre_nurture_stage_id = payload.pre_nurture_stage_id;
     renderPipeline();
 
     try {
       await window.db.update('deals', '?id=eq.' + dealId, payload);
       if (window.toast) window.toast('Moved to "' + (st?st.name:'—') + '"', 'success');
-      // If moved to Won, auto-promote company to "client" lifecycle
       if (st && st.is_won && deal.client_id) {
         try {
           await window.db.update('clients', '?id=eq.' + deal.client_id, { lifecycle_stage:'client', became_client_at:new Date().toISOString() });
@@ -14995,7 +15091,6 @@ window.loadBoms = async function initBoms() {
         } catch(_){}
       }
     } catch(err) {
-      // Roll back
       deal.stage_id = prevStage;
       renderPipeline();
       if (window.toast) window.toast('Could not move deal: ' + (err.message||err), 'error');
@@ -15257,6 +15352,51 @@ window.loadBoms = async function initBoms() {
     }
   };
 
+  // ── Stage gate criteria (advisory overlay) ──────────────────────────────
+  var STAGE_GATES = {
+    'PS-LEAD':  ['Contact name and company captured', 'Source recorded (inbound, referral, trade show, outbound)'],
+    'PS-QUAL':  ['Liquid source confirmed (owned, contracted, or credibly sourced)', 'Indicative volume captured and within Lighthouse capacity', 'Timeline tied to a real market driver', 'Decision-maker identified and engaged'],
+    'PS-SCOPE': ['Brief shared (brand, market, positioning, or price point)', 'At least one of: liquid spec, format spec, or route to market under active discussion', 'Customer providing input, not just receiving it', 'Note: pure co-packing deals skip this stage'],
+    'PS-QUOTE': ['Formal written quote issued', 'Bottling cost, dry goods, setup, excise, and storage covered as applicable', 'Quote version and date logged on the deal record'],
+    'PS-NEGO':  ['Customer has responded to the quote', 'At least one of: sample requested, label proof in progress, terms under discussion, contract redlines exchanged', 'Specific objections or change requests documented'],
+    'PS-WON':   ['PO received OR deposit paid', 'Linked Job record created in Pulse Operations', 'Handover pack (spec, attachments, contact) attached to the deal'],
+    'PS-LOST':  ['Loss reason selected', 'Free-text note required if reason is "Other"'],
+    'PS-NURT':  ['Specific blocker named (funding, approvals, market timing, internal delay)', 'Expected re-engagement date or trigger logged', 'Stage the deal left from preserved so it can resume in place']
+  };
+
+  function _showStageGateOverlay(targetStage) {
+    var gates = STAGE_GATES[targetStage.id] || [];
+    if (!gates.length) return Promise.resolve(true);
+    return new Promise(function(resolve) {
+      var col = stageColor(targetStage);
+      var ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:100050;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
+      var gateHtml = gates.map(function(g){
+        return '<label style="display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--text);cursor:pointer;padding:5px 0;">'
+          + '<input type="checkbox" style="margin-top:2px;accent-color:' + col + ';flex-shrink:0;" onchange="window._sgChecked(this.closest(\'[data-sgov]\'))" />'
+          + '<span>' + esc(g) + '</span>'
+          + '</label>';
+      }).join('');
+      ov.setAttribute('data-sgov', '1');
+      ov.innerHTML =
+        '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:8px;padding:24px 28px;max-width:440px;width:100%;">'
+        + '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:' + col + ';font-weight:700;margin-bottom:6px;">Moving to ' + esc(targetStage.name) + '</div>'
+        + '<div style="font-size:15px;font-weight:700;color:var(--white);margin-bottom:4px;">Advisory stage checklist</div>'
+        + '<div style="font-size:11px;color:var(--muted);margin-bottom:14px;">These criteria are advisory. Tick what applies and proceed when ready.</div>'
+        + '<div style="display:flex;flex-direction:column;gap:2px;margin-bottom:18px;">' + gateHtml + '</div>'
+        + '<div style="display:flex;gap:10px;justify-content:flex-end;">'
+        +   '<button id="_sg-cancel" style="background:none;border:1px solid var(--navy-border);color:var(--muted);padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;">Cancel</button>'
+        +   '<button id="_sg-confirm" style="background:' + col + ';border:1px solid ' + col + ';color:var(--navy);padding:8px 20px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;">Move to ' + esc(targetStage.name) + '</button>'
+        + '</div>'
+        + '</div>';
+      document.body.appendChild(ov);
+      ov.querySelector('#_sg-cancel').addEventListener('click', function(){ ov.remove(); resolve(false); });
+      ov.querySelector('#_sg-confirm').addEventListener('click', function(){ ov.remove(); resolve(true); });
+      ov.addEventListener('click', function(e){ if (e.target === ov) { ov.remove(); resolve(false); } });
+    });
+  }
+  window._sgChecked = function(ov) {}; // placeholder — visual only
+
   window._ddLinkQuote = async function() {
     var sel = document.getElementById('dd-quote-select');
     if (!sel || !window._ddCurrentId) return;
@@ -15276,10 +15416,41 @@ window.loadBoms = async function initBoms() {
     var d = DEALS.find(function(x){ return x.id === window._ddCurrentId; });
     if (!d || d.stage_id === stageId) return;
     var st = STAGE_BY_ID[stageId];
+
+    // Require reason before moving to Lost
+    var lostReason = null;
+    if (st && st.is_lost) {
+      lostReason = await _showLostReasonModal();
+      if (lostReason === null) return;
+    }
+
+    // Prompt for blocker note when moving to Nurture
+    var nurtureNote = null;
+    if (isNurture(st)) {
+      nurtureNote = await window.lpPrompt('What is the specific blocker? (e.g. awaiting funding, label approval)', '', { title: 'Move to Nurture', placeholder: 'Blocker + expected re-engagement date or trigger' });
+      if (nurtureNote === null) return;
+    }
+
+    // Advisory gate overlay for standard forward stages
+    if (st && !st.is_won && !st.is_lost && !isNurture(st)) {
+      var confirmed = await _showStageGateOverlay(st);
+      if (!confirmed) return;
+    }
+
     var payload = { stage_id: stageId, stage_entered_at: new Date().toISOString() };
     if (st && st.is_won)  { payload.closed_at = new Date().toISOString(); payload.closed_reason = 'Won'; }
-    if (st && st.is_lost) { payload.closed_at = new Date().toISOString(); }
+    if (st && st.is_lost) { payload.closed_at = new Date().toISOString(); payload.closed_reason = lostReason; }
+    if (isNurture(st)) {
+      payload.pre_nurture_stage_id = d.stage_id;
+      if (nurtureNote) payload.notes = (d.notes ? d.notes + '\n\n' : '') + '[Nurture blocker] ' + nurtureNote;
+    }
+    // Moving OUT of Nurture — clear pre_nurture_stage_id
+    if (isNurture(STAGE_BY_ID[d.stage_id]) && !isNurture(st)) {
+      payload.pre_nurture_stage_id = null;
+    }
+
     d.stage_id = stageId; d.stage_entered_at = payload.stage_entered_at;
+    if (payload.pre_nurture_stage_id !== undefined) d.pre_nurture_stage_id = payload.pre_nurture_stage_id;
     try {
       await window.db.update('deals', '?id=eq.' + d.id, payload);
       window.openDealDetail(d.id);
@@ -15296,6 +15467,58 @@ window.loadBoms = async function initBoms() {
     }
   };
 
+  // ── Lost reason modal (shared by markDealLost, drag-to-lost, quick-move) ──
+  function _showLostReasonModal() {
+    return new Promise(function(resolve) {
+      var ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:100050;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
+      ov.innerHTML =
+        '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--red);border-radius:8px;padding:24px 28px;max-width:400px;width:100%;">'
+        + '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#e84f4f;font-weight:700;margin-bottom:6px;">Mark Deal Lost</div>'
+        + '<div style="font-size:15px;font-weight:700;color:var(--white);margin-bottom:16px;">Reason for losing this deal</div>'
+        + '<select id="_lost-reason-sel" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:9px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;margin-bottom:10px;">'
+        +   '<option value="">— Select a reason —</option>'
+        +   '<option value="Price">Price — too expensive</option>'
+        +   '<option value="Timeline">Timeline — timing didn\'t work</option>'
+        +   '<option value="Competitor">Competitor — went with someone else</option>'
+        +   '<option value="No funding">No funding — budget fell through</option>'
+        +   '<option value="Spec mismatch">Spec mismatch — we couldn\'t meet the requirement</option>'
+        +   '<option value="Unresponsive">Unresponsive — contact went dark</option>'
+        +   '<option value="Other">Other</option>'
+        + '</select>'
+        + '<textarea id="_lost-reason-txt" rows="2" placeholder="Add more detail (required if Other)…" style="display:none;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:9px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;resize:vertical;box-sizing:border-box;margin-bottom:10px;"></textarea>'
+        + '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px;">'
+        +   '<button id="_lost-cancel" style="background:none;border:1px solid var(--navy-border);color:var(--muted);padding:8px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;">Cancel</button>'
+        +   '<button id="_lost-confirm" disabled style="background:#e84f4f;border:1px solid #e84f4f;color:#fff;padding:8px 20px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;opacity:0.5;">Mark Lost</button>'
+        + '</div>'
+        + '</div>';
+      document.body.appendChild(ov);
+
+      var sel  = ov.querySelector('#_lost-reason-sel');
+      var txt  = ov.querySelector('#_lost-reason-txt');
+      var conf = ov.querySelector('#_lost-confirm');
+      var canc = ov.querySelector('#_lost-cancel');
+
+      function validate() {
+        var ok = sel.value && (sel.value !== 'Other' || txt.value.trim());
+        conf.disabled = !ok;
+        conf.style.opacity = ok ? '1' : '0.5';
+      }
+      sel.addEventListener('change', function() {
+        txt.style.display = sel.value === 'Other' ? 'block' : 'none';
+        validate();
+      });
+      txt.addEventListener('input', validate);
+      canc.addEventListener('click', function() { ov.remove(); resolve(null); });
+      conf.addEventListener('click', function() {
+        var r = sel.value === 'Other' ? ('Other: ' + txt.value.trim()) : sel.value;
+        ov.remove();
+        resolve(r);
+      });
+      ov.addEventListener('click', function(e) { if (e.target === ov) { ov.remove(); resolve(null); } });
+    });
+  }
+
   window.markDealWon = function() {
     var wonStage = PIPE_STAGES.find(function(s){ return s.is_won; });
     if (wonStage) window._ddChangeStage(wonStage.id);
@@ -15303,11 +15526,11 @@ window.loadBoms = async function initBoms() {
   window.markDealLost = async function() {
     var lostStage = PIPE_STAGES.find(function(s){ return s.is_lost; });
     if (!lostStage) return;
-    var reason = await window.lpPrompt('Reason for losing this deal (optional):', '', { title:'Mark Lost', placeholder:'e.g. Price, competitor, timing' });
+    var reason = await _showLostReasonModal();
     if (reason === null) return;
     var d = DEALS.find(function(x){ return x.id === window._ddCurrentId; });
     if (!d) return;
-    var payload = { stage_id: lostStage.id, stage_entered_at: new Date().toISOString(), closed_at: new Date().toISOString(), closed_reason: reason || 'Lost' };
+    var payload = { stage_id: lostStage.id, stage_entered_at: new Date().toISOString(), closed_at: new Date().toISOString(), closed_reason: reason };
     d.stage_id = lostStage.id;
     try {
       await window.db.update('deals', '?id=eq.' + d.id, payload);
@@ -17587,6 +17810,39 @@ window.loadBoms = async function initBoms() {
     // Refresh list after modal is closed — isolated so any display error never masks save success
     if (saved) {
       try { await reloadClientsFromDB(); } catch(e) { console.error('[Clients] post-save refresh error:', e); }
+
+      // Keep the contacts table in sync: upsert a primary contact row so the
+      // Contacts tab is always populated when a contact_name is on the client.
+      var savedId    = editId || dbPayload.id;
+      var savedName  = dbPayload.contact_name;
+      var savedEmail = dbPayload.email;
+      var savedPhone = dbPayload.phone;
+      if (savedId && savedName) {
+        try {
+          // Check if a primary contact already exists for this client
+          var existingContacts = await window.db.select('contacts', '?client_id=eq.' + savedId + '&is_primary=eq.true&limit=1');
+          if (existingContacts && existingContacts.length) {
+            // Update the existing primary contact
+            await window.db.update('contacts', '?id=eq.' + existingContacts[0].id, {
+              name:  savedName,
+              email: savedEmail || null,
+              phone: savedPhone || null
+            });
+          } else {
+            // Insert a new primary contact
+            await window.db.insert('contacts', {
+              client_id:  savedId,
+              name:       savedName,
+              email:      savedEmail || null,
+              phone:      savedPhone || null,
+              is_primary: true,
+              created_at: new Date().toISOString()
+            });
+          }
+        } catch(ce) {
+          console.warn('[Clients] contacts sync error (non-fatal):', ce);
+        }
+      }
     }
   };
 
