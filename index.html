@@ -8186,9 +8186,13 @@ window.copyInviteLink = function() {
 
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeBomModal()">Cancel</button>
+      <button id="bom-draft-btn" class="btn btn-outline" onclick="saveBomDraft()" style="border-color:var(--gold);color:var(--gold);">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4.5a.5.5 0 0 0-.146-.354l-3-3A.5.5 0 0 0 11.5 1H2zm0 1h9.293L14 4.707V14H2V2zm5.5 5a.5.5 0 0 0-.5.5v3.793l-1.146-1.147a.5.5 0 0 0-.708.708l2 2a.5.5 0 0 0 .708 0l2-2a.5.5 0 0 0-.708-.708L8 11.293V7.5a.5.5 0 0 0-.5-.5z"/></svg>
+        Save Draft
+      </button>
       <button id="bom-save-btn" class="btn btn-gold" onclick="saveBom()">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg>
-        Save BOM
+        Submit for Approval
       </button>
     </div>
 
@@ -11347,10 +11351,12 @@ async function openBomModal(editId) {
 
   var titleEl  = el('bom-modal-title');
   var saveBtn  = el('bom-save-btn');
+  var draftBtn = el('bom-draft-btn');
   var editIdEl = el('bm-edit-id');
   if (editIdEl) editIdEl.value = editId || '';
   if (titleEl)  titleEl.textContent = editId ? 'Edit Bill of Materials' : 'Add Bill of Materials';
-  if (saveBtn)  saveBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg> ' + (editId ? 'Save Changes' : 'Save BOM');
+  if (saveBtn)  saveBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg> Submit for Approval';
+  if (draftBtn) draftBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4.5a.5.5 0 0 0-.146-.354l-3-3A.5.5 0 0 0 11.5 1H2zm0 1h9.293L14 4.707V14H2V2zm5.5 5a.5.5 0 0 0-.5.5v3.793l-1.146-1.147a.5.5 0 0 0-.708.708l2 2a.5.5 0 0 0 .708 0l2-2a.5.5 0 0 0-.708-.708L8 11.293V7.5a.5.5 0 0 0-.5-.5z"/></svg> Save Draft';
 
   // Ensure clients are loaded before populating dropdown
   await loadClients();
@@ -11857,6 +11863,145 @@ function closeBomModal() {
   document.body.style.overflow = '';
 }
 
+async function saveBomDraft() {
+  var product  = gv('bm-product');
+  var clientId = gv('bm-client');
+  var editId   = gv('bm-edit-id');
+
+  // Lock check
+  if (editId) {
+    var _draftCheck = BOMS.find(function(b){ return b.id === editId; });
+    if (_draftCheck && (_draftCheck.status === 'approved' || _draftCheck.status === 'pending')) {
+      await window.lpAlert('This BOM is locked and cannot be edited. Use Request Edit to ask Quality & Compliance to return it to draft.', { title: 'BOM locked', variant: 'warn' });
+      return;
+    }
+  }
+  if (!clientId) { await window.lpAlert('Please select a client before saving a draft.', { variant: 'warn' }); return; }
+  if (!product)  { await window.lpAlert('Please enter a Product Full Name before saving a draft.', { variant: 'warn' }); return; }
+
+  function skuId(id) { var s = el(id); return (s && s.value) ? s.value : null; }
+  function skuDesc(id) {
+    var s = el(id); if (!s || !s.value) return null;
+    var opt = s.options[s.selectedIndex];
+    return opt ? (opt.getAttribute('data-desc') || opt.text.split(' — ')[0].trim()) : null;
+  }
+
+  var volume = gv('bm-volume');
+  var abv    = gv('bm-abv');
+
+  var additionalInfo = {
+    labelBarcode:  gv('bm-label-barcode')   || null, shipperBarcode: gv('bm-shipper-barcode') || null,
+    intendedMarket:gv('bm-intended-market') || null, dutyStamp:      gv('bm-duty-stamp')      || null,
+    annex2:        gv('bm-annex2')          || null, lotNumber:      gv('bm-lot-number')       || null,
+    pallet:        gv('bm-pallet')          || null, casesLayer:     gv('bm-cases-layer')      || null,
+    layersPallet:  gv('bm-layers-pallet')   || null, labelPosition:  gv('bm-label-position')   || null,
+    notes:         gv('bm-notes')           || null
+  };
+
+  var dbPayload = {
+    bom_status:          'draft',
+    client_id:           clientId,
+    product_name:        product,
+    volume_cl:           parseFloat(volume) || null,
+    abv:                 parseFloat(abv)    || null,
+    liquid_sku_id:       null,
+    liquid_spec:         gv('bm-liquid-sku') || null,
+    bottle_sku_id:       skuId('bm-bottle'),
+    cork_sku_id:         skuId('bm-cork'),
+    ropp_sku_id:         skuId('bm-ropp'),
+    foil_sku_id:         skuId('bm-foil'),
+    front_label_sku_id:  skuId('bm-label-front-sel'),
+    back_label_sku_id:   skuId('bm-label-back-sel'),
+    neck_label_sku_id:   skuId('bm-label-neck-sel'),
+    shipper_sku_id:      skuId('bm-shipper-sel'),
+    divider_sku_id:      skuId('bm-divider-sel'),
+    string_twine_sku_id: skuId('bm-string-sel'),
+    monocarton_sku_id:   skuId('bm-monocarton'),
+    gift_tube_sku_id:    skuId('bm-gift-tube'),
+    tube_lid_sku_id:     skuId('bm-tube-lid'),
+    tin_sku_id:          skuId('bm-tin'),
+    bottles_per_shipper: parseInt(gv('bm-bottles-per-shipper')) || null,
+    bph:                 parseInt(gv('bm-bph'))                 || null,
+    bottling_abv:        parseFloat(abv)    || null,
+    chill_filtration:    gv('bm-chill-bom')      === 'yes',
+    colouring:           gv('bm-colouring-bom')  === 'yes',
+    colour_spec:         gv('bm-colour-spec-bom') || null,
+    additional_info:     additionalInfo,
+    notes:               gv('bm-notes') || null,
+    gi_verified:         false,
+    label_master_photos: (window._bmLabelPhotos && Object.keys(window._bmLabelPhotos).length) ? window._bmLabelPhotos : {}
+  };
+  if (dbPayload.label_master_photos && Object.keys(dbPayload.label_master_photos).length) {
+    dbPayload.label_master_set_at = new Date().toISOString();
+    dbPayload.label_master_set_by = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || null;
+  }
+
+  function localDraftBom(id) {
+    return {
+      id: id, product: product, clientId: clientId, volume: volume, abv: abv,
+      liquidSkuId: null,                                liquid:     gv('bm-liquid-sku') || null,
+      bottleSkuId: skuId('bm-bottle'),                  bottle:     skuDesc('bm-bottle'),
+      corkSkuId:   skuId('bm-cork'),                    cork:       skuDesc('bm-cork'),
+      roppSkuId:   skuId('bm-ropp'),                    ropp:       skuDesc('bm-ropp'),
+      foilSkuId:   skuId('bm-foil'),                    foil:       skuDesc('bm-foil'),
+      frontLabelSkuId: skuId('bm-label-front-sel'),     labelFront: skuDesc('bm-label-front-sel'),
+      backLabelSkuId:  skuId('bm-label-back-sel'),      labelBack:  skuDesc('bm-label-back-sel'),
+      neckLabelSkuId:  skuId('bm-label-neck-sel'),      labelNeck:  skuDesc('bm-label-neck-sel'),
+      shipperSkuId:    skuId('bm-shipper-sel'),          shipper:    skuDesc('bm-shipper-sel'),
+      dividerSkuId:    skuId('bm-divider-sel'),          divider:    skuDesc('bm-divider-sel'),
+      stringTwineSkuId:skuId('bm-string-sel'),           string:     skuDesc('bm-string-sel'),
+      monocartonSkuId: skuId('bm-monocarton'),           monocarton: skuDesc('bm-monocarton'),
+      giftTubeSkuId:   skuId('bm-gift-tube'),            giftTube:   skuDesc('bm-gift-tube'),
+      tubeLidSkuId:    skuId('bm-tube-lid'),             tubeLid:    skuDesc('bm-tube-lid'),
+      tinSkuId:        skuId('bm-tin'),                  tin:        skuDesc('bm-tin'),
+      bottlesPerShipper: gv('bm-bottles-per-shipper'),
+      bph: gv('bm-bph'), bottlingAbv: abv,
+      chill: gv('bm-chill-bom'), colour: gv('bm-colouring-bom'), colourSpec: gv('bm-colour-spec-bom'),
+      labelBarcode: gv('bm-label-barcode'), shipperBarcode: gv('bm-shipper-barcode'),
+      intendedMarket: gv('bm-intended-market'), dutyStamp: gv('bm-duty-stamp'),
+      annex2: gv('bm-annex2'), lotNumber: gv('bm-lot-number'),
+      pallet: gv('bm-pallet'), casesLayer: gv('bm-cases-layer'),
+      layersPallet: gv('bm-layers-pallet'), labelPosition: gv('bm-label-position'),
+      notes: gv('bm-notes'), gi: 'N', giDocUrl: '',
+      labelMasterPhotos: Object.assign({}, window._bmLabelPhotos || {}),
+      labelMasterSetAt:  dbPayload.label_master_set_at || '',
+      labelMasterSetBy:  dbPayload.label_master_set_by || '',
+      status: 'draft', lockedBy: '', approvalRequestedAt: '', editRequestedBy: '',
+      added: new Date().toISOString().slice(0,10)
+    };
+  }
+
+  var draftBtn = el('bom-draft-btn');
+  if (draftBtn) { draftBtn.disabled = true; draftBtn.textContent = 'Saving…'; }
+  try {
+    if (editId) {
+      await window.db.update('boms', '?id=eq.' + editId, dbPayload);
+      var idx = BOMS.findIndex(function(b){ return b.id === editId; });
+      if (idx >= 0) Object.assign(BOMS[idx], localDraftBom(editId));
+      window.BOMS = BOMS;
+      window.toast && window.toast('Draft saved: ' + product, 'success');
+    } else {
+      dbPayload.id = 'BOM-' + clientId.replace('CLI-','') + '-' + Date.now().toString(36).toUpperCase();
+      var saved = await window.db.insert('boms', dbPayload);
+      var newId = (Array.isArray(saved) && saved[0] && saved[0].id) ? saved[0].id : dbPayload.id;
+      BOMS.unshift(localDraftBom(newId));
+      window.BOMS = BOMS;
+      // Set edit id so subsequent saves update this record
+      var editIdEl = el('bm-edit-id');
+      if (editIdEl) editIdEl.value = newId;
+      window.toast && window.toast('Draft saved: ' + product, 'success');
+    }
+    renderBoms();
+  } catch(e) {
+    await window.lpAlert('Error saving draft: ' + e.message, { variant: 'error' });
+  } finally {
+    if (draftBtn) {
+      draftBtn.disabled = false;
+      draftBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4.5a.5.5 0 0 0-.146-.354l-3-3A.5.5 0 0 0 11.5 1H2zm0 1h9.293L14 4.707V14H2V2zm5.5 5a.5.5 0 0 0-.5.5v3.793l-1.146-1.147a.5.5 0 0 0-.708.708l2 2a.5.5 0 0 0 .708 0l2-2a.5.5 0 0 0-.708-.708L8 11.293V7.5a.5.5 0 0 0-.5-.5z"/> </svg> Save Draft';
+    }
+  }
+}
+
 async function saveBom() {
   var product  = gv('bm-product');
   var clientId = gv('bm-client');
@@ -11970,26 +12115,28 @@ async function saveBom() {
   }
 
   var saveBtn = el('bom-save-btn');
-  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Submitting…'; }
   try {
+    var _savedBomId = editId;
     if (editId) {
       await window.db.update('boms', '?id=eq.' + editId, dbPayload);
       var idx = BOMS.findIndex(function(b){ return b.id===editId; });
       if (idx>=0) Object.assign(BOMS[idx], localBom(editId));
       window.BOMS = BOMS;
-      if (window.toast) window.toast('BOM updated: '+product);
     } else {
       dbPayload.id = 'BOM-'+clientId.replace('CLI-','')+'-'+Date.now().toString(36).toUpperCase();
       var saved = await window.db.insert('boms', dbPayload);
-      BOMS.unshift(localBom(Array.isArray(saved) ? saved[0].id : dbPayload.id));
+      _savedBomId = Array.isArray(saved) && saved[0] && saved[0].id ? saved[0].id : dbPayload.id;
+      BOMS.unshift(localBom(_savedBomId));
       window.BOMS = BOMS;
-      if (window.toast) window.toast('BOM saved: '+product);
     }
     closeBomModal(); renderBoms();
+    // Request approval immediately — staff used "Submit for Approval"
+    await window.requestBomApproval(_savedBomId);
   } catch(e) {
     await window.lpAlert('Error saving BOM: '+e.message, { variant: 'error' });
   } finally {
-    if (saveBtn) { saveBtn.disabled=false; saveBtn.innerHTML='<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg> '+(editId?'Save Changes':'Save BOM'); }
+    if (saveBtn) { saveBtn.disabled=false; saveBtn.innerHTML='<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg> Submit for Approval'; }
   }
 }
 var bomOv = el('bom-modal-overlay');
@@ -12262,6 +12409,7 @@ window.saveGIApproval = async function(bomId) {
 window.openBomModal  = openBomModal;
 window.closeBomModal = closeBomModal;
 window.saveBom       = saveBom;
+window.saveBomDraft  = saveBomDraft;
 window.viewBom       = viewBom;
 window.editBom       = editBom;
 window.deleteBom     = deleteBom;
