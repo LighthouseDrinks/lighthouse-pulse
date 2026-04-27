@@ -25968,8 +25968,14 @@ var _dgLocations = [];
 window.DG_LOCATIONS = _dgLocations;
 
 function _dgLocName(locId) {
+  if (!locId) return null;
   var l = _dgLocations.find(function(x){ return x.id === locId; });
-  return l ? l.name : (locId || '—');
+  return l ? l.name : locId;
+}
+
+// Returns the best available location text for a batch record
+function _batchLocText(b, skuFallback) {
+  return (b.location && b.location.trim()) || _dgLocName(b.location_id) || (skuFallback && skuFallback.trim()) || null;
 }
 
 // Populate all location <select> elements with current cache
@@ -25995,6 +26001,13 @@ window.loadDryGoods = async function() {
     // Load supporting data
     if (!_clients.length) _clients = await supaFetch('clients', '?order=name.asc');
     _cats = await supaFetch('dry_goods_categories', '?order=sort_order.asc');
+
+    // Load locations (silent — resolves location_id → name for legacy batches)
+    try {
+      var locs = await supaFetch('dry_goods_locations', '?order=sort_order.asc');
+      _dgLocations.length = 0;
+      (locs||[]).forEach(function(l){ _dgLocations.push(l); });
+    } catch(_le) { /* table may not exist yet — ignore */ }
 
     // Load SKUs and batches
     _skus    = await supaFetch('dry_goods_skus', '?is_active=eq.true&order=description.asc');
@@ -26102,8 +26115,9 @@ window.renderDryGoods = function() {
       + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">'+supplierName+'</td>'
       + (function(){
           var locMap2 = {};
-          activeBatches.forEach(function(b){
-            var lkey = (b.location || 'Unspecified').trim();
+          var allBatchesForGrid = skuBatches.filter(function(b){ return parseInt(b.quantity_remaining||0) > 0; });
+          allBatchesForGrid.forEach(function(b){
+            var lkey = _batchLocText(b, sku.location) || 'No location set';
             if (!locMap2[lkey]) locMap2[lkey] = 0;
             locMap2[lkey] += parseInt(b.quantity_remaining||0);
           });
@@ -26241,9 +26255,10 @@ window.openTransferStockModal = async function(skuId) {
 
   // From: only locations (by text) that have stock for this SKU
   var tsBatches = _batches.filter(function(b){ return b.sku_id === skuId && parseInt(b.quantity_remaining||0) > 0; });
+  var tsSkuRec = _skus.find(function(s){ return s.id === skuId; }) || {};
   var locMap = {};
   tsBatches.forEach(function(b){
-    var lkey = (b.location || 'Unspecified').trim();
+    var lkey = _batchLocText(b, tsSkuRec.location) || 'No location set';
     if (!locMap[lkey]) locMap[lkey] = 0;
     locMap[lkey] += parseInt(b.quantity_remaining||0);
   });
@@ -26312,7 +26327,7 @@ window.saveStockTransfer = async function() {
     // Find source batches at fromLocId (FIFO order) and deplete
     var sourceBatches = _batches.filter(function(b){
       return b.sku_id === skuId && parseInt(b.quantity_remaining||0) > 0
-        && (b.location || 'Unspecified').trim() === fromLocId;
+        && (_batchLocText(b, sku ? sku.location : null) || 'No location set') === fromLocId;
     }).sort(function(a,b){ return new Date(a.delivery_date) - new Date(b.delivery_date); });
 
     var remaining = qty;
@@ -26544,7 +26559,7 @@ window.openSKUPanel = async function(skuId) {
     if (locWrap && locEl && activeBatchesForSku.length > 0) {
       var locMap = {};
       activeBatchesForSku.forEach(function(b) {
-        var lkey = (b.location || 'Unspecified').trim();
+        var lkey = _batchLocText(b, sku.location) || 'No location set';
         if (!locMap[lkey]) locMap[lkey] = 0;
         locMap[lkey] += parseInt(b.quantity_remaining||0);
       });
@@ -26555,7 +26570,8 @@ window.openSKUPanel = async function(skuId) {
           + '<span style="font-size:14px;font-weight:700;color:var(--blue);">'+locMap[lkey].toLocaleString()+' <span style="font-size:10px;font-weight:400;color:var(--muted);">'+(sku.unit_of_measure||'units')+'</span></span>'
           + '</div>';
       }).join('');
-      locWrap.style.display = locKeys.length > 1 ? '' : 'none';
+      // Show the section whenever there's at least one location (even if only one)
+      locWrap.style.display = '';
     } else if (locWrap) {
       locWrap.style.display = 'none';
     }
@@ -26570,7 +26586,7 @@ window.openSKUPanel = async function(skuId) {
         var pct = tot > 0 ? Math.round(rem/tot*100) : 0;
         var col = rem === 0 ? 'var(--muted)' : pct < 20 ? 'var(--red)' : pct < 50 ? 'var(--amber)' : 'var(--green)';
         var isFIFO = idx === 0 && rem > 0;
-        var locName = b.location || null;
+        var locName = _batchLocText(b, sku.location);
         return '<div style="background:var(--navy-card);border:1px solid '+(isFIFO?'var(--gold)':'var(--navy-border)')+';border-radius:6px;padding:14px 16px;margin-bottom:10px;position:relative;">'
           + (isFIFO ? '<div style="position:absolute;top:10px;right:10px;font-size:9px;letter-spacing:0.1em;background:var(--gold);color:var(--navy);padding:2px 6px;border-radius:3px;font-weight:700;">FIFO NEXT</div>' : '')
           + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;'+(isFIFO?'padding-right:72px;':'')+'">'
