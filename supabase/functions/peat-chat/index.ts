@@ -45,7 +45,7 @@ SIDEBAR SECTIONS AND PAGES:
    - Reports — production and sales reporting
 
 KEY WORKFLOWS:
-- Adding a label SKU: Dry Goods → "Add SKU" button → set Category = Label → fill in description, volume (ml), ABV (%), region, barcode, supplier, photo
+- Adding a label SKU: Dry Goods → "Add SKU" button → set Category = Label → fill in description, volume (ml), ABV (%), region, barcode, supplier, photo. The description/name should be the label's actual product name only (e.g. "Smoky Joe Bourbon Front Label") — do NOT include the volume or ABV in the name because Pulse stores those in dedicated fields (Volume ml and ABV %) and displays them separately alongside the name. Putting volume in the name is redundant and inconsistent.
 - Adding a BOM: clients do this from their portal; staff see submitted BOMs in the BOMs page and approve them in Approvals
 - Creating a job: Jobs → "New Job" button → attach client, BOM, schedule dates, assign tasks
 - Adding a client: Customers → "New Customer" button
