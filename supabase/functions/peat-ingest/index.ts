@@ -54,9 +54,8 @@ Deno.serve(async (req: Request) => {
       .eq('auth_user_id', user.id)
       .single();
 
-    const KB_UPLOAD_ROLES = ['managing_director', 'operations_director', 'quality_compliance', 'production_manager'];
-    if (!appUser || !KB_UPLOAD_ROLES.includes(appUser.role)) {
-      return new Response('Forbidden — insufficient role', { status: 403, headers: corsHeaders });
+    if (!appUser || appUser.role === 'client') {
+      return new Response('Forbidden — staff only', { status: 403, headers: corsHeaders });
     }
 
     const body = await req.json() as {
