@@ -90,7 +90,7 @@ Deno.serve(async (req: Request) => {
     const { data: appUser } = await adminClient
       .from('app_users')
       .select('role')
-      .eq('auth_id', user.id)
+      .eq('auth_user_id', user.id)
       .maybeSingle();
 
     // Portal clients won't have an app_users row — that's fine
