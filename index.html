@@ -17697,6 +17697,7 @@ window.loadBoms = async function initBoms() {
   <!-- Sub-nav tabs -->
   <div id="reports-tabs" style="display:flex;gap:0;margin-bottom:24px;border-bottom:2px solid var(--navy-border);">
     <button class="inv-tab active" onclick="showReportsTab('lpa-recon',this)">LPA Reconciliation</button>
+    <button class="inv-tab" onclick="showReportsTab('cbw-log',this)">CBW Bottling Log</button>
     <button class="inv-tab" onclick="showReportsTab('production',this)">Production</button>
     <button class="inv-tab" onclick="showReportsTab('financial',this)">Financial</button>
     <button class="inv-tab" onclick="showReportsTab('compliance',this)">Compliance</button>
@@ -17715,6 +17716,25 @@ window.loadBoms = async function initBoms() {
     </div>
     <div id="recon-content">
       <div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Select a date range and click Run Report to generate the LPA reconciliation.</div>
+    </div>
+  </div>
+
+  <!-- CBW Bottling Log -->
+  <div id="reports-cbw-log" class="reports-panel" style="display:none;">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;">
+      <div>
+        <div style="font-size:13px;color:var(--text);margin-bottom:4px;">Auto-populated from completed jobs. One row per job.</div>
+        <div style="font-size:11px;color:var(--muted);">Data writes to this log the moment a job is moved to Complete.</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <input type="month" id="cbw-log-month" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">
+        <button onclick="window.loadCBWLog()" class="btn btn-outline" style="font-size:12px;padding:7px 16px;">View Month</button>
+        <button onclick="window._emailCBWLog(false)" class="btn btn-gold" style="font-size:12px;padding:7px 16px;">&#9993; Email CBW — Previous Month</button>
+        <button onclick="window._emailCBWLog(true)" title="Send test copy to yourself" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 12px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Test &#9993;</button>
+      </div>
+    </div>
+    <div id="cbw-log-content">
+      <div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Select a month and click View Month, or click Email CBW to send the previous month automatically.</div>
     </div>
   </div>
 
@@ -17854,6 +17874,15 @@ window.loadBoms = async function initBoms() {
     var panel = document.getElementById('reports-' + tab);
     if (panel) panel.style.display = '';
     if (btn) btn.classList.add('active');
+    // Auto-load CBW log for current month when tab is opened
+    if (tab === 'cbw-log') {
+      var monthEl = document.getElementById('cbw-log-month');
+      if (monthEl && !monthEl.value) {
+        var now = new Date();
+        monthEl.value = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
+      }
+      window.loadCBWLog && window.loadCBWLog();
+    }
   }
   window.showReportsTab = showReportsTab;
 
@@ -21849,6 +21878,331 @@ window.loadReconciliation = async function() {
   } catch(e) {
     logError('loadReconciliation', e);
     contentEl.innerHTML = '<div style="color:var(--red);padding:24px;text-align:center;">Error loading reconciliation: ' + e.message + '</div>';
+  }
+};
+
+// ── CBW BOTTLING LOG ─────────────────────────────────────────────────────────
+
+// Helper: fetch all data for completed jobs in a given YYYY-MM month
+async function _cbwFetchMonth(yearMonth) {
+  // Build date range for the month
+  var yr  = parseInt(yearMonth.slice(0,4), 10);
+  var mo  = parseInt(yearMonth.slice(5,7), 10);
+  var from = yearMonth + '-01T00:00:00.000Z';
+  var nextMo = mo === 12 ? (yr+1) + '-01' : yr + '-' + String(mo+1).padStart(2,'0');
+  var to   = nextMo + '-01T00:00:00.000Z';
+
+  var jobs = await supaGet(
+    'jobs?stage=eq.complete&date_completed=gte.' + from + '&date_completed=lt.' + to
+    + '&select=*,clients(name)&order=date_completed.asc'
+  );
+  if (!jobs || !jobs.length) return [];
+
+  var jobIds = jobs.map(function(j){ return j.id; });
+
+  // Fetch liquid signoffs and BOMs in parallel
+  var signoffs = await supaGet('job_liquid_signoff?job_id=in.(' + jobIds.join(',') + ')&select=job_id,linked_containers_json,linked_container_id,water_required,final_litres');
+  var bomIds   = [...new Set(jobs.map(function(j){ return j.bom_id; }).filter(Boolean))];
+  var boms     = bomIds.length ? await supaGet('boms?id=in.(' + bomIds.join(',') + ')&select=id,volume_cl,bottling_abv,abv,bottles_per_shipper,additional_info') : [];
+
+  // Collect all container IDs
+  var allContIds = [];
+  signoffs.forEach(function(s) {
+    var lc = [];
+    try { lc = JSON.parse(s.linked_containers_json || '[]'); } catch(e) {}
+    if (!lc.length && s.linked_container_id) lc = [{ id: s.linked_container_id }];
+    lc.forEach(function(c){ if (c.id && allContIds.indexOf(c.id) === -1) allContIds.push(c.id); });
+  });
+  var conts = allContIds.length ? await supaGet('liquid_containers?id=in.(' + allContIds.join(',') + ')&select=id,reference,cbw_rotation,abv,spirit_type') : [];
+
+  // Build lookup maps
+  var soMap  = {}; signoffs.forEach(function(s){ soMap[s.job_id] = s; });
+  var bomMap = {}; boms.forEach(function(b){ bomMap[b.id] = b; });
+  var cMap   = {}; conts.forEach(function(c){ cMap[c.id] = c; });
+
+  return jobs.map(function(j) {
+    var so  = soMap[j.id]  || {};
+    var bom = bomMap[j.bom_id] || {};
+    var ai  = bom.additional_info || {};
+
+    var lc = [];
+    try { lc = JSON.parse(so.linked_containers_json || '[]'); } catch(e) {}
+    if (!lc.length && so.linked_container_id) lc = [{ id: so.linked_container_id }];
+    var linkedConts = lc.map(function(l){ return cMap[l.id] || { id: l.id, reference: l.id }; });
+
+    var waterAdded  = parseFloat(so.water_required  || 0);
+    var finalLitres = parseFloat(so.final_litres     || 0);
+    var srcLitres   = Math.max(0, finalLitres - waterAdded);
+    var bottlingAbv = parseFloat(j.bottling_abv || bom.bottling_abv || bom.abv || 0);
+    var srcAbv      = linkedConts.length
+      ? linkedConts.reduce(function(s,c){ return s + parseFloat(c.abv||0); }, 0) / linkedConts.length
+      : bottlingAbv;
+    var volumeCl    = parseFloat(bom.volume_cl || 0);
+    var bottlesFill = parseInt(j.actual_bottles_produced || 0);
+    var filledLitres = volumeCl && bottlesFill ? (bottlesFill * volumeCl) / 100 : 0;
+    var losses      = finalLitres > 0 ? Math.max(0, finalLitres - filledLitres - parseFloat(j.liquid_leftover||0)) : null;
+
+    var bottlesPerCase  = parseInt(bom.bottles_per_shipper || 0) || null;
+    var casesPerLayer   = parseInt((ai.casesLayer||0)) || null;
+    var layersPerPallet = parseInt((ai.layersPallet||0)) || null;
+    var casesPerPallet  = (casesPerLayer && layersPerPallet) ? casesPerLayer * layersPerPallet : null;
+
+    return {
+      job:           j,
+      client:        (j.clients && j.clients.name) || '',
+      date:          j.date_completed,
+      rotations:     linkedConts.map(function(c){ return c.cbw_rotation || '—'; }).join(', '),
+      containerRefs: linkedConts.map(function(c){ return c.reference   || c.id; }).join(', '),
+      srcLitres:     srcLitres,
+      srcAbv:        srcAbv,
+      waterAdded:    waterAdded,
+      totalLitres:   finalLitres,
+      bottlingAbv:   bottlingAbv,
+      batchNo:       j.lot_number || '',
+      productName:   j.product_name || '',
+      bottlesFilled: bottlesFill,
+      volumeCl:      volumeCl,
+      residue:       parseFloat(j.liquid_leftover || 0),
+      losses:        losses,
+      newRotation:   j.cbw_new_rotation_no || '',
+      signedAt:      j.results_signed_at,
+      signedBy:      j.results_signed_by || '',
+      bottlesPerCase:  bottlesPerCase,
+      casesPerPallet:  casesPerPallet
+    };
+  });
+}
+
+function _cbwFmtDate(ts) {
+  if (!ts) return '';
+  try { return new Date(ts).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}); } catch(e){ return ts; }
+}
+
+window.loadCBWLog = async function() {
+  var el = document.getElementById('cbw-log-content');
+  if (!el) return;
+
+  var monthEl = document.getElementById('cbw-log-month');
+  var now     = new Date();
+  var yearMonth = (monthEl && monthEl.value) || (now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0'));
+  if (monthEl && !monthEl.value) monthEl.value = yearMonth;
+
+  el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Loading…</div>';
+
+  try {
+    var rows = await _cbwFetchMonth(yearMonth);
+
+    if (!rows.length) {
+      el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">No completed jobs found for ' + yearMonth + '.</div>';
+      return;
+    }
+
+    var th = function(t, right) {
+      return '<th style="padding:7px 10px;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;' + (right?'text-align:right;':'') + '">' + t + '</th>';
+    };
+    var td = function(v, right, muted) {
+      return '<td style="padding:7px 10px;font-size:12px;color:' + (muted?'var(--muted)':'var(--text)') + ';white-space:nowrap;' + (right?'text-align:right;':'') + '">' + (v!=null?window.escapeHtml(String(v)):'—') + '</td>';
+    };
+    var subHead = function(label, span) {
+      return '<th colspan="' + span + '" style="padding:5px 10px;font-size:9px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);background:rgba(201,168,76,0.07);border-bottom:1px solid rgba(201,168,76,0.2);white-space:nowrap;">' + label + '</th>';
+    };
+
+    var html = '<div style="overflow-x:auto;">'
+      + '<table style="width:100%;border-collapse:collapse;font-size:12px;min-width:1200px;">'
+      + '<thead>'
+      + '<tr>'
+      + subHead('GI Product for Bottling (Duty Suspended)', 5)
+      + subHead('Blending', 5)
+      + subHead('Volume Filled', 3)
+      + subHead('Sign-off', 3)
+      + '</tr>'
+      + '<tr style="border-bottom:2px solid var(--navy-border);">'
+      + th('Date') + th('Rotation No.') + th('Container ID') + th('Qty (L)',true) + th('ABV',true)
+      + th('Water (L)',true) + th('Total Litres',true) + th('Alc %',true) + th('Batch No.') + th('Product')
+      + th('Bottles Filled') + th('Residue (L)',true) + th('Losses (L)',true)
+      + th('New Rot. No.') + th('Sign-off Date') + th('Signed By')
+      + '</tr>'
+      + '</thead><tbody>';
+
+    rows.forEach(function(r, i) {
+      var bg = i % 2 === 0 ? '' : 'background:rgba(255,255,255,0.02);';
+      var bottlesStr = r.bottlesFilled && r.volumeCl
+        ? r.bottlesFilled.toLocaleString() + ' × ' + r.volumeCl + 'cl'
+        : (r.bottlesFilled ? r.bottlesFilled.toLocaleString() + ' btls' : '—');
+      html += '<tr style="border-bottom:1px solid var(--navy-border);' + bg + '">'
+        + td(_cbwFmtDate(r.date))
+        + td(r.rotations)
+        + td(r.containerRefs)
+        + td(r.srcLitres > 0 ? r.srcLitres.toFixed(1) : '—', true)
+        + td(r.srcAbv > 0 ? r.srcAbv.toFixed(1) + '%' : '—', true)
+        + td(r.waterAdded > 0 ? r.waterAdded.toFixed(1) : '0', true)
+        + td(r.totalLitres > 0 ? r.totalLitres.toFixed(1) : '—', true)
+        + td(r.bottlingAbv > 0 ? r.bottlingAbv.toFixed(1) + '%' : '—', true)
+        + td(r.batchNo)
+        + td(r.productName)
+        + td(bottlesStr)
+        + td(r.residue > 0 ? r.residue.toFixed(1) : '0', true)
+        + td(r.losses != null ? r.losses.toFixed(1) : '—', true)
+        + '<td style="padding:7px 10px;font-size:12px;">'
+        + '<input value="' + window.escapeHtml(r.newRotation) + '" placeholder="—" data-jobid="' + r.job.id + '"'
+        + ' onchange="window._cbwSaveNewRot(this)" style="background:transparent;border:1px solid var(--navy-border);color:var(--white);padding:3px 8px;font-size:11px;border-radius:3px;width:110px;font-family:Lato,sans-serif;">'
+        + '</td>'
+        + td(_cbwFmtDate(r.signedAt), false, true)
+        + td(r.signedBy, false, true)
+        + '</tr>';
+    });
+
+    html += '<tr style="background:rgba(201,168,76,0.05);border-top:2px solid var(--navy-border);font-weight:700;">'
+      + '<td colspan="3" style="padding:8px 10px;font-size:12px;color:var(--muted);">Totals — ' + rows.length + ' job' + (rows.length>1?'s':'') + '</td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.srcLitres; },0).toFixed(1) + '</td>'
+      + '<td></td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.waterAdded; },0).toFixed(1) + '</td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.totalLitres; },0).toFixed(1) + '</td>'
+      + '<td></td><td></td><td></td>'
+      + '<td style="padding:8px 10px;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.bottlesFilled; },0).toLocaleString() + ' btls</td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.residue; },0).toFixed(1) + '</td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + (r.losses||0); },0).toFixed(1) + '</td>'
+      + '<td colspan="3"></td>'
+      + '</tr>';
+
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--red);padding:24px;">Error: ' + e.message + '</div>';
+  }
+};
+
+// Save new rotation number inline from the log table
+window._cbwSaveNewRot = async function(input) {
+  var jobId = input.dataset.jobid;
+  var val   = (input.value || '').trim() || null;
+  try {
+    await supaGet('jobs?id=eq.' + encodeURIComponent(jobId)); // existence check
+    await window.db.update('jobs', '?id=eq.' + encodeURIComponent(jobId), { cbw_new_rotation_no: val });
+    input.style.borderColor = 'var(--green)';
+    setTimeout(function(){ input.style.borderColor = 'var(--navy-border)'; }, 1500);
+  } catch(e) {
+    window.toast && window.toast('Could not save rotation: ' + e.message, 'error');
+    input.style.borderColor = 'var(--red)';
+  }
+};
+
+// ── CBW Monthly Email ─────────────────────────────────────────────────────────
+window._emailCBWLog = async function(isTest) {
+  var testEmail = null;
+  if (isTest) {
+    testEmail = window.prompt('Send test to which email address?', (window.CURRENT_USER && window.CURRENT_USER.email) || '');
+    if (!testEmail) return;
+  }
+
+  // Always report on the PREVIOUS calendar month
+  var now    = new Date();
+  var prevMo = now.getMonth() === 0 ? 11 : now.getMonth() - 1;
+  var prevYr = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+  var yearMonth = prevYr + '-' + String(prevMo + 1).padStart(2, '0');
+  var monthLabel = new Date(prevYr, prevMo, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' });
+
+  if (!isTest) {
+    if (!confirm('Send ' + monthLabel + ' CBW Bottling Log to orders@corkbondedwarehouses.ie?')) return;
+  }
+
+  window.toast && window.toast('Building ' + monthLabel + ' log…');
+
+  try {
+    var rows = await _cbwFetchMonth(yearMonth);
+
+    if (!rows.length && !isTest) {
+      window.toast && window.toast('No completed jobs found for ' + monthLabel + '.', 'error');
+      return;
+    }
+
+    // Build CSV
+    var esc_csv = function(v) {
+      if (v == null) return '';
+      var s = String(v);
+      if (s.indexOf(',') >= 0 || s.indexOf('"') >= 0 || s.indexOf('\n') >= 0) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+
+    var csvLines = [];
+    // Row 1: month header + section sub-headings
+    csvLines.push([
+      monthLabel + ' — GI Product for Bottling (Duty Suspended)', '', '', '', '',
+      'Blending', '', '', '', '',
+      'Volume Filled', '', '',
+      '', '', ''
+    ].map(esc_csv).join(','));
+
+    // Row 2: column headers
+    csvLines.push([
+      'Date', 'Rotation No.', 'Container ID', 'Quantity (L)', 'ABV',
+      'Water (L)', 'Total Litres for Bottling', 'Alc %', 'Bottling Batch No.', 'Product Name',
+      'Bottles Filled', 'Litres Residue', 'Litres Losses',
+      'New Rotation No.', 'Date', 'Signed'
+    ].map(esc_csv).join(','));
+
+    rows.forEach(function(r) {
+      var bottlesStr = r.bottlesFilled && r.volumeCl
+        ? r.bottlesFilled.toLocaleString() + ' x ' + r.volumeCl + 'cl'
+        : (r.bottlesFilled ? String(r.bottlesFilled) : '');
+      csvLines.push([
+        _cbwFmtDate(r.date),
+        r.rotations,
+        r.containerRefs,
+        r.srcLitres > 0 ? r.srcLitres.toFixed(1) : '',
+        r.srcAbv > 0 ? r.srcAbv.toFixed(1) + '%' : '',
+        r.waterAdded > 0 ? r.waterAdded.toFixed(1) : '0',
+        r.totalLitres > 0 ? r.totalLitres.toFixed(1) : '',
+        r.bottlingAbv > 0 ? r.bottlingAbv.toFixed(1) + '%' : '',
+        r.batchNo,
+        r.productName,
+        bottlesStr,
+        r.residue > 0 ? r.residue.toFixed(1) : '0',
+        r.losses != null ? r.losses.toFixed(1) : '',
+        r.newRotation,
+        _cbwFmtDate(r.signedAt),
+        r.signedBy
+      ].map(esc_csv).join(','));
+    });
+
+    var csvContent = csvLines.join('\r\n');
+    var csvBase64  = btoa(unescape(encodeURIComponent(csvContent)));
+
+    var subject = 'CBW Bottling Log — ' + monthLabel;
+    var bodyHtml = '<div style="font-family:Arial,sans-serif;max-width:600px;color:#1a1a2e;">'
+      + '<div style="background:#0d1b2a;padding:24px 28px;border-bottom:3px solid #c9a84c;">'
+      + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;margin-bottom:6px;">Lighthouse Drinks</div>'
+      + '<div style="font-size:20px;font-weight:700;color:#ffffff;">CBW Bottling Log</div>'
+      + '<div style="font-size:13px;color:#8899aa;margin-top:4px;">' + monthLabel + '</div>'
+      + '</div>'
+      + '<div style="padding:24px 28px;font-size:13px;color:#374151;line-height:1.6;">'
+      + 'Please find attached the bottling log for <strong>' + monthLabel + '</strong>.<br><br>'
+      + 'This report covers <strong>' + rows.length + ' job' + (rows.length !== 1 ? 's' : '') + '</strong> completed during the period.'
+      + '<br><br>Total bottles filled: <strong>' + rows.reduce(function(s,r){ return s + r.bottlesFilled; }, 0).toLocaleString() + '</strong>'
+      + '<br>Total litres bottled: <strong>' + rows.reduce(function(s,r){ return s + r.totalLitres; }, 0).toFixed(1) + ' L</strong>'
+      + '</div>'
+      + '<div style="padding:0 28px 24px;font-size:11px;color:#9ca3af;">This report was generated automatically by Lighthouse Pulse.</div>'
+      + '</div>';
+
+    var to = isTest ? testEmail : 'orders@corkbondedwarehouses.ie';
+    await window.sendEmail({
+      to: to,
+      subject: subject,
+      html: bodyHtml,
+      from: 'reports@lighthousedrinks.com',
+      attachments: [{ filename: 'CBW_Bottling_Log_' + yearMonth + '.csv', content: csvBase64, encoding: 'base64', type: 'text/csv' }]
+    });
+
+    if (!isTest) {
+      window.toast && window.toast(monthLabel + ' log sent to CBW.', 'success');
+    } else {
+      window.toast && window.toast('Test log sent to ' + testEmail, 'success');
+    }
+  } catch(e) {
+    window.toast && window.toast('Failed to send log: ' + (e.message || e), 'error');
   }
 };
 
@@ -28405,6 +28759,7 @@ window.saveAdjModal = async function() {
     html += '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">Production Manager Sign-Off</div>';
     html += frow('Name', inp('signed-by', j.results_signed_by, 'Production Manager name'), true);
     html += frow('Date', inp('signed-at', j.results_signed_at ? j.results_signed_at.slice(0,10) : '', '', 'date'), true);
+    html += frow('New CBW Rotation No. (finished product)', inp('cbw-new-rotation', j.cbw_new_rotation_no, 'e.g. R-2026-047') + sub('Assigned by CBW for the bottled product — goes on the monthly CBW log'));
 
     // ── Email Reports bar ───────────────────────────────────────────────────
     var cbwSentBadge = j.cbw_report_sent_at
@@ -28500,7 +28855,8 @@ window.saveAdjModal = async function() {
       delivery_cleared:        true,
       results_notes:           gv('notes') || null,
       results_signed_by:       gv('signed-by') || null,
-      results_signed_at:       gv('signed-at') ? gv('signed-at') + 'T00:00:00Z' : null
+      results_signed_at:       gv('signed-at') ? gv('signed-at') + 'T00:00:00Z' : null,
+      cbw_new_rotation_no:     gv('cbw-new-rotation') || null
     };
     try {
       await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, payload);
