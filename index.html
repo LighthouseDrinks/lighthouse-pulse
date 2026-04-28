@@ -15412,6 +15412,37 @@ window.loadBoms = async function initBoms() {
           });
         });
 
+        // If this is a sample mixing task — notify requester + update sample status
+        try {
+          var smpCheck = await db.select('samples','?mixing_task_id=eq.'+encodeURIComponent(taskId)+'&select=id,requested_by,client_id&limit=1');
+          if (smpCheck && smpCheck.length) {
+            var smpRec = smpCheck[0];
+            // Bump sample to awaiting_feedback
+            await db.update('samples','?id=eq.'+encodeURIComponent(smpRec.id),{ status:'awaiting_feedback' });
+            var cachedSmp = (window._SAMPLES||[]).find(function(s){ return s.id === smpRec.id; });
+            if (cachedSmp) cachedSmp.status = 'awaiting_feedback';
+            if (window.toast) window.toast('Sample '+smpRec.id+' marked Awaiting Feedback.','success');
+            // Send email to requester if we can find their address
+            if (smpRec.requested_by && window.sendEmail) {
+              try {
+                var reqName = smpRec.requested_by;
+                var uRows = await db.select('app_users','?display_name=ilike.'+encodeURIComponent(reqName)+'&select=email&limit=1');
+                var reqEmail = uRows && uRows[0] && uRows[0].email;
+                if (reqEmail) {
+                  window.sendEmail({
+                    to: reqEmail,
+                    subject: 'Sample '+smpRec.id+' is ready for review',
+                    html: '<p>Hi '+reqName+',</p>'
+                      +'<p>The mixing task for sample <strong>'+smpRec.id+'</strong> has been completed.</p>'
+                      +'<p>The sample is now ready for your review. Please log in to Pulse to update the status.</p>'
+                      +'<p style="color:#999;font-size:12px;">This is an automated notification from Lighthouse Pulse.</p>'
+                  });
+                }
+              } catch(_) {}
+            }
+          }
+        } catch(_) {}
+
         // Auto-sign-off any linked next step
         if (t.deal_id) {
           try {
@@ -17852,6 +17883,26 @@ window.loadBoms = async function initBoms() {
             <select id="smp-modal-deal" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;">
               <option value="">— none —</option>
             </select>
+          </div>
+        </div>
+
+        <!-- Mixing Task -->
+        <div style="border:1px solid var(--navy-border);border-radius:4px;padding:12px 14px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;">Mixing Task</div>
+            <button id="smp-task-toggle-btn" onclick="window._smpToggleTaskForm()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;padding:3px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">+ Assign</button>
+          </div>
+          <div id="smp-task-status-line" style="font-size:12px;color:var(--muted);">No mixing task assigned yet.</div>
+          <div id="smp-task-form" style="display:none;flex-direction:column;gap:8px;margin-top:10px;">
+            <div>
+              <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Assign To</div>
+              <select id="smp-task-assignee" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;"><option value="">— select person —</option></select>
+            </div>
+            <div>
+              <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Due Date</div>
+              <input id="smp-task-due" type="date" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+            </div>
+            <button onclick="window._smpAssignTask()" style="background:var(--gold);border:none;color:var(--navy);font-size:11px;font-weight:700;padding:7px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;align-self:flex-start;">Create Mixing Task</button>
           </div>
         </div>
 
@@ -40256,15 +40307,21 @@ window._smpRender = function() {
   }).join('');
 };
 
-// ─── Populate client + deal dropdowns in modal ────────────────────────────
-function _smpFillDropdowns(presetClientId, presetDealId) {
+// ─── Populate dropdowns (clients, deals, task assignees) ─────────────────
+// Async so it can fall back to DB if window.CLIENTS not yet loaded
+async function _smpFillDropdowns(presetClientId, presetDealId) {
   var cSel = document.getElementById('smp-modal-client');
   var dSel = document.getElementById('smp-modal-deal');
   if (!cSel || !dSel) return;
 
-  // Clients
+  // Clients — use cache or fetch from DB
+  var cls = (window.CLIENTS || []);
+  if (!cls.length) {
+    try { cls = await _smpDB().select('clients','?order=company.asc&select=id,company') || []; }
+    catch(_) { cls = []; }
+  }
+  cls = cls.slice().sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
   cSel.innerHTML = '<option value="">— select client —</option>';
-  var cls = (window.CLIENTS || []).slice().sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
   cls.forEach(function(c){
     var o = document.createElement('option');
     o.value = c.id;
@@ -40283,6 +40340,20 @@ function _smpFillDropdowns(presetClientId, presetDealId) {
     if (d.id === presetDealId) o.selected = true;
     dSel.appendChild(o);
   });
+
+  // Task assignee dropdown — all staff users
+  var aSel = document.getElementById('smp-task-assignee');
+  if (aSel && aSel.options.length <= 1) {
+    try {
+      var users = await _smpDB().select('app_users','?select=id,display_name,role&order=display_name.asc') || [];
+      users.forEach(function(u){
+        var o = document.createElement('option');
+        o.value = u.id;
+        o.textContent = u.display_name || u.id.slice(0,8);
+        aSel.appendChild(o);
+      });
+    } catch(_) {}
+  }
 }
 
 // ─── Open modal (new) ─────────────────────────────────────────────────────
@@ -40309,10 +40380,13 @@ window.openNewSample = async function(presets) {
   var notesEl = document.getElementById('smp-modal-notes');
   if (notesEl) notesEl.value = '';
 
-  _smpFillDropdowns(presets.client_id || '', presets.deal_id || '');
+  await _smpFillDropdowns(presets.client_id || '', presets.deal_id || '');
 
   // Components
   _smpResetCompTbody([]);
+
+  // Task section — reset
+  _smpRenderTaskSection(null, null);
 
   // Delete button — hide for new
   var del = document.getElementById('smp-delete-btn');
@@ -40365,8 +40439,11 @@ window.openSampleDetail = async function(id) {
   var dateEl = document.getElementById('smp-modal-date');
   if (dateEl) dateEl.value = s.date_shared || '';
 
-  _smpFillDropdowns(s.client_id, s.deal_id);
+  await _smpFillDropdowns(s.client_id, s.deal_id);
   _smpResetCompTbody(s.components || []);
+
+  // Task section
+  await _smpRenderTaskSection(s.id, s.mixing_task_id || null);
 
   var del = document.getElementById('smp-delete-btn');
   if (del) del.style.display = 'inline-block';
@@ -40513,6 +40590,104 @@ window.saveSample = async function() {
     }
   } catch(e) {
     if (window.toast) window.toast('Save failed: '+e.message,'error');
+  }
+};
+
+// ─── Mixing task helpers ──────────────────────────────────────────────────
+window._smpToggleTaskForm = function() {
+  var form = document.getElementById('smp-task-form');
+  if (!form) return;
+  var showing = form.style.display === 'flex';
+  form.style.display = showing ? 'none' : 'flex';
+  var btn = document.getElementById('smp-task-toggle-btn');
+  if (btn) btn.textContent = showing ? '+ Assign' : '✕ Cancel';
+};
+
+async function _smpRenderTaskSection(sampleId, taskId) {
+  var statusLine = document.getElementById('smp-task-status-line');
+  var form       = document.getElementById('smp-task-form');
+  var toggleBtn  = document.getElementById('smp-task-toggle-btn');
+  if (!statusLine) return;
+
+  if (!taskId) {
+    statusLine.innerHTML = '<span style="color:var(--muted);">No mixing task assigned yet.</span>';
+    if (form)      form.style.display = 'none';
+    if (toggleBtn) { toggleBtn.textContent = '+ Assign'; toggleBtn.style.display = 'inline-block'; }
+    return;
+  }
+
+  // Fetch task details
+  try {
+    var rows = await _smpDB().select('job_tasks','?id=eq.'+encodeURIComponent(taskId)+'&select=id,title,status,completed_at,assignee_id&limit=1');
+    var t = rows && rows[0];
+    if (!t) { statusLine.innerHTML = '<span style="color:var(--muted);">Task not found.</span>'; return; }
+    // Find assignee name
+    var users = await _smpDB().select('app_users','?id=eq.'+encodeURIComponent(t.assignee_id||'')+'&select=display_name&limit=1').catch(function(){return [];});
+    var aName = (users && users[0] && users[0].display_name) || 'Someone';
+    var done  = !!t.completed_at;
+    var col   = done ? 'var(--green)' : 'var(--amber)';
+    var lbl   = done ? 'Completed' : 'In Progress';
+    statusLine.innerHTML = '<span style="color:'+col+';font-weight:700;">'+lbl+'</span>'
+      + ' &mdash; assigned to <strong style="color:var(--text);">'+esc(aName)+'</strong>'
+      + (done ? '' : ' <span style="color:var(--muted);font-size:10px;">(pending)</span>');
+    if (form)      form.style.display = 'none';
+    if (toggleBtn) toggleBtn.style.display = 'none';
+  } catch(_) {}
+}
+
+window._smpAssignTask = async function() {
+  var sampleId  = document.getElementById('smp-modal-hidden-id') ? document.getElementById('smp-modal-hidden-id').value.trim() : '';
+  if (!sampleId) { if(window.toast) window.toast('Save the sample first, then assign a mixing task.','error'); return; }
+
+  var assigneeId = document.getElementById('smp-task-assignee') ? document.getElementById('smp-task-assignee').value : '';
+  var dueDate    = document.getElementById('smp-task-due')       ? document.getElementById('smp-task-due').value       : '';
+  if (!assigneeId) { if(window.toast) window.toast('Please select a person to assign the task to.','error'); return; }
+
+  // Find client name for task title
+  var clientId  = document.getElementById('smp-modal-client') ? document.getElementById('smp-modal-client').value : '';
+  var cls       = window.CLIENTS || [];
+  var cl        = cls.find(function(c){ return c.id === clientId; });
+  var clientName = cl ? (cl.company || clientId) : clientId;
+  var reqBy      = document.getElementById('smp-modal-reqby') ? document.getElementById('smp-modal-reqby').value.trim() : '';
+
+  var task = {
+    title:       'Mix sample ' + sampleId + ' for ' + clientName,
+    description: 'Prepare and mix sample ' + sampleId + '. Requested by: ' + (reqBy || '—') + '.\nOnce complete, mark this task done — the requester will be notified automatically.',
+    assignee_id: assigneeId,
+    due_date:    dueDate || null,
+    status:      'pending',
+    priority:    'normal',
+    client_id:   clientId || null,
+    created_by:  (window.CURRENT_USER && window.CURRENT_USER.id) || null,
+    created_at:  new Date().toISOString()
+  };
+
+  try {
+    var saved = await _smpDB().insert('job_tasks', task);
+    // Get the inserted task id — PostgREST returns array
+    var newTaskId = saved && saved[0] && saved[0].id;
+    if (!newTaskId) {
+      // Fetch most recent task with this title as fallback
+      var recent = await _smpDB().select('job_tasks','?title=eq.'+encodeURIComponent(task.title)+'&order=created_at.desc&select=id&limit=1');
+      newTaskId = recent && recent[0] && recent[0].id;
+    }
+    if (!newTaskId) throw new Error('Could not retrieve new task ID.');
+
+    // Link task to sample
+    await _smpDB().update('samples','?id=eq.'+encodeURIComponent(sampleId),{ mixing_task_id: newTaskId });
+
+    // Update local cache
+    var cached = (window._SAMPLES||[]).find(function(s){ return s.id === sampleId; });
+    if (cached) cached.mixing_task_id = newTaskId;
+
+    if (window.toast) window.toast('Mixing task created and assigned.','success');
+    window._smpToggleTaskForm();
+    await _smpRenderTaskSection(sampleId, newTaskId);
+
+    // Reload my-tasks badge
+    if (typeof window.updateMyTasksBadge === 'function') window.updateMyTasksBadge();
+  } catch(e) {
+    if (window.toast) window.toast('Failed to create task: '+e.message,'error');
   }
 };
 
