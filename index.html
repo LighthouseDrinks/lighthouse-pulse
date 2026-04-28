@@ -13107,20 +13107,23 @@ window.loadBoms = async function initBoms() {
         ? '<div style="font-size:10px;color:var(--muted);text-align:center;padding:16px 6px;opacity:0.55;border:1px dashed var(--navy-border);border-radius:4px;margin:4px;">Drop deal here</div>'
         : deals.map(renderCard).join('');
       return '<div class="pipe-col' + (isEmpty ? ' pipe-col-empty' : '') + '" data-stage-id="' + esc(s.id) + '" ondragover="window._pipeDragOver(event,this)" ondragleave="window._pipeDragLeave(event,this)" ondrop="window._pipeDrop(event,this)" '
-        + 'style="flex:1 1 200px;min-width:180px;max-width:300px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s;">'
+        + 'style="flex:1 1 0;min-width:160px;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:5px;display:flex;flex-direction:column;transition:background .15s;">'
         + '<div style="padding:10px 12px;border-bottom:1px solid var(--navy-border);display:flex;align-items:flex-start;justify-content:space-between;gap:6px;">'
         +   '<div style="min-width:0;flex:1;">'
         +     '<div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;font-weight:700;color:' + col + ';line-height:1.2;">' + esc(s.name) + '</div>'
         +     '<div style="font-size:10px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums;">' + deals.length + ' · <span style="color:var(--text);">' + fmtMoneyFull(sum,'EUR') + '</span></div>'
         +   '</div>'
-        +   '<div style="font-size:9px;color:var(--muted);font-weight:700;background:var(--navy-mid);border:1px solid var(--navy-border);padding:2px 5px;border-radius:10px;flex:0 0 auto;">' + (s.default_probability||0) + '%</div>'
+        +   '<div style="display:flex;align-items:center;gap:5px;flex-shrink:0;">'
+        +     '<button onclick="event.stopPropagation();window._showStageInfo(\'' + esc(s.id) + '\')" title="About this stage" style="background:none;border:1px solid rgba(255,255,255,0.12);color:var(--muted);font-size:10px;font-weight:700;width:18px;height:18px;border-radius:50%;cursor:pointer;font-family:Lato,sans-serif;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1;flex-shrink:0;" onmouseover="this.style.borderColor=\'' + col + '\';this.style.color=\'' + col + '\'" onmouseout="this.style.borderColor=\'rgba(255,255,255,0.12)\';this.style.color=\'var(--muted)\'">i</button>'
+        +     '<div style="font-size:9px;color:var(--muted);font-weight:700;background:var(--navy-mid);border:1px solid var(--navy-border);padding:2px 5px;border-radius:10px;">' + (s.default_probability||0) + '%</div>'
+        +   '</div>'
         + '</div>'
         + '<div class="pipe-col-body" style="padding:6px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:60px;">' + bodyHtml + '</div>'
         + '</div>';
     }
 
-    // Active stage columns
-    var colsHtml = '<div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;align-items:flex-start;">'
+    // Active stage columns — stretch to full width; overflow only on very small screens
+    var colsHtml = '<div style="display:flex;gap:8px;padding-bottom:4px;align-items:flex-start;width:100%;overflow-x:auto;">'
       + activeStages.map(makeCol).join('')
       + '</div>';
 
@@ -13387,6 +13390,12 @@ window.loadBoms = async function initBoms() {
     if (isNurture(st)) {
       nurtureNote = await window.lpPrompt('What is the specific blocker?', '', { title: 'Move to Nurture', placeholder: 'Blocker + expected re-engagement date or trigger' });
       if (nurtureNote === null) return;
+    }
+
+    // Advisory gate overlay for standard forward stages
+    if (st && !st.is_won && !st.is_lost && !isNurture(st)) {
+      var confirmed = await _showStageGateOverlay(st);
+      if (!confirmed) return;
     }
 
     var payload = { stage_id: stageId, stage_entered_at: new Date().toISOString() };
@@ -13702,6 +13711,18 @@ window.loadBoms = async function initBoms() {
     }
   };
 
+  // ── Stage descriptions (shown on "ⓘ" button in column header) ──────────
+  var STAGE_DESCRIPTIONS = {
+    'PS-LEAD':  { title: 'Lead', summary: 'An initial expression of interest. Contact name and company captured; source recorded (inbound, referral, trade show, or outbound). Not yet qualified — just enough to warrant a follow-up.' },
+    'PS-QUAL':  { title: 'Qualified', summary: 'The opportunity has been assessed and stacks up. Liquid source is confirmed (owned, contracted, or credibly sourced), indicative volume is within Lighthouse capacity, timeline is tied to a real market driver, and the decision-maker is identified and engaged.' },
+    'PS-SCOPE': { title: 'Scoping', summary: 'An active design and specification conversation is underway. The customer has shared a brief covering brand, market, positioning, or price point. At least one of liquid spec, format spec, or route to market is under discussion — and the customer is providing input, not just receiving it. Note: pure co-packing deals typically skip this stage.' },
+    'PS-QUOTE': { title: 'Quoted', summary: 'A formal written quote has been issued covering bottling cost, dry goods, setup, excise, and storage as applicable. The quote version and date are logged on the deal record. The ball is now in the customer\'s court.' },
+    'PS-NEGO':  { title: 'Negotiation', summary: 'The customer has responded to the quote. At least one of the following is actively in progress: sample requested, label proof in review, commercial terms under discussion, or contract redlines exchanged. Specific objections or change requests are documented.' },
+    'PS-WON':   { title: 'Won', summary: 'The deal is confirmed. A PO has been received or a deposit paid. A linked Job record must be created in Pulse Operations and the handover pack (spec sheet, attachments, primary contact) attached to the deal.' },
+    'PS-LOST':  { title: 'Lost', summary: 'The deal did not proceed. A loss reason is required. If the reason is "Other" a free-text note is mandatory. Lost deals are preserved here for pipeline review and forecasting accuracy.' },
+    'PS-NURT':  { title: 'Nurture', summary: 'The deal is alive but on hold due to a specific blocker — funding, approvals, market timing, or internal delay. The blocker must be named, an expected re-engagement date or trigger logged, and the stage the deal left from preserved so it can resume in place.' }
+  };
+
   // ── Stage gate criteria (advisory overlay) ──────────────────────────────
   var STAGE_GATES = {
     'PS-LEAD':  ['Contact name and company captured', 'Source recorded (inbound, referral, trade show, outbound)'],
@@ -13746,6 +13767,38 @@ window.loadBoms = async function initBoms() {
     });
   }
   window._sgChecked = function(ov) {}; // placeholder — visual only
+
+  window._showStageInfo = function(stageId) {
+    var st  = STAGE_BY_ID[stageId];
+    var col = st ? stageColor(st) : 'var(--gold)';
+    var info = STAGE_DESCRIPTIONS[stageId] || { title: (st && st.name) || stageId, summary: '' };
+    var gates = STAGE_GATES[stageId] || [];
+    var gatesHtml = gates.length
+      ? '<div style="margin-top:14px;"><div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px;">Entry checklist (advisory)</div>'
+        + gates.map(function(g){
+            return '<div style="display:flex;align-items:flex-start;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);">'
+              + '<span style="color:' + col + ';font-size:14px;line-height:1;flex-shrink:0;margin-top:1px;">✓</span>'
+              + '<span style="font-size:12px;color:var(--text);line-height:1.45;">' + esc(g) + '</span>'
+              + '</div>';
+          }).join('')
+        + '</div>'
+      : '';
+    var ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.82);z-index:100060;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
+    ov.innerHTML =
+      '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid ' + col + ';border-radius:8px;padding:24px 28px;max-width:420px;width:100%;">'
+      + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:' + col + ';font-weight:700;margin-bottom:4px;">Stage · ' + esc(info.title) + '</div>'
+      + '<div style="font-size:15px;font-weight:700;color:var(--white);margin-bottom:10px;">' + esc(info.title) + '</div>'
+      + '<div style="font-size:13px;color:var(--text);line-height:1.6;">' + esc(info.summary) + '</div>'
+      + gatesHtml
+      + '<div style="display:flex;justify-content:flex-end;margin-top:18px;">'
+      +   '<button style="background:' + col + ';border:none;color:var(--navy);padding:8px 20px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-size:13px;font-weight:700;" onclick="this.closest(\'[data-si]\').remove()">Got it</button>'
+      + '</div>'
+      + '</div>';
+    ov.setAttribute('data-si','1');
+    ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
+    document.body.appendChild(ov);
+  };
 
   window._ddLinkQuote = async function() {
     var sel = document.getElementById('dd-quote-select');
