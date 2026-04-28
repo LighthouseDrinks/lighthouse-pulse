@@ -27436,6 +27436,23 @@ window.saveAdjModal = async function() {
         return;
       }
 
+      // Deduplicate by sku_id — keep the row with the most user data (PO, order qty, etc.)
+      // This is a render-level safety net for any jobs that already have duplicate DB rows.
+      var seen = {};
+      comps = comps.filter(function(c) {
+        var key = c.sku_id || c.item_name || c.id;
+        if (seen[key]) {
+          // Keep whichever row has more filled-in fields (PO number, qty ordered, etc.)
+          var prev = seen[key];
+          var prevScore = (prev.po_number?1:0) + (prev.qty_ordered?1:0) + (prev.on_site_confirmed?1:0);
+          var curScore  = (c.po_number?1:0)    + (c.qty_ordered?1:0)    + (c.on_site_confirmed?1:0);
+          if (curScore > prevScore) seen[key] = c;
+          return false;
+        }
+        seen[key] = c;
+        return true;
+      });
+
       // Fetch stock, unit costs, and location per SKU
       var skuIds = comps.filter(function(c){return c.sku_id;}).map(function(c){return c.sku_id;});
       var stockMap = {}, locationMap = {}, latestCostMap = {};
@@ -27706,6 +27723,9 @@ window.saveAdjModal = async function() {
       return;
     }
     try {
+      // Always wipe existing rows first so repeated calls never double-seed
+      await supaMut('DELETE','job_components','?job_id=eq.'+jobId, null);
+
       // BOM stores components as individual SKU ID columns — read the BOM row directly
       var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=*');
       if (!bomRows || !bomRows.length) {
