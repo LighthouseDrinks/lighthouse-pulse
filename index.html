@@ -27437,8 +27437,9 @@ window.saveAdjModal = async function() {
       }
 
       // Deduplicate by sku_id — keep the row with the most user data (PO, order qty, etc.)
-      // This is a render-level safety net for any jobs that already have duplicate DB rows.
+      // Also delete ghost duplicate rows from the DB silently so the data stays clean.
       var seen = {};
+      var ghostIds = [];
       comps = comps.filter(function(c) {
         var key = c.sku_id || c.item_name || c.id;
         if (seen[key]) {
@@ -27446,12 +27447,23 @@ window.saveAdjModal = async function() {
           var prev = seen[key];
           var prevScore = (prev.po_number?1:0) + (prev.qty_ordered?1:0) + (prev.on_site_confirmed?1:0);
           var curScore  = (c.po_number?1:0)    + (c.qty_ordered?1:0)    + (c.on_site_confirmed?1:0);
-          if (curScore > prevScore) seen[key] = c;
+          if (curScore > prevScore) {
+            ghostIds.push(prev.id);
+            seen[key] = c;
+          } else {
+            ghostIds.push(c.id);
+          }
           return false;
         }
         seen[key] = c;
         return true;
       });
+      // Fire-and-forget: purge duplicate rows from the DB so they never resurface
+      if (ghostIds.length) {
+        ghostIds.forEach(function(gid){
+          supaMut('DELETE','job_components','?id=eq.'+gid, null).catch(function(){});
+        });
+      }
 
       // Fetch stock, unit costs, and location per SKU
       var skuIds = comps.filter(function(c){return c.sku_id;}).map(function(c){return c.sku_id;});
