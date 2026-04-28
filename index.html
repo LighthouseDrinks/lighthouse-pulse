@@ -9140,8 +9140,10 @@ async function saveJob(){
       // they aren't already tagged as Client or Churned (respect churn).
       if (clientId) {
         try {
+          // Promote anyone who isn't already Client or Churned — this also
+          // catches records with stale/invalid stage values like 'planning'.
           await db.update('clients',
-            '?id=eq.' + clientId + '&lifecycle_stage=in.(opportunity,lead,prospect,customer)',
+            '?id=eq.' + clientId + '&lifecycle_stage=not.in.(client,churned)',
             { lifecycle_stage: 'client', became_client_at: new Date().toISOString() }
           );
           if (window._reloadClientsFromDB) window._reloadClientsFromDB();
@@ -16137,8 +16139,12 @@ window.loadBoms = async function initBoms() {
     return CLIENTS.filter(function(c){
       if (_custState.lifecycle !== 'all') {
         var _ls = c.lifecycle_stage || 'client';
+        // Any unrecognised stage (e.g. legacy 'planning') falls through to 'client'
+        var _validLS = { opportunity:1, lead:1, prospect:1, customer:1, client:1, churned:1 };
+        if (!_validLS[_ls]) _ls = 'client';
         var _match = _ls === _custState.lifecycle
-          || (_custState.lifecycle === 'opportunity' && (_ls === 'lead' || _ls === 'prospect'));
+          || (_custState.lifecycle === 'opportunity' && (_ls === 'lead' || _ls === 'prospect'))
+          || (_custState.lifecycle === 'client'      && _ls === 'customer');
         if (!_match) return false;
       }
       if (_custState.referral  && (c.referred_by || 'Direct') !== _custState.referral) return false;
@@ -16155,7 +16161,11 @@ window.loadBoms = async function initBoms() {
     var phone     = esc(c.phone    || '—');
     var notes     = esc(c.notes    || '—');
     var country   = esc(c.country  || '—');
-    var stage     = c.lifecycle_stage || 'client';
+    // Normalise any legacy/invalid stage value (e.g. job-stage 'planning' that
+    // accidentally landed in the clients table) so the pill always shows something sensible.
+    var _rawStage = c.lifecycle_stage || 'client';
+    var _validStages = { opportunity:1, lead:1, prospect:1, customer:1, client:1, churned:1 };
+    var stage     = _validStages[_rawStage] ? _rawStage : 'client';
     var stageLbl  = STAGE_LABELS[stage] || stage;
     var stageCol  = STAGE_COLORS[stage] || 'var(--muted)';
     var source    = esc(c.referred_by || 'Direct');
