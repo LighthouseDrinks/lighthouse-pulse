@@ -17741,8 +17741,8 @@ window.loadBoms = async function initBoms() {
 <div id="page-samples" class="page">
 <div class="wrapper">
   <div class="page-label">Sales &amp; CRM</div>
-  <div class="page-heading" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
-    Sample Log
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:28px;">
+    <div class="page-heading" style="margin-bottom:0;">Sample Log</div>
     <button class="btn btn-gold" onclick="window.openNewSample()" style="font-size:12px;">+ New Sample</button>
   </div>
 
@@ -40146,8 +40146,9 @@ window._lpNewQuoteCustomer = function(ev) {
 (function(){
 'use strict';
 
-var db  = window.db;
 var esc = window.escapeHtml || function(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+// Resolve db at call time so we never capture it before window.db is initialised
+function _smpDB(){ return window.db; }
 
 var _SMP_STATUS = {
   pending:           { label:'Pending',            color:'var(--amber)' },
@@ -40170,7 +40171,7 @@ function _smpStatusPill(status) {
 // ─── ID generation ────────────────────────────────────────────────────────
 async function _smpNextId() {
   try {
-    var rows = await db.select('samples','?select=id&order=id.desc&limit=100');
+    var rows = await _smpDB().select('samples','?select=id&order=id.desc&limit=100');
     if (!rows || !rows.length) return 'SMP-001';
     var max = 0;
     rows.forEach(function(r){
@@ -40189,13 +40190,13 @@ window.loadSamplesPage = async function() {
   var tbody = document.getElementById('smp-tbody');
   if (tbody) tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:32px;">Loading…</td></tr>';
   try {
-    var rows = await db.select('samples','?order=date_shared.desc,created_at.desc');
+    var rows = await _smpDB().select('samples','?order=date_shared.desc,created_at.desc');
     if (!rows) rows = [];
     // Fetch all components in one shot
     var comps = [];
     if (rows.length) {
       var ids = rows.map(function(r){ return encodeURIComponent(r.id); }).join(',');
-      try { comps = await db.select('sample_components','?sample_id=in.('+ids+')&order=sort_order.asc'); }
+      try { comps = await _smpDB().select('sample_components','?sample_id=in.('+ids+')&order=sort_order.asc'); }
       catch(_) { comps = []; }
     }
     // Attach client names from window.CLIENTS
@@ -40210,7 +40211,13 @@ window.loadSamplesPage = async function() {
     window._SAMPLES = rows;
     window._smpRender();
   } catch(e) {
-    if (tbody) tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--red);padding:24px;">Error: '+esc(e.message)+'</td></tr>';
+    var msg = (e.message || '').toLowerCase();
+    var notSetup = msg.indexOf('fetch') >= 0 || msg.indexOf('relation') >= 0 || msg.indexOf('does not exist') >= 0;
+    if (tbody) tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:32px;">'
+      + (notSetup
+          ? '⚠ Sample tables not yet created.<br><span style="font-size:11px;">Please run the SQL in Supabase to set up the samples &amp; sample_components tables.</span>'
+          : 'Error: '+esc(e.message))
+      + '</td></tr>';
   }
 };
 
@@ -40328,10 +40335,10 @@ window.openSampleDetail = async function(id) {
   if (!s) {
     // Fetch if not in cache
     try {
-      var rows = await db.select('samples','?id=eq.'+encodeURIComponent(id));
+      var rows = await _smpDB().select('samples','?id=eq.'+encodeURIComponent(id));
       s = rows && rows[0];
       if (s) {
-        var comps = await db.select('sample_components','?sample_id=eq.'+encodeURIComponent(id)+'&order=sort_order.asc');
+        var comps = await _smpDB().select('sample_components','?sample_id=eq.'+encodeURIComponent(id)+'&order=sort_order.asc');
         s.components = comps || [];
         // client name
         var cls = window.CLIENTS || [];
@@ -40484,17 +40491,17 @@ window.saveSample = async function() {
 
   try {
     if (isNew) {
-      await db.insert('samples', payload);
+      await _smpDB().insert('samples', payload);
     } else {
       var upd = Object.assign({}, payload);
       delete upd.id;
-      await db.update('samples', '?id=eq.'+encodeURIComponent(sampleId), upd);
+      await _smpDB().update('samples', '?id=eq.'+encodeURIComponent(sampleId), upd);
     }
     // Replace components: delete then re-insert
-    await db.delete('sample_components', '?sample_id=eq.'+encodeURIComponent(sampleId));
+    await _smpDB().delete('sample_components', '?sample_id=eq.'+encodeURIComponent(sampleId));
     for (var i = 0; i < comps.length; i++) {
       comps[i].sample_id = sampleId;
-      await db.insert('sample_components', comps[i]);
+      await _smpDB().insert('sample_components', comps[i]);
     }
 
     if (window.toast) window.toast('Sample '+sampleId+' saved.', 'success');
@@ -40520,7 +40527,7 @@ window._smpDelete = async function() {
   if (!id) return;
   if (!confirm('Delete sample '+id+'? This cannot be undone.')) return;
   try {
-    await db.delete('samples','?id=eq.'+encodeURIComponent(id));
+    await _smpDB().delete('samples','?id=eq.'+encodeURIComponent(id));
     if (window.toast) window.toast('Sample '+id+' deleted.','success');
     window.closeSampleModal();
     if (typeof window.loadSamplesPage === 'function') window.loadSamplesPage();
@@ -40536,14 +40543,14 @@ window.loadC360Samples = async function(clientId) {
   if (!clientId) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No client selected.</td></tr>'; return; }
   tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
   try {
-    var rows = await db.select('samples','?client_id=eq.'+encodeURIComponent(clientId)+'&order=date_shared.desc,created_at.desc');
+    var rows = await _smpDB().select('samples','?client_id=eq.'+encodeURIComponent(clientId)+'&order=date_shared.desc,created_at.desc');
     if (!rows || !rows.length) {
       tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No samples for this client yet.</td></tr>';
       return;
     }
     var ids = rows.map(function(r){ return encodeURIComponent(r.id); }).join(',');
     var comps = [];
-    try { comps = await db.select('sample_components','?sample_id=in.('+ids+')&order=sort_order.asc'); } catch(_){}
+    try { comps = await _smpDB().select('sample_components','?sample_id=in.('+ids+')&order=sort_order.asc'); } catch(_){}
     rows.forEach(function(r){ r.components = comps.filter(function(c){ return c.sample_id===r.id; }); });
 
     tbody.innerHTML = rows.map(function(s){
@@ -40570,7 +40577,7 @@ window._ddLoadLinkedSamples = async function(dealId) {
   if (!container) return;
   if (!dealId) { container.innerHTML = ''; return; }
   try {
-    var rows = await db.select('samples','?deal_id=eq.'+encodeURIComponent(dealId)+'&order=date_shared.desc');
+    var rows = await _smpDB().select('samples','?deal_id=eq.'+encodeURIComponent(dealId)+'&order=date_shared.desc');
     if (!rows || !rows.length) { container.innerHTML = '<div style="font-size:11px;color:var(--muted);">None linked yet.</div>'; return; }
     container.innerHTML = rows.map(function(s){
       var st = _SMP_STATUS[s.status]||_SMP_STATUS.pending;
@@ -40610,7 +40617,7 @@ window._ddLinkSample = async function() {
   var found = unlinked.find(function(s){ return s.id === picked; });
   if (!found) { if(window.toast) window.toast('Sample not found: '+picked,'error'); return; }
   try {
-    await db.update('samples','?id=eq.'+encodeURIComponent(found.id),{ deal_id: dealId });
+    await _smpDB().update('samples','?id=eq.'+encodeURIComponent(found.id),{ deal_id: dealId });
     found.deal_id = dealId;
     if(window.toast) window.toast(found.id+' linked to deal.','success');
     window._ddLoadLinkedSamples(dealId);
