@@ -11972,6 +11972,7 @@ window.loadBoms = async function initBoms() {
       <select id="pipe-owner-filter" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:6px 8px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
         <option value="">All owners</option>
       </select>
+      <button id="pipe-my-deals-btn" type="button" onclick="window._pipeMyDeals && window._pipeMyDeals()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;padding:5px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;white-space:nowrap;">My Deals</button>
       <select id="pipe-type-filter" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:6px 8px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
         <option value="">All types</option>
         <option value="new_business">New business</option>
@@ -12683,8 +12684,12 @@ window.loadBoms = async function initBoms() {
         <input type="date" id="df-close">
       </div>
       <div class="mfield">
+        <label>Follow-up Date</label>
+        <input type="date" id="df-followup">
+      </div>
+      <div class="mfield">
         <label>Owner</label>
-        <input type="text" id="df-owner" placeholder="e.g. John">
+        <select id="df-owner" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;border-radius:3px;width:100%;"></select>
       </div>
       <div class="mfield">
         <label>Source</label>
@@ -12742,6 +12747,7 @@ window.loadBoms = async function initBoms() {
         <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Owner</div>       <div id="dd-owner"  style="font-size:13px;color:var(--white);">—</div></div>
         <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Source</div>      <div id="dd-source" style="font-size:13px;color:var(--white);">—</div></div>
         <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Created</div>     <div id="dd-created" style="font-size:13px;color:var(--muted);">—</div></div>
+        <div><div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Follow-up</div>   <div id="dd-followup" style="font-size:13px;color:var(--white);">—</div></div>
       </div>
 
       <!-- Linked quote -->
@@ -12949,9 +12955,25 @@ window.loadBoms = async function initBoms() {
     DEALS.forEach(function(d){ if (d.owner_id) owners[d.owner_id] = true; });
     var current = ownerSel.value;
     var keys = Object.keys(owners).sort();
-    ownerSel.innerHTML = '<option value="">All owners</option>' + keys.map(function(k){ return '<option value="' + esc(k) + '">' + esc(k) + '</option>'; }).join('');
+    ownerSel.innerHTML = '<option value="">All owners</option>' + keys.map(function(k){
+      var u = (window.APP_USERS||[]).find(function(u){ return u.id === k; });
+      var label = u ? (u.display_name || u.email || k) : k;
+      return '<option value="' + esc(k) + '">' + esc(label) + '</option>';
+    }).join('');
     if (current) ownerSel.value = current;
   }
+
+  window._pipeMyDeals = function() {
+    var myId = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
+    if (!myId) return;
+    var ownerSel = document.getElementById('pipe-owner-filter');
+    if (!ownerSel) return;
+    ownerSel.value = myId;
+    _pipeState.owner = myId;
+    renderPipeline();
+    var btn = document.getElementById('pipe-my-deals-btn');
+    if (btn) { btn.style.background = 'var(--gold)'; btn.style.color = 'var(--navy)'; btn.style.borderColor = 'var(--gold)'; }
+  };
 
   function filteredDeals() {
     return DEALS.filter(function(d){
@@ -13417,11 +13439,29 @@ window.loadBoms = async function initBoms() {
   window.openDealModal = async function(editId, presets) {
     presets = presets || {};
     if (!PIPE_STAGES.length) await loadPipelineMeta();
+    // Ensure clients list is loaded
+    if (!(window.CLIENTS||[]).length) {
+      var _loadCli = window._reloadClientsFromDB || window.reloadClientsFromDB;
+      if (_loadCli) try { await _loadCli(); } catch(_){}
+    }
+    // Ensure app users list is loaded for owner dropdown
+    if (!(window.APP_USERS||[]).length && window.loadAppUsers) {
+      try { await window.loadAppUsers(); } catch(_){}
+    }
     var ov = document.getElementById('deal-modal-overlay'); if (!ov) return;
     var clientSel = document.getElementById('df-client');
     var stageSel  = document.getElementById('df-stage');
+    var ownerSel  = document.getElementById('df-owner');
     var idPrev    = document.getElementById('deal-id-preview');
     var delBtn    = document.getElementById('df-delete-btn');
+
+    // Populate owner dropdown from real app_users
+    if (ownerSel) {
+      var users = (window.APP_USERS||[]).filter(function(u){ return u.role !== 'client'; });
+      ownerSel.innerHTML = '<option value="">— Unassigned —</option>' + users.map(function(u){
+        return '<option value="'+esc(u.id)+'">'+(u.display_name||u.email||u.id)+'</option>';
+      }).join('');
+    }
 
     function sv(id, v){ var n=document.getElementById(id); if (n) n.value = (v==null?'':v); }
     if (editId) {
@@ -13434,7 +13474,8 @@ window.loadBoms = async function initBoms() {
       sv('df-name',     d.name);
       sv('df-forecast', d.forecast_value);
       sv('df-close',    d.expected_close_date);
-      sv('df-owner',    d.owner_id);
+      sv('df-followup', d.follow_up_date);
+      if (ownerSel) ownerSel.value = d.owner_id || '';
       sv('df-source',   d.source);
       sv('df-notes',    d.notes);
       document.getElementById('df-type').value     = d.deal_type || 'new_business';
@@ -13445,7 +13486,8 @@ window.loadBoms = async function initBoms() {
       idPrev.textContent = await nextDealId();
       _populateClientDropdown(clientSel, presets.client_id || '');
       _populateStageDropdown(stageSel, presets.stage_id || (PIPE_STAGES[0] && PIPE_STAGES[0].id));
-      ['df-name','df-forecast','df-close','df-owner','df-source','df-notes'].forEach(function(id){ sv(id,''); });
+      ['df-name','df-forecast','df-close','df-followup','df-source','df-notes'].forEach(function(id){ sv(id,''); });
+      if (ownerSel) ownerSel.value = presets.owner_id || '';
       document.getElementById('df-type').value     = presets.deal_type || 'new_business';
       document.getElementById('df-currency').value = 'EUR';
       // If opened for a repeat customer, auto-suggest repeat type
@@ -13488,6 +13530,7 @@ window.loadBoms = async function initBoms() {
       currency:            gv('df-currency') || 'EUR',
       expected_close_date: gv('df-close')   || null,
       owner_id:            gv('df-owner')   || null,
+      follow_up_date:      gv('df-followup') || null,
       source:              gv('df-source')  || null,
       notes:               gv('df-notes')   || null,
       updated_at:          new Date().toISOString()
@@ -13608,9 +13651,13 @@ window.loadBoms = async function initBoms() {
     var weighted = (parseFloat(d.forecast_value)||0) * (prob/100);
     document.getElementById('dd-weighted').textContent = fmtMoneyFull(weighted, d.currency) + '  (' + prob + '%)';
     document.getElementById('dd-close').textContent    = fmtDate(d.expected_close_date);
-    document.getElementById('dd-owner').textContent    = d.owner_id || '—';
+    var ownerName = d.owner_id
+      ? (((window.APP_USERS||[]).find(function(u){return u.id===d.owner_id;})||{}).display_name || d.owner_id)
+      : '—';
+    document.getElementById('dd-owner').textContent    = ownerName;
     document.getElementById('dd-source').textContent   = d.source   || '—';
     document.getElementById('dd-created').textContent  = fmtDate(d.created_at);
+    document.getElementById('dd-followup').textContent = d.follow_up_date ? fmtDate(d.follow_up_date) : '—';
     document.getElementById('dd-notes').textContent    = d.notes    || '—';
 
     // Stage quick-change buttons
@@ -14054,7 +14101,13 @@ window.loadBoms = async function initBoms() {
     var s = document.getElementById('pipe-search');
     if (s) s.addEventListener('input', function(){ _pipeState.search = this.value.trim().toLowerCase(); renderPipeline(); });
     var o = document.getElementById('pipe-owner-filter');
-    if (o) o.addEventListener('change', function(){ _pipeState.owner = this.value; renderPipeline(); });
+    if (o) o.addEventListener('change', function(){
+      _pipeState.owner = this.value;
+      renderPipeline();
+      // Reset My Deals button styling when filter changes manually
+      var btn = document.getElementById('pipe-my-deals-btn');
+      if (btn) { btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }
+    });
     var t = document.getElementById('pipe-type-filter');
     if (t) t.addEventListener('change', function(){ _pipeState.type = this.value; renderPipeline(); });
     var h = document.getElementById('pipe-hide-closed');
@@ -15399,20 +15452,22 @@ window.loadBoms = async function initBoms() {
     // Wrap stage changer in detail panel
     if (window._ddChangeStage && !window._ddChangeStage._phase3Wrapped) {
       var orig2 = window._ddChangeStage;
-      window._ddChangeStage = async function(dealId, stageId){
+      window._ddChangeStage = async function(stageId){
+        // _ddCurrentId is set by the kanban/detail panel before calling this
+        var dealId = window._ddCurrentId;
         var d0 = (window.DEALS||[]).find(function(x){return x.id===dealId;});
         var oldStage = d0 ? d0.stage_id : null;
         var r = await orig2.apply(this, arguments);
-        var d = (window.DEALS||[]).find(function(x){return x.id===dealId;});
-        if (d && oldStage !== stageId) {
+        if (dealId && oldStage && oldStage !== stageId) {
+          var d = (window.DEALS||[]).find(function(x){return x.id===dealId;});
           var stageName = ((window.PIPE_STAGES||[]).find(function(s){return s.id===stageId;})||{}).name || stageId;
           logActivity('deal', dealId, 'system', 'Stage changed to ' + stageName, null);
-          if (d.client_id) logActivity('company', d.client_id, 'system', 'Deal "' + (d.name||dealId) + '" moved to ' + stageName, null);
-          // Notify deal owner
-          if (d.owner_id && d.owner_id !== meId()) {
+          if (d && d.client_id) logActivity('company', d.client_id, 'system', 'Deal "' + ((d&&d.name)||dealId) + '" moved to ' + stageName, null);
+          // Notify deal owner if someone else moved it
+          if (d && d.owner_id && d.owner_id !== meId()) {
             createNotification({
-              user_id: d.owner_id, type: 'deal_stage', deal_id: dealId, client_id: d.client_id||null,
-              body: meDisplay() + ' moved "' + (d.name||dealId) + '" to ' + stageName
+              user_id: d.owner_id, type: 'deal_stage', deal_id: dealId, client_id: (d&&d.client_id)||null,
+              body: meDisplay() + ' moved "' + ((d&&d.name)||dealId) + '" to ' + stageName
             });
           }
         }
@@ -15421,17 +15476,18 @@ window.loadBoms = async function initBoms() {
       window._ddChangeStage._phase3Wrapped = true;
     }
 
-    // Wrap saveContact
+    // Wrap saveContact (contact modal uses ctf-* element IDs)
     if (window.saveContact && !window.saveContact._phase3Wrapped) {
       var orig3 = window.saveContact;
       window.saveContact = async function(){
-        var wasNew = !document.getElementById('cnt-edit-id').value;
+        var editEl = document.getElementById('ctf-edit-id');
+        var wasNew = !editEl || !editEl.value;
         var r = await orig3.apply(this, arguments);
         if (wasNew) {
           setTimeout(function(){
             try {
-              var cid = document.getElementById('cnt-client-id') && document.getElementById('cnt-client-id').value;
-              var name = document.getElementById('cnt-name') && document.getElementById('cnt-name').value;
+              var cid  = document.getElementById('ctf-client-id') && document.getElementById('ctf-client-id').value;
+              var name = document.getElementById('ctf-name') && document.getElementById('ctf-name').value;
               if (cid && name) logActivity('company', cid, 'system', 'Contact added: ' + name, null);
             } catch(_){}
           }, 400);
