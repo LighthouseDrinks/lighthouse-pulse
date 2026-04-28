@@ -28394,6 +28394,7 @@ window.saveAdjModal = async function() {
     html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub('Auto-calculated from start/end times'));
     html += frow('Line Clearance Checklist Complete', cb('line-clearance', !!j.line_clearance_complete, 'Confirmed complete'), true);
     html += frow('Liquid Leftover (litres)', inp('liquid-leftover', j.liquid_leftover||0, '0 if none', 'number'), true);
+    html += frow('Cost per Unit (€)', inp('cost-per-unit', j.cost_per_unit, 'e.g. 4.85', 'number') + sub('Used in CBW bottling report'));
     html += frow('Delivery Cleared with Management', cb('delivery-cleared', !!j.delivery_cleared, 'Cleared for release'), true);
 
     html += '<div style="margin-top:16px;">'
@@ -28404,6 +28405,30 @@ window.saveAdjModal = async function() {
     html += '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">Production Manager Sign-Off</div>';
     html += frow('Name', inp('signed-by', j.results_signed_by, 'Production Manager name'), true);
     html += frow('Date', inp('signed-at', j.results_signed_at ? j.results_signed_at.slice(0,10) : '', '', 'date'), true);
+
+    // ── Email Reports bar ───────────────────────────────────────────────────
+    var cbwSentBadge = j.cbw_report_sent_at
+      ? '<span style="font-size:10px;color:var(--green);font-weight:700;margin-left:8px;">&#10003; Sent ' + new Date(j.cbw_report_sent_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) + '</span>'
+      : '';
+    var clientSentBadge = j.client_report_sent_at
+      ? '<span style="font-size:10px;color:var(--green);font-weight:700;margin-left:8px;">&#10003; Sent ' + new Date(j.client_report_sent_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) + '</span>'
+      : '';
+
+    html += '<div style="margin-top:24px;padding:16px 18px;background:rgba(201,168,76,0.05);border:1px solid rgba(201,168,76,0.2);border-radius:5px;">'
+      + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:12px;">Email Reports</div>'
+      + '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">'
+      // CBW button + test
+      + '<button data-job="' + jobId + '" onclick="window._emailCBW(this.dataset.job,false)" style="background:transparent;border:1px solid var(--blue);color:#60a5fa;font-size:11px;font-weight:700;padding:7px 16px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">&#9993; Email CBW</button>'
+      + cbwSentBadge
+      + '<button data-job="' + jobId + '" onclick="window._emailCBW(this.dataset.job,true)" title="Send a test copy to yourself" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;padding:5px 10px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Test &#9993;</button>'
+      + '<div style="width:1px;height:28px;background:var(--navy-border);margin:0 4px;"></div>'
+      // Client button + test
+      + '<button data-job="' + jobId + '" onclick="window._emailClient(this.dataset.job,false)" style="background:transparent;border:1px solid var(--green);color:var(--green);font-size:11px;font-weight:700;padding:7px 16px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">&#9993; Email Client</button>'
+      + clientSentBadge
+      + '<button data-job="' + jobId + '" onclick="window._emailClient(this.dataset.job,true)" title="Send a test copy to yourself" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;padding:5px 10px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Test &#9993;</button>'
+      + '</div>'
+      + '<div style="font-size:10px;color:var(--muted);margin-top:8px;">Save Results first to include the latest figures in the email.</div>'
+      + '</div>';
 
     html += '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--navy-border);">'
       + '<button data-job="' + jobId + '" onclick="window.saveResults(this.dataset.job)" class="btn btn-gold" style="font-size:11px;padding:8px 18px;">Save Results</button>'
@@ -28471,6 +28496,7 @@ window.saveAdjModal = async function() {
       actual_job_hours:        parseFloat(gv('hours')) || null,
       line_clearance_complete: true,
       liquid_leftover:         parseFloat(gv('liquid-leftover')) || 0,
+      cost_per_unit:           parseFloat(gv('cost-per-unit')) || null,
       delivery_cleared:        true,
       results_notes:           gv('notes') || null,
       results_signed_by:       gv('signed-by') || null,
@@ -28481,6 +28507,290 @@ window.saveAdjModal = async function() {
       window.toast && window.toast('Results saved.', 'success');
       await loadJobs();
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
+  };
+
+  // ── EMAIL REPORTS ─────────────────────────────────────────────────────────
+
+  // Shared helper: gather all data needed for both email reports
+  async function _gatherReportData(jobId) {
+    var j = _jobs.find(function(x){ return x.id === jobId; });
+    if (!j) throw new Error('Job not found in local cache.');
+
+    var results = await Promise.all([
+      supaGet('boms?id=eq.' + j.bom_id + '&select=bottles_per_shipper,additional_info,volume_cl,abv,bottling_abv,product_name&limit=1'),
+      supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1'),
+      supaGet('clients?id=eq.' + j.client_id + '&select=id,name,email&limit=1')
+    ]);
+    var bom       = results[0][0] || {};
+    var lso       = results[1][0] || {};
+    var client    = results[2][0] || {};
+    var ai        = bom.additional_info || {};
+
+    // Resolve linked containers
+    var linkedConts = [];
+    try { linkedConts = JSON.parse(lso.linked_containers_json || '[]'); } catch(e) {}
+    if (!linkedConts.length && lso.linked_container_id) linkedConts = [{ id: lso.linked_container_id }];
+
+    var contDetails = [];
+    if (linkedConts.length) {
+      var ids = linkedConts.map(function(c){ return c.id; }).filter(Boolean);
+      try {
+        var rows = await supaGet('liquid_containers?id=in.(' + ids.join(',') + ')&select=id,reference,spirit_type,abv,current_litres,cbw_rotation,capacity_litres');
+        contDetails = rows || [];
+      } catch(e) {}
+    }
+
+    return { j: j, bom: bom, ai: ai, lso: lso, client: client, linkedConts: linkedConts, contDetails: contDetails };
+  }
+
+  // Format date nicely
+  function _fmtDate(ts) {
+    if (!ts) return '—';
+    try { return new Date(ts).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' }); } catch(e) { return ts; }
+  }
+
+  // Common email wrapper styles
+  var _emailWrap = 'font-family:Arial,Helvetica,sans-serif;max-width:680px;margin:0 auto;background:#ffffff;color:#1a1a2e;';
+  var _emailHeader = function(title, subtitle) {
+    return '<div style="background:#0d1b2a;padding:28px 32px 20px;border-bottom:3px solid #c9a84c;">'
+      + '<div style="font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;margin-bottom:6px;">Lighthouse Drinks</div>'
+      + '<div style="font-size:22px;font-weight:700;color:#ffffff;margin-bottom:4px;">' + title + '</div>'
+      + (subtitle ? '<div style="font-size:13px;color:#8899aa;">' + subtitle + '</div>' : '')
+      + '</div>';
+  };
+  var _emailSection = function(title, rows) {
+    var html = '<div style="padding:20px 32px 0;">'
+      + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:#c9a84c;font-weight:700;border-bottom:1px solid #e5e7eb;padding-bottom:6px;margin-bottom:12px;">' + title + '</div>'
+      + '<table style="width:100%;border-collapse:collapse;">';
+    rows.forEach(function(r) {
+      html += '<tr><td style="font-size:12px;color:#6b7280;padding:5px 0;width:220px;vertical-align:top;">' + r[0] + '</td>'
+            + '<td style="font-size:13px;color:#1a1a2e;padding:5px 0;font-weight:600;">' + (r[1]||'—') + '</td></tr>';
+    });
+    html += '</table></div>';
+    return html;
+  };
+  var _emailFooter = function() {
+    return '<div style="padding:24px 32px;background:#f9fafb;border-top:1px solid #e5e7eb;margin-top:28px;font-size:11px;color:#9ca3af;">'
+      + 'This report was generated automatically by Lighthouse Pulse. Please do not reply to this email directly.'
+      + '</div>';
+  };
+
+  // ── CBW Email ─────────────────────────────────────────────────────────────
+  window._emailCBW = async function(jobId, isTest) {
+    var testEmail = null;
+    if (isTest) {
+      testEmail = window.prompt('Send test to which email address?', window.CURRENT_USER && window.CURRENT_USER.email || '');
+      if (!testEmail) return;
+    }
+
+    var j0 = _jobs.find(function(x){ return x.id === jobId; });
+    if (j0 && j0.cbw_report_sent_at && !isTest) {
+      if (!confirm('CBW report already sent on ' + _fmtDate(j0.cbw_report_sent_at) + '. Send again?')) return;
+    }
+
+    window.toast && window.toast('Building CBW report…');
+    try {
+      var d = await _gatherReportData(jobId);
+      var j = d.j, bom = d.bom, ai = d.ai, lso = d.lso, client = d.client;
+      var contDetails = d.contDetails;
+
+      var bottlingAbv = parseFloat(j.bottling_abv || bom.bottling_abv || bom.abv || 0);
+      var bottlesPerCase = parseInt(bom.bottles_per_shipper || 0) || null;
+      var casesPerLayer  = parseInt(ai.casesLayer || 0) || null;
+      var layersPerPallet = parseInt(ai.layersPallet || 0) || null;
+      var casesPerPallet = (casesPerLayer && layersPerPallet) ? casesPerLayer * layersPerPallet : null;
+      var volumeCl = parseFloat(bom.volume_cl || 0) || null;
+
+      // Spirit type from first linked container
+      var spiritType = (contDetails[0] && contDetails[0].spirit_type) || '—';
+
+      // Build containers table
+      var contRowsHtml = '';
+      if (contDetails.length) {
+        contRowsHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">'
+          + '<thead><tr style="background:#f3f4f6;">'
+          + '<th style="text-align:left;padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;">CBW Rotation</th>'
+          + '<th style="text-align:left;padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;">Vessel Ref</th>'
+          + '<th style="text-align:left;padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;">Spirit Type</th>'
+          + '<th style="text-align:right;padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;">ABV</th>'
+          + '</tr></thead><tbody>';
+        contDetails.forEach(function(c) {
+          contRowsHtml += '<tr style="border-bottom:1px solid #e5e7eb;">'
+            + '<td style="padding:7px 10px;color:#1a1a2e;font-weight:600;">' + (c.cbw_rotation || '—') + '</td>'
+            + '<td style="padding:7px 10px;color:#1a1a2e;">' + (c.reference || '—') + '</td>'
+            + '<td style="padding:7px 10px;color:#1a1a2e;">' + (c.spirit_type || '—') + '</td>'
+            + '<td style="padding:7px 10px;color:#1a1a2e;text-align:right;">' + (c.abv ? c.abv + '%' : '—') + '</td>'
+            + '</tr>';
+        });
+        contRowsHtml += '</tbody></table>';
+      } else {
+        contRowsHtml = '<p style="color:#9ca3af;font-size:12px;">No containers linked to this job.</p>';
+      }
+
+      var waterAdded   = parseFloat(lso.water_required || 0);
+      var finalLitres  = parseFloat(lso.final_litres || 0);
+      var dilutionLine = waterAdded > 0
+        ? waterAdded.toFixed(1) + ' L water added → ' + finalLitres.toFixed(1) + ' L final @ ' + bottlingAbv.toFixed(1) + '% ABV'
+        : 'No dilution — bottled at cask/original strength (' + bottlingAbv.toFixed(1) + '% ABV)';
+
+      var subject = 'Bottling Report — ' + (j.product_name || j.id) + ' · Lot ' + (j.lot_number || '—') + ' [' + j.id + ']';
+      var html = '<div style="' + _emailWrap + '">'
+        + _emailHeader('Bottling Report', client.name + ' — ' + (j.product_name || '—'))
+        + _emailSection('Job Details', [
+            ['Job ID',            j.id],
+            ['Client',            client.name || '—'],
+            ['Product',           j.product_name || '—'],
+            ['Spirit Type',       spiritType],
+            ['Volume',            volumeCl ? volumeCl + ' cl' : '—'],
+            ['Bottling ABV',      bottlingAbv ? bottlingAbv.toFixed(1) + '%' : '—'],
+            ['Date Bottled',      _fmtDate(j.date_completed || j.results_signed_at)]
+          ])
+        + '<div style="padding:20px 32px 0;">'
+        + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:#c9a84c;font-weight:700;border-bottom:1px solid #e5e7eb;padding-bottom:6px;margin-bottom:12px;">Liquid Used</div>'
+        + contRowsHtml
+        + '<table style="width:100%;border-collapse:collapse;margin-top:12px;">'
+        + '<tr><td style="font-size:12px;color:#6b7280;padding:5px 0;width:220px;">Dilution</td><td style="font-size:13px;color:#1a1a2e;font-weight:600;">' + dilutionLine + '</td></tr>'
+        + (j.liquid_leftover ? '<tr><td style="font-size:12px;color:#6b7280;padding:5px 0;">Liquid Wastage / Leftover</td><td style="font-size:13px;color:#1a1a2e;font-weight:600;">' + parseFloat(j.liquid_leftover).toFixed(1) + ' L</td></tr>' : '')
+        + '</table></div>'
+        + _emailSection('Production Results', [
+            ['Lot Number',        j.lot_number || '—'],
+            ['Bottles Produced',  j.actual_bottles_produced ? j.actual_bottles_produced.toLocaleString() + ' btls' : '—'],
+            ['Total Cases',       j.actual_cases ? j.actual_cases.toLocaleString() : '—'],
+            ['Bottles per Case',  bottlesPerCase ? String(bottlesPerCase) : '—'],
+            ['Cases per Pallet',  casesPerPallet ? String(casesPerPallet) : '—'],
+            ['Cost per Unit',     j.cost_per_unit ? '€' + parseFloat(j.cost_per_unit).toFixed(2) : '—']
+          ])
+        + _emailSection('Sign-Off', [
+            ['Production Manager', j.results_signed_by || '—'],
+            ['Date Signed',        _fmtDate(j.results_signed_at)]
+          ])
+        + _emailFooter()
+        + '</div>';
+
+      var to = isTest ? testEmail : 'orders@corkbondedwarehouses.ie';
+      await window.sendEmail({ to: to, subject: subject, html: html, from: 'reports@lighthousedrinks.com' });
+
+      if (!isTest) {
+        await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, { cbw_report_sent_at: new Date().toISOString() });
+        await loadJobs();
+        var jUpd = _jobs.find(function(x){ return x.id === jobId; });
+        if (jUpd) Object.assign(jUpd, { cbw_report_sent_at: new Date().toISOString() });
+        // Reload tab to show sent badge
+        if (window._currentJobId === jobId) loadResultsTab(jobId);
+        window.toast && window.toast('CBW report sent to orders@corkbondedwarehouses.ie', 'success');
+      } else {
+        window.toast && window.toast('Test CBW report sent to ' + testEmail, 'success');
+      }
+    } catch(e) {
+      window.toast && window.toast('Failed to send CBW report: ' + (e.message || e), 'error');
+    }
+  };
+
+  // ── Client Email ──────────────────────────────────────────────────────────
+  window._emailClient = async function(jobId, isTest) {
+    var testEmail = null;
+    if (isTest) {
+      testEmail = window.prompt('Send test to which email address?', window.CURRENT_USER && window.CURRENT_USER.email || '');
+      if (!testEmail) return;
+    }
+
+    window.toast && window.toast('Building client report…');
+    try {
+      var d = await _gatherReportData(jobId);
+      var j = d.j, bom = d.bom, ai = d.ai, lso = d.lso, client = d.client;
+      var contDetails = d.contDetails;
+
+      // Resolve recipient
+      var recipientEmail = client.email || null;
+      if (!recipientEmail) {
+        try {
+          var cRows = await supaGet('contacts?client_id=eq.' + j.client_id + '&email=not.is.null&limit=1&select=email,first_name,last_name');
+          if (cRows && cRows[0] && cRows[0].email) recipientEmail = cRows[0].email;
+        } catch(e2) {}
+      }
+      if (!isTest && !recipientEmail) {
+        window.toast && window.toast('No email address on file for this client. Add one in the Customers section first.', 'error');
+        return;
+      }
+
+      var j0 = _jobs.find(function(x){ return x.id === jobId; });
+      if (j0 && j0.client_report_sent_at && !isTest) {
+        if (!confirm('Client report already sent on ' + _fmtDate(j0.client_report_sent_at) + '. Send again?')) return;
+      }
+
+      var bottlingAbv    = parseFloat(j.bottling_abv || bom.bottling_abv || bom.abv || 0);
+      var bottlesPerCase = parseInt(bom.bottles_per_shipper || 0) || null;
+      var casesPerLayer  = parseInt(ai.casesLayer || 0) || null;
+      var layersPerPallet= parseInt(ai.layersPallet || 0) || null;
+      var casesPerPallet = (casesPerLayer && layersPerPallet) ? casesPerLayer * layersPerPallet : null;
+      var volumeCl       = parseFloat(bom.volume_cl || 0) || null;
+      var spiritType     = (contDetails[0] && contDetails[0].spirit_type) || '—';
+
+      var waterAdded  = parseFloat(lso.water_required || 0);
+      var finalLitres = parseFloat(lso.final_litres || 0);
+      var liquidSummary = waterAdded > 0
+        ? 'Liquid diluted to ' + finalLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '% ABV'
+        : 'Bottled at ' + (bottlingAbv ? bottlingAbv.toFixed(1) + '% ABV' : 'specified strength');
+
+      var actualHours = null;
+      if (j.date_commenced && j.date_completed) {
+        var ms = new Date(j.date_completed) - new Date(j.date_commenced);
+        actualHours = Math.round(ms / 36000) / 100;
+      }
+
+      var subject = 'Bottling Confirmation — ' + (j.product_name || j.id) + ' · Lot ' + (j.lot_number || '—');
+      var html = '<div style="' + _emailWrap + '">'
+        + _emailHeader('Bottling Confirmation', 'Dear ' + (client.name || 'Valued Client') + ',')
+        + '<div style="padding:20px 32px;font-size:13px;color:#374151;line-height:1.6;">'
+        + 'We are pleased to confirm the successful completion of your bottling run. Please find the details below for your records.'
+        + '</div>'
+        + _emailSection('Product Details', [
+            ['Product',          j.product_name || '—'],
+            ['Spirit Type',      spiritType],
+            ['Lot Number',       j.lot_number || '—'],
+            ['Volume',           volumeCl ? volumeCl + ' cl' : '—'],
+            ['ABV',              bottlingAbv ? bottlingAbv.toFixed(1) + '%' : '—']
+          ])
+        + _emailSection('Production Results', [
+            ['Bottles Produced',  j.actual_bottles_produced ? j.actual_bottles_produced.toLocaleString() + ' btls' : '—'],
+            ['Planned Target',    j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—'],
+            ['Total Cases',       j.actual_cases ? j.actual_cases.toLocaleString() : '—'],
+            ['Bottles per Case',  bottlesPerCase ? String(bottlesPerCase) : '—'],
+            ['Cases per Pallet',  casesPerPallet ? String(casesPerPallet) : '—']
+          ])
+        + _emailSection('Liquid', [
+            ['Summary',            liquidSummary],
+            ['Liquid Leftover',    j.liquid_leftover ? parseFloat(j.liquid_leftover).toFixed(1) + ' L' : '0 L']
+          ])
+        + _emailSection('Timeline', [
+            ['Date Commenced',    _fmtDate(j.date_commenced)],
+            ['Date Completed',    _fmtDate(j.date_completed)],
+            ['Run Duration',      actualHours ? actualHours + ' hrs' : '—']
+          ])
+        + _emailSection('Quality & Sign-Off', [
+            ['Line Clearance',     j.line_clearance_complete ? '&#10003; Confirmed' : 'Pending'],
+            ['Delivery Cleared',   j.delivery_cleared ? '&#10003; Cleared for release' : 'Pending'],
+            ['Production Manager', j.results_signed_by || '—'],
+            ['Sign-Off Date',      _fmtDate(j.results_signed_at)]
+          ])
+        + (j.results_notes ? '<div style="padding:20px 32px 0;"><div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:#c9a84c;font-weight:700;border-bottom:1px solid #e5e7eb;padding-bottom:6px;margin-bottom:10px;">Notes</div><div style="font-size:13px;color:#374151;line-height:1.6;">' + window.escapeHtml(j.results_notes) + '</div></div>' : '')
+        + _emailFooter()
+        + '</div>';
+
+      var to = isTest ? testEmail : recipientEmail;
+      await window.sendEmail({ to: to, subject: subject, html: html, from: 'reports@lighthousedrinks.com' });
+
+      if (!isTest) {
+        await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, { client_report_sent_at: new Date().toISOString() });
+        await loadJobs();
+        if (window._currentJobId === jobId) loadResultsTab(jobId);
+        window.toast && window.toast('Client report sent to ' + recipientEmail, 'success');
+      } else {
+        window.toast && window.toast('Test client report sent to ' + testEmail, 'success');
+      }
+    } catch(e) {
+      window.toast && window.toast('Failed to send client report: ' + (e.message || e), 'error');
+    }
   };
 
   // ── LIQUID SIGN-OFF (5.02.02) ──────────────────────────────────────────────
