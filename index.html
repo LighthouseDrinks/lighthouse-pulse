@@ -39385,14 +39385,29 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var pick = await _pickFromQueue(bayNo, top);
       if (!pick) return;
       // Assign bay only — priority is independent and unchanged
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(pick), {
-        job_bay:            bayNo,
-        bay_assigned_at:    new Date().toISOString(),
-        bay_assigned_by:    whoLabel(),
-        bay_released_at:    null,
-        bay_released_by:    null,
-        bay_release_reason: null
-      });
+      try {
+        await apiPatch('jobs', '?id=eq.' + encodeURIComponent(pick), {
+          job_bay:            bayNo,
+          bay_assigned_at:    new Date().toISOString(),
+          bay_assigned_by:    whoLabel(),
+          bay_released_at:    null,
+          bay_released_by:    null,
+          bay_release_reason: null
+        });
+      } catch(patchErr) {
+        var msg = (patchErr && patchErr.message) || '';
+        if (msg.indexOf('23505') >= 0 || msg.indexOf('jobs_bay_active_unique') >= 0) {
+          var sql = 'ALTER TABLE jobs DROP CONSTRAINT jobs_bay_active_unique;';
+          var copied = false;
+          try { await navigator.clipboard.writeText(sql); copied = true; } catch(ce) {}
+          await window.lpAlert(
+            'Bay sharing is blocked by a database unique constraint.\n\nRun this one-off migration in your Supabase SQL editor, then try again:\n\n' + sql + (copied ? '\n\n(SQL copied to clipboard.)' : ''),
+            { title: 'DB Migration Required — jobs_bay_active_unique' }
+          );
+          return;
+        }
+        throw patchErr;
+      }
       var jobRow = await apiGet('jobs?id=eq.' + encodeURIComponent(pick) + '&select=stage');
       await auditBay(pick, jobRow && jobRow[0] ? jobRow[0].stage : null, 'Bay ' + bayNo + ' assigned by ' + whoLabel());
       window.toast && window.toast('Bay ' + bayNo + ' assigned to ' + pick + '.', 'success');
