@@ -39453,7 +39453,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         window.toast && window.toast('This job isn\'t currently holding a bay.', 'error'); return;
       }
       var freedBay = me[0].job_bay;
-      if (!(await window.lpConfirm('Remove this job from Bay ' + freedBay + '? The bay will be freed and the alert email will fire. The job\'s priority position is unchanged.', { title: 'Unassign from Bay ' + freedBay, confirmLabel: 'Unassign', destructive: true }))) return;
+      // Check whether another job still occupies this bay (shared bay scenario)
+      var remainingInBay = await apiGet('jobs?job_bay=eq.' + freedBay + '&bay_released_at=is.null&id=neq.' + encodeURIComponent(jobId) + '&select=id&limit=1');
+      var bayStillOccupied = remainingInBay && remainingInBay.length > 0;
+      var confirmMsg = bayStillOccupied
+        ? 'Remove this job from Bay ' + freedBay + '? The bay will remain occupied by another job. No email will fire. The job\'s priority position is unchanged.'
+        : 'Remove this job from Bay ' + freedBay + '? The bay will be freed and the alert email will fire. The job\'s priority position is unchanged.';
+      if (!(await window.lpConfirm(confirmMsg, { title: 'Unassign from Bay ' + freedBay, confirmLabel: 'Unassign', destructive: true }))) return;
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
         job_bay:            null,
         bay_assigned_at:    null,
@@ -39464,8 +39470,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       });
       await _clearExtraBays(jobId);
       await auditBay(jobId, me[0].stage, 'Unassigned from Bay ' + freedBay + ' by ' + whoLabel());
-      window._bayEmailAlert(freedBay, 'manual');
-      window.toast && window.toast('Bay ' + freedBay + ' freed. Job is now at the top of the queue.', 'success');
+      if (!bayStillOccupied) window._bayEmailAlert(freedBay, 'manual');
+      window.toast && window.toast(
+        bayStillOccupied
+          ? 'Job removed from Bay ' + freedBay + '. Bay still has another job.'
+          : 'Bay ' + freedBay + ' freed. Job is back in the queue.',
+        'success'
+      );
       window._bayRefreshAll(jobId);
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
   };
@@ -39534,7 +39545,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     });
   }
 
-  // ── Mark Bay N clear — job DONE, staging physically removed ────────────
+  // ── Mark Bay N clear — job DONE, goods physically removed ────────────
   window._bayMarkClear = async function(jobId) {
     if (!window.canDo || !window.canDo('bay_release')) { window.toast && window.toast('You don\'t have permission to clear bays.', 'error'); return; }
     try {
@@ -39542,7 +39553,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       if (!rows || !rows.length) return;
       var j = rows[0];
       if (!j.job_bay || j.bay_released_at) { window.toast && window.toast('This job isn\'t currently holding a bay.', 'error'); return; }
-      if (!(await window.lpConfirm('Mark Bay ' + j.job_bay + ' as clear? Use this only when goods have been physically cleared from the bay. The bay will open for the next job and Planning will be emailed.', { title: 'Clear Bay ' + j.job_bay, confirmLabel: 'Mark Clear' }))) return;
+      // Check whether another job shares this bay
+      var others = await apiGet('jobs?job_bay=eq.' + j.job_bay + '&bay_released_at=is.null&id=neq.' + encodeURIComponent(jobId) + '&select=id&limit=1');
+      var bayStillOccupied = others && others.length > 0;
+      var confirmMsg = bayStillOccupied
+        ? 'Mark this job\'s goods as cleared from Bay ' + j.job_bay + '? Another job still occupies this bay so no email will fire.'
+        : 'Mark Bay ' + j.job_bay + ' as clear? Use this only when goods have been physically cleared from the bay. The bay will open for the next job and Planning will be emailed.';
+      if (!(await window.lpConfirm(confirmMsg, { title: 'Clear Bay ' + j.job_bay, confirmLabel: 'Mark Clear' }))) return;
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
         bay_released_at:    new Date().toISOString(),
         bay_released_by:    whoLabel(),
@@ -39550,8 +39567,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       });
       await _clearExtraBays(jobId);
       await auditBay(jobId, j.stage, 'Bay ' + j.job_bay + ' cleared (manual) by ' + whoLabel());
-      window._bayEmailAlert(j.job_bay, 'manual');
-      window.toast && window.toast('Bay ' + j.job_bay + ' cleared. Alert sent.', 'success');
+      if (!bayStillOccupied) window._bayEmailAlert(j.job_bay, 'manual');
+      window.toast && window.toast(
+        bayStillOccupied
+          ? 'Job cleared from Bay ' + j.job_bay + '. Bay still has another job.'
+          : 'Bay ' + j.job_bay + ' cleared. Alert sent.',
+        'success'
+      );
       window._bayRefreshAll(jobId);
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
   };
