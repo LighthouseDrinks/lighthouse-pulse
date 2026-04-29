@@ -39352,13 +39352,20 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   window._bayAssignFromWaitlist = async function(bayNo) {
     if (!window.canDo || !window.canDo('bay_assign')) { window.toast && window.toast('You don\'t have permission to assign bays.', 'error'); return; }
     try {
-      // Verify bay is actually free (primary bay)
-      var held = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
-      if (held && held.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied.', 'error'); return; }
+      // Check if bay is already occupied — warn but allow a second job
+      var held = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id,product_name&limit=5');
+      if (held && held.length) {
+        var existingIds = held.map(function(h){ return h.id; }).join(', ');
+        var ok = await window.lpConfirm('Bay ' + bayNo + ' already has job' + (held.length > 1 ? 's' : '') + ' ' + existingIds + '. Add a second job to this bay anyway?', { title: 'Bay already occupied', confirmLabel: 'Add anyway' });
+        if (!ok) return;
+      }
       // Also check extra_bays (requires SQL migration — skipped silently if column missing)
       try {
         var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
-        if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+        if (heldExtra && heldExtra.length) {
+          var ok2 = await window.lpConfirm('Bay ' + bayNo + ' is also used as an extra bay by job ' + heldExtra[0].id + '. Add another job anyway?', { title: 'Bay already occupied', confirmLabel: 'Add anyway' });
+          if (!ok2) return;
+        }
       } catch(e) {}
 
       // All planning/scheduled jobs without a bay, ordered by priority then creation
@@ -39534,12 +39541,19 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       if (ans == null) return;
       var bayNo = parseInt(ans, 10);
       if (!bayNo || bayNo < 1) { window.toast && window.toast('Enter a valid bay number.', 'error'); return; }
-      // Verify target bay is free
-      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
-      if (heldPrimary && heldPrimary.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied.', 'error'); return; }
+      // Check if bay is occupied — warn but allow
+      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=5');
+      if (heldPrimary && heldPrimary.length) {
+        var existingIds = heldPrimary.map(function(h){ return h.id; }).join(', ');
+        var ok = await window.lpConfirm('Bay ' + bayNo + ' already has job' + (heldPrimary.length > 1 ? 's' : '') + ' ' + existingIds + '. Add this job to that bay anyway?', { title: 'Bay already occupied', confirmLabel: 'Add anyway' });
+        if (!ok) return;
+      }
       try {
         var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
-        if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+        if (heldExtra && heldExtra.length) {
+          var ok2 = await window.lpConfirm('Bay ' + bayNo + ' is also used as an extra bay by job ' + heldExtra[0].id + '. Add anyway?', { title: 'Bay already occupied', confirmLabel: 'Add anyway' });
+          if (!ok2) return;
+        }
       } catch(e) {}
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
         job_bay:            bayNo,
@@ -39574,12 +39588,19 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       if (!bayNo || bayNo === 'NaN') { window.toast && window.toast('Enter a valid bay number.', 'error'); return; }
       if (String(me[0].job_bay) === bayNo) { window.toast && window.toast('That is already the primary bay.', 'error'); return; }
       if (existing.indexOf(bayNo) >= 0) { window.toast && window.toast('Bay ' + bayNo + ' is already assigned to this job.', 'error'); return; }
-      // Verify target bay is free (primary check always works; extra_bays check requires migration)
-      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
-      if (heldPrimary && heldPrimary.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      // Check if bay is occupied — warn but allow a second job
+      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=5');
+      if (heldPrimary && heldPrimary.length) {
+        var existingJobIds = heldPrimary.map(function(h){ return h.id; }).join(', ');
+        var okP = await window.lpConfirm('Bay ' + bayNo + ' already has job' + (heldPrimary.length > 1 ? 's' : '') + ' ' + existingJobIds + '. Share this bay anyway?', { title: 'Bay already occupied', confirmLabel: 'Share bay' });
+        if (!okP) return;
+      }
       try {
         var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
-        if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+        if (heldExtra && heldExtra.length) {
+          var okE = await window.lpConfirm('Bay ' + bayNo + ' is also used as an extra bay by job ' + heldExtra[0].id + '. Share anyway?', { title: 'Bay already occupied', confirmLabel: 'Share bay' });
+          if (!okE) return;
+        }
       } catch(e) { /* extra_bays column not yet created — check skipped */ }
       var updated = existing.concat([bayNo]);
       try {
@@ -39645,18 +39666,25 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       try { await window._bayAutoQueuePlanning(); } catch(e) {}
 
       var held = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,bay_assigned_at,bay_assigned_by,stage,clients(name)&order=job_bay.asc');
+      // heldByBay[n] = array of jobs — supports multiple jobs per bay
       var heldByBay = {};
-      (held||[]).forEach(function(j){ heldByBay[j.job_bay] = j; });
+      (held||[]).forEach(function(j){
+        heldByBay[j.job_bay] = heldByBay[j.job_bay] || [];
+        heldByBay[j.job_bay].push(j);
+      });
       // Also mark bays occupied by extra_bays assignments (requires SQL migration: ALTER TABLE jobs ADD COLUMN IF NOT EXISTS extra_bays text[] DEFAULT '{}')
       try {
         var extraHeld = await apiGet('jobs?extra_bays=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,stage,clients(name)');
         (extraHeld||[]).forEach(function(j) {
           (j.extra_bays||[]).forEach(function(bayNo) {
-            if (bayNo && !heldByBay[bayNo]) heldByBay[bayNo] = j;
+            if (bayNo) {
+              heldByBay[bayNo] = heldByBay[bayNo] || [];
+              if (!heldByBay[bayNo].find(function(x){ return x.id === j.id; })) heldByBay[bayNo].push(j);
+            }
           });
         });
       } catch(extraErr) { /* extra_bays column not yet created — run SQL migration */ }
-      var nextJobs = await apiGet('jobs?bay_waitlist_priority=not.is.null&stage=in.(planning,scheduled)&job_bay=is.null&bay_released_at=is.null&order=bay_waitlist_priority.asc&limit=5&select=id,product_name,bottle_target,bay_waitlist_priority,job_bay,stage,clients(name)');
+      var nextJobs = await apiGet('jobs?stage=in.(planning,scheduled)&job_bay=is.null&bay_released_at=is.null&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=20&select=id,product_name,bottle_target,bay_waitlist_priority,job_bay,stage,clients(name)');
       var canAssign  = window.canDo && window.canDo('bay_assign');
       var canRelease = window.canDo && window.canDo('bay_release');
 
@@ -39664,30 +39692,38 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       // ── Bay card grid ────────────────────────────────────────────────────
       html += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:18px;">';
       BAYS.forEach(function(n) {
-        var j = heldByBay[n];
-        if (j) {
-          var ass = j.bay_assigned_at ? 'since ' + fmtTs(j.bay_assigned_at) : '';
-          var btnRow = '';
-          if (canAssign || canRelease) {
-            btnRow = '<div style="display:flex;gap:4px;flex-wrap:wrap;">';
-            // "Mark Clear" only makes sense when production staging is physically done — not for planning jobs
-            if (canRelease && j.stage !== 'planning') btnRow += '<button title="Job done, staging removed" onclick="window._bayMarkClear(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid var(--amber);color:var(--amber);padding:5px 6px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Mark Clear</button>';
-            if (canAssign)  btnRow += '<button title="Swap to a different bay" onclick="window._bayMoveToBay(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 6px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Move →</button>';
-            if (canRelease) btnRow += '<button title="Pull back to queue (frees bay, fires email)" onclick="window._bayUnassign(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid rgba(224,93,93,0.35);color:var(--red);padding:5px 6px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Unassign</button>';
-            btnRow += '</div>';
-          } else {
-            btnRow = '<div style="font-size:9px;color:var(--muted);font-style:italic;">Release/move restricted</div>';
-          }
-          html += '<div style="background:rgba(61,186,120,0.06);border:1px solid rgba(61,186,120,0.25);border-top:3px solid var(--green);border-radius:5px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-height:148px;">'
-            +   '<div style="display:flex;align-items:center;justify-content:space-between;">'
-            +     '<div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--green);font-weight:700;">Bay ' + n + '</div>'
-            +     '<div style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:2px 7px;border-radius:3px;' + (window.STAGE_STYLE && window.STAGE_STYLE[j.stage] ? window.STAGE_STYLE[j.stage] : 'background:rgba(255,255,255,0.04);color:var(--muted);') + '">' + esc((window.STAGE_LABEL && window.STAGE_LABEL[j.stage]) || j.stage) + '</div>'
+        var jobsInBay = heldByBay[n] || [];
+        if (jobsInBay.length) {
+          // Occupied — show a stacked entry per job in this bay
+          var jobRows = jobsInBay.map(function(j) {
+            var ass = j.bay_assigned_at ? 'since ' + fmtTs(j.bay_assigned_at) : '';
+            var btns = '';
+            if (canAssign || canRelease) {
+              btns = '<div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:4px;">';
+              if (canRelease && j.stage !== 'planning') btns += '<button title="Job done, staging removed" onclick="window._bayMarkClear(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid var(--amber);color:var(--amber);padding:4px 5px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Mark Clear</button>';
+              if (canAssign)  btns += '<button title="Swap to a different bay" onclick="window._bayMoveToBay(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:4px 5px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Move →</button>';
+              if (canRelease) btns += '<button title="Pull back to queue (frees bay, fires email)" onclick="window._bayUnassign(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid rgba(224,93,93,0.35);color:var(--red);padding:4px 5px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Unassign</button>';
+              btns += '</div>';
+            }
+            var stageChip = '<div style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:2px 7px;border-radius:3px;' + (window.STAGE_STYLE && window.STAGE_STYLE[j.stage] ? window.STAGE_STYLE[j.stage] : 'background:rgba(255,255,255,0.04);color:var(--muted);') + '">' + esc((window.STAGE_LABEL && window.STAGE_LABEL[j.stage]) || j.stage) + '</div>';
+            return '<div style="border-top:1px solid rgba(61,186,120,0.15);padding-top:8px;margin-top:2px;">'
+              + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px;">'
+              +   '<a href="javascript:void(0)" onclick="window.openJobDetail&&window.openJobDetail(\'' + esc(j.id) + '\')" style="font-size:12px;font-weight:700;color:var(--gold);text-decoration:none;">' + esc(j.id) + '</a>'
+              +   stageChip
+              + '</div>'
+              + '<div style="font-size:11px;color:var(--white);line-height:1.3;">' + esc(j.product_name||'—') + '</div>'
+              + '<div style="font-size:10px;color:var(--muted);">' + esc((j.clients && j.clients.name) || '—') + '</div>'
+              + (ass ? '<div style="font-size:9px;color:var(--muted);">' + ass + '</div>' : '')
+              + btns
+              + '</div>';
+          }).join('');
+          // First job row loses the border-top for cleanliness
+          jobRows = jobRows.replace('border-top:1px solid rgba(61,186,120,0.15);padding-top:8px;margin-top:2px;', 'padding-top:0;margin-top:0;');
+          html += '<div style="background:rgba(61,186,120,0.06);border:1px solid rgba(61,186,120,0.25);border-top:3px solid var(--green);border-radius:5px;padding:12px 14px;display:flex;flex-direction:column;gap:0;min-height:148px;">'
+            +   '<div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--green);font-weight:700;margin-bottom:8px;">Bay ' + n
+            +     (jobsInBay.length > 1 ? ' <span style="font-size:9px;font-weight:400;color:var(--muted);">(' + jobsInBay.length + ' jobs)</span>' : '')
             +   '</div>'
-            +   '<a href="javascript:void(0)" onclick="window.openJobDetail&&window.openJobDetail(\'' + esc(j.id) + '\')" style="font-size:13px;font-weight:700;color:var(--gold);text-decoration:none;">' + esc(j.id) + '</a>'
-            +   '<div style="font-size:12px;color:var(--white);line-height:1.3;">' + esc(j.product_name||'—') + '</div>'
-            +   '<div style="font-size:10px;color:var(--muted);">' + esc((j.clients && j.clients.name) || '—') + '</div>'
-            +   '<div style="font-size:10px;color:var(--muted);margin-top:auto;">' + ass + '</div>'
-            +   btnRow
+            +   jobRows
             + '</div>';
         } else {
           html += '<div style="background:rgba(255,255,255,0.02);border:1px dashed var(--navy-border);border-radius:5px;padding:12px 14px;display:flex;flex-direction:column;gap:6px;min-height:148px;align-items:flex-start;justify-content:space-between;">'
@@ -39706,7 +39742,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 
       // ── Next Jobs (informational — independent of bay assignment) ───────────
       html += '<div style="display:flex;align-items:center;justify-content:space-between;margin:14px 0 8px;">'
-        +   '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">Next Jobs <span style="color:var(--muted);font-weight:400;font-size:9px;letter-spacing:0.05em;text-transform:none;">— top 5 by priority</span></div>'
+        +   '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">Next Jobs <span style="color:var(--muted);font-weight:400;font-size:9px;letter-spacing:0.05em;text-transform:none;">— all unassigned, by priority</span></div>'
         +   '<div style="display:flex;align-items:center;gap:10px;">'
         +     '<div style="font-size:10px;color:var(--muted);font-style:italic;">Reorder from the Jobs page using ▲▼.</div>'
         +     '<button onclick="window._printNextJobs()" style="font-size:9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Print</button>'
@@ -39743,7 +39779,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   // ── Print the Next Jobs list ─────────────────────────────────────────────
   window._printNextJobs = async function() {
     try {
-      var jobs = await apiGet('jobs?bay_waitlist_priority=not.is.null&stage=in.(planning,scheduled)&job_bay=is.null&bay_released_at=is.null&order=bay_waitlist_priority.asc&limit=5&select=id,product_name,bottle_target,bay_waitlist_priority,job_bay,clients(name)');
+      var jobs = await apiGet('jobs?stage=in.(planning,scheduled)&job_bay=is.null&bay_released_at=is.null&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=20&select=id,product_name,bottle_target,bay_waitlist_priority,job_bay,clients(name)');
       if (!jobs || !jobs.length) { window.toast && window.toast('No jobs in the priority list.', 'error'); return; }
       var dateStr = new Date().toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' });
       var rows = jobs.map(function(w) {
