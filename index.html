@@ -29318,7 +29318,7 @@ window.saveAdjModal = async function() {
     if (!j) throw new Error('Job not found in local cache.');
 
     var results = await Promise.all([
-      supaGet('boms?id=eq.' + j.bom_id + '&select=bottles_per_shipper,additional_info,volume_cl,abv,bottling_abv,product_name&limit=1'),
+      supaGet('boms?id=eq.' + j.bom_id + '&select=bottles_per_shipper,additional_info,volume_cl,abv,bottling_abv,product_name,spirit_type&limit=1'),
       supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1'),
       supaGet('clients?id=eq.' + j.client_id + '&select=id,name,email&limit=1')
     ]);
@@ -29525,19 +29525,16 @@ window.saveAdjModal = async function() {
       var layersPerPallet= parseInt(ai.layersPallet || 0) || null;
       var casesPerPallet = (casesPerLayer && layersPerPallet) ? casesPerLayer * layersPerPallet : null;
       var volumeCl       = parseFloat(bom.volume_cl || 0) || null;
-      var spiritType     = (contDetails[0] && contDetails[0].spirit_type) || '—';
+      // Spirit type: prefer linked container, fall back to BOM field
+      var spiritType = (contDetails[0] && contDetails[0].spirit_type) || bom.spirit_type || '—';
 
       var waterAdded  = parseFloat(lso.water_required || 0);
       var finalLitres = parseFloat(lso.final_litres || 0);
       var liquidSummary = waterAdded > 0
-        ? 'Liquid diluted to ' + finalLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '% ABV'
+        ? 'Diluted to ' + finalLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '% ABV'
         : 'Bottled at ' + (bottlingAbv ? bottlingAbv.toFixed(1) + '% ABV' : 'specified strength');
 
-      var actualHours = null;
-      if (j.date_commenced && j.date_completed) {
-        var ms = new Date(j.date_completed) - new Date(j.date_commenced);
-        actualHours = Math.round(ms / 36000) / 100;
-      }
+      var totalPallets = (casesPerPallet && j.actual_cases) ? Math.ceil(j.actual_cases / casesPerPallet) : null;
 
       var subject = 'Bottling Confirmation — ' + (j.product_name || j.id) + ' · Lot ' + (j.lot_number || '—');
       var html = '<div style="' + _emailWrap + '">'
@@ -29548,31 +29545,26 @@ window.saveAdjModal = async function() {
         + _emailSection('Product Details', [
             ['Product',          j.product_name || '—'],
             ['Spirit Type',      spiritType],
-            ['Lot Number',       j.lot_number || '—'],
+            ['Lot / Batch No.',  j.lot_number || '—'],
             ['Volume',           volumeCl ? volumeCl + ' cl' : '—'],
-            ['ABV',              bottlingAbv ? bottlingAbv.toFixed(1) + '%' : '—']
+            ['ABV',              bottlingAbv ? bottlingAbv.toFixed(1) + '%' : '—'],
+            ['Liquid',           liquidSummary]
           ])
         + _emailSection('Production Results', [
             ['Bottles Produced',  j.actual_bottles_produced ? j.actual_bottles_produced.toLocaleString() + ' btls' : '—'],
             ['Planned Target',    j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—'],
             ['Total Cases',       j.actual_cases ? j.actual_cases.toLocaleString() : '—'],
             ['Bottles per Case',  bottlesPerCase ? String(bottlesPerCase) : '—'],
-            ['Cases per Pallet',  casesPerPallet ? String(casesPerPallet) : '—']
+            ['Cases per Pallet',  casesPerPallet ? String(casesPerPallet) : '—'],
+            ['Total Pallets',     totalPallets ? String(totalPallets) : '—']
           ])
-        + _emailSection('Liquid', [
-            ['Summary',            liquidSummary],
-            ['Liquid Leftover',    j.liquid_leftover ? parseFloat(j.liquid_leftover).toFixed(1) + ' L' : '0 L']
-          ])
-        + _emailSection('Timeline', [
-            ['Date Commenced',    _fmtDate(j.date_commenced)],
+        + _emailSection('Completion & Sign-Off', [
             ['Date Completed',    _fmtDate(j.date_completed)],
-            ['Run Duration',      actualHours ? actualHours + ' hrs' : '—']
-          ])
-        + _emailSection('Quality & Sign-Off', [
-            ['Line Clearance',     j.line_clearance_complete ? '&#10003; Confirmed' : 'Pending'],
-            ['Delivery Cleared',   j.delivery_cleared ? '&#10003; Cleared for release' : 'Pending'],
             ['Production Manager', j.results_signed_by || '—'],
-            ['Sign-Off Date',      _fmtDate(j.results_signed_at)]
+            ['Sign-Off Date',     _fmtDate(j.results_signed_at)],
+            ['Line Clearance',    j.line_clearance_complete ? '&#10003; Confirmed' : 'Pending'],
+            ['Delivery Status',   j.delivery_cleared ? '&#10003; Cleared for release' : 'Pending'],
+            ['CBW Rotation No.',  j.cbw_new_rotation_no || '—']
           ])
         + (j.results_notes ? '<div style="padding:20px 32px 0;"><div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:#c9a84c;font-weight:700;border-bottom:1px solid #e5e7eb;padding-bottom:6px;margin-bottom:10px;">Notes</div><div style="font-size:13px;color:#374151;line-height:1.6;">' + window.escapeHtml(j.results_notes) + '</div></div>' : '')
         + _emailFooter()
