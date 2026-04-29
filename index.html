@@ -27804,7 +27804,8 @@ window.saveAdjModal = async function() {
           await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, {
             bay_released_at:    new Date().toISOString(),
             bay_released_by:    'System (auto on completion)',
-            bay_release_reason: 'auto_complete'
+            bay_release_reason: 'auto_complete',
+            extra_bays:         []
           });
           if (typeof window._bayEmailAlert === 'function') {
             window._bayEmailAlert(bayRow.job_bay, 'auto_complete');
@@ -39340,9 +39341,11 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   window._bayAssignFromWaitlist = async function(bayNo) {
     if (!window.canDo || !window.canDo('bay_assign')) { window.toast && window.toast('You don\'t have permission to assign bays.', 'error'); return; }
     try {
-      // Verify bay is actually free
+      // Verify bay is actually free (primary or extra assignment)
       var held = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
       if (held && held.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied.', 'error'); return; }
+      var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+      if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
 
       var top = await apiGet('jobs?bay_waitlist_priority=not.is.null&job_bay=is.null&bay_released_at=is.null&order=bay_waitlist_priority.asc&limit=10&select=id,product_name,client_id,bay_waitlist_priority,clients(name)');
       if (!top || !top.length) { await window.lpAlert('No planning jobs are in the queue.', { title: 'Empty queue' }); return; }
@@ -39413,7 +39416,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         job_bay:               null,
         bay_assigned_at:       null,
         bay_assigned_by:       null,
-        bay_waitlist_priority: 1
+        bay_waitlist_priority: 1,
+        extra_bays:            []
       });
       await auditBay(jobId, me[0].stage, 'Unassigned from Bay ' + freedBay + ' (returned to queue #1) by ' + whoLabel());
       window._bayEmailAlert(freedBay, 'manual');
@@ -39498,11 +39502,86 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
         bay_released_at:    new Date().toISOString(),
         bay_released_by:    whoLabel(),
-        bay_release_reason: 'manual'
+        bay_release_reason: 'manual',
+        extra_bays:         []
       });
       await auditBay(jobId, j.stage, 'Bay ' + j.job_bay + ' cleared (manual) by ' + whoLabel());
       window._bayEmailAlert(j.job_bay, 'manual');
       window.toast && window.toast('Bay ' + j.job_bay + ' cleared. Alert sent.', 'success');
+      window._bayRefreshAll(jobId);
+    } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
+  };
+
+  // ── Re-assign a released job to a new bay (job still in progress) ────────
+  window._bayReassignReleased = async function(jobId) {
+    if (!window.canDo || !window.canDo('bay_assign')) { window.toast && window.toast('You don\'t have permission to assign bays.', 'error'); return; }
+    try {
+      var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,stage,bay_released_at');
+      if (!me || !me.length) return;
+      var ans = await window.lpPrompt('Enter the bay number to assign this job to.', '', { title: 'Re-assign Bay', placeholder: 'e.g. 3' });
+      if (ans == null) return;
+      var bayNo = parseInt(ans, 10);
+      if (!bayNo || bayNo < 1) { window.toast && window.toast('Enter a valid bay number.', 'error'); return; }
+      // Verify target bay is free
+      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
+      if (heldPrimary && heldPrimary.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied.', 'error'); return; }
+      var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+      if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
+        job_bay:            bayNo,
+        bay_assigned_at:    new Date().toISOString(),
+        bay_assigned_by:    whoLabel(),
+        bay_released_at:    null,
+        bay_released_by:    null,
+        bay_release_reason: null,
+        extra_bays:         []
+      });
+      await auditBay(jobId, me[0].stage, 'Re-assigned to Bay ' + bayNo + ' by ' + whoLabel());
+      window.toast && window.toast('Bay ' + bayNo + ' assigned to ' + jobId + '.', 'success');
+      window._bayRefreshAll(jobId);
+    } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
+  };
+
+  // ── Add an extra bay to a job already holding a primary bay ─────────────
+  window._bayAddExtra = async function(jobId) {
+    if (!window.canDo || !window.canDo('bay_assign')) { window.toast && window.toast('You don\'t have permission to assign bays.', 'error'); return; }
+    try {
+      var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,extra_bays,stage');
+      if (!me || !me.length || !me[0].job_bay) { window.toast && window.toast('Job must have a primary bay before adding extra bays.', 'error'); return; }
+      var ans = await window.lpPrompt('Enter the additional bay number to assign.', '', { title: 'Add Extra Bay', placeholder: 'e.g. 4' });
+      if (ans == null) return;
+      var bayNo = String(parseInt(ans, 10));
+      if (!bayNo || bayNo === 'NaN') { window.toast && window.toast('Enter a valid bay number.', 'error'); return; }
+      if (String(me[0].job_bay) === bayNo) { window.toast && window.toast('That is already the primary bay.', 'error'); return; }
+      var existing = me[0].extra_bays || [];
+      if (existing.indexOf(bayNo) >= 0) { window.toast && window.toast('Bay ' + bayNo + ' is already assigned to this job.', 'error'); return; }
+      // Verify target bay is free
+      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
+      if (heldPrimary && heldPrimary.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+      if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      var updated = existing.concat([bayNo]);
+      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { extra_bays: updated });
+      await auditBay(jobId, me[0].stage, 'Extra bay ' + bayNo + ' added by ' + whoLabel());
+      window.toast && window.toast('Bay ' + bayNo + ' added to ' + jobId + '.', 'success');
+      window._bayRefreshAll(jobId);
+    } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
+  };
+
+  // ── Release a single extra bay from a job (keeps primary + other extras) ─
+  window._bayReleaseExtra = async function(jobId, bayNo) {
+    if (!window.canDo || !window.canDo('bay_release')) { window.toast && window.toast('You don\'t have permission to release bays.', 'error'); return; }
+    try {
+      var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,extra_bays,stage');
+      if (!me || !me.length) return;
+      var existing = me[0].extra_bays || [];
+      if (existing.indexOf(String(bayNo)) < 0) { window.toast && window.toast('Bay ' + bayNo + ' is not an extra bay of this job.', 'error'); return; }
+      if (!(await window.lpConfirm('Release Bay ' + bayNo + ' from this job? Staging must have been physically removed. The bay-free alert email will fire.', { title: 'Release Extra Bay ' + bayNo, confirmLabel: 'Release Bay' }))) return;
+      var updated = existing.filter(function(b) { return b !== String(bayNo); });
+      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { extra_bays: updated });
+      await auditBay(jobId, me[0].stage, 'Extra bay ' + bayNo + ' released by ' + whoLabel());
+      window._bayEmailAlert(bayNo, 'manual');
+      window.toast && window.toast('Bay ' + bayNo + ' released. Alert sent.', 'success');
       window._bayRefreshAll(jobId);
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
   };
@@ -39539,9 +39618,16 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       // Auto-queue any planning jobs without a priority before we paint
       try { await window._bayAutoQueuePlanning(); } catch(e) {}
 
-      var held = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,bay_assigned_at,bay_assigned_by,stage,clients(name)&order=job_bay.asc');
+      var held = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,stage,clients(name)&order=job_bay.asc');
       var heldByBay = {};
       (held||[]).forEach(function(j){ heldByBay[j.job_bay] = j; });
+      // Also mark bays occupied by extra_bays assignments
+      var extraHeld = await apiGet('jobs?extra_bays=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,stage,clients(name)');
+      (extraHeld||[]).forEach(function(j) {
+        (j.extra_bays||[]).forEach(function(bayNo) {
+          if (bayNo && !heldByBay[bayNo]) heldByBay[bayNo] = j;
+        });
+      });
       var totalQ = await apiGet('jobs?bay_waitlist_priority=not.is.null&job_bay=is.null&bay_released_at=is.null&select=id');
       var queue = await apiGet('jobs?bay_waitlist_priority=not.is.null&job_bay=is.null&bay_released_at=is.null&select=id,product_name,bottle_target,bay_waitlist_priority,stage,clients(name)&order=bay_waitlist_priority.asc&limit=10');
       var canAssign  = window.canDo && window.canDo('bay_assign');
@@ -39629,7 +39715,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (!jobId) return;
     container.setAttribute('data-job', jobId);
     try {
-      var rows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,bay_assigned_at,bay_assigned_by,bay_released_at,bay_released_by,bay_release_reason,bay_waitlist_priority,stage');
+      var rows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,bay_released_at,bay_released_by,bay_release_reason,bay_waitlist_priority,stage');
       if (!rows || !rows.length) { container.innerHTML = ''; return; }
       var j = rows[0];
       var st = window._bayState(j);
@@ -39657,19 +39743,42 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
               ? '<button onclick="window._bayEditPriority(\'' + esc(jobId) + '\')" style="font-size:10px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Set priority…</button>'
               : '');
       } else if (st === 'held') {
-        var actions = '';
-        if (canRelease) actions += '<button onclick="window._bayMarkClear(\'' + esc(jobId) + '\')" title="Job done, staging removed" style="font-size:10px;background:transparent;border:1px solid var(--amber);color:var(--amber);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Mark Bay ' + j.job_bay + ' Clear</button>';
-        if (canAssign)  actions += '<button onclick="window._bayMoveToBay(\'' + esc(jobId) + '\')" title="Swap to a different free bay" style="font-size:10px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Move to another bay…</button>';
-        if (canRelease) actions += '<button onclick="window._bayUnassign(\'' + esc(jobId) + '\')" title="Pull off this bay (frees it, fires email) and return to queue" style="font-size:10px;background:transparent;border:1px solid rgba(224,93,93,0.35);color:var(--red);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Unassign</button>';
-        if (!actions) actions = '<div style="font-size:11px;color:var(--muted);font-style:italic;">Release/move restricted for your role.</div>';
-        body = '<div style="font-size:12px;color:var(--white);margin-bottom:8px;line-height:1.5;">Dry goods should be staged at <strong style="color:var(--green);">Bay ' + j.job_bay + '</strong>.<br>'
+        var extraBays = j.extra_bays || [];
+        // Primary bay row
+        var primaryActions = '';
+        if (canRelease) primaryActions += '<button onclick="window._bayMarkClear(\'' + esc(jobId) + '\')" title="Job done, all staging removed" style="font-size:10px;background:transparent;border:1px solid var(--amber);color:var(--amber);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Mark All Clear</button>';
+        if (canAssign)  primaryActions += '<button onclick="window._bayMoveToBay(\'' + esc(jobId) + '\')" title="Swap to a different free bay" style="font-size:10px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Move…</button>';
+        if (canRelease) primaryActions += '<button onclick="window._bayUnassign(\'' + esc(jobId) + '\')" title="Pull off bay (frees it, fires email) and return to queue" style="font-size:10px;background:transparent;border:1px solid rgba(224,93,93,0.35);color:var(--red);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Unassign All</button>';
+        if (!primaryActions) primaryActions = '<div style="font-size:11px;color:var(--muted);font-style:italic;">Release/move restricted for your role.</div>';
+        // Extra bay rows
+        var extraRows = '';
+        extraBays.forEach(function(bNo) {
+          var releaseBtn = canRelease
+            ? '<button onclick="window._bayReleaseExtra(\'' + esc(jobId) + '\',' + bNo + ')" title="Release this extra bay — staging removed" style="font-size:10px;background:transparent;border:1px solid rgba(224,93,93,0.35);color:var(--red);padding:4px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Release Bay ' + bNo + '</button>'
+            : '';
+          extraRows += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid rgba(36,61,87,0.5);margin-top:6px;">'
+            + '<span style="font-size:11px;color:var(--white);">Extra: <strong style="color:var(--green);">Bay ' + bNo + '</strong></span>'
+            + releaseBtn
+            + '</div>';
+        });
+        var addBtn = canAssign
+          ? '<button onclick="window._bayAddExtra(\'' + esc(jobId) + '\')" style="font-size:10px;background:transparent;border:1px solid var(--gold);color:var(--gold);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">+ Add Another Bay</button>'
+          : '';
+        body = '<div style="font-size:12px;color:var(--white);margin-bottom:8px;line-height:1.5;">Dry goods staged at <strong style="color:var(--green);">Bay ' + j.job_bay + '</strong>'
+          + (extraBays.length ? ' + <strong style="color:var(--green);">' + extraBays.map(function(b){ return 'Bay ' + b; }).join(', ') + '</strong>' : '') + '.<br>'
           + '<span style="color:var(--muted);font-size:11px;">Assigned ' + fmtTs(j.bay_assigned_at) + (j.bay_assigned_by ? ' · by ' + esc(j.bay_assigned_by) : '') + '</span></div>'
-          + '<div style="display:flex;gap:6px;flex-wrap:wrap;">' + actions + '</div>';
+          + extraRows
+          + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">' + primaryActions + addBtn + '</div>';
       } else if (st === 'released') {
         var reason = j.bay_release_reason === 'auto_complete' ? 'Auto-released on job completion' : 'Cleared manually';
         body = '<div style="font-size:12px;color:var(--muted);line-height:1.5;">'
           + 'Bay <strong style="color:var(--white);">' + j.job_bay + '</strong> — ' + reason + '.<br>'
           + fmtTs(j.bay_released_at) + (j.bay_released_by ? ' · by ' + esc(j.bay_released_by) : '') + '</div>';
+        if (j.stage !== 'complete' && j.stage !== 'cancelled' && canAssign) {
+          body += '<div style="margin-top:10px;">'
+            + '<button onclick="window._bayReassignReleased(\'' + esc(jobId) + '\')" style="font-size:10px;background:transparent;border:1px solid var(--gold);color:var(--gold);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Re-assign to Bay…</button>'
+            + '</div>';
+        }
       }
 
       container.innerHTML = '<div style="background:rgba(13,27,42,0.5);border:1px solid var(--navy-border);border-left:3px solid var(--gold);border-radius:4px;padding:14px 18px;margin-bottom:18px;">' + title + body + '</div>';
