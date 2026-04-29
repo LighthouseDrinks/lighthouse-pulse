@@ -26293,6 +26293,16 @@ window.saveAdjModal = async function() {
       list.sort(function(a, b) { return (b.bottle_target||0) - (a.bottle_target||0); });
     } else if (sortVal === 'bottles_asc') {
       list.sort(function(a, b) { return (a.bottle_target||0) - (b.bottle_target||0); });
+    } else {
+      // Default: sort by bay queue priority (same order as Schedule page Next Jobs list),
+      // jobs with no priority fall to the bottom ordered by created_at.
+      list.sort(function(a, b) {
+        var ap = a.bay_waitlist_priority, bp = b.bay_waitlist_priority;
+        if (ap == null && bp == null) return new Date(b.created_at) - new Date(a.created_at);
+        if (ap == null) return 1;
+        if (bp == null) return -1;
+        return ap - bp;
+      });
     }
 
     if (!list.length) {
@@ -39299,10 +39309,10 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,bay_waitlist_priority');
       if (!me || !me.length || me[0].bay_waitlist_priority == null) return;
       var myP = me[0].bay_waitlist_priority;
-      // Find nearest neighbour in the right direction (handles gaps in priority sequence)
+      // Find nearest neighbour in the right direction — only within planning/scheduled jobs
       var nbQuery = direction === 'up'
-        ? 'jobs?bay_waitlist_priority=lt.' + myP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1'
-        : 'jobs?bay_waitlist_priority=gt.' + myP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc&limit=1';
+        ? 'jobs?bay_waitlist_priority=lt.' + myP + '&stage=in.(planning,scheduled)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1'
+        : 'jobs?bay_waitlist_priority=gt.' + myP + '&stage=in.(planning,scheduled)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc&limit=1';
       var nb = await apiGet(nbQuery);
       if (!nb || !nb.length) return; // already at top/bottom
       var nbP = nb[0].bay_waitlist_priority;
@@ -39329,14 +39339,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       // Park the row at a sentinel to free up curP
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: -1 });
       if (newP < curP) {
-        // Moving up: shift rows in [newP, curP) down by +1
-        var up = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&bay_waitlist_priority=lt.' + curP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
+        // Moving up: shift rows in [newP, curP) down by +1 — only planning/scheduled
+        var up = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&bay_waitlist_priority=lt.' + curP + '&stage=in.(planning,scheduled)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
         for (var i = 0; i < (up||[]).length; i++) {
           await apiPatch('jobs', '?id=eq.' + encodeURIComponent(up[i].id), { bay_waitlist_priority: (up[i].bay_waitlist_priority || 0) + 1 });
         }
       } else {
-        // Moving down: shift rows in (curP, newP] up by -1
-        var dn = await apiGet('jobs?bay_waitlist_priority=gt.' + curP + '&bay_waitlist_priority=lte.' + newP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
+        // Moving down: shift rows in (curP, newP] up by -1 — only planning/scheduled
+        var dn = await apiGet('jobs?bay_waitlist_priority=gt.' + curP + '&bay_waitlist_priority=lte.' + newP + '&stage=in.(planning,scheduled)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
         for (var k = 0; k < (dn||[]).length; k++) {
           await apiPatch('jobs', '?id=eq.' + encodeURIComponent(dn[k].id), { bay_waitlist_priority: (dn[k].bay_waitlist_priority || 0) - 1 });
         }
