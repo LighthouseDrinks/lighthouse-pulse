@@ -26330,7 +26330,7 @@ window.saveAdjModal = async function() {
       var bayChip = (typeof window._bayChipHTML === 'function') ? window._bayChipHTML(j) : '';
       // If this job is queued (planning priority set) and the user can edit, make the chip
       // clickable to set priority and expose ↑ ↓ reorder arrows inline.
-      var bayEditable = (j.bay_waitlist_priority != null) && (window.canDo && window.canDo('bay_assign'));
+      var bayEditable = (j.stage === 'planning') && (j.bay_waitlist_priority != null) && (window.canDo && window.canDo('bay_assign'));
       var bayWrapped = '';
       if (bayChip) {
         if (bayEditable) {
@@ -39417,15 +39417,18 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (!window.canDo || !window.canDo('bay_release')) { window.toast && window.toast('You don\'t have permission to release bays.', 'error'); return; }
     try {
       var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,stage,bay_released_at');
-      if (!me || !me.length || !me[0].job_bay || me[0].bay_released_at) {
+      if (!me || !me.length || !me[0].job_bay) {
         window.toast && window.toast('This job isn\'t currently holding a bay.', 'error'); return;
       }
       var freedBay = me[0].job_bay;
       if (!(await window.lpConfirm('Remove this job from Bay ' + freedBay + '? The bay will be freed and the alert email will fire. The job\'s priority position is unchanged.', { title: 'Unassign from Bay ' + freedBay, confirmLabel: 'Unassign', destructive: true }))) return;
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
-        job_bay:         null,
-        bay_assigned_at: null,
-        bay_assigned_by: null
+        job_bay:            null,
+        bay_assigned_at:    null,
+        bay_assigned_by:    null,
+        bay_released_at:    null,
+        bay_released_by:    null,
+        bay_release_reason: null
       });
       await _clearExtraBays(jobId);
       await auditBay(jobId, me[0].stage, 'Unassigned from Bay ' + freedBay + ' by ' + whoLabel());
@@ -39557,22 +39560,34 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   window._bayAddExtra = async function(jobId) {
     if (!window.canDo || !window.canDo('bay_assign')) { window.toast && window.toast('You don\'t have permission to assign bays.', 'error'); return; }
     try {
-      var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,extra_bays,stage');
+      var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,stage');
       if (!me || !me.length || !me[0].job_bay) { window.toast && window.toast('Job must have a primary bay before adding extra bays.', 'error'); return; }
+      // Load existing extra_bays (requires SQL migration — falls back to [] if column missing)
+      var existing = [];
+      try {
+        var ebRows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=extra_bays');
+        existing = (ebRows && ebRows[0] && ebRows[0].extra_bays) || [];
+      } catch(e) {}
       var ans = await window.lpPrompt('Enter the additional bay number to assign.', '', { title: 'Add Extra Bay', placeholder: 'e.g. 4' });
       if (ans == null) return;
       var bayNo = String(parseInt(ans, 10));
       if (!bayNo || bayNo === 'NaN') { window.toast && window.toast('Enter a valid bay number.', 'error'); return; }
       if (String(me[0].job_bay) === bayNo) { window.toast && window.toast('That is already the primary bay.', 'error'); return; }
-      var existing = me[0].extra_bays || [];
       if (existing.indexOf(bayNo) >= 0) { window.toast && window.toast('Bay ' + bayNo + ' is already assigned to this job.', 'error'); return; }
-      // Verify target bay is free
+      // Verify target bay is free (primary check always works; extra_bays check requires migration)
       var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
       if (heldPrimary && heldPrimary.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
-      var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
-      if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      try {
+        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+        if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      } catch(e) { /* extra_bays column not yet created — check skipped */ }
       var updated = existing.concat([bayNo]);
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { extra_bays: updated });
+      try {
+        await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { extra_bays: updated });
+      } catch(e) {
+        window.toast && window.toast('Could not save extra bay — please run the SQL migration first: ALTER TABLE jobs ADD COLUMN IF NOT EXISTS extra_bays text[] DEFAULT \'{}\';', 'error');
+        return;
+      }
       await auditBay(jobId, me[0].stage, 'Extra bay ' + bayNo + ' added by ' + whoLabel());
       window.toast && window.toast('Bay ' + bayNo + ' added to ' + jobId + '.', 'success');
       window._bayRefreshAll(jobId);
@@ -39655,7 +39670,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
           var btnRow = '';
           if (canAssign || canRelease) {
             btnRow = '<div style="display:flex;gap:4px;flex-wrap:wrap;">';
-            if (canRelease) btnRow += '<button title="Job done, staging removed" onclick="window._bayMarkClear(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid var(--amber);color:var(--amber);padding:5px 6px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Mark Clear</button>';
+            // "Mark Clear" only makes sense when production staging is physically done — not for planning jobs
+            if (canRelease && j.stage !== 'planning') btnRow += '<button title="Job done, staging removed" onclick="window._bayMarkClear(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid var(--amber);color:var(--amber);padding:5px 6px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Mark Clear</button>';
             if (canAssign)  btnRow += '<button title="Swap to a different bay" onclick="window._bayMoveToBay(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 6px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Move →</button>';
             if (canRelease) btnRow += '<button title="Pull back to queue (frees bay, fires email)" onclick="window._bayUnassign(\'' + esc(j.id) + '\')" style="flex:1;font-size:9px;background:transparent;border:1px solid rgba(224,93,93,0.35);color:var(--red);padding:5px 6px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Unassign</button>';
             btnRow += '</div>';
@@ -39803,10 +39819,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         }
       } else if (st === 'queued') {
         body = '<div style="font-size:12px;color:var(--white);margin-bottom:8px;line-height:1.5;">Priority position <strong style="color:var(--amber);">#' + j.bay_waitlist_priority + '</strong> — no bay assigned yet.<br>'
-          + '<span style="color:var(--muted);font-size:11px;">Bay assignment is independent. Reorder from the Jobs page using ▲▼, or set an exact position below.</span></div>'
-          + (canAssign
-              ? '<button onclick="window._bayEditPriority(\'' + esc(jobId) + '\')" style="font-size:10px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Set priority…</button>'
-              : '');
+          + '<span style="color:var(--muted);font-size:11px;">Reorder using ▲▼ on the Jobs page. Bay assignment is independent of priority.</span></div>';
       } else if (st === 'held') {
         var extraBays = j.extra_bays || [];
         // Primary bay row
