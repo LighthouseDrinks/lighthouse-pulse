@@ -27833,7 +27833,7 @@ window.saveAdjModal = async function() {
     }
 
     // Filter out liquid (handled separately) and items with no SKU
-    var dryComps = comps.filter(function(c){ return c.sku_id; });
+    var dryComps = comps.filter(function(c){ return c.sku_id && !c.is_excluded; });
 
     // If no dry goods at all — skip modal, complete normally
     if (!dryComps.length) {
@@ -28318,8 +28318,8 @@ window.saveAdjModal = async function() {
         if (seen[key]) {
           // Keep whichever row has more filled-in fields (PO number, qty ordered, etc.)
           var prev = seen[key];
-          var prevScore = (prev.po_number?1:0) + (prev.qty_ordered?1:0) + (prev.on_site_confirmed?1:0);
-          var curScore  = (c.po_number?1:0)    + (c.qty_ordered?1:0)    + (c.on_site_confirmed?1:0);
+          var prevScore = (prev.po_number?1:0) + (prev.qty_ordered?1:0) + (prev.on_site_confirmed?1:0) + (prev.is_excluded?1:0);
+          var curScore  = (c.po_number?1:0)    + (c.qty_ordered?1:0)    + (c.on_site_confirmed?1:0)    + (c.is_excluded?1:0);
           if (curScore > prevScore) {
             ghostIds.push(prev.id);
             seen[key] = c;
@@ -28409,6 +28409,7 @@ window.saveAdjModal = async function() {
         + '<th style="padding:8px 6px;min-width:52px;">Qty Ord.</th>'
         + '<th style="padding:8px 6px;min-width:80px;text-align:right;">Unit Price</th>'
         + '<th style="padding:8px 6px;min-width:120px;">Exp. Delivery</th>'
+        + '<th style="text-align:center;padding:8px 6px;white-space:nowrap;" title="Mark item as not required for this job — no stock deduction, not printed on picking list">N/A</th>'
         + '</tr></thead><tbody></tbody>';
       el.appendChild(tbl);
       var tbody = tbl.querySelector('tbody');
@@ -28423,57 +28424,68 @@ window.saveAdjModal = async function() {
         var onSiteStr   = onSite !== null ? onSite.toLocaleString() : '—';
         var onSiteColor = onSite === null ? 'var(--muted)' : sufficient ? 'var(--green)' : onSite > 0 ? 'var(--amber)' : 'var(--red)';
 
+        var isExcluded = !!c.is_excluded;
+        var rowMute = isExcluded ? 'opacity:0.4;' : '';
+
         var tr = document.createElement('tr');
+        if (isExcluded) tr.style.opacity = '0.4';
         tr.innerHTML =
           // col 0: SKU
           '<td style="padding:7px 10px 7px 0;font-size:11px;font-family:monospace;color:var(--muted);white-space:nowrap;">' + esc(c.sku_id||'—') + '</td>'
           // col 1: Item
-          + '<td style="padding:7px 10px 7px 0;font-size:12px;">' + esc(c.item_name||c.sku_id||'—') + '</td>'
+          + '<td style="padding:7px 10px 7px 0;font-size:12px;' + (isExcluded ? 'text-decoration:line-through;' : '') + '">' + esc(c.item_name||c.sku_id||'—') + '</td>'
           // col 2: Required
           + '<td style="padding:7px 6px;text-align:right;font-size:12px;">' + (reqQty ? reqQty.toLocaleString() : '—') + '</td>'
           // col 3: On-site qty
-          + '<td style="padding:7px 6px;text-align:right;font-size:13px;font-weight:700;color:' + onSiteColor + ';">' + onSiteStr + '</td>'
+          + '<td style="padding:7px 6px;text-align:right;font-size:13px;font-weight:700;color:' + (isExcluded ? 'var(--muted)' : onSiteColor) + ';">' + (isExcluded ? '—' : onSiteStr) + '</td>'
           + '<td style="padding:7px 6px;text-align:center;"></td>'   // col 4: on-site ✔
           + '<td style="padding:7px 6px;text-align:center;"></td>'   // col 5: order
           + '<td style="padding:4px 6px;"></td>'                     // col 6: PO no.
           + '<td style="padding:4px 6px;"></td>'                     // col 7: qty ord.
           + '<td style="padding:4px 6px;"></td>'                     // col 8: unit price
-          + '<td style="padding:4px 6px;"></td>';                    // col 9: exp. delivery
+          + '<td style="padding:4px 6px;"></td>'                     // col 9: exp. delivery
+          + '<td style="padding:7px 6px;text-align:center;"></td>';  // col 10: N/A
 
-        // col 4: On-site checkbox — auto-ticked when stock >= required, read-only
-        var cbOnSite = document.createElement('input');
-        cbOnSite.type = 'checkbox';
-        cbOnSite.checked = sufficient;
-        cbOnSite.disabled = true;
-        cbOnSite.title = sufficient ? 'Sufficient stock on site ✓' : 'Stock below required quantity';
-        cbOnSite.style.cssText = 'cursor:not-allowed;' + (sufficient ? 'accent-color:var(--green);' : 'opacity:0.4;');
-        tr.cells[4].appendChild(cbOnSite);
+        // col 4: On-site checkbox — N/A dash if excluded, otherwise auto-ticked when stock >= required
+        if (isExcluded) {
+          tr.cells[4].innerHTML = '<span style="color:var(--muted);font-size:11px;">N/A</span>';
+        } else {
+          var cbOnSite = document.createElement('input');
+          cbOnSite.type = 'checkbox';
+          cbOnSite.checked = sufficient;
+          cbOnSite.disabled = true;
+          cbOnSite.title = sufficient ? 'Sufficient stock on site ✓' : 'Stock below required quantity';
+          cbOnSite.style.cssText = 'cursor:not-allowed;' + (sufficient ? 'accent-color:var(--green);' : 'opacity:0.4;');
+          tr.cells[4].appendChild(cbOnSite);
+        }
 
-        // col 5: Order checkbox — only greyed when sufficient stock already on site
+        // col 5: Order checkbox — disabled if excluded or sufficient stock
         var cbOrder = document.createElement('input');
         cbOrder.type = 'checkbox';
         cbOrder.checked = !!c.is_ordered;
-        if (sufficient) {
+        if (isExcluded || sufficient) {
           cbOrder.disabled = true;
-          cbOrder.title = 'Sufficient stock on site — order not required';
           cbOrder.style.cssText = 'opacity:0.3;cursor:not-allowed;';
+          cbOrder.title = isExcluded ? 'Item marked N/A' : 'Sufficient stock on site — order not required';
         } else {
           cbOrder.onchange = function(){ window.updateComponent(cid,'is_ordered',this.checked); };
         }
         tr.cells[5].appendChild(cbOrder);
 
-        // col 6: PO input — narrowed
+        // col 6: PO input
         var poIn = document.createElement('input');
         poIn.type = 'text'; poIn.value = c.po_number||''; poIn.placeholder = 'PO-';
         poIn.style.cssText = inpStyle + 'max-width:90px;';
-        poIn.onblur = function(){ window.updateComponent(cid,'po_number',this.value); };
+        if (isExcluded) { poIn.disabled = true; poIn.style.cssText += 'opacity:0.3;cursor:not-allowed;'; }
+        else { poIn.onblur = function(){ window.updateComponent(cid,'po_number',this.value); }; }
         tr.cells[6].appendChild(poIn);
 
-        // col 7: Qty ordered — narrowed
+        // col 7: Qty ordered
         var qtyIn = document.createElement('input');
         qtyIn.type = 'number'; qtyIn.value = c.po_value||''; qtyIn.placeholder = '0';
         qtyIn.style.cssText = inpStyle + 'text-align:right;max-width:64px;';
-        qtyIn.onblur = function(){ window.updateComponent(cid,'po_value',parseFloat(this.value)||null); };
+        if (isExcluded) { qtyIn.disabled = true; qtyIn.style.cssText += 'opacity:0.3;cursor:not-allowed;'; }
+        else { qtyIn.onblur = function(){ window.updateComponent(cid,'po_value',parseFloat(this.value)||null); }; }
         tr.cells[7].appendChild(qtyIn);
 
         // col 8: Unit price
@@ -28481,13 +28493,14 @@ window.saveAdjModal = async function() {
         upIn.type = 'number'; upIn.value = c.unit_price != null ? c.unit_price : ''; upIn.placeholder = '0.00';
         upIn.step = '0.01'; upIn.min = '0';
         upIn.style.cssText = inpStyle + 'text-align:right;max-width:80px;';
-        upIn.onblur = function(){ window.updateComponent(cid,'unit_price',parseFloat(this.value)||null); };
+        if (isExcluded) { upIn.disabled = true; upIn.style.cssText += 'opacity:0.3;cursor:not-allowed;'; }
+        else { upIn.onblur = function(){ window.updateComponent(cid,'unit_price',parseFloat(this.value)||null); }; }
         tr.cells[8].appendChild(upIn);
 
-        // col 9: Delivery date — greyed out if sufficient stock on site
+        // col 9: Delivery date
         var dtIn = document.createElement('input');
         dtIn.type = 'date'; dtIn.value = c.expected_delivery||'';
-        if (sufficient) {
+        if (isExcluded || sufficient) {
           dtIn.disabled = true;
           dtIn.style.cssText = inpStyle + 'opacity:0.3;cursor:not-allowed;';
         } else {
@@ -28495,6 +28508,22 @@ window.saveAdjModal = async function() {
           dtIn.onblur = function(){ window.updateComponent(cid,'expected_delivery',this.value); };
         }
         tr.cells[9].appendChild(dtIn);
+
+        // col 10: N/A checkbox — mark component as not required for this job
+        var cbNA = document.createElement('input');
+        cbNA.type = 'checkbox';
+        cbNA.checked = isExcluded;
+        cbNA.title = 'Mark as N/A — no stock deduction, not printed on picking list';
+        cbNA.style.cssText = 'cursor:pointer;accent-color:var(--amber);';
+        cbNA.onchange = (function(rowCid, rowTr) {
+          return function() {
+            var excluded = this.checked;
+            window.updateComponent(rowCid, 'is_excluded', excluded);
+            // Reload the tab so the visual state updates cleanly
+            loadComponentsTab(jobId);
+          };
+        })(cid, tr);
+        tr.cells[10].appendChild(cbNA);
 
         tbody.appendChild(tr);
       });
@@ -28514,7 +28543,7 @@ window.saveAdjModal = async function() {
     var esc = window.escapeHtml;
     var dateStr = new Date().toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' });
 
-    var rows = comps.filter(function(c){ return c.sku_id || c.item_name; }).map(function(c) {
+    var rows = comps.filter(function(c){ return (c.sku_id || c.item_name) && !c.is_excluded; }).map(function(c) {
       return '<tr>'
         + '<td>' + esc(c.sku_id||'—') + '</td>'
         + '<td>' + esc(c.item_name||c.sku_id||'—') + '</td>'
