@@ -18056,14 +18056,25 @@ window.loadBoms = async function initBoms() {
     </div>
   </div>
 
-  <!-- Production (placeholder) -->
+  <!-- Production — Bottling Reports -->
   <div id="reports-production" class="reports-panel" style="display:none;">
-    <div class="placeholder-card" style="min-height:200px;">
-      <div class="placeholder-icon">
-        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 11H2v3h2v-3zm5-4H7v7h2V7zm5-5v12h-2V2h2zm-2-1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1h-2zM6 7a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7zm-5 4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1v-3z"/></svg>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;">
+      <div>
+        <div style="font-size:13px;color:var(--text);margin-bottom:4px;">Full bottling report per completed job — production data, dry goods, liquid, QC and sign-off in one place.</div>
+        <div style="font-size:11px;color:var(--muted);">Click any row to open the full detailed report.</div>
       </div>
-      <div class="placeholder-label">Production Analytics</div>
-      <div class="placeholder-coming">Coming Soon — Monthly volumes, yields, and efficiency charts</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <select id="prod-report-client" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;min-width:140px;">
+          <option value="">All Clients</option>
+        </select>
+        <input type="date" id="prod-report-from" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">
+        <span style="color:var(--muted);font-size:11px;">to</span>
+        <input type="date" id="prod-report-to" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">
+        <button onclick="window.loadProductionReport()" class="btn btn-gold" style="font-size:12px;padding:7px 16px;">Run Report</button>
+      </div>
+    </div>
+    <div id="prod-report-content">
+      <div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Select filters and click Run Report to view bottling reports.</div>
     </div>
   </div>
 
@@ -18099,6 +18110,23 @@ window.loadBoms = async function initBoms() {
   </div>
 
 </div>
+</div>
+
+<!-- Full Bottling Report Modal -->
+<div id="bottling-report-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:9998;overflow-y:auto;padding:24px 16px;">
+  <div style="max-width:920px;margin:0 auto;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
+      <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;">Full Bottling Report</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button onclick="window._sendBottlingReport()" class="btn btn-gold" style="font-size:12px;padding:6px 16px;">&#9993; Send to Client</button>
+        <button onclick="window._printBottlingReport()" class="btn btn-outline" style="font-size:12px;padding:6px 16px;">&#128438; Print</button>
+        <button onclick="window.closeBottlingReport()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;padding:6px 16px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">&#10005; Close</button>
+      </div>
+    </div>
+    <div id="bottling-report-body" style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:8px;overflow:hidden;">
+      <div style="color:var(--muted);padding:48px;text-align:center;">Loading report…</div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -18207,6 +18235,11 @@ window.loadBoms = async function initBoms() {
         monthEl.value = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
       }
       window.loadCBWLog && window.loadCBWLog();
+    }
+    // Auto-populate client filter and load production reports
+    if (tab === 'production') {
+      window._initProdReportClientFilter && window._initProdReportClientFilter();
+      window.loadProductionReport && window.loadProductionReport();
     }
   }
   window.showReportsTab = showReportsTab;
@@ -29632,6 +29665,559 @@ window.saveAdjModal = async function() {
     }
   };
 
+  // ── PRODUCTION REPORTS (Bottling Report) ──────────────────────────────────
+
+  // Populate the client filter dropdown in the Production reports tab
+  window._initProdReportClientFilter = function() {
+    var sel = document.getElementById('prod-report-client');
+    if (!sel) return;
+    while (sel.options.length > 1) sel.remove(1);
+    var clients = (window._clients || []).slice().sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+    clients.forEach(function(c) {
+      var opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name || c.id;
+      sel.appendChild(opt);
+    });
+  };
+
+  // Load completed jobs into the production reports summary table
+  window.loadProductionReport = async function() {
+    var content = document.getElementById('prod-report-content');
+    if (!content) return;
+    content.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Loading…</div>';
+    var clientId = (document.getElementById('prod-report-client') || {}).value || '';
+    var fromVal  = (document.getElementById('prod-report-from')   || {}).value || '';
+    var toVal    = (document.getElementById('prod-report-to')     || {}).value || '';
+    try {
+      var qs = '?stage=eq.complete&order=date_completed.desc'
+             + '&select=id,product_name,client_id,lot_number,date_completed,date_commenced'
+             + ',actual_bottles_produced,actual_cases,actual_job_hours,results_signed_by'
+             + ',clients(name)&limit=300';
+      if (clientId) qs += '&client_id=eq.' + encodeURIComponent(clientId);
+      if (fromVal)  qs += '&date_completed=gte.' + fromVal + 'T00:00:00Z';
+      if (toVal)    qs += '&date_completed=lte.' + toVal   + 'T23:59:59Z';
+      var rows = await supaGet('jobs' + qs);
+      if (!rows || !rows.length) {
+        content.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">No completed jobs found for the selected filters.</div>';
+        return;
+      }
+      function _e(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+      var html = '<div class="card" style="overflow-x:auto;">'
+        + '<table class="data-table" style="width:100%;">'
+        + '<thead><tr>'
+        + '<th>Client</th>'
+        + '<th>Product</th>'
+        + '<th>Lot / Batch</th>'
+        + '<th style="text-align:right;">Bottles</th>'
+        + '<th style="text-align:right;">Cases</th>'
+        + '<th>Completed</th>'
+        + '<th>Signed Off By</th>'
+        + '<th></th>'
+        + '</tr></thead><tbody>';
+      rows.forEach(function(r) {
+        var clientName = (r.clients && r.clients.name) || '—';
+        var bottles = r.actual_bottles_produced ? Number(r.actual_bottles_produced).toLocaleString() : '—';
+        var cases   = r.actual_cases ? Number(r.actual_cases).toLocaleString() : '—';
+        html += '<tr style="cursor:pointer;" onclick="window.openBottlingReport(\'' + _e(r.id) + '\')">'
+          + '<td style="color:var(--gold);font-weight:600;">' + _e(clientName) + '</td>'
+          + '<td>' + _e(r.product_name || '—') + '</td>'
+          + '<td style="font-family:monospace;font-size:11px;color:var(--muted);">' + _e(r.lot_number || '—') + '</td>'
+          + '<td style="text-align:right;font-weight:600;">' + bottles + '</td>'
+          + '<td style="text-align:right;">' + cases + '</td>'
+          + '<td>' + _fmtDate(r.date_completed) + '</td>'
+          + '<td style="color:var(--muted);font-size:12px;">' + _e(r.results_signed_by || '—') + '</td>'
+          + '<td><button class="btn btn-outline" style="font-size:11px;padding:4px 12px;white-space:nowrap;" onclick="event.stopPropagation();window.openBottlingReport(\'' + _e(r.id) + '\')">View Report</button></td>'
+          + '</tr>';
+      });
+      html += '</tbody></table></div>';
+      content.innerHTML = html;
+    } catch(e) {
+      content.innerHTML = '<div style="color:var(--red);font-size:12px;padding:32px 0;text-align:center;">Error loading reports: ' + String(e.message||e) + '</div>';
+      window.logError && window.logError('loadProductionReport', e);
+    }
+  };
+
+  // Open the full bottling report modal for a given job
+  window.openBottlingReport = async function(jobId) {
+    var overlay = document.getElementById('bottling-report-overlay');
+    var body    = document.getElementById('bottling-report-body');
+    if (!overlay || !body) return;
+    overlay.style.display = 'block';
+    overlay.dataset.jobId = jobId;
+    document.body.style.overflow = 'hidden';
+    body.innerHTML = '<div style="color:var(--muted);padding:48px;text-align:center;">Loading report…</div>';
+
+    function _e(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function numFmt(n) { return (n != null && n !== '' && !isNaN(n)) ? Number(n).toLocaleString() : '—'; }
+    function litresFmt(n) {
+      if (n == null || n === '' || isNaN(n) || Number(n) === 0) return '—';
+      return Number(n).toLocaleString(undefined, {maximumFractionDigits:2}) + ' L';
+    }
+
+    try {
+      // Find job in cache or fetch fresh
+      var job = _jobs.find(function(x){ return x.id === jobId; });
+      if (!job) {
+        var jRows = await supaGet('jobs?id=eq.' + jobId + '&limit=1');
+        job = jRows && jRows[0];
+      }
+      if (!job) throw new Error('Job not found.');
+
+      // Parallel fetch all sections
+      var results = await Promise.all([
+        supaGet('boms?id=eq.' + (job.bom_id||'__none') + '&select=bottles_per_shipper,additional_info,volume_cl,abv,bottling_abv,product_name,spirit_type&limit=1'),
+        supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1'),
+        supaGet('clients?id=eq.' + job.client_id + '&select=id,name,email&limit=1'),
+        supaGet('job_drygoods_prep_items?job_id=eq.' + jobId + '&select=sku_id,item_name,qty_required,qty_picked'),
+        supaGet('job_quality_checks?job_id=eq.' + jobId + '&order=checked_at.asc')
+      ]);
+      var bom      = results[0][0] || {};
+      var lso      = results[1][0] || {};
+      var client   = results[2][0] || {};
+      var dgItems  = results[3] || [];
+      var qcChecks = results[4] || [];
+      var ai       = (typeof bom.additional_info === 'object' && bom.additional_info) || {};
+      try { if (typeof bom.additional_info === 'string') ai = JSON.parse(bom.additional_info); } catch(e2){}
+
+      // Fetch SKU details for dry goods descriptions
+      var skuDetails = {};
+      var skuIds = dgItems.map(function(i){ return i.sku_id; }).filter(Boolean);
+      if (skuIds.length) {
+        try {
+          var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,description,volume,abv,region');
+          skuRows.forEach(function(s){ skuDetails[s.id] = s; });
+        } catch(e2){}
+      }
+
+      // Resolve spirit type from linked containers
+      var spiritType = bom.spirit_type || '—';
+      var linkedConts = [];
+      try { linkedConts = JSON.parse(lso.linked_containers_json || '[]'); } catch(e2){}
+      if (!linkedConts.length && lso.linked_container_id) linkedConts = [{ id: lso.linked_container_id }];
+      if (linkedConts.length) {
+        try {
+          var ids = linkedConts.map(function(c){ return c.id; }).filter(Boolean);
+          var cRows = await supaGet('liquid_containers?id=in.(' + ids.join(',') + ')&select=id,spirit_type&limit=10');
+          if (cRows && cRows[0] && cRows[0].spirit_type) spiritType = cRows[0].spirit_type;
+        } catch(e2){}
+      }
+
+      // ── Calculations ────────────────────────────────────────────────────────
+      var volumeCl         = parseFloat(bom.volume_cl || 0) || null;
+      var bottlesProduced  = parseInt(job.actual_bottles_produced || 0) || 0;
+      var bottleTarget     = parseInt(job.bottle_target || 0) || 0;
+      var actualCases      = parseInt(job.actual_cases || 0) || 0;
+      var actualHours      = parseFloat(job.actual_job_hours || 0) || 0;
+      var liquidLeftover   = parseFloat(job.liquid_leftover || 0) || 0;
+      var finalLitres      = parseFloat(lso.final_litres || 0) || 0;
+      var waterRequired    = parseFloat(lso.water_required || 0) || 0;
+      var bottlingAbv      = parseFloat(job.bottling_abv || bom.bottling_abv || bom.abv || 0);
+      var bottlesPerCase   = parseInt(bom.bottles_per_shipper || 0) || null;
+      var casesPerLayer    = parseInt(ai.casesLayer || 0) || null;
+      var layersPerPallet  = parseInt(ai.layersPallet || 0) || null;
+      var casesPerPallet   = (casesPerLayer && layersPerPallet) ? casesPerLayer * layersPerPallet : null;
+      var totalPallets     = (actualCases && casesPerPallet) ? Math.ceil(actualCases / casesPerPallet) : null;
+      var bottleYield      = (bottleTarget > 0 && bottlesProduced > 0) ? Math.round((bottlesProduced / bottleTarget) * 100) : null;
+      var bottleShortfall  = (bottleTarget > 0) ? bottlesProduced - bottleTarget : null;
+      var theoreticalLiq   = (bottlesProduced > 0 && volumeCl) ? Math.round((bottlesProduced * volumeCl / 1000) * 100) / 100 : null;
+      var liquidWaste      = (finalLitres > 0 && theoreticalLiq != null)
+                              ? Math.round((finalLitres - theoreticalLiq - liquidLeftover) * 100) / 100
+                              : null;
+      var bphActual        = (bottlesProduced > 0 && actualHours > 0) ? Math.round(bottlesProduced / actualHours) : null;
+
+      // ── Render helpers ───────────────────────────────────────────────────────
+      function sec(title, content) {
+        return '<div style="border-top:1px solid var(--navy-border);padding:20px 24px;">'
+          + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:14px;">' + title + '</div>'
+          + content + '</div>';
+      }
+      function kv(label, val) {
+        return '<tr>'
+          + '<td style="color:var(--muted);font-size:12px;padding:5px 16px 5px 0;width:220px;vertical-align:top;">' + label + '</td>'
+          + '<td style="color:var(--white);font-size:13px;padding:5px 0;font-weight:600;">' + (val != null ? val : '—') + '</td>'
+          + '</tr>';
+      }
+      function kvTable(rows) {
+        return '<table style="width:100%;border-collapse:collapse;">' + rows.join('') + '</table>';
+      }
+      function badge(text) {
+        return '<span style="display:inline-block;font-size:11px;font-weight:700;color:var(--gold);background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.25);padding:2px 8px;border-radius:3px;letter-spacing:0.04em;">' + _e(text) + '</span>';
+      }
+      function coloured(text, col) {
+        return '<span style="color:' + col + ';font-weight:700;">' + text + '</span>';
+      }
+
+      // ── Section 1: Job Identity ──────────────────────────────────────────────
+      var s1 = kvTable([
+        kv('Client',           _e(client.name || job.client_id || '—')),
+        kv('Product',          _e(job.product_name || '—')),
+        kv('Spirit Type',      _e(spiritType)),
+        kv('Volume',           volumeCl ? volumeCl + ' cl' : '—'),
+        kv('Bottling ABV',     bottlingAbv ? bottlingAbv.toFixed(1) + '%' : '—'),
+        kv('Lot / Batch No.',  job.lot_number ? badge(job.lot_number) : '—'),
+        kv('PO Number',        _e(job.po_number || '—')),
+        kv('Date Commenced',   _fmtDate(job.date_commenced)),
+        kv('Date Completed',   _fmtDate(job.date_completed)),
+        kv('Production Hours', actualHours ? actualHours + ' hrs' : '—'),
+        kv('Bottling Rate',    bphActual ? numFmt(bphActual) + ' bph' : '—')
+      ]);
+
+      // ── Section 2: Liquid Summary ────────────────────────────────────────────
+      var liqWasteDisplay = liquidWaste != null
+        ? litresFmt(liquidWaste) + (liquidWaste < 0 ? ' ' + coloured('(shortfall)', 'var(--red)') : '')
+        : '—';
+      var s2 = kvTable([
+        kv('Liquid into Blend',          litresFmt(finalLitres)),
+        kv('Dilution Water Added',        waterRequired > 0 ? litresFmt(waterRequired) : 'N/A'),
+        kv('Chill Filtration',            lso.chill_filtration_done === 'yes' ? '&#10003; Completed' : (lso.chill_filtration_done === 'no' ? 'Not required' : '—')),
+        kv('Theoretical Liquid Required', theoreticalLiq ? litresFmt(theoreticalLiq) : '—'),
+        kv('Liquid Leftover',             litresFmt(liquidLeftover)),
+        kv('Liquid Waste / Variance',     liqWasteDisplay)
+      ]);
+
+      // ── Section 3: Dry Goods Reconciliation ─────────────────────────────────
+      var s3;
+      if (!dgItems.length) {
+        s3 = '<div style="color:var(--muted);font-size:12px;">No dry goods prep data recorded for this job.</div>';
+      } else {
+        var dgHtml = '<div style="overflow-x:auto;"><table class="data-table" style="width:100%;min-width:520px;">'
+          + '<thead><tr>'
+          + '<th>Description</th>'
+          + '<th style="width:90px;">SKU</th>'
+          + '<th style="text-align:right;width:100px;">Required</th>'
+          + '<th style="text-align:right;width:100px;">Picked</th>'
+          + '<th style="text-align:right;width:110px;">Variance</th>'
+          + '</tr></thead><tbody>';
+        dgItems.forEach(function(item) {
+          var skuObj   = skuDetails[item.sku_id] || {};
+          var desc     = _e(item.item_name || skuObj.description || item.sku_id || '—');
+          var reqd     = item.qty_required != null ? Number(item.qty_required).toLocaleString() : '—';
+          var picked   = item.qty_picked   != null ? Number(item.qty_picked).toLocaleString()   : '—';
+          var variance = (item.qty_required != null && item.qty_picked != null)
+                          ? (Number(item.qty_picked) - Number(item.qty_required)) : null;
+          var varCol   = variance == null ? 'var(--muted)' : (variance < 0 ? 'var(--red)' : variance > 0 ? 'var(--gold)' : 'var(--muted)');
+          var varDisp  = variance != null
+            ? '<span style="color:' + varCol + ';font-weight:600;">' + (variance > 0 ? '+' : '') + variance.toLocaleString() + '</span>'
+            : '—';
+          dgHtml += '<tr>'
+            + '<td>' + desc + '</td>'
+            + '<td><span style="font-size:10px;font-weight:700;color:var(--gold);background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.2);padding:1px 6px;border-radius:2px;letter-spacing:0.06em;">' + _e(item.sku_id || '—') + '</span></td>'
+            + '<td style="text-align:right;">' + reqd   + '</td>'
+            + '<td style="text-align:right;">' + picked + '</td>'
+            + '<td style="text-align:right;">' + varDisp + '</td>'
+            + '</tr>';
+        });
+        dgHtml += '</tbody></table></div>';
+        s3 = dgHtml;
+      }
+
+      // ── Section 4: Production Output ────────────────────────────────────────
+      var yieldCol = bottleYield != null ? (bottleYield >= 98 ? 'var(--green)' : bottleYield >= 95 ? 'var(--gold)' : 'var(--red)') : 'var(--white)';
+      var shortfallDisp = bottleShortfall != null
+        ? coloured((bottleShortfall > 0 ? '+' : '') + numFmt(bottleShortfall) + ' btls', bottleShortfall >= 0 ? 'var(--green)' : 'var(--red)')
+        : '—';
+      var s4 = kvTable([
+        kv('Bottle Target',        bottleTarget > 0 ? numFmt(bottleTarget) + ' btls' : '—'),
+        kv('Bottles Produced',     bottlesProduced > 0 ? numFmt(bottlesProduced) + ' btls' : '—'),
+        kv('Shortfall / Overage',  shortfallDisp),
+        kv('Yield',                bottleYield != null ? coloured(bottleYield + '%', yieldCol) : '—'),
+        kv('Total Cases',          actualCases > 0 ? numFmt(actualCases) : '—'),
+        kv('Bottles per Case',     bottlesPerCase ? String(bottlesPerCase) : '—'),
+        kv('Cases per Layer',      casesPerLayer ? String(casesPerLayer) : '—'),
+        kv('Layers per Pallet',    layersPerPallet ? String(layersPerPallet) : '—'),
+        kv('Cases per Pallet',     casesPerPallet ? String(casesPerPallet) : '—'),
+        kv('Total Pallets',        totalPallets ? String(totalPallets) : '—'),
+        kv('Cost per Unit',        job.cost_per_unit ? '€' + parseFloat(job.cost_per_unit).toFixed(4) : '—')
+      ]);
+
+      // ── Section 5: Quality Control ───────────────────────────────────────────
+      var s5;
+      if (!qcChecks.length) {
+        s5 = '<div style="color:var(--muted);font-size:12px;">No QC checks recorded for this job.</div>';
+      } else {
+        var labelsMap = {
+          abv_actual:'ABV Actual', front_label:'Front Label', back_label:'Back Label',
+          outer_barcode:'Outer Barcode', label_barcode:'Label Barcode', pallet_type:'Pallet Type',
+          weight_check:'Weight Check', lot_number:'Lot No.', spec_crosscheck:'Spec Cross-check',
+          bottle_check:'Bottle Check', lot_no_check:'Lot No. Check',
+          pallet_construction:'Pallet Construction', final_wrapping:'Final Wrapping', pallet_labels:'Pallet Labels'
+        };
+        var qcDetailFields = Object.keys(labelsMap);
+        var qcHtml = '<div style="display:flex;flex-direction:column;gap:10px;">';
+        qcChecks.forEach(function(qc, idx) {
+          var pass       = qc.satisfactory;
+          var statusCol  = pass ? 'var(--green)' : 'var(--red)';
+          var typeLabel  = qc.check_type === 'online' ? 'Online Check' : qc.check_type === 'offline' ? 'Offline Check' : (qc.check_type || 'Check');
+          qcHtml += '<div style="background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;padding:12px 16px;">'
+            + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+            + '<span style="font-size:12px;font-weight:700;color:var(--white);">Round ' + _e(String(qc.check_round || idx+1)) + ' — ' + typeLabel + '</span>'
+            + '<span style="font-size:11px;font-weight:700;color:' + statusCol + ';padding:2px 10px;border:1px solid ' + statusCol + ';border-radius:3px;">' + (pass ? '&#10003; PASS' : '&#10007; FAIL') + '</span>'
+            + '</div>'
+            + '<div style="display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;">';
+          var hasDetail = false;
+          qcDetailFields.forEach(function(f) {
+            if (qc[f] != null && qc[f] !== '') {
+              qcHtml += '<span><span style="color:var(--muted);">' + labelsMap[f] + ': </span><span style="color:var(--white);font-weight:600;">' + _e(String(qc[f])) + '</span></span>';
+              hasDetail = true;
+            }
+          });
+          if (!hasDetail) qcHtml += '<span style="color:var(--muted);">No detail fields recorded.</span>';
+          qcHtml += '<span style="color:var(--muted);font-size:11px;margin-left:auto;white-space:nowrap;">By ' + _e(qc.checked_by || '—') + ' · ' + _fmtDate(qc.checked_at) + '</span>';
+          qcHtml += '</div></div>';
+        });
+        qcHtml += '</div>';
+        s5 = qcHtml;
+      }
+
+      // ── Section 6: Sign-Off & Compliance ─────────────────────────────────────
+      var s6 = kvTable([
+        kv('Production Manager', _e(job.results_signed_by || '—')),
+        kv('Sign-Off Date',      _fmtDate(job.results_signed_at)),
+        kv('Line Clearance',     job.line_clearance_complete ? '&#10003; Confirmed' : '<span style="color:var(--muted);">Pending</span>'),
+        kv('Delivery Cleared',   job.delivery_cleared ? '&#10003; Cleared for release' : '<span style="color:var(--muted);">Pending</span>'),
+        kv('CBW Rotation No.',   _e(job.cbw_new_rotation_no || '—')),
+        kv('Notes',              job.results_notes ? '<span style="white-space:pre-line;color:var(--muted);font-weight:400;font-size:12px;">' + _e(job.results_notes) + '</span>' : '—')
+      ]);
+
+      // ── Assemble full report ─────────────────────────────────────────────────
+      body.innerHTML = ''
+        + '<div style="background:var(--navy-dark);padding:24px 24px 16px;border-bottom:3px solid var(--gold);">'
+        +   '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Lighthouse Drinks — Bottling Report</div>'
+        +   '<div style="font-size:20px;font-weight:700;color:var(--white);margin-bottom:2px;">' + _e(job.product_name || '—') + '</div>'
+        +   '<div style="font-size:12px;color:var(--muted);">' + _e(client.name || '—') + ' &nbsp;·&nbsp; Completed ' + _fmtDate(job.date_completed) + (job.lot_number ? ' &nbsp;·&nbsp; Lot ' + _e(job.lot_number) : '') + '</div>'
+        + '</div>'
+        + sec('1 · Job Identity',           s1)
+        + sec('2 · Liquid Summary',          s2)
+        + sec('3 · Dry Goods Reconciliation', s3)
+        + sec('4 · Production Output',       s4)
+        + sec('5 · Quality Control',         s5)
+        + sec('6 · Sign-Off &amp; Compliance', s6);
+
+    } catch(e) {
+      body.innerHTML = '<div style="color:var(--red);padding:48px;text-align:center;">Error loading report: ' + String(e.message||e) + '</div>';
+      window.logError && window.logError('openBottlingReport', e);
+    }
+  };
+
+  window.closeBottlingReport = function() {
+    var overlay = document.getElementById('bottling-report-overlay');
+    if (overlay) overlay.style.display = 'none';
+    document.body.style.overflow = '';
+  };
+
+  // Send full bottling report as email to client
+  window._sendBottlingReport = async function() {
+    var overlay = document.getElementById('bottling-report-overlay');
+    var jobId   = overlay && overlay.dataset.jobId;
+    if (!jobId) { window.toast && window.toast('No report open.', 'error'); return; }
+
+    var isTest    = false;
+    var testEmail = null;
+    if (!confirm('Send full bottling report to the client email on record?')) {
+      testEmail = window.prompt('Or enter an email address to send a test copy:');
+      if (!testEmail) return;
+      isTest = true;
+    }
+
+    window.toast && window.toast('Building report email…');
+    try {
+      var d        = await _gatherReportData(jobId);
+      var j = d.j, bom = d.bom, ai = d.ai, lso = d.lso, client = d.client, contDetails = d.contDetails;
+
+      // Extra data: dry goods + QC
+      var extra    = await Promise.all([
+        supaGet('job_drygoods_prep_items?job_id=eq.' + jobId + '&select=sku_id,item_name,qty_required,qty_picked'),
+        supaGet('job_quality_checks?job_id=eq.' + jobId + '&order=checked_at.asc')
+      ]);
+      var dgItems  = extra[0] || [];
+      var qcChecks = extra[1] || [];
+
+      // SKU names for dry goods
+      var skuNames = {};
+      var dgSkuIds = dgItems.map(function(i){ return i.sku_id; }).filter(Boolean);
+      if (dgSkuIds.length) {
+        try {
+          var skuR = await supaGet('dry_goods_skus?id=in.(' + dgSkuIds.join(',') + ')&select=id,description');
+          skuR.forEach(function(s){ skuNames[s.id] = s.description || s.id; });
+        } catch(e2){}
+      }
+
+      var spiritType = (contDetails[0] && contDetails[0].spirit_type) || bom.spirit_type || '—';
+
+      // Calculations
+      var volumeCl        = parseFloat(bom.volume_cl || 0) || null;
+      var bottlesProduced = parseInt(j.actual_bottles_produced || 0) || 0;
+      var bottleTarget    = parseInt(j.bottle_target || 0) || 0;
+      var actualCases     = parseInt(j.actual_cases || 0) || 0;
+      var actualHours     = parseFloat(j.actual_job_hours || 0) || 0;
+      var liquidLeftover  = parseFloat(j.liquid_leftover || 0) || 0;
+      var finalLitres     = parseFloat(lso.final_litres || 0) || 0;
+      var waterRequired   = parseFloat(lso.water_required || 0) || 0;
+      var bottlingAbv     = parseFloat(j.bottling_abv || bom.bottling_abv || bom.abv || 0);
+      var bottlesPerCase  = parseInt(bom.bottles_per_shipper || 0) || null;
+      var casesPerLayer   = parseInt(ai.casesLayer || 0) || null;
+      var layersPerPallet = parseInt(ai.layersPallet || 0) || null;
+      var casesPerPallet  = (casesPerLayer && layersPerPallet) ? casesPerLayer * layersPerPallet : null;
+      var totalPallets    = (actualCases && casesPerPallet) ? Math.ceil(actualCases / casesPerPallet) : null;
+      var bottleYield     = (bottleTarget > 0 && bottlesProduced > 0) ? Math.round((bottlesProduced / bottleTarget) * 100) : null;
+      var bottleShortfall = (bottleTarget > 0) ? bottlesProduced - bottleTarget : null;
+      var theoreticalLiq  = (bottlesProduced > 0 && volumeCl) ? Math.round((bottlesProduced * volumeCl / 1000) * 100) / 100 : null;
+      var liquidWaste     = (finalLitres > 0 && theoreticalLiq != null)
+                             ? Math.round((finalLitres - theoreticalLiq - liquidLeftover) * 100) / 100 : null;
+      var bphActual       = (bottlesProduced > 0 && actualHours > 0) ? Math.round(bottlesProduced / actualHours) : null;
+
+      function _lf(n) { return (n != null && n !== 0 && !isNaN(n)) ? Number(n).toLocaleString(undefined,{maximumFractionDigits:2}) + ' L' : '—'; }
+      function _nf(n) { return (n != null && !isNaN(n)) ? Number(n).toLocaleString() : '—'; }
+
+      // Dry goods table HTML for email
+      var dgEmailHtml;
+      if (dgItems.length) {
+        dgEmailHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">'
+          + '<thead><tr style="background:#f3f4f6;">'
+          + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Description</th>'
+          + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">SKU</th>'
+          + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Required</th>'
+          + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Used</th>'
+          + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Variance</th>'
+          + '</tr></thead><tbody>';
+        dgItems.forEach(function(item) {
+          var desc     = item.item_name || skuNames[item.sku_id] || item.sku_id || '—';
+          var variance = (item.qty_required != null && item.qty_picked != null)
+                          ? (Number(item.qty_picked) - Number(item.qty_required)) : null;
+          var varStr   = variance != null ? ((variance > 0 ? '+' : '') + Number(variance).toLocaleString()) : '—';
+          var varCol   = variance == null ? '#6b7280' : (variance < 0 ? '#dc2626' : (variance > 0 ? '#d97706' : '#6b7280'));
+          dgEmailHtml += '<tr>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;color:#374151;">' + String(desc||'') + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;color:#6b7280;font-size:11px;">' + String(item.sku_id||'—') + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:#374151;">' + (item.qty_required != null ? Number(item.qty_required).toLocaleString() : '—') + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:#374151;font-weight:600;">' + (item.qty_picked != null ? Number(item.qty_picked).toLocaleString() : '—') + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:' + varCol + ';font-weight:600;">' + varStr + '</td>'
+            + '</tr>';
+        });
+        dgEmailHtml += '</tbody></table>';
+      } else {
+        dgEmailHtml = '<p style="color:#9ca3af;font-size:12px;margin-top:8px;">No dry goods prep data recorded.</p>';
+      }
+
+      // QC table HTML for email
+      var qcEmailHtml;
+      if (qcChecks.length) {
+        qcEmailHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">'
+          + '<thead><tr style="background:#f3f4f6;">'
+          + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;">Round</th>'
+          + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;">Type</th>'
+          + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;">Checked By</th>'
+          + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;">Date</th>'
+          + '<th style="text-align:center;padding:6px 8px;border-bottom:1px solid #e5e7eb;">Result</th>'
+          + '</tr></thead><tbody>';
+        qcChecks.forEach(function(qc, idx) {
+          var pass = qc.satisfactory;
+          qcEmailHtml += '<tr>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + String(qc.check_round || idx+1) + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-transform:capitalize;">' + String(qc.check_type || '—') + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + String(qc.checked_by || '—') + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + _fmtDate(qc.checked_at) + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:700;color:' + (pass ? '#16a34a' : '#dc2626') + ';">' + (pass ? '&#10003; Pass' : '&#10007; Fail') + '</td>'
+            + '</tr>';
+        });
+        qcEmailHtml += '</tbody></table>';
+      } else {
+        qcEmailHtml = '<p style="color:#9ca3af;font-size:12px;margin-top:8px;">No QC checks recorded.</p>';
+      }
+
+      // Build email HTML
+      var emailHtml = '<div style="' + _emailWrap + '">'
+        + _emailHeader('Full Bottling Report', 'Dear ' + (client.name || 'Valued Client') + ',')
+        + '<div style="padding:16px 32px 0;font-size:13px;color:#374151;line-height:1.6;">Please find below the complete bottling report for your production run.</div>'
+        + _emailSection('Job Identity', [
+            ['Client',              client.name || '—'],
+            ['Product',             j.product_name || '—'],
+            ['Spirit Type',         spiritType],
+            ['Volume',              volumeCl ? volumeCl + ' cl' : '—'],
+            ['Bottling ABV',        bottlingAbv ? bottlingAbv.toFixed(1) + '%' : '—'],
+            ['Lot / Batch No.',     j.lot_number || '—'],
+            ['PO Number',           j.po_number || '—'],
+            ['Date Commenced',      _fmtDate(j.date_commenced)],
+            ['Date Completed',      _fmtDate(j.date_completed)],
+            ['Production Hours',    actualHours ? actualHours + ' hrs' : '—'],
+            ['Bottling Rate',       bphActual ? _nf(bphActual) + ' bph' : '—']
+          ])
+        + _emailSection('Liquid Summary', [
+            ['Liquid into Blend',           _lf(finalLitres)],
+            ['Dilution Water Added',         waterRequired > 0 ? _lf(waterRequired) : 'N/A'],
+            ['Chill Filtration',             lso.chill_filtration_done === 'yes' ? 'Completed' : 'Not required'],
+            ['Theoretical Liquid Required',  theoreticalLiq ? _lf(theoreticalLiq) : '—'],
+            ['Liquid Leftover',              _lf(liquidLeftover)],
+            ['Liquid Waste / Variance',      liquidWaste != null ? _lf(liquidWaste) : '—']
+          ])
+        + '<div style="padding:20px 32px 0;">'
+        +   '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:#c9a84c;font-weight:700;border-bottom:1px solid #e5e7eb;padding-bottom:6px;margin-bottom:12px;">Dry Goods Reconciliation</div>'
+        +   dgEmailHtml
+        + '</div>'
+        + _emailSection('Production Output', [
+            ['Bottle Target',       bottleTarget > 0 ? _nf(bottleTarget) + ' btls' : '—'],
+            ['Bottles Produced',    bottlesProduced > 0 ? _nf(bottlesProduced) + ' btls' : '—'],
+            ['Shortfall / Overage', bottleShortfall != null ? ((bottleShortfall > 0 ? '+' : '') + _nf(bottleShortfall) + ' btls') : '—'],
+            ['Yield',               bottleYield != null ? bottleYield + '%' : '—'],
+            ['Total Cases',         actualCases > 0 ? _nf(actualCases) : '—'],
+            ['Bottles per Case',    bottlesPerCase ? String(bottlesPerCase) : '—'],
+            ['Cases per Pallet',    casesPerPallet ? String(casesPerPallet) : '—'],
+            ['Total Pallets',       totalPallets ? String(totalPallets) : '—']
+          ])
+        + '<div style="padding:20px 32px 0;">'
+        +   '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:#c9a84c;font-weight:700;border-bottom:1px solid #e5e7eb;padding-bottom:6px;margin-bottom:12px;">Quality Control Checks</div>'
+        +   qcEmailHtml
+        + '</div>'
+        + _emailSection('Sign-Off &amp; Compliance', [
+            ['Production Manager', j.results_signed_by || '—'],
+            ['Sign-Off Date',      _fmtDate(j.results_signed_at)],
+            ['Line Clearance',     j.line_clearance_complete ? 'Confirmed' : 'Pending'],
+            ['Delivery Cleared',   j.delivery_cleared ? 'Cleared for release' : 'Pending']
+          ])
+        + (j.results_notes ? '<div style="padding:12px 32px 0;font-size:12px;color:#6b7280;"><em>Notes: ' + String(j.results_notes||'') + '</em></div>' : '')
+        + _emailFooter()
+        + '</div>';
+
+      var recipientEmail = isTest ? testEmail : (client.email || (window.CURRENT_USER && window.CURRENT_USER.email));
+      if (!recipientEmail) { window.toast && window.toast('No client email address on record.', 'error'); return; }
+      var subject = 'Full Bottling Report — ' + (j.product_name || 'Production Run') + (j.lot_number ? ' (' + j.lot_number + ')' : '');
+      await window.sendEmail({ to: recipientEmail, subject: subject, html: emailHtml, from: 'reports@lighthousedrinks.com' });
+      window.toast && window.toast(isTest ? 'Test report sent to ' + testEmail : 'Report sent to ' + recipientEmail, 'success');
+    } catch(e) {
+      window.toast && window.toast('Error sending report: ' + (e.message || e), 'error');
+      window.logError && window.logError('_sendBottlingReport', e);
+    }
+  };
+
+  // Open a print-friendly version of the report in a new window
+  window._printBottlingReport = function() {
+    var body = document.getElementById('bottling-report-body');
+    if (!body) return;
+    var win = window.open('', '_blank', 'width=860,height=960');
+    if (!win) { window.toast && window.toast('Pop-up blocked — please allow pop-ups to print.', 'error'); return; }
+    win.document.write('<!DOCTYPE html><html><head><title>Bottling Report</title>'
+      + '<style>'
+      + 'body{font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#111827;max-width:840px;margin:20px auto;padding:0 20px;}'
+      + 'table{width:100%;border-collapse:collapse;margin-bottom:12px;}'
+      + 'th,td{padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:left;}'
+      + 'th{background:#f9fafb;font-weight:600;font-size:11px;}'
+      + '.sec-title{font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#b45309;font-weight:700;'
+      +   'border-top:2px solid #f59e0b;padding-top:14px;margin-top:18px;margin-bottom:8px;}'
+      + '.header{background:#0d1b2a;color:#fff;padding:20px 24px;margin-bottom:12px;border-bottom:3px solid #c9a84c;}'
+      + '.header .label{font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;}'
+      + '.header h1{font-size:20px;font-weight:700;margin:4px 0 2px;}'
+      + '.header .sub{font-size:12px;color:#8899aa;}'
+      + 'span[style*="color:var"]{color:inherit!important;}'
+      + '@media print{body{margin:0;}}'
+      + '</style></head><body>'
+      + body.innerHTML
+      + '</body></html>');
+    win.document.close();
+    win.focus();
+    setTimeout(function(){ win.print(); }, 500);
+  };
+
   // ── LIQUID SIGN-OFF (5.02.02) ──────────────────────────────────────────────
   async function loadLiquidTab(jobId) {
     var el = document.getElementById('jd-liquid-content');
@@ -29643,10 +30229,31 @@ window.saveAdjModal = async function() {
       var rows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1');
       var d = rows[0] || {};
 
-      // Load all liquid containers for source selection (non-critical)
+      // Load liquid containers for source selection — filtered to the job's client only.
+      // Special case: Lighthouse Drinks jobs also show Ferro Drinks containers.
       var _allConts = [], _activeConts = [];
       try {
-        _allConts   = await supaGet('liquid_containers?select=id,reference,type,spirit_type,abv,current_litres,current_lpa,cbw_rotation,capacity_litres&order=type.asc,reference.asc');
+        var _contClientId = j && j.client_id;
+        var _contSelect   = 'liquid_containers?select=id,reference,type,spirit_type,abv,current_litres,current_lpa,cbw_rotation,capacity_litres&order=type.asc,reference.asc';
+        if (_contClientId) {
+          var _jobClientName = (j.clients && j.clients.name) || '';
+          var _isLighthouse  = /lighthouse/i.test(_jobClientName);
+          if (_isLighthouse) {
+            // Also pull in Ferro Drinks containers
+            var _ferroRows = [];
+            try { _ferroRows = await supaGet('clients?name=ilike.ferro%drinks%&select=id&limit=1'); } catch(e3) {}
+            var _ferroId = _ferroRows && _ferroRows[0] && _ferroRows[0].id;
+            if (_ferroId) {
+              _allConts = await supaGet(_contSelect + '&client_id=in.(' + _contClientId + ',' + _ferroId + ')');
+            } else {
+              _allConts = await supaGet(_contSelect + '&client_id=eq.' + _contClientId);
+            }
+          } else {
+            _allConts = await supaGet(_contSelect + '&client_id=eq.' + _contClientId);
+          }
+        } else {
+          _allConts = await supaGet(_contSelect);
+        }
         _activeConts = _allConts.filter(function(c){ return parseFloat(c.current_litres||0) > 0; });
       } catch(e2) { /* non-critical */ }
 
