@@ -17819,7 +17819,7 @@ window.loadBoms = async function initBoms() {
 
     <!-- ── TOP STRIP: two clean rows ── -->
     <div style="flex:0 0 auto;border-bottom:1px solid var(--navy-border);background:var(--navy-mid);position:relative;">
-      <button class="modal-close" onclick="window.closeSampleModal()" style="position:absolute;top:10px;right:14px;">&#x2715;</button>
+      <button class="modal-close" onclick="window.closeSampleModal()" style="position:absolute;top:50%;right:14px;transform:translateY(-50%);">&#x2715;</button>
 
       <!-- Row 1: identity + who/when -->
       <div style="display:flex;align-items:flex-end;gap:16px;padding:16px 52px 14px 24px;">
@@ -40247,7 +40247,7 @@ async function _smpNextId() {
 
 async function _smpNextFinishedLogNo() {
   try {
-    var rows = await _smpDB().select('samples','?select=finished_log_no&not.finished_log_no=is.null&order=finished_log_no.desc&limit=100');
+    var rows = await _smpDB().select('samples','?select=finished_log_no&finished_log_no=not.is.null&order=finished_log_no.desc&limit=100');
     if (!rows || !rows.length) return 1;
     var max = 0;
     rows.forEach(function(r){
@@ -40349,13 +40349,13 @@ window._smpRender = function() {
 async function _smpFillDropdowns(presetClientId, presetDealId) {
   var cSel = document.getElementById('smp-modal-client');
   var dSel = document.getElementById('smp-modal-deal');
-  if (!cSel || !dSel) return;
+  if (!cSel) return;
 
   // Clients — use cache or fetch from DB
-  var cls = (window.CLIENTS || []);
+  var cls = (window.CLIENTS && window.CLIENTS.length) ? window.CLIENTS.slice() : [];
   if (!cls.length) {
-    try { cls = await _smpDB().select('clients','?order=company.asc&select=id,company') || []; }
-    catch(_) { cls = []; }
+    try { cls = await _smpDB().select('clients','?select=id,company&order=company.asc') || []; }
+    catch(e) { cls = []; }
   }
   cls = cls.slice().sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
   cSel.innerHTML = '<option value="">— select client —</option>';
@@ -40368,21 +40368,23 @@ async function _smpFillDropdowns(presetClientId, presetDealId) {
   });
 
   // Deals
-  dSel.innerHTML = '<option value="">— none —</option>';
-  var deals = (window.DEALS || []).slice().sort(function(a,b){ return (a.title||'').localeCompare(b.title||''); });
-  deals.forEach(function(d){
-    var o = document.createElement('option');
-    o.value = d.id;
-    o.textContent = (d.id||'') + ' — ' + (d.title||'Untitled');
-    if (d.id === presetDealId) o.selected = true;
-    dSel.appendChild(o);
-  });
+  if (dSel) {
+    dSel.innerHTML = '<option value="">— none —</option>';
+    var deals = (window.DEALS || []).slice().sort(function(a,b){ return (a.title||'').localeCompare(b.title||''); });
+    deals.forEach(function(d){
+      var o = document.createElement('option');
+      o.value = d.id;
+      o.textContent = (d.id||'') + ' — ' + (d.title||'Untitled');
+      if (d.id === presetDealId) o.selected = true;
+      dSel.appendChild(o);
+    });
+  }
 
   // Task assignee dropdown — all staff users
   var aSel = document.getElementById('smp-task-assignee');
   if (aSel && aSel.options.length <= 1) {
     try {
-      var users = await _smpDB().select('app_users','?select=id,display_name,role&order=display_name.asc') || [];
+      var users = await _smpDB().select('app_users','?select=id,display_name&order=display_name.asc') || [];
       users.forEach(function(u){
         var o = document.createElement('option');
         o.value = u.id;
@@ -40694,7 +40696,14 @@ window._smpAssignTask = async function() {
   var clientName = cl ? (cl.company || clientId) : clientId;
   var reqBy      = document.getElementById('smp-modal-reqby') ? document.getElementById('smp-modal-reqby').value.trim() : '';
 
+  // Generate ID client-side (same pattern as rest of codebase)
+  var newTaskId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){
+        var r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8); return v.toString(16);
+      });
+
   var task = {
+    id:          newTaskId,
     title:       'Mix sample ' + sampleId + ' for ' + clientName,
     description: 'Prepare and mix sample ' + sampleId + '. Requested by: ' + (reqBy || '—') + '.\nOnce complete, mark this task done — the requester will be notified automatically.',
     assignee_id: assigneeId,
@@ -40707,15 +40716,7 @@ window._smpAssignTask = async function() {
   };
 
   try {
-    var saved = await _smpDB().insert('job_tasks', task);
-    // Get the inserted task id — PostgREST returns array
-    var newTaskId = saved && saved[0] && saved[0].id;
-    if (!newTaskId) {
-      // Fetch most recent task with this title as fallback
-      var recent = await _smpDB().select('job_tasks','?title=eq.'+encodeURIComponent(task.title)+'&order=created_at.desc&select=id&limit=1');
-      newTaskId = recent && recent[0] && recent[0].id;
-    }
-    if (!newTaskId) throw new Error('Could not retrieve new task ID.');
+    await _smpDB().insert('job_tasks', task);
 
     // Link task to sample
     await _smpDB().update('samples','?id=eq.'+encodeURIComponent(sampleId),{ mixing_task_id: newTaskId });
