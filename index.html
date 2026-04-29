@@ -26330,7 +26330,7 @@ window.saveAdjModal = async function() {
       var bayChip = (typeof window._bayChipHTML === 'function') ? window._bayChipHTML(j) : '';
       // If this job is queued (planning priority set) and the user can edit, make the chip
       // clickable to set priority and expose ↑ ↓ reorder arrows inline.
-      var bayEditable = (j.bay_waitlist_priority != null) && !j.job_bay && (window.canDo && window.canDo('bay_assign'));
+      var bayEditable = (j.bay_waitlist_priority != null) && (window.canDo && window.canDo('bay_assign'));
       var bayWrapped = '';
       if (bayChip) {
         if (bayEditable) {
@@ -39176,8 +39176,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     var fs  = opts.big ? '11px' : '9px';
     var pad = opts.big ? '4px 10px' : '2px 7px';
     var css = 'display:inline-block;font-size:' + fs + ';font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:' + pad + ';border-radius:3px;';
-    if (st === 'held')     return '<span style="' + css + 'background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.3);">Bay ' + job.job_bay + '</span>';
-    if (st === 'queued')   return '<span style="' + css + 'background:rgba(232,156,58,0.12);color:var(--amber);border:1px solid rgba(232,156,58,0.25);">Queue #' + job.bay_waitlist_priority + '</span>';
+    if (st === 'held') {
+      var bayChip = '<span style="' + css + 'background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.3);">Bay ' + job.job_bay + '</span>';
+      var priChip = job.bay_waitlist_priority != null
+        ? ' <span style="' + css + 'background:rgba(232,156,58,0.12);color:var(--amber);border:1px solid rgba(232,156,58,0.25);">#' + job.bay_waitlist_priority + '</span>'
+        : '';
+      return bayChip + priChip;
+    }
+    if (st === 'queued')   return '<span style="' + css + 'background:rgba(232,156,58,0.12);color:var(--amber);border:1px solid rgba(232,156,58,0.25);">#' + job.bay_waitlist_priority + '</span>';
     if (st === 'released') return '<span style="' + css + 'background:rgba(255,255,255,0.04);color:var(--muted);border:1px solid var(--navy-border);">Bay ' + job.job_bay + ' · Released</span>';
     return '';
   };
@@ -39211,7 +39217,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     try {
       var to = await getBayRecipients();
       if (!to.length) return;
-      var topRows = await apiGet('jobs?bay_waitlist_priority=not.is.null&job_bay=is.null&order=bay_waitlist_priority.asc&limit=1&select=id,product_name,client_id,clients(name)');
+      var topRows = await apiGet('jobs?bay_waitlist_priority=not.is.null&stage=in.(planning,scheduled)&order=bay_waitlist_priority.asc&limit=1&select=id,product_name,client_id,clients(name)');
       var top = (topRows && topRows[0]) || null;
       var topLabel = top
         ? (top.id + ' &middot; ' + esc(top.product_name||'—') + (top.clients && top.clients.name ? ' &middot; ' + esc(top.clients.name) : ''))
@@ -39253,9 +39259,9 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   // Called on job create + every Bay Board render. Idempotent.
   window._bayAutoQueuePlanning = async function() {
     try {
-      var missing = await apiGet('jobs?stage=eq.planning&bay_waitlist_priority=is.null&job_bay=is.null&bay_released_at=is.null&select=id&order=created_at.asc');
+      var missing = await apiGet('jobs?stage=eq.planning&bay_waitlist_priority=is.null&select=id&order=created_at.asc');
       if (!missing || !missing.length) return 0;
-      var tail = await apiGet('jobs?bay_waitlist_priority=not.is.null&job_bay=is.null&order=bay_waitlist_priority.desc&limit=1&select=bay_waitlist_priority');
+      var tail = await apiGet('jobs?bay_waitlist_priority=not.is.null&order=bay_waitlist_priority.desc&limit=1&select=bay_waitlist_priority');
       var maxP = (tail && tail[0] && tail[0].bay_waitlist_priority) || 0;
       for (var i = 0; i < missing.length; i++) {
         await apiPatch('jobs', '?id=eq.' + encodeURIComponent(missing[i].id), { bay_waitlist_priority: maxP + i + 1 });
@@ -39267,7 +39273,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   // Compact priorities > gapAtOrAbove by −1 (used whenever a job leaves the queue)
   async function compactQueueAbove(gapAtOrAbove) {
     if (gapAtOrAbove == null) return;
-    var above = await apiGet('jobs?bay_waitlist_priority=gte.' + gapAtOrAbove + '&job_bay=is.null&bay_released_at=is.null&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
+    var above = await apiGet('jobs?bay_waitlist_priority=gte.' + gapAtOrAbove + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
     for (var i = 0; i < (above||[]).length; i++) {
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(above[i].id), { bay_waitlist_priority: (above[i].bay_waitlist_priority || 0) - 1 });
     }
@@ -39275,7 +39281,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 
   // Shift existing priorities in [fromP, toP) down by +1, used when inserting at a specific slot
   async function shiftQueueDown(fromP) {
-    var rows = await apiGet('jobs?bay_waitlist_priority=gte.' + fromP + '&job_bay=is.null&bay_released_at=is.null&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
+    var rows = await apiGet('jobs?bay_waitlist_priority=gte.' + fromP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
     for (var i = 0; i < (rows||[]).length; i++) {
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(rows[i].id), { bay_waitlist_priority: (rows[i].bay_waitlist_priority || 0) + 1 });
     }
@@ -39290,8 +39296,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var myP = me[0].bay_waitlist_priority;
       // Find nearest neighbour in the right direction (handles gaps in priority sequence)
       var nbQuery = direction === 'up'
-        ? 'jobs?bay_waitlist_priority=lt.' + myP + '&job_bay=is.null&bay_released_at=is.null&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1'
-        : 'jobs?bay_waitlist_priority=gt.' + myP + '&job_bay=is.null&bay_released_at=is.null&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc&limit=1';
+        ? 'jobs?bay_waitlist_priority=lt.' + myP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1'
+        : 'jobs?bay_waitlist_priority=gt.' + myP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc&limit=1';
       var nb = await apiGet(nbQuery);
       if (!nb || !nb.length) return; // already at top/bottom
       var nbP = nb[0].bay_waitlist_priority;
@@ -39319,13 +39325,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: -1 });
       if (newP < curP) {
         // Moving up: shift rows in [newP, curP) down by +1
-        var up = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&bay_waitlist_priority=lt.' + curP + '&job_bay=is.null&bay_released_at=is.null&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
+        var up = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&bay_waitlist_priority=lt.' + curP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
         for (var i = 0; i < (up||[]).length; i++) {
           await apiPatch('jobs', '?id=eq.' + encodeURIComponent(up[i].id), { bay_waitlist_priority: (up[i].bay_waitlist_priority || 0) + 1 });
         }
       } else {
         // Moving down: shift rows in (curP, newP] up by -1
-        var dn = await apiGet('jobs?bay_waitlist_priority=gt.' + curP + '&bay_waitlist_priority=lte.' + newP + '&job_bay=is.null&bay_released_at=is.null&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
+        var dn = await apiGet('jobs?bay_waitlist_priority=gt.' + curP + '&bay_waitlist_priority=lte.' + newP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
         for (var k = 0; k < (dn||[]).length; k++) {
           await apiPatch('jobs', '?id=eq.' + encodeURIComponent(dn[k].id), { bay_waitlist_priority: (dn[k].bay_waitlist_priority || 0) - 1 });
         }
@@ -39347,23 +39353,22 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
       if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
 
-      var top = await apiGet('jobs?bay_waitlist_priority=not.is.null&job_bay=is.null&bay_released_at=is.null&order=bay_waitlist_priority.asc&limit=10&select=id,product_name,client_id,bay_waitlist_priority,clients(name)');
-      if (!top || !top.length) { await window.lpAlert('No planning jobs are in the queue.', { title: 'Empty queue' }); return; }
+      // All planning/scheduled jobs without a bay, ordered by priority then creation
+      var top = await apiGet('jobs?stage=in.(planning,scheduled)&job_bay=is.null&bay_released_at=is.null&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=10&select=id,product_name,client_id,bay_waitlist_priority,clients(name)');
+      if (!top || !top.length) { await window.lpAlert('No unassigned planning jobs found.', { title: 'No jobs available' }); return; }
 
       var pick = await _pickFromQueue(bayNo, top);
       if (!pick) return;
 
-      var picked = top.find(function(t){ return t.id === pick; });
+      // Assign bay only — priority is independent and unchanged
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(pick), {
-        job_bay:               bayNo,
-        bay_assigned_at:       new Date().toISOString(),
-        bay_assigned_by:       whoLabel(),
-        bay_waitlist_priority: null,
-        bay_released_at:       null,
-        bay_released_by:       null,
-        bay_release_reason:    null
+        job_bay:            bayNo,
+        bay_assigned_at:    new Date().toISOString(),
+        bay_assigned_by:    whoLabel(),
+        bay_released_at:    null,
+        bay_released_by:    null,
+        bay_release_reason: null
       });
-      if (picked && picked.bay_waitlist_priority != null) await compactQueueAbove(picked.bay_waitlist_priority + 1);
       var jobRow = await apiGet('jobs?id=eq.' + encodeURIComponent(pick) + '&select=stage');
       await auditBay(pick, jobRow && jobRow[0] ? jobRow[0].stage : null, 'Bay ' + bayNo + ' assigned by ' + whoLabel());
       window.toast && window.toast('Bay ' + bayNo + ' assigned to ' + pick + '.', 'success');
@@ -39409,17 +39414,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         window.toast && window.toast('This job isn\'t currently holding a bay.', 'error'); return;
       }
       var freedBay = me[0].job_bay;
-      if (!(await window.lpConfirm('Pull this job off Bay ' + freedBay + ' and return it to the top of the planning queue? The bay will be freed and the alert email will fire.', { title: 'Unassign from Bay ' + freedBay, confirmLabel: 'Unassign', destructive: true }))) return;
-      // Shift existing queue down so we can insert at priority 1
-      await shiftQueueDown(1);
+      if (!(await window.lpConfirm('Remove this job from Bay ' + freedBay + '? The bay will be freed and the alert email will fire. The job\'s priority position is unchanged.', { title: 'Unassign from Bay ' + freedBay, confirmLabel: 'Unassign', destructive: true }))) return;
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
-        job_bay:               null,
-        bay_assigned_at:       null,
-        bay_assigned_by:       null,
-        bay_waitlist_priority: 1,
-        extra_bays:            []
+        job_bay:         null,
+        bay_assigned_at: null,
+        bay_assigned_by: null,
+        extra_bays:      []
       });
-      await auditBay(jobId, me[0].stage, 'Unassigned from Bay ' + freedBay + ' (returned to queue #1) by ' + whoLabel());
+      await auditBay(jobId, me[0].stage, 'Unassigned from Bay ' + freedBay + ' by ' + whoLabel());
       window._bayEmailAlert(freedBay, 'manual');
       window.toast && window.toast('Bay ' + freedBay + ' freed. Job is now at the top of the queue.', 'success');
       window._bayRefreshAll(jobId);
@@ -39434,14 +39436,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var card = document.createElement('div');
       card.style.cssText = 'background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:6px;padding:22px 26px;width:540px;max-width:94vw;max-height:88vh;overflow-y:auto;';
       var header = '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">Assign Bay ' + bayNo + '</div>'
-        + '<div style="font-size:15px;font-weight:700;color:var(--white);margin-bottom:4px;">Pick the next job</div>'
-        + '<div style="font-size:11px;color:var(--muted);margin-bottom:16px;">Top of the planning queue shown first.</div>';
+        + '<div style="font-size:15px;font-weight:700;color:var(--white);margin-bottom:4px;">Pick a job to stage</div>'
+        + '<div style="font-size:11px;color:var(--muted);margin-bottom:16px;">Ordered by priority where set. Bay assignment is independent of job priority.</div>';
       var list = '<div style="display:flex;flex-direction:column;gap:8px;">';
       candidates.forEach(function(c) {
         var clientName = c.clients && c.clients.name ? c.clients.name : '';
         list += '<button type="button" data-pick="' + esc(c.id) + '" style="text-align:left;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:10px 14px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">'
           + '<div style="display:flex;align-items:center;gap:10px;">'
-          +   '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;color:var(--amber);background:rgba(232,156,58,0.12);border:1px solid rgba(232,156,58,0.25);padding:2px 7px;border-radius:3px;">#' + c.bay_waitlist_priority + '</span>'
+          +   (c.bay_waitlist_priority != null ? '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;color:var(--amber);background:rgba(232,156,58,0.12);border:1px solid rgba(232,156,58,0.25);padding:2px 7px;border-radius:3px;">#' + c.bay_waitlist_priority + '</span>' : '<span style="font-size:10px;color:var(--muted);padding:2px 7px;">—</span>')
           +   '<span style="font-size:12px;font-weight:700;color:var(--gold);">' + esc(c.id) + '</span>'
           +   '<span style="font-size:12px;color:var(--white);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(c.product_name||'—') + '</span>'
           +   (clientName ? '<span style="font-size:11px;color:var(--muted);">' + esc(clientName) + '</span>' : '')
@@ -39628,8 +39630,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
           if (bayNo && !heldByBay[bayNo]) heldByBay[bayNo] = j;
         });
       });
-      var totalQ = await apiGet('jobs?bay_waitlist_priority=not.is.null&job_bay=is.null&bay_released_at=is.null&select=id');
-      var queue = await apiGet('jobs?bay_waitlist_priority=not.is.null&job_bay=is.null&bay_released_at=is.null&select=id,product_name,bottle_target,bay_waitlist_priority,stage,clients(name)&order=bay_waitlist_priority.asc&limit=10');
+      var nextJobs = await apiGet('jobs?bay_waitlist_priority=not.is.null&stage=in.(planning,scheduled)&order=bay_waitlist_priority.asc&limit=5&select=id,product_name,bottle_target,bay_waitlist_priority,job_bay,stage,clients(name)');
       var canAssign  = window.canDo && window.canDo('bay_assign');
       var canRelease = window.canDo && window.canDo('bay_release');
 
@@ -39676,26 +39677,31 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       });
       html += '</div>';
 
-      // ── Planning Queue (auto-populated) ──────────────────────────────────
-      var totalCount = (totalQ || []).length;
-      var showing    = (queue || []).length;
+      // ── Next Jobs (informational — independent of bay assignment) ───────────
       html += '<div style="display:flex;align-items:center;justify-content:space-between;margin:14px 0 8px;">'
-        +   '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">Planning Queue <span style="color:var(--muted);font-weight:400;">(' + (showing < totalCount ? 'top ' + showing + ' of ' + totalCount : totalCount) + ')</span></div>'
-        +   '<div style="font-size:10px;color:var(--muted);font-style:italic;">Priority is edited on the Jobs page — changes sync here automatically</div>'
+        +   '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">Next Jobs <span style="color:var(--muted);font-weight:400;font-size:9px;letter-spacing:0.05em;text-transform:none;">— top 5 by priority</span></div>'
+        +   '<div style="display:flex;align-items:center;gap:10px;">'
+        +     '<div style="font-size:10px;color:var(--muted);font-style:italic;">Reorder from the Jobs page using ▲▼.</div>'
+        +     '<button onclick="window._printNextJobs()" style="font-size:9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Print</button>'
+        +   '</div>'
         + '</div>';
-      if (!queue || !queue.length) {
-        html += '<div style="padding:14px 0;color:var(--muted);font-size:12px;text-align:center;border:1px dashed var(--navy-border);border-radius:4px;">No planning jobs waiting. Create one from the Jobs page to queue it.</div>';
+      if (!nextJobs || !nextJobs.length) {
+        html += '<div style="padding:14px 0;color:var(--muted);font-size:12px;text-align:center;border:1px dashed var(--navy-border);border-radius:4px;">No jobs in the priority list yet. Use ▲▼ on the Jobs page to set order.</div>';
       } else {
         html += '<div style="border:1px solid var(--navy-border);border-radius:4px;overflow:hidden;">';
-        queue.forEach(function(w, idx) {
+        nextJobs.forEach(function(w, idx) {
           var cn = w.clients && w.clients.name ? w.clients.name : '—';
           var bt = w.bottle_target ? w.bottle_target.toLocaleString() + ' btls' : '—';
-          html += '<div style="display:grid;grid-template-columns:44px 90px 1fr 180px 120px;gap:10px;align-items:center;padding:9px 12px;border-bottom:1px solid rgba(36,61,87,0.4);' + (idx % 2 ? 'background:rgba(255,255,255,0.015);' : '') + '">'
-            +   '<div style="font-size:12px;font-weight:700;color:var(--amber);">#' + w.bay_waitlist_priority + '</div>'
+          var bayBadge = w.job_bay
+            ? '<span style="font-size:9px;font-weight:700;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.3);padding:1px 6px;border-radius:3px;white-space:nowrap;">Bay ' + w.job_bay + '</span>'
+            : '<span style="font-size:9px;color:var(--muted);font-style:italic;">no bay</span>';
+          html += '<div style="display:grid;grid-template-columns:36px 90px 1fr 140px 80px 70px;gap:8px;align-items:center;padding:9px 12px;border-bottom:1px solid rgba(36,61,87,0.4);' + (idx % 2 ? 'background:rgba(255,255,255,0.015);' : '') + '">'
+            +   '<div style="font-size:13px;font-weight:700;color:var(--amber);">#' + w.bay_waitlist_priority + '</div>'
             +   '<a href="javascript:void(0)" onclick="window.openJobDetail&&window.openJobDetail(\'' + esc(w.id) + '\')" style="font-size:12px;font-weight:700;color:var(--gold);text-decoration:none;">' + esc(w.id) + '</a>'
             +   '<div style="font-size:12px;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(w.product_name||'—') + '</div>'
             +   '<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(cn) + '</div>'
             +   '<div style="font-size:11px;color:var(--muted);text-align:right;">' + esc(bt) + '</div>'
+            +   '<div style="text-align:right;">' + bayBadge + '</div>'
             + '</div>';
         });
         html += '</div>';
@@ -39705,6 +39711,49 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     } catch(e) {
       el.innerHTML = '<div style="color:var(--red);font-size:12px;padding:10px 0;">Error loading bay board: ' + esc(e && e.message) + '</div>';
     }
+  };
+
+  // ── Print the Next Jobs list ─────────────────────────────────────────────
+  window._printNextJobs = async function() {
+    try {
+      var jobs = await apiGet('jobs?bay_waitlist_priority=not.is.null&stage=in.(planning,scheduled)&order=bay_waitlist_priority.asc&limit=5&select=id,product_name,bottle_target,bay_waitlist_priority,job_bay,clients(name)');
+      if (!jobs || !jobs.length) { window.toast && window.toast('No jobs in the priority list.', 'error'); return; }
+      var dateStr = new Date().toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' });
+      var rows = jobs.map(function(w) {
+        var cn = w.clients && w.clients.name ? w.clients.name : '—';
+        var bt = w.bottle_target ? w.bottle_target.toLocaleString() + ' btls' : '—';
+        var bay = w.job_bay ? 'Bay ' + w.job_bay : '—';
+        return '<tr><td style="padding:10px 12px;font-size:16px;font-weight:700;color:#e89c3a;">#' + w.bay_waitlist_priority + '</td>'
+          + '<td style="padding:10px 12px;font-family:monospace;font-size:12px;">' + w.id + '</td>'
+          + '<td style="padding:10px 12px;font-size:13px;font-weight:600;">' + (w.product_name||'—') + '</td>'
+          + '<td style="padding:10px 12px;font-size:12px;color:#555;">' + cn + '</td>'
+          + '<td style="padding:10px 12px;font-size:12px;text-align:right;">' + bt + '</td>'
+          + '<td style="padding:10px 12px;font-size:12px;text-align:center;font-weight:700;color:#3dba78;">' + bay + '</td>'
+          + '</tr>';
+      }).join('');
+      var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Next Jobs — Lighthouse Drinks</title>'
+        + '<style>body{font-family:Arial,sans-serif;margin:32px 40px;color:#111;}'
+        + 'h1{font-size:18px;margin:0 0 4px;}h2{font-size:13px;font-weight:normal;color:#555;margin:0 0 20px;}'
+        + 'table{width:100%;border-collapse:collapse;}'
+        + 'thead tr{border-bottom:2px solid #111;}'
+        + 'th{font-size:10px;text-transform:uppercase;letter-spacing:0.08em;padding:6px 12px;text-align:left;color:#777;}'
+        + 'td{border-bottom:1px solid #e0e0e0;vertical-align:middle;}'
+        + 'tr:nth-child(even){background:#f9f9f9;}'
+        + '.footer{margin-top:24px;font-size:10px;color:#aaa;display:flex;justify-content:space-between;border-top:1px solid #ddd;padding-top:10px;}'
+        + '@media print{body{margin:16px 20px;}}</style></head><body>'
+        + '<h1>Lighthouse Drinks</h1><h2>Next Jobs — Priority Order</h2>'
+        + '<table><thead><tr>'
+        +   '<th style="width:44px;">#</th><th style="width:100px;">Job</th><th>Product</th><th>Client</th><th style="text-align:right;width:90px;">Target</th><th style="text-align:center;width:80px;">Bay</th>'
+        + '</tr></thead><tbody>' + rows + '</tbody></table>'
+        + '<div class="footer"><span>Lighthouse Pulse</span><span>Printed ' + dateStr + '</span></div>'
+        + '</body></html>';
+      var w = window.open('', '_blank', 'width=760,height=500');
+      if (!w) { window.toast && window.toast('Pop-up blocked — allow pop-ups for this site.', 'error'); return; }
+      w.document.write(html);
+      w.document.close();
+      w.focus();
+      setTimeout(function(){ w.print(); }, 400);
+    } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
   };
 
   // ══ JOB DETAIL — Bay card (injected into Job Summary tab) ═════════════════
@@ -39737,8 +39786,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
           body = '<div style="font-size:12px;color:var(--muted);">This job isn\'t in Planning, so no bay queue applies.</div>';
         }
       } else if (st === 'queued') {
-        body = '<div style="font-size:12px;color:var(--white);margin-bottom:8px;line-height:1.5;">Queued at position <strong style="color:var(--amber);">#' + j.bay_waitlist_priority + '</strong> for the next free bay.<br>'
-          + '<span style="color:var(--muted);font-size:11px;">Edit priority from the Jobs page, or use the ↑ ↓ controls on the Bay Board.</span></div>'
+        body = '<div style="font-size:12px;color:var(--white);margin-bottom:8px;line-height:1.5;">Priority position <strong style="color:var(--amber);">#' + j.bay_waitlist_priority + '</strong> — no bay assigned yet.<br>'
+          + '<span style="color:var(--muted);font-size:11px;">Bay assignment is independent. Reorder from the Jobs page using ▲▼, or set an exact position below.</span></div>'
           + (canAssign
               ? '<button onclick="window._bayEditPriority(\'' + esc(jobId) + '\')" style="font-size:10px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Set priority…</button>'
               : '');
