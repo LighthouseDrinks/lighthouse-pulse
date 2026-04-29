@@ -29096,12 +29096,40 @@ window.saveAdjModal = async function() {
     var autoCase = (j.actual_bottles_produced && bottlesPerCase)
       ? Math.ceil(j.actual_bottles_produced / bottlesPerCase) : null;
     var actualCases = j.actual_cases || autoCase;
+    // Production schedule: Mon–Fri only, breaks excluded
+    // Periods as [startMin, endMin] from midnight
+    var _PROD_PERIODS = [
+      [7*60,       10*60+30],  // 07:00–10:30
+      [10*60+45,   13*60+30],  // 10:45–13:30
+      [14*60,      15*60+45],  // 14:00–15:45
+      [17*60,      21*60]      // 17:00–21:00
+    ];
+    function calcProductionHours(startDt, endDt) {
+      if (!startDt || !endDt || endDt <= startDt) return 0;
+      var totalMin = 0;
+      var d = new Date(startDt); d.setHours(0,0,0,0);
+      var sMs = startDt.getTime(), eMs = endDt.getTime();
+      while (d.getTime() <= eMs) {
+        var dow = d.getDay();
+        if (dow !== 0 && dow !== 6) {
+          var base = d.getTime();
+          for (var pi = 0; pi < _PROD_PERIODS.length; pi++) {
+            var ps = base + _PROD_PERIODS[pi][0]*60000;
+            var pe = base + _PROD_PERIODS[pi][1]*60000;
+            var os = Math.max(sMs, ps), oe = Math.min(eMs, pe);
+            if (oe > os) totalMin += (oe - os) / 60000;
+          }
+        }
+        d.setDate(d.getDate() + 1);
+      }
+      return Math.round(totalMin / 60 * 100) / 100;
+    }
     var autoHours = null;
     if (j.date_commenced && j.date_completed) {
-      var ms = new Date(j.date_completed) - new Date(j.date_commenced);
-      autoHours = Math.round(ms / 36000) / 100;
+      autoHours = calcProductionHours(new Date(j.date_commenced), new Date(j.date_completed));
     }
     var actualHours = j.actual_job_hours || autoHours;
+    var autoRate = (j.actual_bottles_produced && actualHours) ? Math.round(j.actual_bottles_produced / actualHours) : null;
 
     var html = '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">Fields marked <span style="color:var(--red);">*</span> must be completed before the job can be moved to Complete.</div>';
 
@@ -29114,7 +29142,8 @@ window.saveAdjModal = async function() {
     html += frow('Cases per Pallet', inp('cases-pallet', casesPerPallet, 'Auto-calculated', 'text', !!(casesPerLayer && layersPerPallet)));
     html += frow('Date / Time Job Commenced', inp('commenced', j.date_commenced ? j.date_commenced.slice(0,16) : '', '', 'datetime-local'), true);
     html += frow('Date / Time Job Ended', inp('completed', j.date_completed ? j.date_completed.slice(0,16) : '', '', 'datetime-local'), true);
-    html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub('Auto-calculated from start/end times'));
+    html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub('Production time only — excludes breaks &amp; non-working hours. Mon–Fri schedule.'));
+    html += frow('Actual Bottling Rate Achieved', inp('bottling-rate', autoRate, 'Auto-calculated', 'number', true) + sub('Bottles ÷ production hours'));
     html += frow('Line Clearance Checklist Complete', cb('line-clearance', !!j.line_clearance_complete, 'Confirmed complete'), true);
     html += frow('Liquid Leftover (litres)', inp('liquid-leftover', j.liquid_leftover||0, '0 if none', 'number'), true);
     html += frow('Cost per Unit (€)', inp('cost-per-unit', j.cost_per_unit, 'e.g. 4.85', 'number') + sub('Used in CBW bottling report'));
@@ -29167,20 +29196,32 @@ window.saveAdjModal = async function() {
     var commEl  = document.getElementById('res-commenced');
     var compEl  = document.getElementById('res-completed');
     var hoursEl = document.getElementById('res-hours');
+    var rateEl  = document.getElementById('res-bottling-rate');
 
     function recalcCases() {
       var b = parseFloat(btlsEl.value)||0;
       var bpc = parseFloat((bpcEl&&bpcEl.value)||bottlesPerCase||0);
       if (b && bpc && casesEl) casesEl.value = Math.ceil(b/bpc);
+      recalcRate();
     }
     function recalcHours() {
-      var s = new Date(commEl.value), e = new Date(compEl.value);
-      if (!isNaN(s) && !isNaN(e) && e > s && hoursEl) hoursEl.value = Math.round((e-s)/36000)/100;
+      var s = commEl.value ? new Date(commEl.value) : null;
+      var e = compEl.value ? new Date(compEl.value) : null;
+      if (s && e && !isNaN(s) && !isNaN(e) && e > s && hoursEl) {
+        hoursEl.value = calcProductionHours(s, e);
+      }
+      recalcRate();
+    }
+    function recalcRate() {
+      var bottles = parseFloat(btlsEl && btlsEl.value) || 0;
+      var hours   = parseFloat(hoursEl && hoursEl.value) || 0;
+      if (rateEl) rateEl.value = (bottles && hours) ? Math.round(bottles / hours) : '';
     }
     if (btlsEl) btlsEl.oninput = recalcCases;
     if (bpcEl && !bpcEl.readOnly) bpcEl.oninput = recalcCases;
     if (commEl) commEl.onchange = recalcHours;
     if (compEl) compEl.onchange = recalcHours;
+    if (hoursEl) hoursEl.oninput = recalcRate;
   }
 
   window.saveResults = async function(jobId) {
@@ -41235,7 +41276,7 @@ if (typeof _origOpenDD === 'function') {
                  'order_fulfillment'],
     management: ['managing_director','operations_director','quality_compliance','financial_controller'],
     production: ['operations_director','production_manager','production_operator','warehouse_liquid'],
-    ecom:       ['ecommerce_manager']
+    ecom:       ['ecommerce_manager','order_fulfillment']
   };
 
   window.sbSelectGroup = function(btn) {
