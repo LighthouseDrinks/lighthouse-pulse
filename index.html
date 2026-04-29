@@ -28552,29 +28552,28 @@ window.saveAdjModal = async function() {
         var cbOrder = document.createElement('input');
         cbOrder.type = 'checkbox';
         cbOrder.checked = !!c.is_ordered;
+        cbOrder.disabled = isExcluded || sufficient;
         if (isExcluded || sufficient) {
-          cbOrder.disabled = true;
           cbOrder.style.cssText = 'opacity:0.3;cursor:not-allowed;';
           cbOrder.title = isExcluded ? 'Item excluded from this job' : 'Sufficient stock on site — order not required';
-        } else {
-          cbOrder.onchange = function(){ window.updateComponent(cid,'is_ordered',this.checked); };
         }
+        cbOrder.onchange = function(){ if (!this.disabled) window.updateComponent(cid,'is_ordered',this.checked); };
         tr.cells[5].appendChild(cbOrder);
 
         // col 6: PO input
         var poIn = document.createElement('input');
         poIn.type = 'text'; poIn.value = c.po_number||''; poIn.placeholder = 'PO-';
         poIn.style.cssText = inpStyle + 'max-width:90px;';
-        if (isExcluded) { poIn.disabled = true; poIn.style.cssText += 'opacity:0.3;cursor:not-allowed;'; }
-        else { poIn.onblur = function(){ window.updateComponent(cid,'po_number',this.value); }; }
+        if (isExcluded) { poIn.disabled = true; poIn.style.opacity = '0.3'; poIn.style.cursor = 'not-allowed'; }
+        poIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid,'po_number',this.value); };
         tr.cells[6].appendChild(poIn);
 
         // col 7: Qty ordered
         var qtyIn = document.createElement('input');
         qtyIn.type = 'number'; qtyIn.value = c.po_value||''; qtyIn.placeholder = '0';
         qtyIn.style.cssText = inpStyle + 'text-align:right;max-width:64px;';
-        if (isExcluded) { qtyIn.disabled = true; qtyIn.style.cssText += 'opacity:0.3;cursor:not-allowed;'; }
-        else { qtyIn.onblur = function(){ window.updateComponent(cid,'po_value',parseFloat(this.value)||null); }; }
+        if (isExcluded) { qtyIn.disabled = true; qtyIn.style.opacity = '0.3'; qtyIn.style.cursor = 'not-allowed'; }
+        qtyIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid,'po_value',parseFloat(this.value)||null); };
         tr.cells[7].appendChild(qtyIn);
 
         // col 8: Unit price
@@ -28582,36 +28581,77 @@ window.saveAdjModal = async function() {
         upIn.type = 'number'; upIn.value = c.unit_price != null ? c.unit_price : ''; upIn.placeholder = '0.00';
         upIn.step = '0.01'; upIn.min = '0';
         upIn.style.cssText = inpStyle + 'text-align:right;max-width:80px;';
-        if (isExcluded) { upIn.disabled = true; upIn.style.cssText += 'opacity:0.3;cursor:not-allowed;'; }
-        else { upIn.onblur = function(){ window.updateComponent(cid,'unit_price',parseFloat(this.value)||null); }; }
+        if (isExcluded) { upIn.disabled = true; upIn.style.opacity = '0.3'; upIn.style.cursor = 'not-allowed'; }
+        upIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid,'unit_price',parseFloat(this.value)||null); };
         tr.cells[8].appendChild(upIn);
 
         // col 9: Delivery date
         var dtIn = document.createElement('input');
         dtIn.type = 'date'; dtIn.value = c.expected_delivery||'';
-        if (isExcluded || sufficient) {
-          dtIn.disabled = true;
-          dtIn.style.cssText = inpStyle + 'opacity:0.3;cursor:not-allowed;';
-        } else {
-          dtIn.style.cssText = inpStyle;
-          dtIn.onblur = function(){ window.updateComponent(cid,'expected_delivery',this.value); };
-        }
+        dtIn.style.cssText = inpStyle;
+        if (isExcluded || sufficient) { dtIn.disabled = true; dtIn.style.opacity = '0.3'; dtIn.style.cursor = 'not-allowed'; }
+        dtIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid,'expected_delivery',this.value); };
         tr.cells[9].appendChild(dtIn);
 
-        // col 10: N/A checkbox — mark component as not required for this job
+        // col 10: Exclude checkbox — awaits the PATCH then updates the row in-place (no full tab reload)
         var cbNA = document.createElement('input');
         cbNA.type = 'checkbox';
         cbNA.checked = isExcluded;
         cbNA.title = 'Exclude — no stock deduction on job completion, not printed on picking list';
         cbNA.style.cssText = 'cursor:pointer;accent-color:var(--amber);';
-        cbNA.onchange = (function(rowCid, rowTr) {
-          return function() {
-            var excluded = this.checked;
-            window.updateComponent(rowCid, 'is_excluded', excluded);
-            // Reload the tab so the visual state updates cleanly
-            loadComponentsTab(jobId);
+        cbNA.onchange = (function(rowCid, rowTr, rowCbOrder, rowPoIn, rowQtyIn, rowUpIn, rowDtIn, rowSufficient, rowOnSiteStr, rowOnSiteColor) {
+          return async function() {
+            var excl = this.checked;
+            var cb = this;
+            cb.disabled = true;
+            await window.updateComponent(rowCid, 'is_excluded', excl);
+            // Keep _currentComps cache in sync so printPickingList reflects the change
+            if (window._currentComps) {
+              var cached = window._currentComps.find(function(x){ return x.id === rowCid; });
+              if (cached) cached.is_excluded = excl;
+            }
+            // Row opacity
+            rowTr.style.opacity = excl ? '0.4' : '';
+            // Item name strikethrough (col 1)
+            if (rowTr.cells[1]) rowTr.cells[1].style.textDecoration = excl ? 'line-through' : '';
+            // On-site qty value + colour (col 3)
+            if (rowTr.cells[3]) {
+              rowTr.cells[3].textContent = excl ? '—' : rowOnSiteStr;
+              rowTr.cells[3].style.color = excl ? 'var(--muted)' : rowOnSiteColor;
+            }
+            // On-site tick (col 4)
+            if (rowTr.cells[4]) {
+              rowTr.cells[4].innerHTML = '';
+              if (excl) {
+                rowTr.cells[4].innerHTML = '<span style="color:var(--muted);font-size:11px;">N/A</span>';
+              } else {
+                var newCbOS = document.createElement('input');
+                newCbOS.type = 'checkbox';
+                newCbOS.checked = rowSufficient;
+                newCbOS.disabled = true;
+                newCbOS.title = rowSufficient ? 'Sufficient stock on site ✓' : 'Stock below required quantity';
+                newCbOS.style.cssText = 'cursor:not-allowed;' + (rowSufficient ? 'accent-color:var(--green);' : 'opacity:0.4;');
+                rowTr.cells[4].appendChild(newCbOS);
+              }
+            }
+            // Order checkbox (col 5)
+            rowCbOrder.disabled = excl || rowSufficient;
+            rowCbOrder.style.opacity = (excl || rowSufficient) ? '0.3' : '';
+            rowCbOrder.style.cursor  = (excl || rowSufficient) ? 'not-allowed' : 'pointer';
+            // PO / qty / price inputs (cols 6-8)
+            [rowPoIn, rowQtyIn, rowUpIn].forEach(function(inp) {
+              inp.disabled = excl;
+              inp.style.opacity = excl ? '0.3' : '';
+              inp.style.cursor  = excl ? 'not-allowed' : '';
+            });
+            // Delivery date (col 9)
+            rowDtIn.disabled = excl || rowSufficient;
+            rowDtIn.style.opacity = (excl || rowSufficient) ? '0.3' : '';
+            rowDtIn.style.cursor  = (excl || rowSufficient) ? 'not-allowed' : '';
+            // Re-enable the checkbox
+            cb.disabled = false;
           };
-        })(cid, tr);
+        })(cid, tr, cbOrder, poIn, qtyIn, upIn, dtIn, sufficient, onSiteStr, onSiteColor);
         tr.cells[10].appendChild(cbNA);
 
         tbody.appendChild(tr);
