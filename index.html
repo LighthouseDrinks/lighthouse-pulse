@@ -39620,16 +39620,18 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       // Auto-queue any planning jobs without a priority before we paint
       try { await window._bayAutoQueuePlanning(); } catch(e) {}
 
-      var held = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,stage,clients(name)&order=job_bay.asc');
+      var held = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,bay_assigned_at,bay_assigned_by,stage,clients(name)&order=job_bay.asc');
       var heldByBay = {};
       (held||[]).forEach(function(j){ heldByBay[j.job_bay] = j; });
-      // Also mark bays occupied by extra_bays assignments
-      var extraHeld = await apiGet('jobs?extra_bays=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,stage,clients(name)');
-      (extraHeld||[]).forEach(function(j) {
-        (j.extra_bays||[]).forEach(function(bayNo) {
-          if (bayNo && !heldByBay[bayNo]) heldByBay[bayNo] = j;
+      // Also mark bays occupied by extra_bays assignments (requires SQL migration: ALTER TABLE jobs ADD COLUMN IF NOT EXISTS extra_bays text[] DEFAULT '{}')
+      try {
+        var extraHeld = await apiGet('jobs?extra_bays=not.is.null&bay_released_at=is.null&select=id,product_name,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,stage,clients(name)');
+        (extraHeld||[]).forEach(function(j) {
+          (j.extra_bays||[]).forEach(function(bayNo) {
+            if (bayNo && !heldByBay[bayNo]) heldByBay[bayNo] = j;
+          });
         });
-      });
+      } catch(extraErr) { /* extra_bays column not yet created — run SQL migration */ }
       var nextJobs = await apiGet('jobs?bay_waitlist_priority=not.is.null&stage=in.(planning,scheduled)&order=bay_waitlist_priority.asc&limit=5&select=id,product_name,bottle_target,bay_waitlist_priority,job_bay,stage,clients(name)');
       var canAssign  = window.canDo && window.canDo('bay_assign');
       var canRelease = window.canDo && window.canDo('bay_release');
@@ -39764,7 +39766,12 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (!jobId) return;
     container.setAttribute('data-job', jobId);
     try {
-      var rows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,bay_released_at,bay_released_by,bay_release_reason,bay_waitlist_priority,stage');
+      var rows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,bay_assigned_at,bay_assigned_by,bay_released_at,bay_released_by,bay_release_reason,bay_waitlist_priority,stage');
+      // Attempt to load extra_bays separately — only works after SQL migration
+      try {
+        var ebRows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=extra_bays');
+        if (rows && rows[0] && ebRows && ebRows[0]) rows[0].extra_bays = ebRows[0].extra_bays || [];
+      } catch(e) { if (rows && rows[0]) rows[0].extra_bays = []; }
       if (!rows || !rows.length) { container.innerHTML = ''; return; }
       var j = rows[0];
       var st = window._bayState(j);
