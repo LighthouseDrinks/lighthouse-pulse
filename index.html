@@ -27804,9 +27804,9 @@ window.saveAdjModal = async function() {
           await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, {
             bay_released_at:    new Date().toISOString(),
             bay_released_by:    'System (auto on completion)',
-            bay_release_reason: 'auto_complete',
-            extra_bays:         []
+            bay_release_reason: 'auto_complete'
           });
+          await _clearExtraBays(jobId);
           if (typeof window._bayEmailAlert === 'function') {
             window._bayEmailAlert(bayRow.job_bay, 'auto_complete');
           }
@@ -39255,6 +39255,11 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     } catch(e) { /* non-critical */ }
   }
 
+  // ── Helper: clear extra_bays (no-op if column not yet migrated) ─────────
+  async function _clearExtraBays(jobId) {
+    try { await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { extra_bays: [] }); } catch(e) {}
+  }
+
   // ── Auto-queue: give every Planning job without a priority a slot at the tail ─
   // Called on job create + every Bay Board render. Idempotent.
   window._bayAutoQueuePlanning = async function() {
@@ -39347,11 +39352,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   window._bayAssignFromWaitlist = async function(bayNo) {
     if (!window.canDo || !window.canDo('bay_assign')) { window.toast && window.toast('You don\'t have permission to assign bays.', 'error'); return; }
     try {
-      // Verify bay is actually free (primary or extra assignment)
+      // Verify bay is actually free (primary bay)
       var held = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
       if (held && held.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied.', 'error'); return; }
-      var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
-      if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      // Also check extra_bays (requires SQL migration — skipped silently if column missing)
+      try {
+        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+        if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      } catch(e) {}
 
       // All planning/scheduled jobs without a bay, ordered by priority then creation
       var top = await apiGet('jobs?stage=in.(planning,scheduled)&job_bay=is.null&bay_released_at=is.null&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=10&select=id,product_name,client_id,bay_waitlist_priority,clients(name)');
@@ -39359,7 +39367,6 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 
       var pick = await _pickFromQueue(bayNo, top);
       if (!pick) return;
-
       // Assign bay only — priority is independent and unchanged
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(pick), {
         job_bay:            bayNo,
@@ -39418,9 +39425,9 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
         job_bay:         null,
         bay_assigned_at: null,
-        bay_assigned_by: null,
-        extra_bays:      []
+        bay_assigned_by: null
       });
+      await _clearExtraBays(jobId);
       await auditBay(jobId, me[0].stage, 'Unassigned from Bay ' + freedBay + ' by ' + whoLabel());
       window._bayEmailAlert(freedBay, 'manual');
       window.toast && window.toast('Bay ' + freedBay + ' freed. Job is now at the top of the queue.', 'success');
@@ -39504,9 +39511,9 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
         bay_released_at:    new Date().toISOString(),
         bay_released_by:    whoLabel(),
-        bay_release_reason: 'manual',
-        extra_bays:         []
+        bay_release_reason: 'manual'
       });
+      await _clearExtraBays(jobId);
       await auditBay(jobId, j.stage, 'Bay ' + j.job_bay + ' cleared (manual) by ' + whoLabel());
       window._bayEmailAlert(j.job_bay, 'manual');
       window.toast && window.toast('Bay ' + j.job_bay + ' cleared. Alert sent.', 'success');
@@ -39527,17 +39534,19 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       // Verify target bay is free
       var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=1');
       if (heldPrimary && heldPrimary.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied.', 'error'); return; }
-      var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
-      if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      try {
+        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+        if (heldExtra && heldExtra.length) { window.toast && window.toast('Bay ' + bayNo + ' is still occupied by another job.', 'error'); return; }
+      } catch(e) {}
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), {
         job_bay:            bayNo,
         bay_assigned_at:    new Date().toISOString(),
         bay_assigned_by:    whoLabel(),
         bay_released_at:    null,
         bay_released_by:    null,
-        bay_release_reason: null,
-        extra_bays:         []
+        bay_release_reason: null
       });
+      await _clearExtraBays(jobId);
       await auditBay(jobId, me[0].stage, 'Re-assigned to Bay ' + bayNo + ' by ' + whoLabel());
       window.toast && window.toast('Bay ' + bayNo + ' assigned to ' + jobId + '.', 'success');
       window._bayRefreshAll(jobId);
