@@ -26378,17 +26378,13 @@ window.saveAdjModal = async function() {
       row += '<td class="mob-hide" style="font-size:12px;">' + target + '</td>';
       row += '<td class="mob-hide">' + signoffs + '</td>';
       var bayChip = (typeof window._bayChipHTML === 'function') ? window._bayChipHTML(j) : '';
-      // If this job is queued (planning priority set) and the user can edit, make the chip
-      // clickable to set priority and expose ↑ ↓ reorder arrows inline.
       var bayEditable = (j.stage === 'planning') && (j.bay_waitlist_priority != null) && (window.canDo && window.canDo('bay_assign'));
       var bayWrapped = '';
       if (bayChip) {
         if (bayEditable) {
-          // Small outlined arrows — clearly visible but compact.
-          var arrowCss = 'background:transparent;border:1px solid var(--navy-border);color:var(--gold);width:22px;height:22px;line-height:20px;padding:0;border-radius:3px;cursor:pointer;font-size:13px;font-weight:700;';
+          // Chip is clickable to set priority; arrows are DOM-wired after render (robust, no escaping issues)
           bayWrapped = '<span title="Click to set queue priority" style="cursor:pointer;display:inline-block;" onclick="event.stopPropagation();window._bayEditPriority(\'' + jid + '\')">' + bayChip + '</span>'
-            + '<button title="Move up in planning queue"   onclick="event.stopPropagation();window._bayWaitlistMove(\'' + jid + '\',\'up\')"   style="' + arrowCss + '" onmouseover="this.style.background=\'rgba(201,168,76,0.12)\'" onmouseout="this.style.background=\'transparent\'">&#9650;</button>'
-            + '<button title="Move down in planning queue" onclick="event.stopPropagation();window._bayWaitlistMove(\'' + jid + '\',\'down\')" style="' + arrowCss + '" onmouseover="this.style.background=\'rgba(201,168,76,0.12)\'" onmouseout="this.style.background=\'transparent\'">&#9660;</button>';
+            + '<span class="job-arrow-cell" data-arrow-id="' + jid + '" style="display:inline-flex;gap:3px;vertical-align:middle;margin-left:2px;"></span>';
         } else {
           bayWrapped = bayChip;
         }
@@ -26430,6 +26426,37 @@ window.saveAdjModal = async function() {
       cell.appendChild(viewBtn);
       cell.appendChild(delBtn);
     });
+
+    // Wire up ▲▼ arrow buttons via DOM — resilient, no inline-JS escaping edge cases
+    var _arrowCss = 'background:transparent;border:1px solid var(--navy-border);color:var(--gold);width:22px;height:22px;line-height:20px;padding:0;border-radius:3px;cursor:pointer;font-size:13px;font-weight:700;font-family:Lato,sans-serif;';
+    tbody.querySelectorAll('.job-arrow-cell').forEach(function(cell) {
+      var jid = cell.dataset.arrowId;
+      if (!jid) return;
+      ([ ['up','&#9650;','Move up in planning queue'], ['down','&#9660;','Move down in planning queue'] ]).forEach(function(cfg) {
+        var btn = document.createElement('button');
+        btn.innerHTML    = cfg[1];
+        btn.title        = cfg[2];
+        btn.style.cssText = _arrowCss;
+        btn.dataset.arrowJobId  = jid;
+        btn.dataset.arrowDir    = cfg[0];
+        btn.onmouseover = function(){ if (!this.disabled) this.style.background = 'rgba(201,168,76,0.12)'; };
+        btn.onmouseout  = function(){ if (!this.disabled) this.style.background = 'transparent'; };
+        btn.onclick = function(e){
+          e.stopPropagation();
+          window._bayWaitlistMove(this.dataset.arrowJobId, this.dataset.arrowDir);
+        };
+        cell.appendChild(btn);
+      });
+    });
+
+    // Expose local-cache swap so _bayWaitlistMove can update optimistically without a full DB re-fetch
+    window._jobsSwapPriorities = function(idA, newPA, idB, newPB) {
+      var a = _jobs.find(function(j){ return j.id === idA; });
+      var b = _jobs.find(function(j){ return j.id === idB; });
+      if (a) a.bay_waitlist_priority = newPA;
+      if (b) b.bay_waitlist_priority = newPB;
+      window.renderJobsTable();
+    };
 
     // Wire tap-to-expand on mobile
     var tbl = document.getElementById('jobs-main-table');
@@ -39394,25 +39421,49 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   }
 
   // ── Reorder: swap priority with adjacent neighbour ──────────────────────
+  var _baySwappingJobs = {};   // per-job lock — prevents double-click corruption
   window._bayWaitlistMove = async function(jobId, direction) {
     if (!window.canDo || !window.canDo('bay_assign')) return;
+    if (_baySwappingJobs[jobId]) return;   // already in-flight for this job
+    _baySwappingJobs[jobId] = true;
+
+    // Visually disable both arrow buttons for this job immediately
+    document.querySelectorAll('[data-arrow-job-id="' + jobId + '"]').forEach(function(b){
+      b.disabled = true; b.style.opacity = '0.35'; b.style.cursor = 'not-allowed';
+    });
+
     try {
       var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,bay_waitlist_priority');
       if (!me || !me.length || me[0].bay_waitlist_priority == null) return;
       var myP = me[0].bay_waitlist_priority;
-      // Find nearest neighbour in the right direction — only within planning/scheduled jobs
       var nbQuery = direction === 'up'
         ? 'jobs?bay_waitlist_priority=lt.' + myP + '&stage=in.(planning,scheduled)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1'
         : 'jobs?bay_waitlist_priority=gt.' + myP + '&stage=in.(planning,scheduled)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc&limit=1';
       var nb = await apiGet(nbQuery);
-      if (!nb || !nb.length) return; // already at top/bottom
-      var nbP = nb[0].bay_waitlist_priority;
-      // Swap via a temporary sentinel so we never collide on a unique constraint
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(me[0].id), { bay_waitlist_priority: -1 });
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(nb[0].id), { bay_waitlist_priority: myP });
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(me[0].id), { bay_waitlist_priority: nbP });
-      window._bayRefreshAll();
-    } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
+      if (!nb || !nb.length) return;   // already at top / bottom
+      var nbP  = nb[0].bay_waitlist_priority;
+      var nbId = nb[0].id;
+
+      // Optimistic local update — table re-renders instantly, arrows stay visible
+      if (typeof window._jobsSwapPriorities === 'function') {
+        window._jobsSwapPriorities(jobId, nbP, nbId, myP);
+      }
+
+      // DB swap — use 99999 as sentinel (never a real priority; avoids the -1 corruption bug)
+      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: 99999 });
+      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(nbId),  { bay_waitlist_priority: myP });
+      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: nbP });
+
+      // Refresh Bay Board + schedule only — jobs table is already correct from the optimistic update
+      if (typeof window._renderBayBoard === 'function') { try { window._renderBayBoard(); } catch(e){} }
+      if (typeof window.loadSchedule === 'function')    { try { window.loadSchedule();    } catch(e){} }
+    } catch(e) {
+      window.toast && window.toast('Error moving job: ' + (e && e.message), 'error');
+      // Full reload to restore correct state after a failed patch
+      if (typeof window.loadJobs === 'function') window.loadJobs();
+    } finally {
+      delete _baySwappingJobs[jobId];
+    }
   };
 
   // ── Set an explicit priority (click-to-edit from Jobs table). Shifts others as needed. ─
