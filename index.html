@@ -43278,24 +43278,37 @@ if (typeof _origOpenDD === 'function') {
     var el = document.getElementById('plant-next-jobs');
     if (!el) return;
     var active = getActiveJob();
+    // Show all non-complete jobs except the active one — regardless of scheduled_start
     var upcoming = _plantJobs.filter(function(j) {
-      return j.scheduled_start && !j.actual_end && (!active || j.id !== active.id);
+      if (j.actual_end) return false;                       // done
+      if (j.stage === 'complete') return false;             // done
+      if (active && j.id === active.id) return false;       // already in active panel
+      return true;
     });
-    upcoming.sort(function(a, b) { return new Date(a.scheduled_start) - new Date(b.scheduled_start); });
+    // Sort: scheduled_start asc (nulls last), then bay_waitlist_priority asc
+    upcoming.sort(function(a, b) {
+      if (a.scheduled_start && b.scheduled_start) return new Date(a.scheduled_start) - new Date(b.scheduled_start);
+      if (a.scheduled_start) return -1;
+      if (b.scheduled_start) return 1;
+      var pa = a.bay_waitlist_priority || 9999;
+      var pb = b.bay_waitlist_priority || 9999;
+      return pa - pb;
+    });
     upcoming = upcoming.slice(0, 5);
     if (!upcoming.length) {
-      el.innerHTML = '<div style="color:var(--muted);font-size:12px;">No upcoming jobs scheduled</div>';
+      el.innerHTML = '<div style="color:var(--muted);font-size:14px;">No upcoming jobs</div>';
       return;
     }
     el.innerHTML = upcoming.map(function(j, idx) {
       var timeStr = j.scheduled_start
         ? new Date(j.scheduled_start).toLocaleString('en-IE', { weekday:'short', hour:'2-digit', minute:'2-digit' })
         : '—';
+      var stageCol = j.stage === 'scheduled' ? 'var(--gold)' : 'var(--muted)';
       return '<div class="plant-next-job-row">'
         + '<div class="plant-next-job-num">' + (idx + 1) + '</div>'
         + '<div class="plant-next-job-name" title="' + esc(j.product_name || j.id) + '">' + esc(j.product_name || j.id) + '</div>'
         + '<div class="plant-next-job-time">' + timeStr + '</div>'
-        + '<div class="plant-next-job-btls">' + (j.bottle_target ? j.bottle_target.toLocaleString() : '—') + '</div>'
+        + '<div class="plant-next-job-btls" style="color:' + stageCol + '">' + (j.bottle_target ? j.bottle_target.toLocaleString() : '—') + '</div>'
       + '</div>';
     }).join('');
   }
@@ -43312,8 +43325,9 @@ if (typeof _origOpenDD === 'function') {
     for (var b = 1; b <= BAY_COUNT; b++) {
       var j = bayMap[b];
       if (j) {
+        var isActive = active && active.id === j.id;
         html += '<div class="plant-bay-card occupied">'
-          + '<div class="plant-bay-num">Bay ' + b + '</div>'
+          + '<div class="plant-bay-num">Bay ' + b + (isActive ? ' &nbsp;&#9679; Running' : '') + '</div>'
           + '<div class="plant-bay-job" title="' + esc(j.product_name || j.id) + '">' + esc(j.product_name || j.id) + '</div>'
         + '</div>';
       } else {
@@ -43457,9 +43471,9 @@ if (typeof _origOpenDD === 'function') {
   async function loadPlantDisplay() {
     try {
       var jobs = await plantGet(
-        'jobs?stage=in.(scheduled,complete)'
+        'jobs?stage=in.(planning,scheduled,complete)'
         + '&select=id,product_name,bottle_target,bom_id,scheduled_start,scheduled_end,'
-        + 'schedule_notes,stage,job_bay,actual_start,actual_end,clients(name)'
+        + 'schedule_notes,stage,job_bay,bay_waitlist_priority,actual_start,actual_end,clients(name)'
         + '&order=scheduled_start.asc.nullsfirst'
       );
       _plantJobs = (jobs || []).map(function(j) {
