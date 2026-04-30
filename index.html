@@ -6574,7 +6574,10 @@ window.copyInviteLink = function() {
 
   <!-- Stage advance bar -->
   <div id="jd-stage-bar" style="padding:16px 24px;border-top:1px solid var(--navy-border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;background:var(--navy-dark);">
-    <div id="jd-stage-info" style="font-size:12px;color:var(--muted);min-width:160px;flex:1;"></div>
+    <div style="flex:1;min-width:160px;">
+      <div id="jd-stage-info" style="font-size:12px;color:var(--muted);"></div>
+      <div id="jd-liquid-warning" style="display:none;margin-top:6px;padding:5px 10px;background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.4);border-radius:4px;font-size:11px;color:var(--amber);">&#9888; No liquid containers linked to sign-off — required before job can be completed.</div>
+    </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
       <button id="jd-btn-delete" onclick="window.deleteJobFromDetail()" style="font-size:11px;padding:7px 14px;background:transparent;border:1px solid var(--red);color:var(--red);cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Delete</button>
       <button id="jd-btn-edit" onclick="window.editJobFromDetail()" class="btn btn-outline" style="font-size:11px;padding:7px 14px;">Edit</button>
@@ -27402,6 +27405,24 @@ window.saveAdjModal = async function() {
     // Default to Job Summary tab
     var defaultTab = document.querySelector('.jd-tab[data-tab="jobsheet"]');
     if (defaultTab) window.showJobTab('jobsheet', defaultTab);
+
+    // Async: show liquid warning badge if scheduled/complete stage and no containers linked
+    var _lqWarnEl = document.getElementById('jd-liquid-warning');
+    if (_lqWarnEl) _lqWarnEl.style.display = 'none';
+    if (_lqWarnEl && (j.stage === 'scheduled' || j.stage === 'complete')) {
+      supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=linked_containers_json,signed_at&limit=1').then(function(rows) {
+        if (!_lqWarnEl || document.getElementById('jd-liquid-warning') !== _lqWarnEl) return;
+        var row = rows && rows[0];
+        var linked = [];
+        try { linked = JSON.parse((row && row.linked_containers_json) || '[]'); } catch(e) {}
+        if (!linked.length) {
+          _lqWarnEl.style.display = '';
+          _lqWarnEl.innerHTML = '&#9888; No liquid containers linked to sign-off'
+            + (row && row.signed_at ? ' — sign-off was completed without linking containers' : '')
+            + '. Required before job can be marked complete.';
+        }
+      }).catch(function() {});
+    }
   };
 
   window.closeJobDetail = function() {
@@ -27897,10 +27918,13 @@ window.saveAdjModal = async function() {
         return;
       }
 
-      // All gates clear — show dry goods deduction modal (or plain confirm if no dry goods)
-      var deductionConfirmed = await _showDryGoodsDeductionModal(j, _currentJobId);
+      // All gates clear — show liquid deduction modal FIRST (collects data, no DB writes yet),
+      // then dry goods. Both deductions execute together before _finaliseJobComplete.
+      var liquidPlan = await _showLiquidDeductionModal(j, _currentJobId);
+      if (liquidPlan === false) return; // user cancelled or hard-blocked
+
+      var deductionConfirmed = await _showDryGoodsDeductionModal(j, _currentJobId, liquidPlan);
       if (!deductionConfirmed) return;
-      // deductionConfirmed may carry waste entries — handled inside the modal
       return; // modal calls _finaliseJobComplete internally
     }
 
@@ -27943,7 +27967,8 @@ window.saveAdjModal = async function() {
   }
 
   // ── Dry-goods deduction modal ─────────────────────────────────────────────────
-  async function _showDryGoodsDeductionModal(job, jobId) {
+  // liquidPlan: result from _showLiquidDeductionModal (array with {lines, waste} or [])
+  async function _showDryGoodsDeductionModal(job, jobId, liquidPlan) {
     var actualBottles = parseInt(job.actual_bottles_produced || 0);
     if (!actualBottles) {
       await window.lpAlert('Actual bottles produced must be entered on the Results tab before completing this job.', { title: 'Results required', variant: 'warn' });
@@ -27967,8 +27992,11 @@ window.saveAdjModal = async function() {
       var ok = await window.lpConfirm('All sign-offs are complete. No dry goods components to deduct.\n\nMark this job as Complete?', { title: 'Complete Job', confirmLabel: 'Complete Job' });
       if (!ok) return false;
       try {
+        if (liquidPlan && liquidPlan.lines && liquidPlan.lines.length) {
+          await _executeLiquidDeductionPlan(jobId, liquidPlan, job);
+        }
         await _finaliseJobComplete(jobId, job.stage);
-        window.toast && window.toast('Job complete — no dry goods to deduct.', 'success');
+        window.toast && window.toast('Job complete.', 'success');
         await loadJobs();
         window.closeJobDetail();
       } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
@@ -28184,7 +28212,12 @@ window.saveAdjModal = async function() {
             } catch(e) { console.warn('job_waste insert failed (non-critical):', e.message); }
           }
 
-          // 5. Mark job complete
+          // 5. Execute liquid deductions if a plan was collected
+          if (liquidPlan && liquidPlan.lines && liquidPlan.lines.length) {
+            await _executeLiquidDeductionPlan(jobId, liquidPlan, job);
+          }
+
+          // 6. Mark job complete
           await _finaliseJobComplete(jobId, job.stage);
           var deducted = deductions.filter(function(d){ return !d.noStock; }).length;
           window.toast && window.toast('Job complete — stock updated for ' + deducted + ' component' + (deducted !== 1 ? 's' : '') + '.', 'success');
@@ -30460,6 +30493,24 @@ window.saveAdjModal = async function() {
       // ── Liquid Source section ──────────────────────────────────────────────
       html += sec('Liquid Source');
 
+      // ── Step 1: Prepare bottling-strength liquid ───────────────────────────
+      if (!isLocked) {
+        var _step1BotAbv = _bottlingAbv > 0 ? _bottlingAbv.toFixed(1) + '%' : 'bottling ABV';
+        html += '<div style="background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:5px;padding:14px 16px;margin-bottom:14px;">'
+          + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:#60a5fa;font-weight:700;margin-bottom:8px;">Step 1 — Prepare Bottling-Strength Liquid</div>'
+          + '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">'
+          + 'If your containers are already at bottling strength (<strong style="color:var(--white);">' + _step1BotAbv + '</strong>), skip to Step 2 and link them directly. '
+          + 'If you need to dilute cask-strength liquid first, use the Liquid tab.'
+          + '</div>'
+          + '<button onclick="window.lsoOpenLiquidTab(\'' + jobId + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:12px;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">&#9658; Open Liquid Tab for This Job</button>'
+          + '</div>';
+      }
+
+      // ── Step 2: Link containers ────────────────────────────────────────────
+      if (!isLocked) {
+        html += '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">Step 2 — Link Bottling-Strength Containers</div>';
+      }
+
       // ── Requirement panel ─────────────────────────────────────────────────
       if (_reqLitres > 0) {
         var _reqPct = Math.min(100, Math.round(_linkedTotalLitres / _reqLitres * 100));
@@ -30497,7 +30548,7 @@ window.saveAdjModal = async function() {
       if (!isLocked) {
         // Container selector for adding more
         var _alreadyLinkedIds = _linkedConts.map(function(lc){ return lc.id; });
-        var _conOptH = '<option value="">— Add a container —</option>'
+        var _conOptH = '<option value="">— Select a bottling-strength container —</option>'
           + _activeConts.filter(function(c){ return _alreadyLinkedIds.indexOf(c.id) === -1; }).map(function(c){
               var lbl = c.reference + ' [' + (c.type==='ibc'?'IBC':c.type) + '] — ' + (c.spirit_type||'—') + ' — ' + parseFloat(c.current_litres||0).toFixed(0) + 'L @ ' + (c.abv||'?') + '%' + (c.cbw_rotation?' · '+c.cbw_rotation:'');
               return '<option value="' + c.id + '">' + window.escapeHtml(lbl) + '</option>';
@@ -30509,36 +30560,6 @@ window.saveAdjModal = async function() {
         html += '<div id="lso-spirit-warn" style="display:none;margin-bottom:10px;"></div>';
         html += '<div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;">'
           + '<button id="lso-link-btn" onclick="window.lsoLinkContainer(\'' + jobId + '\')" class="btn btn-gold" style="font-size:12px;padding:7px 18px;" disabled>+ Add Container to Job</button>'
-          + '</div>';
-
-        // Dilution scope toggle — visible when containers are linked AND dilution is needed.
-        // Always rendered (with display:none if not currently applicable) so _lsoRenderLinkedList
-        // can show/update it dynamically as containers are added or removed in-session.
-        var _prevMode   = window._lsoDilutionMode || 'requirement';
-        var _showScope  = _linkedConts.length > 0 && _dilutionNeeded;
-        var _initReqDesc = (_reqLitres > 0 && _dilSrcNeeded > 0)
-          ? 'Draw ~' + _dilSrcNeeded.toFixed(1) + ' L from container(s), add ~' + _dilWater.toFixed(1) + ' L water → <strong>' + _dilFinal.toFixed(1) + ' L</strong> at ' + _bottlingAbv.toFixed(1) + '% ABV. Remainder stays in vessel(s) at cask strength.'
-          : 'Draw only enough to meet the job volume. Remainder stays in vessel(s) at cask strength.';
-        var _initAllDesc = _linkedTotalLitres > 0
-          ? 'Draw full <strong>' + _linkedTotalLitres.toFixed(1) + ' L</strong> from container(s), add ~' + _dilAllWater.toFixed(1) + ' L water → <strong>' + _dilAllFinal.toFixed(1) + ' L</strong> at ' + _bottlingAbv.toFixed(1) + '% ABV.'
-          : 'Draw all linked container contents and add water to reach the target ABV.';
-        html += '<div id="lso-dil-scope-wrap" style="' + (_showScope ? '' : 'display:none;') + 'background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.3);border-radius:5px;padding:14px 16px;margin-bottom:12px;">'
-          + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">Dilution Scope</div>'
-          + '<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-bottom:10px;">'
-          + '<input type="radio" id="lso-dil-req" name="lso-dil-mode" value="requirement" ' + (_prevMode !== 'all' ? 'checked' : '') + ' onchange="window.lsoDilutionModeChange()" style="margin-top:3px;accent-color:var(--gold);">'
-          + '<div><div style="font-size:12px;color:var(--white);font-weight:600;margin-bottom:2px;">Dilute to job requirement only</div>'
-          + '<div id="lso-dil-req-desc" style="font-size:11px;color:var(--muted);">' + _initReqDesc + '</div></div></label>'
-          + '<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">'
-          + '<input type="radio" id="lso-dil-all" name="lso-dil-mode" value="all" ' + (_prevMode === 'all' ? 'checked' : '') + ' onchange="window.lsoDilutionModeChange()" style="margin-top:3px;accent-color:var(--gold);">'
-          + '<div><div style="font-size:12px;color:var(--white);font-weight:600;margin-bottom:2px;">Dilute all linked container contents</div>'
-          + '<div id="lso-dil-all-desc" style="font-size:11px;color:var(--muted);">' + _initAllDesc + '</div></div></label>'
-          + '</div>';
-
-        html += '<div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">'
-          + '<button onclick="window.lsoGoToBlending(\'' + jobId + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:12px;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">&#9658; Complete via Liquid tab</button>'
-          + '</div>'
-          + '<div style="font-size:11px;color:var(--muted);padding:8px 12px;background:rgba(0,0,0,0.2);border:1px solid var(--navy-border);border-radius:3px;">'
-          + 'To dilute or blend the liquid for this job, use the <strong style="color:var(--gold);">Liquid tab</strong>. The job will be pre-filled and the sign-off task will auto-complete when you save.'
           + '</div>';
       } else {
         if (!_linkedConts.length) {
@@ -30630,7 +30651,8 @@ window.saveAdjModal = async function() {
               dilution:'Diluted', dilute_in_place:'Diluted in-place',
               transfer_from:'Transferred out', transfer_to:'Transferred in',
               price_change:'Price updated', regauge:'Regauged',
-              lpa_price:'Price updated'
+              lpa_price:'Price updated',
+              bottling_deduction:'Bottling deduction'
             };
             var _defEgid = d.blend_event_group_id || null;
             html += sec('Liquid Operations History');
@@ -30694,17 +30716,35 @@ window.saveAdjModal = async function() {
         if (document.getElementById('lso-bl-sources-wrap')) window.lsoAddInlineBlendSrc();
       }
 
-      // Wire sign-off button — enable when name entered
+      // Wire sign-off button — enable when name entered and no cask-strength containers linked
       var signBtn = document.getElementById('lso-signoff-btn');
       if (signBtn && !isLocked) {
         function checkSignReady() {
-          var nameEl = document.getElementById('lso-signed-by');
-          var ready = nameEl && nameEl.value.trim().length > 1;
+          var nameEl  = document.getElementById('lso-signed-by');
+          var hasName = nameEl && nameEl.value.trim().length > 1;
+
+          // Hard block: any linked container at cask strength blocks sign-off
+          var bottAbv   = window._lsoBottlingAbv || 0;
+          var linked    = window._lsoAllLinkedConts || [];
+          var allConts2 = window._lsoContainers || [];
+          var caskBlock = bottAbv > 0 && linked.some(function(lc) {
+            var c = allConts2.find(function(x){ return x.id === lc.id; });
+            var abvVal = parseFloat((c && c.abv) || lc.abv || 0);
+            return abvVal > bottAbv + 2;
+          });
+
+          var ready = hasName && !caskBlock;
           signBtn.disabled = !ready;
           signBtn.style.background = ready ? 'var(--gold)' : 'var(--navy-border)';
           signBtn.style.color = ready ? 'var(--navy-dark)' : 'var(--muted)';
           signBtn.style.cursor = ready ? 'pointer' : 'not-allowed';
-          signBtn.textContent = ready ? 'Sign Off ✓' : 'Sign Off';
+          if (caskBlock) {
+            signBtn.textContent = '⚠ Dilute containers first';
+            signBtn.title = 'One or more linked containers are at cask strength. Dilute to bottling ABV before signing off.';
+          } else {
+            signBtn.textContent = ready ? 'Sign Off ✓' : 'Sign Off';
+            signBtn.title = '';
+          }
         }
         var nameInp = document.getElementById('lso-signed-by');
         if (nameInp) nameInp.addEventListener('input', checkSignReady);
@@ -30712,6 +30752,7 @@ window.saveAdjModal = async function() {
           inp.addEventListener('change', checkSignReady);
         });
         checkSignReady();
+        window._lsoCheckSignReady = checkSignReady;
         signBtn.onclick = function() { if (!signBtn.disabled) window.saveLiquidSignoff(jobId, lsoBtnId); };
       }
 
@@ -31329,7 +31370,15 @@ window.saveAdjModal = async function() {
     if (window._lsoAllLinkedConts.find(function(lc){ return lc.id === cid; })) {
       window.toast && window.toast('Container already linked.', 'error'); return;
     }
-    window._lsoAllLinkedConts.push({ id: cid, litres: parseFloat(c.current_litres||0) });
+    // Snapshot current_litres, abv, lpa and reference at link time — used as "Before job"
+    // figures in the completion deduction modal, so stale live values don't corrupt the ledger
+    window._lsoAllLinkedConts.push({
+      id:        cid,
+      reference: c.reference || '',
+      litres:    parseFloat(c.current_litres||0),
+      abv:       parseFloat(c.abv||0),
+      lpa:       parseFloat(c.current_lpa||0)
+    });
 
     // Auto-fill ABV from first container only
     if (window._lsoAllLinkedConts.length === 1) {
@@ -31390,14 +31439,26 @@ window.saveAdjModal = async function() {
     var linked = window._lsoAllLinkedConts || [];
     var allConts = window._lsoContainers || [];
 
+    var _bottAbv = window._lsoBottlingAbv || 0;
     list.innerHTML = linked.map(function(lc, idx) {
       var cont = allConts.find(function(c){ return c.id === lc.id; });
+      var contAbv = parseFloat((cont && cont.abv) || lc.abv || 0);
+      var contLitres = cont ? parseFloat(cont.current_litres||0) : parseFloat(lc.litres||0);
       var label = cont
-        ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + parseFloat(cont.current_litres||0).toFixed(0) + 'L @ ' + (cont.abv||'?') + '%'
-        : lc.id;
+        ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + contLitres.toFixed(0) + 'L @ ' + (cont.abv||'?') + '%'
+        : (lc.reference || lc.id);
       var _locked = !!window._lsoIsLocked;
+      // ABV badge — green if at/near bottling strength, amber if cask-strength
+      var abvBadge = '';
+      if (_bottAbv > 0 && contAbv > 0) {
+        if (contAbv > _bottAbv + 2) {
+          abvBadge = ' <span style="display:inline-block;font-size:10px;padding:1px 7px;border-radius:3px;background:rgba(201,168,76,0.15);color:var(--amber);border:1px solid rgba(201,168,76,0.4);margin-left:6px;font-weight:600;">&#9888; Cask strength ' + contAbv.toFixed(1) + '%</span>';
+        } else {
+          abvBadge = ' <span style="display:inline-block;font-size:10px;padding:1px 7px;border-radius:3px;background:rgba(61,186,120,0.12);color:var(--green);border:1px solid rgba(61,186,120,0.3);margin-left:6px;font-weight:600;">&#10003; Bottling strength</span>';
+        }
+      }
       return '<div class="lso-linked-row" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
-        + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + '</span>'
+        + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + abvBadge + '</span>'
         + (!_locked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" title="Delink this container from the job" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:600;">&#10005; Delink</button>' : '')
         + '</div>';
     }).join('');
@@ -31510,6 +31571,9 @@ window.saveAdjModal = async function() {
         scopeWrap.style.display = 'none';
       }
     }
+
+    // Re-evaluate sign-off button in case a cask-strength container was just linked/delinked
+    if (typeof window._lsoCheckSignReady === 'function') window._lsoCheckSignReady();
   };
 
   window.lsoChangeContainer = function() {
@@ -31545,6 +31609,324 @@ window.saveAdjModal = async function() {
         });
       }
     } catch(e) { console.warn('LSO auto-save containers failed:', e.message); }
+  }
+
+  // ── Link containers from Liquid tab to job sign-off ────────────────────────
+  // Called programmatically from _lsoOfferLinkToJob after user confirms the prompt.
+  async function _lsoLinkContainersToJobSignoff(jobId, containers) {
+    if (!jobId || !containers || !containers.length) return;
+    try {
+      var existing = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=id,linked_containers_json&limit=1');
+      var current = [];
+      if (existing && existing[0]) {
+        try { current = JSON.parse(existing[0].linked_containers_json || '[]'); } catch(e2) {}
+      }
+      containers.forEach(function(nc) {
+        if (!current.find(function(lc){ return lc.id === nc.id; })) current.push(nc);
+      });
+      var lcJson  = JSON.stringify(current);
+      var firstId = current.length ? current[0].id : null;
+      if (existing && existing[0]) {
+        await supaMut('PATCH', 'job_liquid_signoff', '?id=eq.' + existing[0].id, {
+          linked_container_id: firstId, linked_containers_json: lcJson
+        });
+      } else {
+        await supaMut('POST', 'job_liquid_signoff', '', {
+          job_id: jobId, linked_container_id: firstId, linked_containers_json: lcJson
+        });
+      }
+      window.toast && window.toast('Container(s) linked to job sign-off.', 'success');
+    } catch(e) { window.toast && window.toast('Could not link to sign-off: ' + e.message, 'error'); }
+  }
+
+  // Shows a confirm prompt offering to link Liquid tab output to the job sign-off.
+  // Called after saveDilution / saveBlend when a job context is active.
+  function _lsoOfferLinkToJob(jobId, outputContainers) {
+    if (!jobId || !outputContainers || !outputContainers.length) return;
+    var listHtml = outputContainers.map(function(c) {
+      return '<li style="padding:4px 0;color:var(--white);">'
+        + window.escapeHtml(c.reference || c.id.slice(0,8)+'…')
+        + ' &mdash; ' + parseFloat(c.litres||0).toFixed(1) + ' L @ ' + parseFloat(c.abv||0).toFixed(1) + '%'
+        + '</li>';
+    }).join('');
+    window._pulseConfirm({
+      title: 'Link to Job Sign-Off?',
+      body:  '<p style="margin:0 0 10px;">Link the output container(s) to the job\'s liquid sign-off?</p>'
+           + '<ul style="margin:0;padding:0 0 0 18px;font-size:11px;line-height:1.8;">' + listHtml + '</ul>'
+           + '<p style="margin:10px 0 0;font-size:11px;color:var(--muted);">These containers will be used for stock deduction when the job is marked complete.</p>',
+      confirmLabel: '+ Link Containers',
+      onConfirm: function() {
+        _lsoLinkContainersToJobSignoff(jobId, outputContainers).then(function() {
+          if (window._lsoCurrentJobId === jobId && typeof window.loadLiquidSignoffPanel === 'function') {
+            window.loadLiquidSignoffPanel(jobId);
+          }
+        });
+      }
+    });
+  }
+
+  // ── Liquid stock deduction modal (shown BEFORE dry goods at job completion) ──
+  async function _showLiquidDeductionModal(job, jobId) {
+    var actualBottles = parseInt(job.actual_bottles_produced || 0);
+
+    // Fetch sign-off linked containers
+    var signoffRows;
+    try {
+      signoffRows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=linked_containers_json,linked_container_id&limit=1');
+    } catch(e) {
+      window.toast && window.toast('Could not load liquid sign-off: ' + e.message, 'error');
+      return false;
+    }
+
+    var linkedConts = [];
+    if (signoffRows && signoffRows[0]) {
+      try { linkedConts = JSON.parse(signoffRows[0].linked_containers_json || '[]'); } catch(e) {}
+      if (!linkedConts.length && signoffRows[0].linked_container_id) {
+        linkedConts = [{ id: signoffRows[0].linked_container_id, litres: null, abv: null, reference: signoffRows[0].linked_container_id }];
+      }
+    }
+
+    // Hard block: no containers linked to sign-off
+    if (!linkedConts.length) {
+      await window.lpAlert(
+        'No liquid containers are linked to this job\'s sign-off.\n\nOpen the job\'s Liquid Sign-Off tab, link the bottling-strength containers and complete the sign-off before marking this job complete.',
+        { title: 'Liquid Sign-Off Incomplete', variant: 'error' }
+      );
+      return false;
+    }
+
+    // Double-deduction guard — skip if liquid has already been deducted for this job
+    try {
+      var prevDeductions = await supaGet('liquid_history?job_id=eq.' + jobId + '&event_type=eq.bottling_deduction&limit=1');
+      if (prevDeductions && prevDeductions.length > 0) return [];
+    } catch(e) {
+      console.warn('Liquid double-deduction guard query failed — showing modal:', e.message);
+    }
+
+    // Resolve required litres from actual bottles produced
+    var reqLitres = 0;
+    var bomVolCl  = 0;
+    try {
+      if (job.bom_id) {
+        var bomR2 = await supaGet('boms?id=eq.' + job.bom_id + '&select=volume_cl&limit=1');
+        if (bomR2 && bomR2[0]) bomVolCl = parseFloat(bomR2[0].volume_cl || 0);
+      }
+      if (actualBottles && bomVolCl) reqLitres = (actualBottles * bomVolCl) / 100;
+    } catch(e) {}
+
+    // Fetch live container data (fallback where snapshot is absent)
+    var contIds  = linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
+    var liveConts = [];
+    try {
+      if (contIds.length) liveConts = await supaGet('liquid_containers?id=in.(' + contIds.join(',') + ')&select=id,reference,current_litres,abv');
+    } catch(e) {}
+
+    // Build rows — prefer snapshotted litres/abv recorded at link time
+    var contRows = linkedConts.map(function(lc) {
+      var live   = liveConts.find(function(c){ return c.id === lc.id; });
+      var ref    = lc.reference || (live && live.reference) || lc.id.slice(0,8)+'…';
+      var before = lc.litres != null ? parseFloat(lc.litres) : parseFloat((live && live.current_litres) || 0);
+      var abv    = lc.abv   != null ? parseFloat(lc.abv)    : parseFloat((live && live.abv) || 0);
+      return { id: lc.id, reference: ref, before: before, abv: abv };
+    });
+
+    // FIFO pre-fill: allocate required litres across containers in order
+    var toAllocate = reqLitres;
+    var fifoRemaining = [];
+    for (var fi = 0; fi < contRows.length; fi++) {
+      if (toAllocate <= 0) { fifoRemaining.push(Math.round(contRows[fi].before * 10) / 10); continue; }
+      var _draw = Math.min(contRows[fi].before, toAllocate);
+      toAllocate -= _draw;
+      fifoRemaining.push(Math.max(0, Math.round((contRows[fi].before - _draw) * 10) / 10));
+    }
+
+    return new Promise(function(resolve) {
+      var esc = window.escapeHtml;
+      var ov  = document.createElement('div');
+      ov.id   = 'lq-deduct-overlay';
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.92);z-index:100031;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto;font-family:Lato,sans-serif;';
+
+      function getRemaining(idx) {
+        var inp = document.getElementById('lq-remaining-' + idx);
+        return inp ? Math.max(0, parseFloat(inp.value) || 0) : fifoRemaining[idx];
+      }
+      function getWasteLitres() {
+        var inp = document.getElementById('lq-waste-litres');
+        return inp ? Math.max(0, parseFloat(inp.value) || 0) : 0;
+      }
+      function getWasteReason() {
+        var inp = document.getElementById('lq-waste-reason');
+        return inp ? inp.value.trim() : '';
+      }
+
+      function updateBalance() {
+        var totalDrawn = 0;
+        contRows.forEach(function(row, idx) {
+          var rem   = getRemaining(idx);
+          var drawn = Math.max(0, row.before - rem);
+          totalDrawn += drawn;
+          var drawnEl = document.getElementById('lq-drawn-' + idx);
+          if (drawnEl) drawnEl.textContent = drawn.toFixed(1) + ' L';
+        });
+        var waste    = getWasteLitres();
+        var target   = reqLitres + waste;
+        var diff     = Math.abs(totalDrawn - target);
+        var balanced = diff <= 0.5 && totalDrawn > 0;
+        var wasteOk  = waste <= 0 || getWasteReason().length > 0;
+
+        var wasteWrap = document.getElementById('lq-waste-reason-wrap');
+        if (wasteWrap) wasteWrap.style.display = waste > 0 ? '' : 'none';
+
+        var balEl = document.getElementById('lq-balance-display');
+        if (balEl) {
+          var col = balanced ? 'var(--green)' : 'var(--red)';
+          balEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Required</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + reqLitres.toFixed(1) + ' L</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Waste</div><div style="font-size:15px;font-weight:800;color:var(--amber);">' + waste.toFixed(1) + ' L</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Total Drawn</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + totalDrawn.toFixed(1) + ' L</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Balance</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + (balanced ? '&#10003; OK' : diff.toFixed(1) + ' L off') + '</div></div>'
+            + '</div>';
+        }
+
+        var confirmBtn = document.getElementById('lq-dd-confirm');
+        if (confirmBtn) {
+          var ok = balanced && wasteOk;
+          confirmBtn.disabled    = !ok;
+          confirmBtn.style.opacity = ok ? '1' : '0.4';
+          confirmBtn.style.cursor  = ok ? 'pointer' : 'not-allowed';
+        }
+      }
+
+      var rowsHtml = contRows.map(function(row, idx) {
+        return '<tr style="border-bottom:1px solid var(--navy-border);">'
+          + '<td style="padding:10px 8px;font-size:12px;font-weight:700;color:var(--white);">' + esc(row.reference) + '<br><span style="font-size:10px;font-weight:400;color:var(--muted);">' + row.abv.toFixed(1) + '% ABV</span></td>'
+          + '<td style="padding:10px 8px;text-align:right;font-size:12px;color:var(--muted);">' + row.before.toFixed(1) + ' L</td>'
+          + '<td style="padding:6px 8px;text-align:center;">'
+          +   '<input type="number" id="lq-remaining-' + idx + '" min="0" max="' + row.before.toFixed(1) + '" step="0.1" value="' + fifoRemaining[idx].toFixed(1) + '" '
+          +   'oninput="window._lqUpdateBalance()" '
+          +   'style="width:90px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:5px 8px;font-size:12px;border-radius:3px;text-align:right;">'
+          + '</td>'
+          + '<td style="padding:10px 8px;text-align:right;font-size:12px;font-weight:700;color:var(--amber);" id="lq-drawn-' + idx + '">' + Math.max(0, row.before - fifoRemaining[idx]).toFixed(1) + ' L</td>'
+          + '</tr>';
+      }).join('');
+
+      var reqDisp = reqLitres > 0
+        ? actualBottles.toLocaleString() + ' bottles &times; ' + bomVolCl + ' cl = <strong style="color:var(--white);">' + reqLitres.toFixed(1) + ' L required</strong>'
+        : 'Required volume not calculated &mdash; adjust remaining values to match actual drawn.';
+
+      ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px 28px 22px;width:min(680px,100%);margin:auto;">'
+        + '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;">'
+        +   '<div><div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Complete Job</div>'
+        +     '<div style="font-size:16px;font-weight:800;color:var(--white);">Liquid Stock Deduction</div></div>'
+        +   '<button id="lq-dd-close" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0;line-height:1;">&#10005;</button>'
+        + '</div>'
+        + '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">' + reqDisp + '</div>'
+        + '<table style="width:100%;border-collapse:collapse;">'
+        + '<thead><tr style="border-bottom:2px solid var(--navy-border);">'
+        +   '<th style="text-align:left;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Container</th>'
+        +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Before Job</th>'
+        +   '<th style="text-align:center;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Remaining After</th>'
+        +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Drawn</th>'
+        + '</tr></thead><tbody>' + rowsHtml + '</tbody></table>'
+
+        + '<div style="margin-top:16px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
+        +   '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;">Waste (Optional)</div>'
+        +   '<div style="display:grid;grid-template-columns:160px 1fr;gap:12px;">'
+        +     '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Waste litres</label>'
+        +       '<input type="number" id="lq-waste-litres" min="0" step="0.1" value="0" oninput="window._lqUpdateBalance()" '
+        +       'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
+        +     '<div id="lq-waste-reason-wrap" style="display:none;">'
+        +       '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Reason <span style="color:var(--red);">*</span></label>'
+        +       '<input type="text" id="lq-waste-reason" placeholder="e.g. overfill, line loss, sample…" oninput="window._lqUpdateBalance()" '
+        +       'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
+        +   '</div>'
+        + '</div>'
+
+        + '<div id="lq-balance-display" style="margin-top:14px;padding:14px 16px;background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:5px;"></div>'
+
+        + '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:22px;flex-wrap:wrap;">'
+        +   '<button id="lq-dd-cancel" style="padding:10px 20px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;">Cancel</button>'
+        +   '<button id="lq-dd-confirm" disabled style="padding:10px 22px;background:var(--gold);border:none;border-radius:4px;color:var(--navy-dark);cursor:not-allowed;font-size:12px;font-weight:800;opacity:0.4;">Confirm &amp; Continue to Dry Goods &#8594;</button>'
+        + '</div></div>';
+
+      document.body.appendChild(ov);
+      document.body.style.overflow = 'hidden';
+
+      window._lqUpdateBalance = function() { updateBalance(); };
+      updateBalance();
+
+      function closeModal() {
+        ov.remove();
+        document.body.style.overflow = '';
+        delete window._lqUpdateBalance;
+        resolve(false);
+      }
+
+      ov.querySelector('#lq-dd-close').onclick  = closeModal;
+      ov.querySelector('#lq-dd-cancel').onclick = closeModal;
+      ov.addEventListener('click', function(e){ if (e.target === ov) closeModal(); });
+
+      ov.querySelector('#lq-dd-confirm').onclick = function() {
+        var confirmBtn2 = ov.querySelector('#lq-dd-confirm');
+        if (confirmBtn2 && confirmBtn2.disabled) return;
+        var plan = {
+          lines: contRows.map(function(row, idx) {
+            var rem   = getRemaining(idx);
+            var drawn = Math.max(0, row.before - rem);
+            return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv };
+          }).filter(function(l){ return l.litreDrawn > 0.001; }),
+          waste: { litres: getWasteLitres(), reason: getWasteReason() }
+        };
+        ov.remove();
+        document.body.style.overflow = '';
+        delete window._lqUpdateBalance;
+        resolve(plan);
+      };
+    });
+  }
+
+  // ── Execute a liquid deduction plan built by _showLiquidDeductionModal ─────
+  async function _executeLiquidDeductionPlan(jobId, plan, job) {
+    if (!plan || !plan.lines || !plan.lines.length) return;
+    var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
+    var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
+    var egid    = crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36));
+    var wasteL  = plan.waste ? parseFloat(plan.waste.litres || 0) : 0;
+    var wasteR  = plan.waste ? (plan.waste.reason || '') : '';
+    var isLastLine = false;
+
+    for (var li = 0; li < plan.lines.length; li++) {
+      var line = plan.lines[li];
+      isLastLine = (li === plan.lines.length - 1);
+      var origABV  = parseFloat(line.abv || 0);
+      var remainLP = origABV > 0 ? line.litreRemaining * origABV / 100 : 0;
+      var beforeLP = origABV > 0 ? line.litreBefore   * origABV / 100 : 0;
+      var drawnLP  = origABV > 0 ? line.litreDrawn     * origABV / 100 : 0;
+      var newStatus = line.litreRemaining <= 0 ? 'empty'
+        : (line.litreRemaining < line.litreBefore ? 'partially_full' : 'full');
+      await window.db.update('liquid_containers', '?id=eq.' + line.containerId, {
+        current_litres: Math.round(line.litreRemaining * 1e4) / 1e4,
+        current_lpa:    Math.round(remainLP * 1e4) / 1e4,
+        status:         newStatus
+      });
+      var wasteNote = (isLastLine && wasteL > 0) ? ' (incl. ' + wasteL.toFixed(1) + 'L waste: ' + wasteR + ')' : '';
+      await writeHistory({
+        container_id:      line.containerId,
+        event_type:        'bottling_deduction',
+        event_group_id:    egid,
+        job_id:            jobId,
+        container_ref:     line.reference,
+        litres_before:     line.litreBefore,
+        litres_after:      line.litreRemaining,
+        litres_changed:    -line.litreDrawn,
+        abv_before:        origABV,
+        lpa_before:        beforeLP,
+        lpa_after:         remainLP,
+        notes:             line.litreDrawn.toFixed(1) + 'L drawn for bottling' + wasteNote,
+        performed_by_id:   pById,
+        performed_by_name: pByName
+      });
+    }
   }
 
   window.lsoGoToBlending = function(jobId) {
@@ -31622,6 +32004,26 @@ window.saveAdjModal = async function() {
     }, 450);
   };
 
+  // Simplified navigation to Liquid tab with job context set — no pre-fill calculations.
+  // Replaces the old "Complete via Liquid tab" button for the new Step 1 guided workflow.
+  window.lsoOpenLiquidTab = function(jobId) {
+    if (window.closeJobDetail) window.closeJobDetail();
+    var jobRef = jobId;
+    var j = (_jobs||[]).find(function(x){ return x.id === jobId; });
+    if (j) jobRef = j.job_number || j.reference || jobId;
+    var blNav = document.getElementById('sbnav-blending') || document.querySelector('[onclick*="blending"]');
+    if (typeof showPage === 'function') {
+      showPage('blending', blNav);
+    } else if (blNav) {
+      blNav.click();
+    }
+    setTimeout(function() {
+      if (window.setBLJobContext) window.setBLJobContext(jobId, jobRef);
+      var dilBtn = document.querySelector('.blend-stab[onclick*="dilute"]');
+      if (dilBtn && window.showBlendTab) window.showBlendTab('dilute', dilBtn);
+    }, 450);
+  };
+
   window.lsoToggleInlinePrep = function() {
     var prep = document.getElementById('lso-inline-prep');
     var btn  = document.getElementById('lso-prep-toggle-btn');
@@ -31676,10 +32078,10 @@ window.saveAdjModal = async function() {
   };
 
   // lsoSaveInlineDilute kept as a no-op stub — liquid operations for jobs are
-  // now performed in the dedicated Blending tab via lsoGoToBlending.
+  // now performed in the dedicated Liquid tab via lsoOpenLiquidTab.
   window.lsoSaveInlineDilute = async function(jobId) {
     window.toast && window.toast('Please use the Liquid tab to complete liquid preparation for this job.', 'error');
-    if (window.lsoGoToBlending) window.lsoGoToBlending(jobId);
+    if (window.lsoOpenLiquidTab) window.lsoOpenLiquidTab(jobId);
     return;
     // --- legacy body below (unreachable, kept for reference) ---
     var gv  = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
@@ -31852,10 +32254,10 @@ window.saveAdjModal = async function() {
     }
   };
 
-  // lsoSaveInlineBlend kept as a no-op stub — see lsoGoToBlending.
+  // lsoSaveInlineBlend kept as a no-op stub — see lsoOpenLiquidTab.
   window.lsoSaveInlineBlend = async function(jobId) {
     window.toast && window.toast('Please use the Liquid tab to complete liquid preparation for this job.', 'error');
-    if (window.lsoGoToBlending) window.lsoGoToBlending(jobId);
+    if (window.lsoOpenLiquidTab) window.lsoOpenLiquidTab(jobId);
     return;
     // --- legacy body below (unreachable, kept for reference) ---
     var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
@@ -36787,10 +37189,19 @@ window.saveAdjModal = async function() {
           performed_by_id: pById, performed_by_name: pByName });
         if (blJobId) await _blAutoCompleteSignoff(blJobId, egid);
         window.toast && window.toast('Blend saved.', 'success');
+        // Capture output container snapshot BEFORE reload (for the link-to-job prompt)
+        var _blInPlaceOutput = blJobId ? [{
+          id:        base.id,
+          reference: destCont.reference,
+          litres:    Math.round(totalL * 1e4) / 1e4,
+          abv:       Math.round(newABV * 100) / 100,
+          lpa:       Math.round(totalLPA * 1e4) / 1e4
+        }] : null;
         ['bl-product-name','bl-cbw','bl-notes','bl-water-litres'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
         var wc=document.getElementById('bl-water-check'); if(wc) wc.checked=false;
         var ww=document.getElementById('bl-water-wrap'); if(ww) ww.style.display='none';
         await loadBlData(); initBLBlend();
+        if (_blInPlaceOutput) _lsoOfferLinkToJob(blJobId, _blInPlaceOutput);
       } catch(e) {
         window.toast && window.toast('Error: ' + e.message, 'error');
       } finally {
@@ -36886,10 +37297,26 @@ window.saveAdjModal = async function() {
       }
       if (blJobId) await _blAutoCompleteSignoff(blJobId, egid);
       window.toast && window.toast('Blend saved.', 'success');
+      // Capture output containers snapshot BEFORE reload (for the link-to-job prompt)
+      var _lpaPerLitreBlend = totalL > 0 ? totalLPA / totalL : 0;
+      var _blMultiOutput = blJobId ? dests.map(function(d) {
+        var dOrigL   = parseFloat(d.cont.current_litres||0);
+        var dOrigLP  = parseFloat(d.cont.current_lpa||0);
+        var dNewL    = dOrigL + d.litres;
+        var dNewLP   = dOrigLP + d.litres * _lpaPerLitreBlend;
+        return {
+          id:        d.cont.id,
+          reference: d.cont.reference,
+          litres:    Math.round(dNewL * 1e4) / 1e4,
+          abv:       dNewL > 0 ? Math.round(dNewLP / dNewL * 100 * 100) / 100 : 0,
+          lpa:       Math.round(dNewLP * 1e4) / 1e4
+        };
+      }) : null;
       ['bl-product-name','bl-cbw','bl-notes','bl-water-litres'].forEach(function(id){ var e=document.getElementById(id); if(e) e.value=''; });
       var wc=document.getElementById('bl-water-check'); if(wc) wc.checked=false;
       var ww=document.getElementById('bl-water-wrap'); if(ww) ww.style.display='none';
       await loadBlData(); initBLBlend();
+      if (_blMultiOutput) _lsoOfferLinkToJob(blJobId, _blMultiOutput);
     } catch(e) {
       window.toast && window.toast('Error: ' + e.message, 'error');
     } finally {
@@ -37227,8 +37654,40 @@ window.saveAdjModal = async function() {
       }
       if (dlJobId) await _blAutoCompleteSignoff(dlJobId, egid);
       window.toast && window.toast('Dilution saved.', 'success');
+
+      // Capture output containers BEFORE reload (for the link-to-job prompt).
+      // For in-place, newTL/newABV2/src are already in scope from the if(inPlace) block above.
+      var _dlOutput = null;
+      if (dlJobId) {
+        if (inPlace) {
+          _dlOutput = [{
+            id:        src.cont.id,
+            reference: src.cont.reference,
+            litres:    Math.round(newTL * 1e4) / 1e4,
+            abv:       Math.round(newABV2 * 100) / 100,
+            lpa:       Math.round(src.lpa * 1e4) / 1e4
+          }];
+        } else {
+          var _lppDl = outputL > 0 ? srcTotalLPA / outputL : 0;
+          _dlOutput = dests.map(function(d) {
+            var dOrigL  = parseFloat(d.cont.current_litres||0);
+            var dOrigLP = parseFloat(d.cont.current_lpa||0);
+            var dNewL   = dOrigL + d.litres;
+            var dNewLP  = dOrigLP + d.litres * _lppDl;
+            return {
+              id:        d.cont.id,
+              reference: d.cont.reference,
+              litres:    Math.round(dNewL * 1e4) / 1e4,
+              abv:       dNewL > 0 ? Math.round(dNewLP / dNewL * 100 * 100) / 100 : 0,
+              lpa:       Math.round(dNewLP * 1e4) / 1e4
+            };
+          });
+        }
+      }
+
       hideDilutePreview();
       await loadBlData(); initBLDilute();
+      if (_dlOutput) _lsoOfferLinkToJob(dlJobId, _dlOutput);
     } catch(e) {
       window.toast && window.toast('Error: ' + e.message, 'error');
     } finally {
