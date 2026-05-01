@@ -31923,10 +31923,15 @@ window.saveAdjModal = async function() {
       return false;
     }
 
-    // Double-deduction guard — skip if liquid has already been deducted for this job
+    // Double-deduction guard — fetch which containers have already had a bottling_deduction
+    // written for this job, so the modal can skip them (prevents double-deduction even if
+    // a previous attempt only partially completed).
+    var alreadyDeductedIds = [];
     try {
-      var prevDeductions = await supaGet('liquid_history?job_id=eq.' + jobId + '&event_type=eq.bottling_deduction&limit=1');
-      if (prevDeductions && prevDeductions.length > 0) return [];
+      var prevDeductions = await supaGet('liquid_history?job_id=eq.' + jobId + '&event_type=eq.bottling_deduction&select=container_id');
+      if (prevDeductions && prevDeductions.length > 0) {
+        alreadyDeductedIds = prevDeductions.map(function(r){ return r.container_id; }).filter(Boolean);
+      }
     } catch(e) {
       console.warn('Liquid double-deduction guard query failed — showing modal:', e.message);
     }
@@ -31950,13 +31955,17 @@ window.saveAdjModal = async function() {
     } catch(e) {}
 
     // Build rows — prefer snapshotted litres/abv recorded at link time
+    // Exclude containers already fully deducted in a previous (partial) attempt
     var contRows = linkedConts.map(function(lc) {
       var live   = liveConts.find(function(c){ return c.id === lc.id; });
       var ref    = lc.reference || (live && live.reference) || lc.id.slice(0,8)+'…';
       var before = lc.litres != null ? parseFloat(lc.litres) : parseFloat((live && live.current_litres) || 0);
       var abv    = lc.abv   != null ? parseFloat(lc.abv)    : parseFloat((live && live.abv) || 0);
       return { id: lc.id, reference: ref, before: before, abv: abv };
-    });
+    }).filter(function(row){ return alreadyDeductedIds.indexOf(row.id) < 0; });
+
+    // If every container was already deducted (clean full run), skip the modal
+    if (!contRows.length && alreadyDeductedIds.length > 0) return [];
 
     // FIFO pre-fill: allocate required litres across containers in order
     var toAllocate = reqLitres;
@@ -32042,12 +32051,19 @@ window.saveAdjModal = async function() {
         ? actualBottles.toLocaleString() + ' bottles &times; ' + bomVolCl + ' cl = <strong style="color:var(--white);">' + reqLitres.toFixed(1) + ' L required</strong>'
         : 'Required volume not calculated &mdash; adjust remaining values to match actual drawn.';
 
+      var partialBanner = alreadyDeductedIds.length
+        ? '<div style="margin-bottom:14px;padding:10px 14px;background:rgba(245,158,11,0.1);border:1px solid var(--amber);border-radius:4px;font-size:11px;color:var(--amber);">'
+          + '<strong>Partial deduction detected.</strong> ' + alreadyDeductedIds.length + ' container(s) were already updated in a previous attempt and are excluded below. Only the remaining containers are shown.'
+          + '</div>'
+        : '';
+
       ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px 28px 22px;width:min(680px,100%);margin:auto;">'
         + '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;">'
         +   '<div><div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Complete Job</div>'
         +     '<div style="font-size:16px;font-weight:800;color:var(--white);">Liquid Stock Deduction</div></div>'
         +   '<button id="lq-dd-close" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0;line-height:1;">&#10005;</button>'
         + '</div>'
+        + partialBanner
         + '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">' + reqDisp + '</div>'
         + '<table style="width:100%;border-collapse:collapse;">'
         + '<thead><tr style="border-bottom:2px solid var(--navy-border);">'
@@ -32102,7 +32118,7 @@ window.saveAdjModal = async function() {
             var rem   = getRemaining(idx);
             var drawn = Math.max(0, row.before - rem);
             return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv };
-          }).filter(function(l){ return l.litreDrawn > 0.001; }),
+          }).filter(function(l){ return l.litreDrawn > 0.001 && alreadyDeductedIds.indexOf(l.containerId) < 0; }),
           waste: { litres: getWasteLitres(), reason: getWasteReason() }
         };
         ov.remove();
@@ -32123,37 +32139,49 @@ window.saveAdjModal = async function() {
     var wasteR  = plan.waste ? (plan.waste.reason || '') : '';
     var isLastLine = false;
 
+    var failures = [];
     for (var li = 0; li < plan.lines.length; li++) {
       var line = plan.lines[li];
       isLastLine = (li === plan.lines.length - 1);
-      var origABV  = parseFloat(line.abv || 0);
-      var remainLP = origABV > 0 ? line.litreRemaining * origABV / 100 : 0;
-      var beforeLP = origABV > 0 ? line.litreBefore   * origABV / 100 : 0;
-      var drawnLP  = origABV > 0 ? line.litreDrawn     * origABV / 100 : 0;
-      var newStatus = line.litreRemaining <= 0 ? 'empty'
-        : (line.litreRemaining < line.litreBefore ? 'partially_full' : 'full');
-      await window.db.update('liquid_containers', '?id=eq.' + line.containerId, {
-        current_litres: Math.round(line.litreRemaining * 1e4) / 1e4,
-        current_lpa:    Math.round(remainLP * 1e4) / 1e4,
-        status:         newStatus
-      });
-      var wasteNote = (isLastLine && wasteL > 0) ? ' (incl. ' + wasteL.toFixed(1) + 'L waste: ' + wasteR + ')' : '';
-      await writeHistory({
-        container_id:      line.containerId,
-        event_type:        'bottling_deduction',
-        event_group_id:    egid,
-        job_id:            jobId,
-        container_ref:     line.reference,
-        litres_before:     line.litreBefore,
-        litres_after:      line.litreRemaining,
-        litres_changed:    -line.litreDrawn,
-        abv_before:        origABV,
-        lpa_before:        beforeLP,
-        lpa_after:         remainLP,
-        notes:             line.litreDrawn.toFixed(1) + 'L drawn for bottling' + wasteNote,
-        performed_by_id:   pById,
-        performed_by_name: pByName
-      });
+      try {
+        var origABV  = parseFloat(line.abv || 0);
+        var remainLP = origABV > 0 ? line.litreRemaining * origABV / 100 : 0;
+        var beforeLP = origABV > 0 ? line.litreBefore   * origABV / 100 : 0;
+        var drawnLP  = origABV > 0 ? line.litreDrawn     * origABV / 100 : 0;
+        var newStatus = line.litreRemaining <= 0 ? 'empty'
+          : (line.litreRemaining < line.litreBefore ? 'partially_full' : 'full');
+        await window.db.update('liquid_containers', '?id=eq.' + line.containerId, {
+          current_litres: Math.round(line.litreRemaining * 1e4) / 1e4,
+          current_lpa:    Math.round(remainLP * 1e4) / 1e4,
+          status:         newStatus
+        });
+        var wasteNote = (isLastLine && wasteL > 0) ? ' (incl. ' + wasteL.toFixed(1) + 'L waste: ' + wasteR + ')' : '';
+        await writeHistory({
+          container_id:      line.containerId,
+          event_type:        'bottling_deduction',
+          event_group_id:    egid,
+          job_id:            jobId,
+          container_ref:     line.reference,
+          litres_before:     line.litreBefore,
+          litres_after:      line.litreRemaining,
+          litres_changed:    -line.litreDrawn,
+          abv_before:        origABV,
+          lpa_before:        beforeLP,
+          lpa_after:         remainLP,
+          notes:             line.litreDrawn.toFixed(1) + 'L drawn for bottling' + wasteNote,
+          performed_by_id:   pById,
+          performed_by_name: pByName
+        });
+      } catch(lineErr) {
+        console.error('Liquid deduction failed for container ' + line.containerId + ':', lineErr.message);
+        failures.push(line.reference || line.containerId);
+      }
+    }
+    if (failures.length) {
+      window.toast && window.toast(
+        'Warning: liquid deduction incomplete — failed for: ' + failures.join(', ') + '. Update these containers manually.',
+        'error'
+      );
     }
   }
 
