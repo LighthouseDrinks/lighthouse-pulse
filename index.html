@@ -28368,6 +28368,8 @@ window.saveAdjModal = async function() {
         }
       });
 
+      var deductionsDone = false; // hoisted here so closeModal can read it
+
       function closeModal() {
         ov.remove();
         document.body.style.overflow = '';
@@ -28477,6 +28479,9 @@ window.saveAdjModal = async function() {
             await _executeLiquidDeductionPlan(jobId, liquidPlan, job);
           }
 
+          // Mark deductions as done — past this point do not allow retry (would double-deduct)
+          deductionsDone = true;
+
           // 6. Mark job complete
           await _finaliseJobComplete(jobId, job.stage);
           var deducted = deductions.filter(function(d){ return !d.noStock; }).length;
@@ -28487,10 +28492,23 @@ window.saveAdjModal = async function() {
           window.closeJobDetail();
           resolve(false); // outer caller must not run again
         } catch(e) {
-          window.toast && window.toast('Error completing job: ' + e.message, 'error');
-          confirmBtn.disabled = false;
-          confirmBtn.textContent = 'Complete Job and Deduct Stock';
-          resolve(false);
+          if (deductionsDone) {
+            // Stock was already deducted — closing the modal to prevent a retry that would double-deduct.
+            // The job stage update failed; it must be corrected manually in the database.
+            ov.remove();
+            document.body.style.overflow = '';
+            window.toast && window.toast(
+              'Stock deducted but job completion failed (' + (e.message || 'unknown error') + '). ' +
+              'Stock has been updated — please manually mark the job as Complete or contact support.',
+              'error'
+            );
+            resolve(false);
+          } else {
+            // Deductions never ran — safe to retry
+            window.toast && window.toast('Error: ' + e.message, 'error');
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Complete Job and Deduct Stock';
+          }
         }
       };
     });
