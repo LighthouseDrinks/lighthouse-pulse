@@ -31923,14 +31923,18 @@ window.saveAdjModal = async function() {
       return false;
     }
 
-    // Double-deduction guard — fetch which containers have already had a bottling_deduction
-    // written for this job, so the modal can skip them (prevents double-deduction even if
-    // a previous attempt only partially completed).
+    // Double-deduction guard — check which linked containers already have a bottling_deduction
+    // history record written (job_id is UUID type so we query by container_id instead).
     var alreadyDeductedIds = [];
     try {
-      var prevDeductions = await supaGet('liquid_history?job_id=eq.' + jobId + '&event_type=eq.bottling_deduction&select=container_id');
-      if (prevDeductions && prevDeductions.length > 0) {
-        alreadyDeductedIds = prevDeductions.map(function(r){ return r.container_id; }).filter(Boolean);
+      var signoffContIds = linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
+      if (signoffContIds.length) {
+        var prevDeductions = await supaGet(
+          'liquid_history?container_id=in.(' + signoffContIds.join(',') + ')&event_type=eq.bottling_deduction&select=container_id'
+        );
+        if (prevDeductions && prevDeductions.length > 0) {
+          alreadyDeductedIds = prevDeductions.map(function(r){ return r.container_id; }).filter(Boolean);
+        }
       }
     } catch(e) {
       console.warn('Liquid double-deduction guard query failed — showing modal:', e.message);
@@ -32156,11 +32160,12 @@ window.saveAdjModal = async function() {
           status:         newStatus
         });
         var wasteNote = (isLastLine && wasteL > 0) ? ' (incl. ' + wasteL.toFixed(1) + 'L waste: ' + wasteR + ')' : '';
+        // job_id column in liquid_history is UUID type; jobs use text IDs (e.g. JOB-3)
+        // so we omit job_id to avoid a type cast error — the job reference goes in notes instead.
         await writeHistory({
           container_id:      line.containerId,
           event_type:        'bottling_deduction',
           event_group_id:    egid,
-          job_id:            jobId,
           container_ref:     line.reference,
           litres_before:     line.litreBefore,
           litres_after:      line.litreRemaining,
@@ -32168,7 +32173,7 @@ window.saveAdjModal = async function() {
           abv_before:        origABV,
           lpa_before:        beforeLP,
           lpa_after:         remainLP,
-          notes:             line.litreDrawn.toFixed(1) + 'L drawn for bottling' + wasteNote,
+          notes:             line.litreDrawn.toFixed(1) + 'L drawn for bottling (job ' + jobId + ')' + wasteNote,
           performed_by_id:   pById,
           performed_by_name: pByName
         });
