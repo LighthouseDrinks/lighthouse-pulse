@@ -28197,7 +28197,7 @@ window.saveAdjModal = async function() {
       if (type === 'liquid_signoff') {
         var rows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1');
         // Accept completion if either a blending operation is linked OR the legacy form is signed
-        if (!rows.length || (!rows[0].signed_by && !rows[0].blend_event_group_id)) {
+        if (!rows.length || (!rows[0].signed_by && !rows[0].blend_event_group_id && !rows[0].liquid_excluded)) {
           window.toast && window.toast('Complete the liquid operation in the Liquid tab first.', 'error');
           openTaskInJob(jobId, type);
           return false;
@@ -29431,17 +29431,20 @@ window.saveAdjModal = async function() {
         dtIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid,'expected_delivery',this.value); };
         tr.cells[9].appendChild(dtIn);
 
-        // col 10: Exclude checkbox — awaits the PATCH then updates the row in-place (no full tab reload)
-        var cbNA = document.createElement('input');
-        cbNA.type = 'checkbox';
-        cbNA.checked = isExcluded;
+        // col 10: Exclude toggle button — awaits the PATCH then updates the row in-place (no full tab reload)
+        var cbNA = document.createElement('button');
+        cbNA.textContent = isExcluded ? '✕ Excluded' : 'Exclude';
+        cbNA.dataset.excl = isExcluded ? '1' : '0';
         cbNA.title = 'Exclude — no stock deduction on job completion, not printed on picking list';
-        cbNA.style.cssText = 'cursor:pointer;accent-color:var(--amber);';
-        cbNA.onchange = (function(rowCid, rowTr, rowCbOrder, rowPoIn, rowQtyIn, rowUpIn, rowDtIn, rowSufficient, rowOnSiteStr, rowOnSiteColor) {
+        cbNA.style.cssText = isExcluded
+          ? 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--amber);background:rgba(201,168,76,0.15);color:var(--amber);white-space:nowrap;'
+          : 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--navy-border);background:transparent;color:var(--muted);white-space:nowrap;';
+        cbNA.onclick = (function(rowCid, rowTr, rowCbOrder, rowPoIn, rowQtyIn, rowUpIn, rowDtIn, rowSufficient, rowOnSiteStr, rowOnSiteColor, btn) {
           return async function() {
-            var excl = this.checked;
-            var cb = this;
+            var excl = btn.dataset.excl !== '1';
+            var cb = btn;
             cb.disabled = true;
+            cb.style.opacity = '0.5';
             await window.updateComponent(rowCid, 'is_excluded', excl);
             // Keep _currentComps cache in sync so printPickingList reflects the change
             if (window._currentComps) {
@@ -29486,10 +29489,16 @@ window.saveAdjModal = async function() {
             rowDtIn.disabled = excl || rowSufficient;
             rowDtIn.style.opacity = (excl || rowSufficient) ? '0.3' : '';
             rowDtIn.style.cursor  = (excl || rowSufficient) ? 'not-allowed' : '';
-            // Re-enable the checkbox
+            // Re-enable the button and update its appearance
+            cb.dataset.excl = excl ? '1' : '0';
+            cb.textContent  = excl ? '✕ Excluded' : 'Exclude';
+            cb.style.cssText = excl
+              ? 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--amber);background:rgba(201,168,76,0.15);color:var(--amber);white-space:nowrap;'
+              : 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--navy-border);background:transparent;color:var(--muted);white-space:nowrap;';
             cb.disabled = false;
+            cb.style.opacity = '';
           };
-        })(cid, tr, cbOrder, poIn, qtyIn, upIn, dtIn, sufficient, onSiteStr, onSiteColor);
+        })(cid, tr, cbOrder, poIn, qtyIn, upIn, dtIn, sufficient, onSiteStr, onSiteColor, cbNA);
         tr.cells[10].appendChild(cbNA);
 
         tbody.appendChild(tr);
@@ -31171,6 +31180,7 @@ window.saveAdjModal = async function() {
           + '<span style="color:var(--green);font-size:15px;">&#10003;</span>'
           + '<div><div style="font-size:12px;font-weight:700;color:var(--green);">Signed Off</div>'
           + '<div style="font-size:11px;color:var(--muted);">By ' + window.escapeHtml(d.signed_by) + ' &nbsp;&#183;&nbsp; ' + new Date(d.signed_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) + '</div>'
+          + (d.liquid_excluded ? '<div style="font-size:10px;color:var(--amber);margin-top:3px;">&#9432; Liquid not tracked in system' + (d.excluded_note ? ' — ' + window.escapeHtml(d.excluded_note) : '') + '</div>' : '')
           + '</div></div>'
           + '<button data-jid="' + lsoBtnId + '" data-jobid="' + jobId + '" onclick="window.unsignLiquidSignoff(this.dataset.jobid,this.dataset.jid)"'
           + ' class="btn btn-outline" style="font-size:11px;padding:6px 14px;border-color:var(--amber);color:var(--amber);">&#9888; Reopen</button>'
@@ -31362,6 +31372,15 @@ window.saveAdjModal = async function() {
       // Name / sign-off row — only when not locked
       if (!isLocked) {
         html += sec('Sign Off');
+        html += '<div style="background:rgba(201,168,76,0.05);border:1px solid rgba(201,168,76,0.2);border-radius:4px;padding:10px 14px;margin-bottom:12px;">'
+          + '<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">'
+          + '<input type="checkbox" id="lso-not-tracked"' + (d.liquid_excluded ? ' checked' : '') + ' style="margin-top:2px;width:15px;height:15px;accent-color:var(--amber);flex-shrink:0;">'
+          + '<div><div style="font-size:12px;color:var(--amber);font-weight:700;">Liquid not tracked in this system</div>'
+          + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">Tick this if the liquid for this job was never on your system — the container requirement will be waived. Your name and this note are still recorded on the sign-off.</div>'
+          + '</div></label>'
+          + '<input type="text" id="lso-not-tracked-note" placeholder="Note (optional) — e.g. Olmo confirmed liquid was never on system" value="' + window.escapeHtml(d.excluded_note||'') + '"'
+          + ' style="margin-top:8px;width:100%;box-sizing:border-box;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:11px;border-radius:3px;font-family:Lato,sans-serif;display:' + (d.liquid_excluded ? 'block' : 'none') + ';" id="lso-not-tracked-note-wrap">'
+          + '</div>';
         html += frow('Your Name',
           '<input type="text" id="lso-signed-by" value="' + (window.escapeHtml ? window.escapeHtml(d.signed_by||'') : (d.signed_by||'').replace(/"/g,'&quot;')) + '" placeholder="Enter your name to enable sign-off" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;">',
           'Once signed off, this document locks and the task completes automatically');
@@ -31471,15 +31490,29 @@ window.saveAdjModal = async function() {
       // Wire sign-off button — enable when name entered and no cask-strength containers linked
       var signBtn = document.getElementById('lso-signoff-btn');
       if (signBtn && !isLocked) {
+        // Show/hide the optional note field when "not tracked" checkbox changes
+        var notTrackedCb = document.getElementById('lso-not-tracked');
+        var notTrackedNote = document.getElementById('lso-not-tracked-note-wrap');
+        if (notTrackedCb && notTrackedNote) {
+          notTrackedCb.addEventListener('change', function() {
+            notTrackedNote.style.display = this.checked ? 'block' : 'none';
+            checkSignReady();
+          });
+        }
+
         function checkSignReady() {
           var nameEl  = document.getElementById('lso-signed-by');
           var hasName = nameEl && nameEl.value.trim().length > 1;
 
+          var bypassEl = document.getElementById('lso-not-tracked');
+          var bypass   = bypassEl && bypassEl.checked;
+
           // Hard block: any linked container at cask strength blocks sign-off
+          // (waived when "not tracked" is ticked — no containers to worry about)
           var bottAbv   = window._lsoBottlingAbv || 0;
           var linked    = window._lsoAllLinkedConts || [];
           var allConts2 = window._lsoContainers || [];
-          var caskBlock = bottAbv > 0 && linked.some(function(lc) {
+          var caskBlock = !bypass && bottAbv > 0 && linked.some(function(lc) {
             var c = allConts2.find(function(x){ return x.id === lc.id; });
             var abvVal = parseFloat((c && c.abv) || lc.abv || 0);
             return abvVal > bottAbv + 2;
@@ -31528,9 +31561,13 @@ window.saveAdjModal = async function() {
     var _lcJson = JSON.stringify(window._lsoAllLinkedConts || []);
     var _firstLinkedId = (window._lsoAllLinkedConts && window._lsoAllLinkedConts[0]) ? window._lsoAllLinkedConts[0].id : ((document.getElementById('lso-linked-container-id')||{}).value || null);
 
-    var _dilDoneEl   = document.getElementById('lso-dilution-done');
-    var _chillDoneEl = document.getElementById('lso-chill-done');
-    var _colDoneEl   = document.getElementById('lso-colouring-done');
+    var _dilDoneEl    = document.getElementById('lso-dilution-done');
+    var _chillDoneEl  = document.getElementById('lso-chill-done');
+    var _colDoneEl    = document.getElementById('lso-colouring-done');
+    var _notTrackedEl = document.getElementById('lso-not-tracked');
+    var _notTrackedNoteEl = document.getElementById('lso-not-tracked-note-wrap');
+    var _notTracked   = _notTrackedEl && _notTrackedEl.checked;
+    var _notTrackedNote = _notTrackedNoteEl ? (_notTrackedNoteEl.value||'').trim() : '';
     var payload = {
       job_id:                  jobId,
       linked_container_id:     _firstLinkedId,
@@ -31544,7 +31581,11 @@ window.saveAdjModal = async function() {
       colouring_complete:      _colDoneEl   ? (_colDoneEl.checked   ? 'yes' : 'no') : null,
       signed_by:               signedBy,
       signed_at:               new Date().toISOString(),
-      signoff_history:     JSON.stringify(existingHist)
+      liquid_excluded:         _notTracked || false,
+      excluded_note:           _notTracked ? (_notTrackedNote || 'Liquid not tracked in system') : null,
+      excluded_by:             _notTracked ? signedBy : null,
+      excluded_at:             _notTracked ? new Date().toISOString() : null,
+      signoff_history:         JSON.stringify(existingHist)
     };
     try {
       if (existingId) {
@@ -35446,6 +35487,12 @@ window.saveAdjModal = async function() {
     var cur = new Date(startDt), remaining = durationMins;
     for (var safety = 0; safety < 60 && remaining > 0; safety++) {
       var dayStart = new Date(cur); dayStart.setHours(0, 0, 0, 0);
+      // If this day is a non-working day, jump straight to next working day at 07:00
+      if (_isNonWorkingDay(dayStart)) {
+        cur = new Date(dayStart); cur.setDate(dayStart.getDate() + 1); cur.setHours(7, 0, 0, 0);
+        while (_isNonWorkingDay(cur)) cur.setDate(cur.getDate() + 1);
+        continue;
+      }
       var curMin = cur.getHours() * 60 + cur.getMinutes();
       var advanced = false;
       for (var wi = 0; wi < PROD_WINDOWS.length; wi++) {
@@ -35460,7 +35507,6 @@ window.saveAdjModal = async function() {
       }
       if (!advanced) {
         cur = new Date(dayStart); cur.setDate(dayStart.getDate() + 1); cur.setHours(7, 0, 0, 0);
-        // Skip weekends and bank holidays (unless the factory has overridden that day)
         while (_isNonWorkingDay(cur)) cur.setDate(cur.getDate() + 1);
       }
     }
@@ -35849,14 +35895,16 @@ window.saveAdjModal = async function() {
         html += '<div style="position:absolute;top:0;bottom:0;left:' + pct + '%;width:1px;background:var(--navy-border);z-index:1;"></div>';
       });
 
-      // Overlay non-working days with a hatched dim cover (but still show any jobs that ran)
-      if (isNonWorking) {
-        html += '<div style="position:absolute;inset:0;background:repeating-linear-gradient(135deg,rgba(0,0,0,0) 0,rgba(0,0,0,0) 4px,rgba(255,255,255,0.03) 4px,rgba(255,255,255,0.03) 6px);pointer-events:none;z-index:5;"></div>';
-      }
-
       var dayStart7 = new Date(day); dayStart7.setHours(7, 0, 0, 0);
       var dayEnd21  = new Date(day); dayEnd21.setHours(21, 0, 0, 0);
-      calBlocks.forEach(function(b) {
+
+      // Non-working days: show a hatched cover and render NO job blocks.
+      // Pressing "Mark Open" sets isOverride → isNonWorking becomes false → blocks render.
+      if (isNonWorking) {
+        html += '<div style="position:absolute;inset:0;background:repeating-linear-gradient(135deg,rgba(0,0,0,0) 0,rgba(0,0,0,0) 6px,rgba(255,255,255,0.025) 6px,rgba(255,255,255,0.025) 8px);pointer-events:none;z-index:5;"></div>';
+      }
+
+      if (!isNonWorking) calBlocks.forEach(function(b) {
         if (b.endDt <= dayStart7 || b.startDt >= dayEnd21) return;
         var bs = b.startDt < dayStart7 ? dayStart7 : b.startDt;
         var be = b.endDt   > dayEnd21  ? dayEnd21  : b.endDt;
@@ -35879,8 +35927,8 @@ window.saveAdjModal = async function() {
           + noteIcon + '</div></div>';
       });
 
-      // Break bands
-      BREAK_BANDS.forEach(function(bb, bi) {
+      // Break bands — only on working days
+      if (!isNonWorking) BREAK_BANDS.forEach(function(bb, bi) {
         html += '<div style="position:absolute;top:0;bottom:0;left:' + minToP(bb[0]) + ';width:' + widthP(bb[0], bb[1]) + ';background:rgba(8,16,26,0.72);border-left:1px solid rgba(255,255,255,0.15);border-right:1px solid rgba(255,255,255,0.15);z-index:3;display:flex;align-items:center;justify-content:center;"><span style="font-size:7px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.3);writing-mode:vertical-rl;transform:rotate(180deg);">' + ['Break','Lunch','Down'][bi] + '</span></div>';
       });
 
