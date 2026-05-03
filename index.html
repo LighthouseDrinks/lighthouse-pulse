@@ -28456,13 +28456,16 @@ window.saveAdjModal = async function() {
         el.appendChild(row);
 
         // For bom_link tasks, inject the BOM Client Confirmation panel below the row
-        if (t.task_type === 'bom_link') {
+        var _isBomTask = t.task_type === 'bom_link'
+          || (t.title && t.title.toLowerCase().includes('bill of materials'))
+          || (t.task_type && t.task_type.toLowerCase().includes('bom'));
+        if (_isBomTask) {
           var bomVerifDiv = document.createElement('div');
           bomVerifDiv.id = 'jd-bom-verif';
-          bomVerifDiv.style.cssText = 'margin:10px 0 20px;padding:14px 16px;background:rgba(201,168,76,0.04);border:1px solid rgba(201,168,76,0.2);border-radius:5px;grid-column:1/-1;';
+          bomVerifDiv.style.cssText = 'margin:4px 0 16px;padding:14px 16px;background:rgba(201,168,76,0.04);border:1px solid rgba(201,168,76,0.2);border-radius:5px;';
           bomVerifDiv.innerHTML = '<div style="color:var(--muted);font-size:11px;">Loading BOM confirmation status…</div>';
           el.appendChild(bomVerifDiv);
-          setTimeout(function(){ window._renderBomVerification && window._renderBomVerification(jobId); }, 100);
+          setTimeout(function(){ window._renderBomVerification && window._renderBomVerification(jobId); }, 150);
         }
       });
     } catch(e) { el.innerHTML = '<div style="color:var(--red);">Error: ' + e.message + '</div>'; }
@@ -33831,7 +33834,8 @@ window.saveAdjModal = async function() {
       banner = '<div style="font-size:12px;color:#ffa000;font-weight:600;">&#9679; Awaiting client response</div>'
         + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Sent to: ' + (rec.client_email_to || '—') + '</div>';
       actions = '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">'
-        + '<button onclick="window._bomResend(\'' + jobId + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Resend</button>'
+        + '<button onclick="window._bomApprovalCache[\'' + jobId + '\']=null;window._renderBomVerification(\'' + jobId + '\')" style="background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.3);color:var(--gold);font-size:11px;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;font-weight:600;">&#8635; Refresh Status</button>'
+        + '<button onclick="window._bomResend(\'' + jobId + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Resend Email</button>'
         + '</div>';
     } else if (status === 'approved') {
       banner = '<div style="font-size:12px;color:var(--green);font-weight:700;">&#10003; BOM confirmed by client</div>'
@@ -41513,30 +41517,26 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 <!-- ══ BOM CLIENT CONFIRMATION (public magic-link page) ════════════════════ -->
 <script>
 (function() {
-  var SUPA_URL = window._SUPA_URL || (window._sb && window._sb.supabaseUrl) || '';
-  var SUPA_KEY = window._SUPA_ANON || '';
-  // Try to inherit credentials from parent context if available
-  if (!SUPA_URL || !SUPA_KEY) {
-    try {
-      var _cfg = window.__SUPA_CFG || {};
-      SUPA_URL = _cfg.url || SUPA_URL;
-      SUPA_KEY = _cfg.key || SUPA_KEY;
-    } catch(_) {}
-  }
+  var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co';
+  var SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
 
   function apiGet(path) {
-    if (!SUPA_URL) return Promise.reject(new Error('Supabase URL not configured'));
     return fetch(SUPA_URL + '/rest/v1/' + path, {
       headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + SUPA_KEY, 'Accept': 'application/json' }
-    }).then(function(r){ return r.json(); });
+    }).then(function(r) {
+      if (!r.ok) return r.text().then(function(t){ throw new Error(t || r.statusText); });
+      return r.json();
+    });
   }
   function apiPatch(path, body) {
-    if (!SUPA_URL) return Promise.reject(new Error('Supabase URL not configured'));
     return fetch(SUPA_URL + '/rest/v1/' + path, {
       method: 'PATCH',
       headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + SUPA_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json', 'Prefer': 'return=representation' },
       body: JSON.stringify(body)
-    }).then(function(r){ return r.json(); });
+    }).then(function(r) {
+      if (!r.ok) return r.text().then(function(t){ throw new Error(t || r.statusText); });
+      return r.json();
+    });
   }
 
   function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -41631,22 +41631,24 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       client_notes: notes || null,
       client_user_agent: navigator.userAgent || null
     }).then(function() {
-      // Notify staff via edge function if available
+      // Notify staff via edge function
       try {
-        var FUNC_URL = (SUPA_URL || '').replace('/rest/v1','') + '/functions/v1/swift-function';
         var isApproved = decision === 'approved';
         var clientName = client ? client.name : name;
-        var productName = job ? job.product_name : rec.bom_id;
+        var productName = job ? job.product_name : (rec.bom_id || 'BOM');
         var jobRef = job ? job.id : '';
+        var FUNC_URL = SUPA_URL + '/functions/v1/swift-function';
         fetch(FUNC_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPA_KEY },
           body: JSON.stringify({
             action: 'sendEmail',
-            to: '', // staff notification — resolved server-side by trio
-            subject: 'BOM ' + (isApproved ? 'Confirmed' : 'Concern Flagged') + ' — ' + productName,
-            useTrioRecipients: true,
-            body: (isApproved ? '✓ ' : '⚠ ') + clientName + ' has ' + (isApproved ? 'confirmed' : 'flagged a concern with') + ' the BOM for job ' + jobRef + '.' + (notes ? '\n\nClient notes: ' + notes : '')
+            to: ['quality_compliance', 'client_coordinator', 'managing_director'],
+            subject: 'BOM ' + (isApproved ? 'Confirmed ✓' : 'Concern Flagged ⚠') + ' — ' + productName,
+            html: '<p><strong>' + (isApproved ? '✓ BOM Confirmed' : '⚠ BOM Concern Flagged') + '</strong></p>'
+              + '<p>' + clientName + ' has ' + (isApproved ? 'confirmed' : 'flagged a concern with') + ' the BOM for job <strong>' + jobRef + '</strong>.</p>'
+              + (notes ? '<p><strong>Client notes:</strong><br>' + notes.replace(/\n/g,'<br>') + '</p>' : '')
+              + '<p>Log in to Lighthouse Pulse to view the job.</p>'
           })
         }).catch(function(){});
       } catch(_) {}
@@ -41688,16 +41690,6 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     }
   };
 
-  // Inherit Supabase config from the main app context once it's ready
-  document.addEventListener('DOMContentLoaded', function() {
-    try {
-      var _sb2 = window._sb || window.supabase;
-      if (_sb2) {
-        SUPA_URL = _sb2.supabaseUrl || SUPA_URL;
-        SUPA_KEY = (_sb2.supabaseKey || _sb2.anonKey) || SUPA_KEY;
-      }
-    } catch(_) {}
-  });
 })();
 </script>
 
