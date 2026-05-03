@@ -1805,26 +1805,36 @@ async function handleSession(session) {
     var uid   = session.user.id;
     var email = session.user.email;
     var token = session.access_token;
-    var res   = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=id,role,client_id,display_name,status,clients(name)', {
+    var res   = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=id,role,client_id,display_name,clients(name)', {
       headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token }
     });
     var rows = await res.json();
-    var role        = rows && rows.length ? rows[0].role         : 'none';
-    var appUserId   = rows && rows.length ? rows[0].id           : null;
-    var clientId    = rows && rows.length ? rows[0].client_id    : null;
-    var clientName  = rows && rows.length && rows[0].clients     ? rows[0].clients.name : null;
-    var displayName = rows && rows.length ? rows[0].display_name : null;
-    var userStatus  = rows && rows.length ? rows[0].status       : null;
+    // Guard: if Supabase returned an error object rather than an array, treat as no rows
+    if (!Array.isArray(rows)) rows = [];
+    var role        = rows.length ? rows[0].role         : 'none';
+    var appUserId   = rows.length ? rows[0].id           : null;
+    var clientId    = rows.length ? rows[0].client_id    : null;
+    var clientName  = rows.length && rows[0].clients     ? rows[0].clients.name : null;
+    var displayName = rows.length ? rows[0].display_name : null;
     var STAFF_ROLES = ['managing_director','operations_director','business_analyst','quality_compliance','financial_controller','commercial_manager','ecommerce_manager','production_manager','warehouse_liquid','client_coordinator','production_operator','order_fulfillment'];
 
-    // Block terminated employees immediately
-    if (userStatus === 'terminated') {
-      await window._sb.auth.signOut();
-      window.CURRENT_USER = null;
-      showLogin();
-      setAuthError('Your Pulse access has been revoked. Please contact your manager if you believe this is an error.');
-      return;
-    }
+    // Block terminated employees — check status via a separate lightweight query
+    // so that login still works even if the status column hasn't been migrated yet
+    try {
+      var statusRes  = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=status', {
+        headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token }
+      });
+      if (statusRes.ok) {
+        var statusRows = await statusRes.json();
+        if (Array.isArray(statusRows) && statusRows[0] && statusRows[0].status === 'terminated') {
+          await window._sb.auth.signOut();
+          window.CURRENT_USER = null;
+          showLogin();
+          setAuthError('Your Pulse access has been revoked. Please contact your manager if you believe this is an error.');
+          return;
+        }
+      }
+    } catch(se) { /* status column may not exist yet — safe to continue */ }
 
     window.CURRENT_USER = { id: uid, app_user_id: appUserId, email: email, role: role, client_id: clientId, client_name: clientName, display_name: displayName };
     // Store email in app_users for settings panel display
