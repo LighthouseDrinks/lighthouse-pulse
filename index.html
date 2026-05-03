@@ -33850,20 +33850,43 @@ window.saveAdjModal = async function() {
 
       var bomId = job.bom_id;
       var productName = job.product_name || jobId;
+      var clientName = (job.clients && job.clients.name) || '';
       var jobRef = jobId + (job.po_number ? ' / PO: ' + job.po_number : '');
-      var volume = ''; var abv = '';
-      if (bomId) {
-        try {
-          var bomRows = await supaGet('boms?id=eq.' + bomId + '&select=volume_cl,abv&limit=1');
-          if (bomRows && bomRows[0]) { volume = bomRows[0].volume_cl || ''; abv = bomRows[0].abv || ''; }
-        } catch(_) {}
+
+      // Build BOM snapshot from in-memory BOMS array (already loaded, no extra fetch needed)
+      var b = bomId && window.BOMS && window.BOMS.find(function(x){ return x.id === bomId; });
+      var volume = b ? (b.volume || '') : '';
+      var abv    = b ? (b.abv    || '') : '';
+      var bomSnapshot = null;
+      if (b) {
+        var snap = { product: productName, client: clientName, volume: volume, abv: abv, components: [] };
+        function _snapRow(label, val, sku) { if (val || sku) snap.components.push({ label: label, value: val || '', sku: sku || '' }); }
+        _snapRow('Liquid Specification', b.liquid || b.liquidSkuId,  b.liquidSkuId);
+        _snapRow('Bottle',               b.bottle,                   b.bottleSkuId);
+        _snapRow('ROPP Capsule',         b.ropp,                     b.roppSkuId);
+        _snapRow('Cork',                 b.cork,                     b.corkSkuId);
+        _snapRow('Foil / Heat Shrink',   b.foil,                     b.foilSkuId);
+        _snapRow('Front Label',          b.labelFront,               b.frontLabelSkuId);
+        _snapRow('Back Label',           b.labelBack,                b.backLabelSkuId);
+        _snapRow('Neck Label',           b.labelNeck,                b.neckLabelSkuId);
+        _snapRow('Shipper',              b.shipper,                  b.shipperSkuId);
+        _snapRow('Divider / Insert',     b.divider,                  b.dividerSkuId);
+        _snapRow('String / Twine',       b.string,                   b.stringTwineSkuId);
+        _snapRow('Monocarton',           b.monocarton,               b.monocartonSkuId);
+        _snapRow('Gift Tube',            b.giftTube,                 b.giftTubeSkuId);
+        _snapRow('Tube Lid',             b.tubeLid,                  b.tubeLidSkuId);
+        _snapRow('Tin',                  b.tin,                      b.tinSkuId);
+        if (b.bottlesPerShipper) snap.components.push({ label: 'Bottles per Shipper', value: String(b.bottlesPerShipper), sku: '' });
+        if (b.intendedMarket)    snap.components.push({ label: 'Intended Market',      value: b.intendedMarket,            sku: '' });
+        if (b.notes)             snap.components.push({ label: 'Special Instructions', value: b.notes,                     sku: '' });
+        bomSnapshot = snap;
       }
 
       // Insert or reuse job_bom_approvals row
       var existing = window._bomApprovalCache[jobId];
       var recId;
       if (!existing) {
-        var inserted = await supaMut('POST', 'job_bom_approvals', '', { job_id: jobId, bom_id: bomId || null });
+        var inserted = await supaMut('POST', 'job_bom_approvals', '', { job_id: jobId, bom_id: bomId || null, product_name: productName, client_name: clientName, bom_snapshot: bomSnapshot });
         // Reload to get the DB-generated token
         var fresh = await supaGet('job_bom_approvals?job_id=eq.' + jobId + '&order=created_at.desc&limit=1');
         existing = fresh && fresh[0];
@@ -33884,8 +33907,8 @@ window.saveAdjModal = async function() {
         );
       }
 
-      // Record sent_at and email
-      await supaMut('PATCH', 'job_bom_approvals', '?id=eq.' + recId, { client_email_to: to, client_email_sent_at: new Date().toISOString() });
+      // Record sent_at, email, and snapshot (ensures snapshot is always up to date)
+      await supaMut('PATCH', 'job_bom_approvals', '?id=eq.' + recId, { client_email_to: to, client_email_sent_at: new Date().toISOString(), product_name: productName, client_name: clientName, bom_snapshot: bomSnapshot });
       window._bomApprovalCache[jobId] = null;
       await window._renderBomVerification(jobId);
       window.toast && window.toast('BOM confirmation sent to ' + to, 'success');
@@ -41529,10 +41552,16 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (host) host.innerHTML = '<div style="text-align:center;padding:80px 20px;"><div style="font-size:16px;color:#e05757;font-weight:700;margin-bottom:8px;">Unable to load</div><div style="color:var(--muted);font-size:13px;">' + esc(msg || 'Unknown error') + '</div></div>';
   }
 
-  function renderBomBody(rec, job, bom, client) {
+  function renderBomBody(rec) {
     var host = document.getElementById('ba-body');
     if (!host) return;
     var isDecided = !!rec.client_decision;
+    var snap = rec.bom_snapshot || {};
+    var productName = rec.product_name || snap.product || '—';
+    var clientName  = rec.client_name  || snap.client  || '';
+    var volume      = snap.volume || '';
+    var abv         = snap.abv    || '';
+    var components  = snap.components || [];
 
     var header = '<div style="border-bottom:1px solid rgba(201,168,76,0.3);padding-bottom:16px;margin-bottom:24px;">'
       + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">'
@@ -41542,16 +41571,32 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       + '</div>'
       + '</div>';
 
+    // Summary info block
+    var metaItems = '';
+    metaItems += '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Product</div><div style="color:var(--white);font-weight:600;">' + esc(productName) + '</div></div>';
+    metaItems += '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Job Reference</div><div style="color:var(--white);">' + esc(rec.job_id || '—') + '</div></div>';
+    if (volume) metaItems += '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Bottle Size</div><div style="color:var(--white);">' + esc(String(volume)) + ' cl</div></div>';
+    if (abv)    metaItems += '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">ABV</div><div style="color:var(--white);">' + esc(String(abv)) + '%</div></div>';
+    if (clientName) metaItems += '<div style="grid-column:1/-1;"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Client</div><div style="color:var(--white);">' + esc(clientName) + '</div></div>';
+
+    // BOM components table
+    var compTable = '';
+    if (components.length) {
+      var LBL = 'font-size:11px;font-weight:700;color:var(--muted);padding:8px 14px 8px 0;width:44%;border-bottom:1px solid rgba(36,61,87,0.5);vertical-align:top;white-space:nowrap;';
+      var VAL = 'font-size:12px;color:var(--white);padding:8px 0;border-bottom:1px solid rgba(36,61,87,0.5);vertical-align:top;';
+      var rows = components.map(function(c) {
+        var skuBadge = c.sku ? ' <span style="display:inline-block;font-size:9px;font-weight:700;color:#c9a84c;background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.3);padding:1px 6px;border-radius:2px;letter-spacing:0.06em;vertical-align:middle;margin-left:5px;">' + esc(c.sku) + '</span>' : '';
+        return '<tr><td style="' + LBL + '">' + esc(c.label) + '</td><td style="' + VAL + '">' + esc(c.value) + skuBadge + '</td></tr>';
+      }).join('');
+      compTable = '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:6px;padding:0 18px;margin-bottom:24px;">'
+        + '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;padding:12px 0 8px;">Bill of Materials Components</div>'
+        + '<table style="width:100%;border-collapse:collapse;">' + rows + '</table>'
+        + '</div>';
+    }
+
     var info = '<div style="background:rgba(255,255,255,0.03);border:1px solid var(--navy-border);border-radius:6px;padding:18px 22px;margin-bottom:24px;">'
-      + '<div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.5;">Please review the Bill of Materials below and confirm it is correct for your upcoming production run. If anything looks wrong, use the <strong style="color:var(--white);">Flag a Concern</strong> button and our team will be in touch before proceeding.</div>'
-      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px;font-size:13px;">'
-      +   '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Product</div><div style="color:var(--white);">' + esc(job.product_name || '—') + '</div></div>'
-      +   '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Job Reference</div><div style="color:var(--white);">' + esc(job.id || '—') + '</div></div>'
-      +   (bom && bom.volume_cl ? '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Bottle Size</div><div style="color:var(--white);">' + esc(String(bom.volume_cl)) + ' cl</div></div>' : '')
-      +   (bom && bom.abv ? '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">ABV</div><div style="color:var(--white);">' + esc(String(bom.abv)) + '%</div></div>' : '')
-      +   (bom && bom.liquid_spec ? '<div style="grid-column:1/-1;"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Liquid</div><div style="color:var(--white);">' + esc(bom.liquid_spec) + '</div></div>' : '')
-      +   (client ? '<div style="grid-column:1/-1;"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:3px;">Client</div><div style="color:var(--white);">' + esc(client.name || '—') + '</div></div>' : '')
-      + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-bottom:14px;line-height:1.6;">Please review the Bill of Materials below and confirm it is correct for your upcoming production run. If anything looks wrong, use the <strong style="color:var(--white);">Flag a Concern</strong> button and our team will be in touch before proceeding.</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px;font-size:13px;">' + metaItems + '</div>'
       + '</div>';
 
     var formOrResult = '';
@@ -41583,25 +41628,25 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         + '</div>';
     }
 
-    host.innerHTML = header + info + formOrResult;
+    host.innerHTML = header + info + compTable + formOrResult;
 
     if (!isDecided) {
       document.getElementById('ba-confirm').addEventListener('click', function() {
         var name = (document.getElementById('ba-name').value || '').trim();
         if (!name) { alert('Please enter your name.'); return; }
-        submitBomDecision(rec, 'approved', name, (document.getElementById('ba-notes').value || '').trim(), job, client);
+        submitBomDecision(rec, 'approved', name, (document.getElementById('ba-notes').value || '').trim());
       });
       document.getElementById('ba-flag').addEventListener('click', function() {
         var name = (document.getElementById('ba-name').value || '').trim();
         var notes = (document.getElementById('ba-notes').value || '').trim();
         if (!name) { alert('Please enter your name.'); return; }
         if (!notes) { alert('Please describe your concern in the Notes field.'); return; }
-        submitBomDecision(rec, 'flagged', name, notes, job, client);
+        submitBomDecision(rec, 'flagged', name, notes);
       });
     }
   }
 
-  function submitBomDecision(rec, decision, name, notes, job, client) {
+  function submitBomDecision(rec, decision, name, notes) {
     var confirmBtn = document.getElementById('ba-confirm');
     var flagBtn = document.getElementById('ba-flag');
     if (confirmBtn) confirmBtn.disabled = true;
@@ -41617,9 +41662,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       // Notify staff via edge function
       try {
         var isApproved = decision === 'approved';
-        var clientName = client ? client.name : name;
-        var productName = job ? job.product_name : (rec.bom_id || 'BOM');
-        var jobRef = job ? job.id : '';
+        var productName = rec.product_name || (rec.bom_snapshot && rec.bom_snapshot.product) || rec.job_id || 'BOM';
+        var clientLabel = rec.client_name || name;
         var FUNC_URL = SUPA_URL + '/functions/v1/swift-function';
         fetch(FUNC_URL, {
           method: 'POST',
@@ -41629,13 +41673,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
             to: ['quality_compliance', 'client_coordinator', 'managing_director'],
             subject: 'BOM ' + (isApproved ? 'Confirmed ✓' : 'Concern Flagged ⚠') + ' — ' + productName,
             html: '<p><strong>' + (isApproved ? '✓ BOM Confirmed' : '⚠ BOM Concern Flagged') + '</strong></p>'
-              + '<p>' + clientName + ' has ' + (isApproved ? 'confirmed' : 'flagged a concern with') + ' the BOM for job <strong>' + jobRef + '</strong>.</p>'
+              + '<p>' + clientLabel + ' has ' + (isApproved ? 'confirmed' : 'flagged a concern with') + ' the BOM for job <strong>' + rec.job_id + '</strong>.</p>'
               + (notes ? '<p><strong>Client notes:</strong><br>' + notes.replace(/\n/g,'<br>') + '</p>' : '')
               + '<p>Log in to Lighthouse Pulse to view the job.</p>'
           })
         }).catch(function(){});
       } catch(_) {}
-      renderBomBody(Object.assign({}, rec, { client_decision: decision, client_approver_name: name, client_notes: notes }), job, null, client);
+      renderBomBody(Object.assign({}, rec, { client_decision: decision, client_approver_name: name, client_notes: notes }));
     }).catch(function(e) {
       if (confirmBtn) confirmBtn.disabled = false;
       if (flagBtn) flagBtn.disabled = false;
@@ -41648,26 +41692,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var rows = await apiGet('job_bom_approvals?approval_token=eq.' + encodeURIComponent(token) + '&select=*&limit=1');
       if (!rows || !rows.length) { renderBomError('This confirmation link was not found or has expired. Please contact Lighthouse.'); return; }
       var rec = rows[0];
-      var job = { id: rec.job_id };
-      var bom = null;
-      var client = null;
-      try {
-        var jrs = await apiGet('jobs?id=eq.' + encodeURIComponent(rec.job_id) + '&select=id,product_name,bom_id,client_id&limit=1');
-        if (jrs && jrs[0]) job = jrs[0];
-      } catch(_) {}
-      if (job.bom_id) {
-        try {
-          var brs = await apiGet('boms?id=eq.' + encodeURIComponent(job.bom_id) + '&select=volume_cl,abv,liquid_spec&limit=1');
-          if (brs && brs[0]) bom = brs[0];
-        } catch(_) {}
-      }
-      if (job.client_id) {
-        try {
-          var crs = await apiGet('clients?id=eq.' + encodeURIComponent(job.client_id) + '&select=id,name&limit=1');
-          if (crs && crs[0]) client = crs[0];
-        } catch(_) {}
-      }
-      renderBomBody(rec, job, bom, client);
+      // Use snapshot data stored at send time — no need to query restricted tables
+      renderBomBody(rec);
     } catch(e) {
       renderBomError(e && e.message);
     }
