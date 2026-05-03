@@ -35729,6 +35729,9 @@ window.saveAdjModal = async function() {
     var el = document.getElementById('sched-next-jobs');
     if (!el) return;
     var canControl = window.canDo && window.canDo('production_control');
+    var lineOccupied = _schedJobs.some(function(j) {
+      return (j.actual_start && j.stage !== 'complete') || !!j.changeover_start;
+    });
     var queued = _schedJobs.filter(function(j) {
       return !j.actual_start && !j.changeover_start && j.stage !== 'complete';
     });
@@ -35808,25 +35811,26 @@ window.saveAdjModal = async function() {
         bottleTarget: j.bottle_target || null, durMins: null });
     });
 
-    // 2. Running / paused job — project end from last actual BPH → 400
-    var runningJob = _schedJobs.find(function(j) { return j.actual_start && !j.actual_end; });
-    var _now       = new Date();
-    var projSeedDt = new Date(_now);
-    if (runningJob) {
-      var bph = _lastBphMap[runningJob.bom_id] || DEFAULT_BPH;
-      var dur = calcDurationMins(runningJob.bottle_target, bph) || CHANGEOVER_PROJ_MINS;
+    // 2. Running / paused jobs — render all concurrent running jobs, seed from the latest projected end
+    var runningJobs = _schedJobs.filter(function(j) { return j.actual_start && !j.actual_end; });
+    var _now        = new Date();
+    var projSeedDt  = new Date(_now);
+    runningJobs.forEach(function(runningJob) {
+      var bph     = _lastBphMap[runningJob.bom_id] || DEFAULT_BPH;
+      var dur     = calcDurationMins(runningJob.bottle_target, bph) || CHANGEOVER_PROJ_MINS;
       var projEnd = calcEndTime(new Date(runningJob.actual_start), dur);
       calBlocks.push({ startDt: new Date(runningJob.actual_start), endDt: projEnd,
         label: runningJob.id + (runningJob.paused_at ? ' \u2016 paused' : ' \u25b6 running') + (runningJob.product_name ? ' \u00b7 ' + runningJob.product_name : ''),
         colour: runningJob.colour, style: runningJob.paused_at ? 'paused' : 'running', noteIcon: '',
         bphUsed: bph, jobId: runningJob.id, productName: runningJob.product_name || '',
         bottleTarget: runningJob.bottle_target || null, durMins: dur });
-      projSeedDt = projEnd > _now ? projEnd : new Date(_now);
-    }
+      var seed = projEnd > _now ? projEnd : new Date(_now);
+      if (seed > projSeedDt) projSeedDt = seed;
+    });
 
-    // 3. Changeover job — amber changeover block + projected run block
-    var coJob = _schedJobs.find(function(j) { return j.changeover_start && !j.actual_start; });
-    if (coJob) {
+    // 3. Changeover jobs — render all concurrent changeover blocks + their projected run blocks
+    var coJobs = _schedJobs.filter(function(j) { return j.changeover_start && !j.actual_start; });
+    coJobs.forEach(function(coJob) {
       var coStart = new Date(coJob.changeover_start);
       var coEnd   = calcEndTime(coStart, CHANGEOVER_PROJ_MINS);
       calBlocks.push({ startDt: coStart, endDt: coEnd,
@@ -35841,8 +35845,9 @@ window.saveAdjModal = async function() {
         colour: coJob.colour, style: 'ghost', noteIcon: '',
         bphUsed: bphCo, jobId: coJob.id, productName: coJob.product_name || '',
         bottleTarget: coJob.bottle_target || null, durMins: durCo });
-      if (jobEnd > projSeedDt) projSeedDt = jobEnd > _now ? jobEnd : new Date(_now);
-    }
+      var coSeed = jobEnd > _now ? jobEnd : new Date(_now);
+      if (coSeed > projSeedDt) projSeedDt = coSeed;
+    });
 
     // 4. Ghost blocks: next 5 queued jobs — each preceded by an amber changeover block
     var queued = _schedJobs.filter(function(j) {
@@ -35856,7 +35861,7 @@ window.saveAdjModal = async function() {
     var ghostCount = 0;
     for (var qi = 0; qi < queued.length && ghostCount < 5; qi++) {
       var qj = queued[qi];
-      if (coJob && coJob.id === qj.id) continue; // already shown as changeover
+      if (coJobs.some(function(c) { return c.id === qj.id; })) continue; // already shown as changeover
       // Amber changeover block before each queued job
       var coBlockStart = new Date(projSeedDt);
       var coBlockEnd   = calcEndTime(coBlockStart, CHANGEOVER_PROJ_MINS);
