@@ -35444,16 +35444,40 @@ window.saveAdjModal = async function() {
     }
     return false;
   }
+  // Bank-holiday + weekend aware productive seconds calculator.
+  // Counts only seconds within PROD_WINDOWS on non-non-working days.
+  function _calcProdSecs(startDt, endDt) {
+    if (!startDt || !endDt || endDt <= startDt) return 0;
+    var total = 0;
+    // Clamp to 90 days max for safety
+    var limit = new Date(Math.min(endDt.getTime(), startDt.getTime() + 90 * 86400000));
+    var cur   = new Date(startDt);
+    for (var guard = 0; guard < 200 && cur < limit; guard++) {
+      var dayStart = new Date(cur); dayStart.setHours(0, 0, 0, 0);
+      if (_isNonWorkingDay(dayStart)) {
+        // Skip the whole day
+        cur = new Date(dayStart); cur.setDate(dayStart.getDate() + 1);
+        continue;
+      }
+      // Count seconds within each production window that overlaps [cur, limit]
+      for (var wi = 0; wi < PROD_WINDOWS.length; wi++) {
+        var wsAbs = new Date(dayStart.getTime() + PROD_WINDOWS[wi][0] * 60000);
+        var weAbs = new Date(dayStart.getTime() + PROD_WINDOWS[wi][1] * 60000);
+        var oStart = new Date(Math.max(cur.getTime(),    wsAbs.getTime()));
+        var oEnd   = new Date(Math.min(limit.getTime(),  weAbs.getTime()));
+        if (oEnd > oStart) total += (oEnd - oStart) / 1000;
+      }
+      // Advance to start of next day
+      cur = new Date(dayStart); cur.setDate(dayStart.getDate() + 1);
+    }
+    return total;
+  }
+
   // Returns productive seconds from startISO to (pausedAtISO || now) minus totalPausedSecs
   function _safeProdSecs(startISO, pausedAtISO, totalPausedSecs) {
     if (!startISO) return 0;
     var endDate = pausedAtISO ? new Date(pausedAtISO) : new Date();
-    var raw;
-    if (window._prodSecsElapsed) {
-      raw = window._prodSecsElapsed(new Date(startISO), endDate);
-    } else {
-      raw = Math.max(0, (endDate.getTime() - new Date(startISO).getTime()) / 1000);
-    }
+    var raw = _calcProdSecs(new Date(startISO), endDate);
     return Math.max(0, raw - (totalPausedSecs || 0));
   }
   function _isWithinShift() {
@@ -35778,7 +35802,8 @@ window.saveAdjModal = async function() {
 
     // 2. Running / paused job — project end from last actual BPH → BOM BPH → 400
     var runningJob = _schedJobs.find(function(j) { return j.actual_start && !j.actual_end; });
-    var projSeedDt = new Date();
+    var _now       = new Date();
+    var projSeedDt = new Date(_now);
     if (runningJob) {
       var bph = _lastBphMap[runningJob.bom_id] || runningJob.bph || DEFAULT_BPH;
       var dur = calcDurationMins(runningJob.bottle_target, bph) || CHANGEOVER_PROJ_MINS;
@@ -35787,7 +35812,9 @@ window.saveAdjModal = async function() {
         label: runningJob.id + (runningJob.paused_at ? ' \u2016 paused' : ' \u25b6 running') + (runningJob.product_name ? ' \u00b7 ' + runningJob.product_name : ''),
         colour: runningJob.colour, style: runningJob.paused_at ? 'paused' : 'running', noteIcon: '',
         bphUsed: bph, jobId: runningJob.id, productName: runningJob.product_name || '' });
-      projSeedDt = projEnd;
+      // If the projected end is still in the future, use it as the seed for the next job.
+      // If the job has overrun (projected end is in the past), seed from now instead.
+      projSeedDt = projEnd > _now ? projEnd : new Date(_now);
     }
 
     // 3. Changeover job — amber changeover block + projected run block
@@ -35805,7 +35832,7 @@ window.saveAdjModal = async function() {
         label: coJob.id + (coJob.product_name ? ' \u00b7 ' + coJob.product_name : ''),
         colour: coJob.colour, style: 'ghost', noteIcon: '',
         bphUsed: bphCo, jobId: coJob.id, productName: coJob.product_name || '' });
-      if (jobEnd > projSeedDt) projSeedDt = jobEnd;
+      if (jobEnd > projSeedDt) projSeedDt = jobEnd > _now ? jobEnd : new Date(_now);
     }
 
     // 4. Ghost blocks: next 5 queued jobs — each preceded by an amber changeover block
@@ -39381,6 +39408,8 @@ window.saveAdjModal = async function() {
   window.canDo = function(permKey) {
     var role = window.CURRENT_USER && window.CURRENT_USER.role;
     if (!role) return false;
+    // MD and Ops Dir always have every permission regardless of saved matrix
+    if (role === 'managing_director' || role === 'operations_director') return true;
     var perms = window.CURRENT_PERMISSIONS && window.CURRENT_PERMISSIONS[role];
     if (!perms) return false;
     return !!perms[permKey];
