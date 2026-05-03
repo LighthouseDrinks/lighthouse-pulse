@@ -30062,8 +30062,9 @@ window.saveAdjModal = async function() {
     html += frow('Total Cases', inp('cases', actualCases, 'Auto-calculated', 'number') + sub('Auto-calculated from bottles ÷ case size'), true);
     html += frow('Cases per Layer', inp('cases-layer', casesPerLayer, 'From BOM', 'text', !!casesPerLayer));
     html += frow('Cases per Pallet', inp('cases-pallet', casesPerPallet, 'Auto-calculated', 'text', !!(casesPerLayer && layersPerPallet)));
-    html += frow('Date / Time Job Commenced', inp('commenced', j.date_commenced ? j.date_commenced.slice(0,16) : '', '', 'datetime-local'), true);
-    html += frow('Date / Time Job Ended', inp('completed', j.date_completed ? j.date_completed.slice(0,16) : '', '', 'datetime-local'), true);
+    var autoFilledNote = '<div style="font-size:10px;color:#22c55e;margin-top:4px;display:flex;align-items:center;gap:4px;">&#10003; Auto-filled from Schedule — edit only if incorrect</div>';
+    html += frow('Date / Time Job Commenced', inp('commenced', j.date_commenced ? j.date_commenced.slice(0,16) : '', '', 'datetime-local') + (j.date_commenced ? autoFilledNote : ''), true);
+    html += frow('Date / Time Job Ended', inp('completed', j.date_completed ? j.date_completed.slice(0,16) : '', '', 'datetime-local') + (j.date_completed ? autoFilledNote : ''), true);
     html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub('Production hours (Mon–Fri schedule, breaks excluded) minus 3h tooling'));
     html += frow('Actual Bottling Rate Achieved', inp('bottling-rate', autoRate, 'Auto-calculated', 'number', true) + sub('Bottles ÷ actual job hours = bottles per hour'));
     html += frow('Line Clearance Checklist Complete', cb('line-clearance', !!j.line_clearance_complete, 'Confirmed complete'), true);
@@ -35802,23 +35803,24 @@ window.saveAdjModal = async function() {
       var noteIcon = j.schedule_notes ? j.schedule_notes : '';
       calBlocks.push({ startDt: new Date(j.actual_start), endDt: new Date(j.actual_end),
         label: j.id + (j.product_name ? ' \u00b7 ' + j.product_name.substring(0, 14) : ''),
-        colour: '#888', style: 'complete', noteIcon: noteIcon, bphUsed: null, jobId: j.id, productName: j.product_name || '' });
+        colour: '#888', style: 'complete', noteIcon: noteIcon,
+        bphUsed: null, jobId: j.id, productName: j.product_name || '',
+        bottleTarget: j.bottle_target || null, durMins: null });
     });
 
-    // 2. Running / paused job — project end from last actual BPH → BOM BPH → 400
+    // 2. Running / paused job — project end from last actual BPH → 400
     var runningJob = _schedJobs.find(function(j) { return j.actual_start && !j.actual_end; });
     var _now       = new Date();
     var projSeedDt = new Date(_now);
     if (runningJob) {
-      var bph = _lastBphMap[runningJob.bom_id] || runningJob.bph || DEFAULT_BPH;
+      var bph = _lastBphMap[runningJob.bom_id] || DEFAULT_BPH;
       var dur = calcDurationMins(runningJob.bottle_target, bph) || CHANGEOVER_PROJ_MINS;
       var projEnd = calcEndTime(new Date(runningJob.actual_start), dur);
       calBlocks.push({ startDt: new Date(runningJob.actual_start), endDt: projEnd,
         label: runningJob.id + (runningJob.paused_at ? ' \u2016 paused' : ' \u25b6 running') + (runningJob.product_name ? ' \u00b7 ' + runningJob.product_name : ''),
         colour: runningJob.colour, style: runningJob.paused_at ? 'paused' : 'running', noteIcon: '',
-        bphUsed: bph, jobId: runningJob.id, productName: runningJob.product_name || '' });
-      // If the projected end is still in the future, use it as the seed for the next job.
-      // If the job has overrun (projected end is in the past), seed from now instead.
+        bphUsed: bph, jobId: runningJob.id, productName: runningJob.product_name || '',
+        bottleTarget: runningJob.bottle_target || null, durMins: dur });
       projSeedDt = projEnd > _now ? projEnd : new Date(_now);
     }
 
@@ -35829,14 +35831,16 @@ window.saveAdjModal = async function() {
       var coEnd   = calcEndTime(coStart, CHANGEOVER_PROJ_MINS);
       calBlocks.push({ startDt: coStart, endDt: coEnd,
         label: 'Changeover \u00b7 ' + (coJob.product_name || coJob.id), colour: '#f59e0b', style: 'changeover', noteIcon: '',
-        bphUsed: null, jobId: coJob.id, productName: coJob.product_name || '' });
-      var bphCo = _lastBphMap[coJob.bom_id] || coJob.bph || DEFAULT_BPH;
+        bphUsed: null, jobId: coJob.id, productName: coJob.product_name || '',
+        bottleTarget: null, durMins: CHANGEOVER_PROJ_MINS });
+      var bphCo = _lastBphMap[coJob.bom_id] || DEFAULT_BPH;
       var durCo = calcDurationMins(coJob.bottle_target, bphCo) || CHANGEOVER_PROJ_MINS;
       var jobEnd = calcEndTime(coEnd, durCo);
       calBlocks.push({ startDt: coEnd, endDt: jobEnd,
         label: coJob.id + (coJob.product_name ? ' \u00b7 ' + coJob.product_name : ''),
         colour: coJob.colour, style: 'ghost', noteIcon: '',
-        bphUsed: bphCo, jobId: coJob.id, productName: coJob.product_name || '' });
+        bphUsed: bphCo, jobId: coJob.id, productName: coJob.product_name || '',
+        bottleTarget: coJob.bottle_target || null, durMins: durCo });
       if (jobEnd > projSeedDt) projSeedDt = jobEnd > _now ? jobEnd : new Date(_now);
     }
 
@@ -35859,15 +35863,17 @@ window.saveAdjModal = async function() {
       calBlocks.push({ startDt: coBlockStart, endDt: coBlockEnd,
         label: 'Changeover \u00b7 ' + (qj.product_name || qj.id),
         colour: '#f59e0b', style: 'changeover', noteIcon: '',
-        bphUsed: null, jobId: qj.id, productName: qj.product_name || '' });
+        bphUsed: null, jobId: qj.id, productName: qj.product_name || '',
+        bottleTarget: null, durMins: CHANGEOVER_PROJ_MINS });
       // Ghost job block
-      var qBph = _lastBphMap[qj.bom_id] || qj.bph || DEFAULT_BPH;
+      var qBph = _lastBphMap[qj.bom_id] || DEFAULT_BPH;
       var qDur = calcDurationMins(qj.bottle_target, qBph) || CHANGEOVER_PROJ_MINS;
       var gEnd = calcEndTime(coBlockEnd, qDur);
       calBlocks.push({ startDt: coBlockEnd, endDt: gEnd,
         label: qj.id + (qj.product_name ? ' \u00b7 ' + qj.product_name : ''),
         colour: qj.colour, style: 'ghost', noteIcon: '',
-        bphUsed: qBph, jobId: qj.id, productName: qj.product_name || '' });
+        bphUsed: qBph, jobId: qj.id, productName: qj.product_name || '',
+        bottleTarget: qj.bottle_target || null, durMins: qDur });
       projSeedDt = gEnd;
       ghostCount++;
     }
@@ -35961,7 +35967,8 @@ window.saveAdjModal = async function() {
         var popData = JSON.stringify({
           label: b.label, style: b.style,
           start: b.startDt.toISOString(), end: b.endDt.toISOString(),
-          bph: b.bphUsed, jobId: b.jobId, product: b.productName
+          bph: b.bphUsed, jobId: b.jobId, product: b.productName,
+          bottles: b.bottleTarget, durMins: b.durMins
         }).replace(/'/g, '&#39;');
         html += '<div onclick="window._schedCalClick(event,\'' + popData.replace(/"/g, '&quot;') + '\')" style="position:absolute;top:4px;height:' + (ROW_H-8) + 'px;left:' + leftP + ';width:' + widP + ';background:' + bg + ';border:' + border + ';border-radius:3px;overflow:hidden;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,0.5);display:flex;align-items:center;padding:0 6px;z-index:2;opacity:' + opacity + ';">'
           + '<div style="min-width:0;flex:1;overflow:hidden;display:flex;align-items:center;">'
@@ -35984,7 +35991,12 @@ window.saveAdjModal = async function() {
   window.schedStartJob = async function(jobId) {
     if (!window.canDo || !window.canDo('production_control')) { window.toast && window.toast('Permission denied.', 'error'); return; }
     try {
-      await sbPatch('jobs', '?id=eq.' + jobId, { actual_start: new Date().toISOString(), actual_end: null, changeover_start: null, paused_at: null, total_paused_secs: 0 });
+      var startIso = new Date().toISOString();
+      var patch = { actual_start: startIso, actual_end: null, changeover_start: null, paused_at: null, total_paused_secs: 0 };
+      // If the job never went through auto-changeover (no date_commenced written yet), seed it now
+      var existing = _schedJobs.find(function(x) { return x.id === jobId; });
+      if (!existing || !existing.date_commenced) patch.date_commenced = startIso;
+      await sbPatch('jobs', '?id=eq.' + jobId, patch);
       window.toast && window.toast('Job started.', 'success');
       await loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
@@ -36016,7 +36028,13 @@ window.saveAdjModal = async function() {
     if (!window.canDo || !window.canDo('production_control')) { window.toast && window.toast('Permission denied.', 'error'); return; }
     if (!confirm('Mark this job as complete?')) return;
     try {
-      await sbPatch('jobs', '?id=eq.' + jobId, { actual_end: new Date().toISOString(), stage: 'complete', paused_at: null });
+      var endIso = new Date().toISOString();
+      await sbPatch('jobs', '?id=eq.' + jobId, {
+        actual_end:     endIso,
+        date_completed: endIso,   // auto-fills Results tab "Date/Time Job Ended"
+        stage:          'complete',
+        paused_at:      null
+      });
       window.toast && window.toast('Job finished.', 'success');
       await _schedAutoChangeover(jobId);
       await loadSchedule();
@@ -36029,7 +36047,11 @@ window.saveAdjModal = async function() {
       if (existing && existing.length) return;
       var next = await sbGet('jobs?stage=in.(planning,scheduled)&actual_start=is.null&changeover_start=is.null&id=neq.' + finishedJobId + '&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=1&select=id');
       if (!next || !next.length) return;
-      await sbPatch('jobs', '?id=eq.' + next[0].id, { changeover_start: new Date().toISOString() });
+      var changeoverIso = new Date().toISOString();
+      await sbPatch('jobs', '?id=eq.' + next[0].id, {
+        changeover_start: changeoverIso,
+        date_commenced:   changeoverIso   // auto-fills Results tab "Date/Time Commenced"
+      });
       window.toast && window.toast('Next job pulled into changeover.', 'success');
     } catch(e) { console.warn('Auto-changeover error:', e && e.message); }
   }
@@ -36073,14 +36095,22 @@ window.saveAdjModal = async function() {
     html += '</div>';
     if (d.product) html += '<div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:2px;word-break:break-word;">' + esc(d.product) + '</div>';
     if (d.jobId)   html += '<div style="font-size:10px;color:var(--gold);margin-bottom:10px;">' + esc(d.jobId) + '</div>';
+    var fmtMins = function(m) {
+      if (!m) return '—';
+      var h = Math.floor(m / 60), mn = Math.round(m % 60);
+      return mn ? h + 'h ' + mn + 'm' : h + 'h';
+    };
     html += '<div style="border-top:1px solid rgba(255,255,255,0.07);padding-top:10px;display:flex;flex-direction:column;gap:6px;">';
     html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">' + (isChangeover ? 'Starts' : 'Proj. start') + '</span><span style="color:#fff;font-weight:600;">' + fmtDt(d.start) + '</span></div>';
     html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">' + (isChangeover ? 'Ends' : 'Proj. finish') + '</span><span style="color:#fff;font-weight:600;">' + fmtDt(d.end) + '</span></div>';
-    if (!isChangeover && d.bph) {
-      var bphSource = (_lastBphMap && d.jobId && _schedJobs.find(function(j){ return j.id === d.jobId; }) &&
-        _lastBphMap[(_schedJobs.find(function(j){ return j.id === d.jobId; }) || {}).bom_id])
-        ? 'Last actual' : (d.bph === DEFAULT_BPH ? 'Default' : 'BOM design');
-      html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">Rate</span><span style="color:#f59e0b;font-weight:700;">' + d.bph + ' BPH <span style="font-weight:400;font-size:9px;color:var(--muted);">(' + bphSource + ')</span></span></div>';
+    if (!isChangeover) {
+      if (d.durMins) html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">Proj. job hours</span><span style="color:#fff;font-weight:600;">' + fmtMins(d.durMins) + ' <span style="font-weight:400;font-size:9px;color:var(--muted);">(productive)</span></span></div>';
+      if (d.bottles) html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">Total bottles</span><span style="color:#fff;font-weight:600;">' + Number(d.bottles).toLocaleString() + ' btls</span></div>';
+      if (d.bph) {
+        var jobRow = _schedJobs.find(function(j){ return j.id === d.jobId; });
+        var bphSource = (jobRow && _lastBphMap[jobRow.bom_id]) ? 'Last actual' : 'Default (400 BPH)';
+        html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">Rate</span><span style="color:#f59e0b;font-weight:700;">' + d.bph + ' BPH <span style="font-weight:400;font-size:9px;color:var(--muted);">(' + bphSource + ')</span></span></div>';
+      }
     }
     html += '</div>';
     pop.innerHTML = html;
