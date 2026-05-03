@@ -4821,12 +4821,16 @@ window.sendInviteEmail = async function() {
 };
 
 window.copyInviteLink = function() {
-  // Regenerate link from current form values
-  var firstName=(document.getElementById('inv-first-name').value||'').trim();
-  var lastName =(document.getElementById('inv-last-name').value||'').trim();
-  var email    =(document.getElementById('inv-email').value||'').trim().toLowerCase();
-  var role     =window._inviteRole||'';
-  var payload={role:role,first_name:firstName,last_name:lastName,email:email,exp:Date.now()+(7*24*60*60*1000),nonce:Math.random().toString(36).substr(2,9)};
+  // Regenerate link from current form values — must mirror sendInviteEmail payload exactly
+  var firstName  =(document.getElementById('inv-first-name').value||'').trim();
+  var lastName   =(document.getElementById('inv-last-name').value||'').trim();
+  var email      =(document.getElementById('inv-email').value||'').trim().toLowerCase();
+  var role       =(document.getElementById('inv-role-select')&&document.getElementById('inv-role-select').value)||window._inviteRole||'';
+  var reportsToId=(document.getElementById('inv-reports-to')&&document.getElementById('inv-reports-to').value)||'';
+  var csel       =document.getElementById('inv-client-select');
+  var clientId   =(role==='client'&&csel)?csel.value:null;
+  var clientName =(role==='client'&&csel&&csel.selectedIndex>=0)?csel.options[csel.selectedIndex].textContent:null;
+  var payload={role:role,client_id:clientId,client_name:clientName,first_name:firstName,last_name:lastName,email:email,reports_to_id:reportsToId||null,exp:Date.now()+(7*24*60*60*1000),nonce:Math.random().toString(36).substr(2,9)};
   var link='https://pulse.lighthousedrinks.com?invite='+encodeURIComponent(btoa(JSON.stringify(payload)));
   navigator.clipboard.writeText(link).then(function(){
     window.toast&&window.toast('Link copied to clipboard','success');
@@ -6757,9 +6761,10 @@ window.copyInviteLink = function() {
 (function() {
   'use strict';
   // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
-  var _hrCurrentUserId  = null;
-  var _hrCurrentProfile = null;
-  var _hrAllUsers       = [];
+  var _hrCurrentUserId     = null;
+  var _hrCurrentProfile    = null;
+  var _hrAllUsers          = [];
+  var _hrCompleteProfileIds = null; // Set of user_ids with profile_complete=true; null = not yet loaded
 
   function sbGet(p)                    { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
   function sbPost(table, body)         { return window.db.insert(table, body); }
@@ -7020,8 +7025,15 @@ window.copyInviteLink = function() {
       if (canViewDirectory()) {
         // Fetch ALL users including terminated so we can split them
         var allUsers = await sbGet('app_users?order=display_name.asc&select=id,display_name,role,email,reports_to_id,status');
-        var active     = allUsers.filter(function(u){ return u.status !== 'terminated'; });
+        var active     = allUsers.filter(function(u){ return u.status !== 'terminated' && u.role !== 'client'; });
+        var clients    = allUsers.filter(function(u){ return u.status !== 'terminated' && u.role === 'client'; });
         var terminated = allUsers.filter(function(u){ return u.status === 'terminated'; });
+
+        // Fetch complete profiles so we can flag anyone with a pending setup
+        try {
+          var profileRows = await sbGet('hr_profiles?select=user_id,profile_complete');
+          _hrCompleteProfileIds = new Set(profileRows.filter(function(p){ return p.profile_complete; }).map(function(p){ return p.user_id; }));
+        } catch(e) { _hrCompleteProfileIds = null; }
 
         _hrAllUsers      = active;
         _hrAllTerminated = terminated;
@@ -7034,15 +7046,20 @@ window.copyInviteLink = function() {
 
         _hrPopulateReportsTo(active);
         _hrRenderDirList(active, 'hr-dir-current-list', false);
+        _hrRenderDirList(clients, 'hr-dir-clients-list', false, true);
         _hrRenderDirList(terminated, 'hr-dir-terminated-list', true);
 
         // Update counts
         var cc = document.getElementById('hr-dir-current-count');
         var tc = document.getElementById('hr-dir-term-count');
-        if (cc) cc.textContent = '(' + active.length + ')';
-        if (tc) tc.textContent = '(' + terminated.length + ')';
+        var clc = document.getElementById('hr-dir-clients-count');
+        if (cc)  cc.textContent  = '(' + active.length + ')';
+        if (tc)  tc.textContent  = '(' + terminated.length + ')';
+        if (clc) clc.textContent = '(' + clients.length + ')';
 
-        // Show terminated section only if there are terminated employees
+        // Show/hide clients and terminated sections based on content
+        var clientSec = document.getElementById('hr-dir-clients-section');
+        if (clientSec) clientSec.style.display = clients.length ? '' : 'none';
         var termSec = document.getElementById('hr-dir-terminated-section');
         if (termSec) termSec.style.display = terminated.length ? '' : 'none';
 
@@ -7070,21 +7087,21 @@ window.copyInviteLink = function() {
     }
   }
 
-  function _hrRenderDirList(users, containerId, isTerminated) {
+  function _hrRenderDirList(users, containerId, isTerminated, isClient) {
     var el = document.getElementById(containerId);
     if (!el) return;
     el.innerHTML = '';
     if (!users.length) {
       el.innerHTML = '<div style="padding:10px 14px;font-size:11px;color:var(--muted);font-style:italic;">'
-        + (isTerminated ? 'No terminated employees' : 'No active employees') + '</div>';
+        + (isTerminated ? 'No terminated employees' : isClient ? 'No clients' : 'No active employees') + '</div>';
       return;
     }
     users.forEach(function(u) {
-      _hrRenderDirItem(el, u, isTerminated);
+      _hrRenderDirItem(el, u, isTerminated, isClient);
     });
   }
 
-  function _hrRenderDirItem(container, u, isTerminated) {
+  function _hrRenderDirItem(container, u, isTerminated, isClient) {
     var name = u.display_name || u.email || '⚠ Name not set';
     var hasName = !!(u.display_name || u.email);
     var isSelected = _hrCurrentUserId === u.id;
@@ -7092,17 +7109,27 @@ window.copyInviteLink = function() {
     item.setAttribute('data-uid', u.id);
     item.setAttribute('data-search-name', (name + ' ' + (u.role||'')).toLowerCase());
     item.style.cssText = 'padding:9px 14px;cursor:pointer;border-left:3px solid transparent;transition:background 0.1s;';
-    item.style.background    = isSelected ? 'rgba(201,168,76,0.08)' : 'transparent';
+    item.style.background      = isSelected ? 'rgba(201,168,76,0.08)' : 'transparent';
     item.style.borderLeftColor = isSelected ? 'var(--gold)' : 'transparent';
 
+    var nameColor = isTerminated ? 'var(--muted)' : 'var(--white)';
+    if (isSelected) nameColor = 'var(--gold)';
     var nameHtml = hasName
-      ? '<div style="font-size:12px;font-weight:600;color:'+(isTerminated?'var(--muted)':'var(--white)')+(isSelected?';color:var(--gold)':'')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+name+'</div>'
-      : '<div style="font-size:12px;font-weight:600;color:var(--amber);">⚠ Name not set</div>';
-    var roleHtml = u.role ? '<div style="font-size:10px;color:var(--muted);margin-top:1px;text-transform:capitalize;">'+(u.role||'').replace(/_/g,' ')+'</div>' : '';
-    var termBadge = isTerminated ? '<span style="font-size:9px;background:rgba(220,53,69,0.15);color:#e05a6a;border:1px solid rgba(220,53,69,0.3);border-radius:3px;padding:1px 5px;margin-left:5px;vertical-align:middle;font-weight:700;letter-spacing:0.05em;">TERMINATED</span>' : '';
+      ? '<div style="font-size:12px;font-weight:600;color:'+nameColor+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + window.escapeHtml(name) + '</div>'
+      : '<div style="font-size:12px;font-weight:600;color:var(--amber);">&#9888; Name not set</div>';
 
-    item.innerHTML = '<div style="display:flex;align-items:center;gap:0;">'
-      + nameHtml.replace('</div>', termBadge + '</div>')
+    var roleLabel = isClient ? 'Client Account' : (u.role||'').replace(/_/g,' ');
+    var roleHtml  = roleLabel ? '<div style="font-size:10px;color:var(--muted);margin-top:1px;text-transform:capitalize;">' + roleLabel + '</div>' : '';
+
+    var profilePending = !isTerminated && !isClient && _hrCompleteProfileIds !== null && !_hrCompleteProfileIds.has(u.id);
+    var badge = isTerminated
+      ? '<span style="font-size:9px;background:rgba(220,53,69,0.15);color:#e05a6a;border:1px solid rgba(220,53,69,0.3);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;flex-shrink:0;">TERMINATED</span>'
+      : profilePending
+        ? '<span title="HR profile not yet completed" style="font-size:9px;background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.35);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;flex-shrink:0;">PROFILE PENDING</span>'
+        : '';
+
+    item.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;">'
+      + nameHtml + badge
       + '</div>'
       + roleHtml;
 
@@ -7114,7 +7141,7 @@ window.copyInviteLink = function() {
 
   window.hrDirFilter = function(query) {
     var q = (query||'').toLowerCase().trim();
-    ['hr-dir-current-list','hr-dir-terminated-list'].forEach(function(id){
+    ['hr-dir-current-list','hr-dir-clients-list','hr-dir-terminated-list'].forEach(function(id){
       var el = document.getElementById(id);
       if (!el) return;
       el.querySelectorAll('div[data-uid]').forEach(function(row){
@@ -7129,8 +7156,17 @@ window.copyInviteLink = function() {
     _hrTerminatedOpen = !_hrTerminatedOpen;
     var list    = document.getElementById('hr-dir-terminated-list');
     var chevron = document.getElementById('hr-dir-term-chevron');
-    if (list)    list.style.display    = _hrTerminatedOpen ? '' : 'none';
+    if (list)    list.style.display      = _hrTerminatedOpen ? '' : 'none';
     if (chevron) chevron.style.transform = _hrTerminatedOpen ? 'rotate(180deg)' : '';
+  };
+
+  var _hrClientsOpen = false;
+  window.hrDirToggleClients = function() {
+    _hrClientsOpen = !_hrClientsOpen;
+    var list    = document.getElementById('hr-dir-clients-list');
+    var chevron = document.getElementById('hr-dir-clients-chevron');
+    if (list)    list.style.display      = _hrClientsOpen ? '' : 'none';
+    if (chevron) chevron.style.transform = _hrClientsOpen ? 'rotate(180deg)' : '';
   };
 
   // ── Reports-To dropdown population (shared helper) ──────────────────────────
@@ -7157,7 +7193,7 @@ window.copyInviteLink = function() {
     document.getElementById('hr-profile-view').style.display = '';
 
     // Highlight selected in directory lists
-    document.querySelectorAll('#hr-dir-current-list div[data-uid], #hr-dir-terminated-list div[data-uid]').forEach(function(el){
+    document.querySelectorAll('#hr-dir-current-list div[data-uid], #hr-dir-clients-list div[data-uid], #hr-dir-terminated-list div[data-uid]').forEach(function(el){
       var selected = el.getAttribute('data-uid') === userId;
       el.style.background      = selected ? 'rgba(201,168,76,0.08)' : 'transparent';
       el.style.borderLeftColor = selected ? 'var(--gold)' : 'transparent';
@@ -21319,12 +21355,12 @@ window.ccxPrintRecord = function() {
   <div style="display:flex;gap:0;min-height:500px;">
 
     <!-- Left: Employee directory (shown to those with hr_view_directory) -->
-    <div id="hr-directory-panel" style="display:none;width:268px;min-width:268px;border-right:1px solid var(--navy-border);padding-right:0;margin-right:20px;flex-direction:column;gap:0;">
+    <div id="hr-directory-panel" style="display:none;width:268px;min-width:268px;border-right:1px solid var(--navy-border);padding-right:0;margin-right:32px;flex-direction:column;gap:0;">
       <!-- Search -->
       <div style="padding:0 0 12px 0;position:relative;">
         <div style="position:relative;">
           <svg style="position:absolute;left:10px;top:50%;transform:translateY(-50%);opacity:0.35;pointer-events:none;" width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.099zm-5.242 1.656a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/></svg>
-          <input id="hr-dir-search" type="text" placeholder="Filter employees…" autocomplete="off"
+          <input id="hr-dir-search" type="text" placeholder="Filter people…" autocomplete="off"
             oninput="window.hrDirFilter(this.value)"
             style="width:100%;padding:9px 12px 9px 30px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-size:12px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
         </div>
@@ -21337,6 +21373,16 @@ window.ccxPrintRecord = function() {
           <span id="hr-dir-current-count" style="color:var(--muted);font-weight:400;margin-left:6px;"></span>
         </div>
         <div id="hr-dir-current-list"></div>
+
+        <!-- Current Clients (collapsible) -->
+        <div id="hr-dir-clients-section" style="display:none;margin-top:4px;">
+          <button onclick="window.hrDirToggleClients()" id="hr-dir-clients-toggle"
+            style="width:100%;text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;padding:8px 12px 6px;border:none;border-bottom:1px solid var(--navy-border);background:var(--navy-dark);cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:Lato,sans-serif;position:sticky;top:0;z-index:1;">
+            <span>Current Clients <span id="hr-dir-clients-count" style="color:var(--muted);font-weight:400;margin-left:6px;"></span></span>
+            <span id="hr-dir-clients-chevron" style="font-size:10px;transition:transform 0.2s;">&#9660;</span>
+          </button>
+          <div id="hr-dir-clients-list" style="display:none;"></div>
+        </div>
 
         <!-- Terminated Employees (collapsible) -->
         <div id="hr-dir-terminated-section" style="display:none;margin-top:4px;">
