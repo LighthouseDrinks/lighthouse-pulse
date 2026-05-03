@@ -1805,7 +1805,7 @@ async function handleSession(session) {
     var uid   = session.user.id;
     var email = session.user.email;
     var token = session.access_token;
-    var res   = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=id,role,client_id,display_name,clients(name)', {
+    var res   = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=id,role,client_id,display_name,status,clients(name)', {
       headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token }
     });
     var rows = await res.json();
@@ -1814,7 +1814,18 @@ async function handleSession(session) {
     var clientId    = rows && rows.length ? rows[0].client_id    : null;
     var clientName  = rows && rows.length && rows[0].clients     ? rows[0].clients.name : null;
     var displayName = rows && rows.length ? rows[0].display_name : null;
+    var userStatus  = rows && rows.length ? rows[0].status       : null;
     var STAFF_ROLES = ['managing_director','operations_director','business_analyst','quality_compliance','financial_controller','commercial_manager','ecommerce_manager','production_manager','warehouse_liquid','client_coordinator','production_operator','order_fulfillment'];
+
+    // Block terminated employees immediately
+    if (userStatus === 'terminated') {
+      await window._sb.auth.signOut();
+      window.CURRENT_USER = null;
+      showLogin();
+      setAuthError('Your Pulse access has been revoked. Please contact your manager if you believe this is an error.');
+      return;
+    }
+
     window.CURRENT_USER = { id: uid, app_user_id: appUserId, email: email, role: role, client_id: clientId, client_name: clientName, display_name: displayName };
     // Store email in app_users for settings panel display
     try { await window.db.update('app_users', '?auth_user_id=eq.' + uid, { email: email }); } catch(e) { window.logError('store user email', e); }
@@ -6754,6 +6765,10 @@ window.copyInviteLink = function() {
     if (isAdmin()) return true;
     return window.canDo && window.canDo('hr_view_all');
   }
+  function canViewDirectory() {
+    if (isAdmin()) return true;
+    return window.canDo && (window.canDo('hr_view_directory') || window.canDo('hr_view_all'));
+  }
   function gv(id){ var e=document.getElementById(id); return e?(e.value||'').trim():''; }
 
   // ── First login check ────────────────────────────────────────────────────────
@@ -6986,70 +7001,127 @@ window.copyInviteLink = function() {
   };
 
   // ── Load HR list ─────────────────────────────────────────────────────────────
+  var _hrAllTerminated = [];
+
   async function loadHRList() {
-    var listEl = document.getElementById('hr-employee-list');
-    if (!listEl) return;
-    listEl.innerHTML = '<div style="padding:12px 16px;font-size:11px;color:var(--muted);">Loading…</div>';
+    var dirPanel = document.getElementById('hr-directory-panel');
 
     try {
-      var users;
-      if (canViewAll()) {
-        users = await sbGet('app_users?order=display_name.asc&select=id,display_name,role,email,reports_to_id');
-        // filter out any terminated records if status column exists
-        users = users.filter(function(u){ return u.status !== 'terminated'; });
+      if (canViewDirectory()) {
+        // Fetch ALL users including terminated so we can split them
+        var allUsers = await sbGet('app_users?order=display_name.asc&select=id,display_name,role,email,reports_to_id,status');
+        var active     = allUsers.filter(function(u){ return u.status !== 'terminated'; });
+        var terminated = allUsers.filter(function(u){ return u.status === 'terminated'; });
+
+        _hrAllUsers      = active;
+        _hrAllTerminated = terminated;
+
+        // Show directory panel
+        if (dirPanel) {
+          dirPanel.style.display = 'flex';
+          dirPanel.style.flexDirection = 'column';
+        }
+
+        _hrPopulateReportsTo(active);
+        _hrRenderDirList(active, 'hr-dir-current-list', false);
+        _hrRenderDirList(terminated, 'hr-dir-terminated-list', true);
+
+        // Update counts
+        var cc = document.getElementById('hr-dir-current-count');
+        var tc = document.getElementById('hr-dir-term-count');
+        if (cc) cc.textContent = '(' + active.length + ')';
+        if (tc) tc.textContent = '(' + terminated.length + ')';
+
+        // Show terminated section only if there are terminated employees
+        var termSec = document.getElementById('hr-dir-terminated-section');
+        if (termSec) termSec.style.display = terminated.length ? '' : 'none';
+
+        // Auto-open own profile
+        if (!_hrCurrentUserId && window.CURRENT_USER) {
+          var myAppId = window.CURRENT_USER.app_user_id;
+          var myEmail = window.CURRENT_USER.email;
+          var me = active.find(function(u){
+            return (myAppId && u.id === myAppId) || (myEmail && u.email === myEmail);
+          }) || null;
+          if (me) window.openHRProfile(me.id);
+        }
       } else {
-        // Employees see only themselves
+        // Non-directory users see only themselves
+        if (dirPanel) dirPanel.style.display = 'none';
         var selfId = window.CURRENT_USER.app_user_id || window.CURRENT_USER.id;
-        users = window.CURRENT_USER ? [{id:selfId, display_name:window.CURRENT_USER.display_name||window.CURRENT_USER.email, role:window.CURRENT_USER.role}] : [];
-      }
-      _hrAllUsers = users;
-
-      // Populate reports-to dropdown
-      _hrPopulateReportsTo(users);
-
-      listEl.innerHTML = '';
-      users.forEach(function(u) {
-        var hasName = !!(u.display_name || u.email);
-        var name = u.display_name || u.email || '⚠ Name not set';
-        var isSelected = _hrCurrentUserId === u.id;
-        var item = document.createElement('div');
-        item.setAttribute('data-uid', u.id);
-        item.style.cssText = 'padding:10px 16px;cursor:pointer;font-size:12px;font-weight:600;'
-          + 'color:'+(isSelected?'var(--gold)':'var(--white)')+'';
-        item.style.background = isSelected ? 'rgba(201,168,76,0.08)' : 'transparent';
-        item.style.borderLeft = isSelected ? '3px solid var(--gold)' : '3px solid transparent';
-        // Show name — highlight missing names in amber so admins know to fix them
-        if (!hasName) {
-          item.innerHTML = '<span style="color:var(--amber);">⚠ Name not set</span>'
-            + '<span style="font-size:10px;color:var(--muted);margin-left:6px;">' + (u.role||'') + '</span>';
-        } else {
-          item.textContent = name;
-        }
-        item.onmouseover = function(){ if(!isSelected){ this.style.background='rgba(255,255,255,0.04)'; } };
-        item.onmouseout  = function(){ if(!isSelected){ this.style.background='transparent'; } };
-        item.onclick = function(){ window.openHRProfile(u.id); };
-        listEl.appendChild(item);
-      });
-
-      // Auto-open own profile for non-admins
-      if (!canViewAll() && users.length) {
-        window.openHRProfile(users[0].id);
-      }
-      // Auto-open current user's own profile for admins too (default view)
-      if (canViewAll() && !_hrCurrentUserId && window.CURRENT_USER) {
-        var myAppId = window.CURRENT_USER.app_user_id;
-        var myEmail = window.CURRENT_USER.email;
-        var me = users.find(function(u){ 
-          return (myAppId && u.id === myAppId) || (myEmail && u.email === myEmail);
-        }) || null;
-        if (me) {
-          window.openHRProfile(me.id);
-        }
+        var selfUsers = window.CURRENT_USER ? [{id:selfId, display_name:window.CURRENT_USER.display_name||window.CURRENT_USER.email, role:window.CURRENT_USER.role}] : [];
+        _hrAllUsers = selfUsers;
+        _hrPopulateReportsTo(selfUsers);
+        if (selfUsers.length) window.openHRProfile(selfUsers[0].id);
       }
     } catch(e) {
-      listEl.innerHTML = '<div style="padding:12px 16px;color:var(--red);font-size:11px;">Error: '+e.message+'</div>';
+      var cur = document.getElementById('hr-dir-current-list');
+      if (cur) cur.innerHTML = '<div style="padding:12px 16px;color:var(--red);font-size:11px;">Error: '+e.message+'</div>';
     }
   }
+
+  function _hrRenderDirList(users, containerId, isTerminated) {
+    var el = document.getElementById(containerId);
+    if (!el) return;
+    el.innerHTML = '';
+    if (!users.length) {
+      el.innerHTML = '<div style="padding:10px 14px;font-size:11px;color:var(--muted);font-style:italic;">'
+        + (isTerminated ? 'No terminated employees' : 'No active employees') + '</div>';
+      return;
+    }
+    users.forEach(function(u) {
+      _hrRenderDirItem(el, u, isTerminated);
+    });
+  }
+
+  function _hrRenderDirItem(container, u, isTerminated) {
+    var name = u.display_name || u.email || '⚠ Name not set';
+    var hasName = !!(u.display_name || u.email);
+    var isSelected = _hrCurrentUserId === u.id;
+    var item = document.createElement('div');
+    item.setAttribute('data-uid', u.id);
+    item.setAttribute('data-search-name', (name + ' ' + (u.role||'')).toLowerCase());
+    item.style.cssText = 'padding:9px 14px;cursor:pointer;border-left:3px solid transparent;transition:background 0.1s;';
+    item.style.background    = isSelected ? 'rgba(201,168,76,0.08)' : 'transparent';
+    item.style.borderLeftColor = isSelected ? 'var(--gold)' : 'transparent';
+
+    var nameHtml = hasName
+      ? '<div style="font-size:12px;font-weight:600;color:'+(isTerminated?'var(--muted)':'var(--white)')+(isSelected?';color:var(--gold)':'')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+name+'</div>'
+      : '<div style="font-size:12px;font-weight:600;color:var(--amber);">⚠ Name not set</div>';
+    var roleHtml = u.role ? '<div style="font-size:10px;color:var(--muted);margin-top:1px;text-transform:capitalize;">'+(u.role||'').replace(/_/g,' ')+'</div>' : '';
+    var termBadge = isTerminated ? '<span style="font-size:9px;background:rgba(220,53,69,0.15);color:#e05a6a;border:1px solid rgba(220,53,69,0.3);border-radius:3px;padding:1px 5px;margin-left:5px;vertical-align:middle;font-weight:700;letter-spacing:0.05em;">TERMINATED</span>' : '';
+
+    item.innerHTML = '<div style="display:flex;align-items:center;gap:0;">'
+      + nameHtml.replace('</div>', termBadge + '</div>')
+      + '</div>'
+      + roleHtml;
+
+    item.onmouseover = function(){ if (_hrCurrentUserId !== u.id) this.style.background='rgba(255,255,255,0.04)'; };
+    item.onmouseout  = function(){ if (_hrCurrentUserId !== u.id) this.style.background='transparent'; };
+    item.onclick     = function(){ window.openHRProfile(u.id); };
+    container.appendChild(item);
+  }
+
+  window.hrDirFilter = function(query) {
+    var q = (query||'').toLowerCase().trim();
+    ['hr-dir-current-list','hr-dir-terminated-list'].forEach(function(id){
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.querySelectorAll('div[data-uid]').forEach(function(row){
+        var needle = row.getAttribute('data-search-name') || '';
+        row.style.display = (!q || needle.includes(q)) ? '' : 'none';
+      });
+    });
+  };
+
+  var _hrTerminatedOpen = false;
+  window.hrDirToggleTerminated = function() {
+    _hrTerminatedOpen = !_hrTerminatedOpen;
+    var list    = document.getElementById('hr-dir-terminated-list');
+    var chevron = document.getElementById('hr-dir-term-chevron');
+    if (list)    list.style.display    = _hrTerminatedOpen ? '' : 'none';
+    if (chevron) chevron.style.transform = _hrTerminatedOpen ? 'rotate(180deg)' : '';
+  };
 
   // ── Reports-To dropdown population (shared helper) ──────────────────────────
   function _hrPopulateReportsTo(users) {
@@ -7074,12 +7146,13 @@ window.copyInviteLink = function() {
     document.getElementById('hr-empty-state').style.display = 'none';
     document.getElementById('hr-profile-view').style.display = '';
 
-    // Highlight selected in list
-    document.querySelectorAll('#hr-employee-list div[data-uid]').forEach(function(el){
+    // Highlight selected in directory lists
+    document.querySelectorAll('#hr-dir-current-list div[data-uid], #hr-dir-terminated-list div[data-uid]').forEach(function(el){
       var selected = el.getAttribute('data-uid') === userId;
-      el.style.color    = selected ? 'var(--gold)' : 'var(--white)';
-      el.style.background = selected ? 'rgba(201,168,76,0.08)' : 'transparent';
-      el.style.borderLeft = selected ? '3px solid var(--gold)' : '3px solid transparent';
+      el.style.background      = selected ? 'rgba(201,168,76,0.08)' : 'transparent';
+      el.style.borderLeftColor = selected ? 'var(--gold)' : 'transparent';
+      var nameDiv = el.querySelector('div[style*="font-size:12px"]');
+      if (nameDiv) nameDiv.style.color = selected ? 'var(--gold)' : '';
     });
 
     var ROLE_LABELS = {managing_director:'Managing Director',operations_director:'Operations Director',production_manager:'Production Manager',quality_compliance:'Quality & Compliance',financial_controller:'Financial Controller',commercial_manager:'Commercial Manager',ecommerce_manager:'E-Commerce Manager',warehouse_liquid:'Warehouse & Liquid',client_coordinator:'Client Coordinator',production_operator:'Production Operator'};
@@ -7096,17 +7169,53 @@ window.copyInviteLink = function() {
 
     var adminBtns = document.getElementById('hr-admin-btns');
     if (adminBtns) adminBtns.style.display = 'none';
-    var adminBtnsBot = document.getElementById('hr-admin-btns-bottom');
-    if (adminBtnsBot) adminBtnsBot.style.display = isAdmin() ? 'flex' : 'none';
 
     // Load profile
     var profiles = await sbGet('hr_profiles?user_id=eq.'+userId+'&limit=1');
     _hrCurrentProfile = profiles[0] || null;
+
+    // Determine terminated state from app_users OR hr_profiles
+    var allU = _hrAllUsers.concat(_hrAllTerminated||[]);
+    var uRecord = allU.find(function(x){ return x.id === userId; }) || {};
+    var isTerminated = uRecord.status === 'terminated' || (_hrCurrentProfile && _hrCurrentProfile.status === 'terminated');
+
+    // Terminated status banner
+    var existingBanner = document.getElementById('hr-terminated-banner');
+    if (existingBanner) existingBanner.remove();
+    if (isTerminated && _hrCurrentProfile) {
+      var p = _hrCurrentProfile;
+      var termDate  = p.terminated_at  ? new Date(p.terminated_at).toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'}) : '—';
+      var termType  = p.termination_type || '—';
+      var lastDay   = p.last_working_day  ? new Date(p.last_working_day+'T00:00:00').toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'}) : '—';
+      var banner = document.createElement('div');
+      banner.id = 'hr-terminated-banner';
+      banner.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:16px;padding:12px 18px;background:rgba(220,53,69,0.1);border:1px solid rgba(220,53,69,0.3);border-radius:6px;margin-bottom:18px;';
+      banner.innerHTML = '<span style="font-size:10px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:#e05a6a;background:rgba(220,53,69,0.18);padding:3px 10px;border-radius:3px;">TERMINATED</span>'
+        + '<span style="font-size:12px;color:var(--muted);">Terminated: <strong style="color:var(--white);">'+termDate+'</strong></span>'
+        + '<span style="font-size:12px;color:var(--muted);">Type: <strong style="color:var(--white);">'+termType+'</strong></span>'
+        + '<span style="font-size:12px;color:var(--muted);">Last day: <strong style="color:var(--white);">'+lastDay+'</strong></span>'
+        + (isAdmin() ? '<button onclick="window.hrReactivate()" style="margin-left:auto;font-size:11px;padding:5px 14px;background:transparent;border:1px solid var(--gold);color:var(--gold);border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">Reactivate</button>' : '');
+      var profileView = document.getElementById('hr-profile-view');
+      if (profileView) profileView.insertBefore(banner, profileView.firstChild);
+    }
+
+    // Admin action buttons — show Terminate for active, hide for terminated
+    var adminBtnsBot = document.getElementById('hr-admin-btns-bottom');
+    if (adminBtnsBot) {
+      if (isAdmin()) {
+        adminBtnsBot.style.display = 'flex';
+        var termBtn = adminBtnsBot.querySelector('button[onclick*="hrTerminate"]');
+        if (termBtn) termBtn.style.display = isTerminated ? 'none' : '';
+      } else {
+        adminBtnsBot.style.display = 'none';
+      }
+    }
+
     // Re-populate the reports-to dropdown every time a profile is opened,
     // ensuring it always has a full, up-to-date list with readable labels
     _hrPopulateReportsTo(_hrAllUsers);
     populateHRFields(_hrCurrentProfile, u);
-    applyHRPermissions();
+    applyHRPermissions(isTerminated);
     window.showHRTab('personal', document.querySelector('.hr-tab[data-htab="personal"]'));
   };
 
@@ -7165,30 +7274,52 @@ window.copyInviteLink = function() {
   }
 
   window.applyHRPermissions = applyHRPermissions;
-  function applyHRPermissions() {
+  function applyHRPermissions(isTerminated) {
     var admin = isAdmin();
+    isTerminated = !!isTerminated;
     // Show/hide Management tab
     var mgmtBtn = document.getElementById('people-tab-mgmt');
     if (mgmtBtn) mgmtBtn.style.display = admin ? '' : 'none';
-    // Show/hide HR search bar
-    var hrSearch = document.getElementById('hr-search-bar');
-    if (hrSearch) hrSearch.style.display = admin ? '' : 'none';
-    // Admin-only fields - readonly for non-admins
+    // Legacy search bar is now hidden in the new layout; directory panel visibility
+    // is managed by loadHRList() via canViewDirectory()
+    // Admin-only fields - readonly for non-admins OR when terminated (read-only for all)
     document.querySelectorAll('.hr-admin-field').forEach(function(el){
-      if (el.tagName==='SELECT') el.disabled = !admin;
-      else el.readOnly = !admin;
-      el.style.opacity = admin ? '1' : '0.6';
+      var lock = !admin || isTerminated;
+      if (el.tagName==='SELECT') el.disabled = lock;
+      else el.readOnly = lock;
+      el.style.opacity = lock ? '0.6' : '1';
     });
+    // All user-editable fields are also locked when profile is terminated
+    if (isTerminated) {
+      document.querySelectorAll('#hr-profile-view .hr-input').forEach(function(el){
+        if (el.tagName==='SELECT') el.disabled = true;
+        else el.readOnly = true;
+        el.style.opacity = '0.6';
+      });
+    } else {
+      // Restore non-admin-field inputs for non-terminated profiles
+      document.querySelectorAll('#hr-profile-view .hr-input:not(.hr-admin-field)').forEach(function(el){
+        if (el.tagName==='SELECT') el.disabled = false;
+        else el.readOnly = false;
+        el.style.opacity = '1';
+      });
+    }
     // Show/hide notes
     var empNote = document.getElementById('hr-employment-readonly-note');
     var payNote = document.getElementById('hr-pay-readonly-note');
-    if (empNote) empNote.style.display = admin ? 'none' : '';
-    if (payNote) payNote.style.display = admin ? 'none' : '';
-    // Show/hide admin save buttons on employment/pay tabs
+    if (empNote) empNote.style.display = (admin && !isTerminated) ? 'none' : '';
+    if (payNote) payNote.style.display = (admin && !isTerminated) ? 'none' : '';
+    // Show/hide admin save buttons on employment/pay tabs (hidden for terminated)
     var empSave = document.getElementById('hr-employment-save-row');
     var paySave = document.getElementById('hr-pay-save-row');
-    if (empSave) empSave.style.display = admin ? 'flex' : 'none';
-    if (paySave) paySave.style.display = admin ? 'flex' : 'none';
+    if (empSave) empSave.style.display = (admin && !isTerminated) ? 'flex' : 'none';
+    if (paySave) paySave.style.display = (admin && !isTerminated) ? 'flex' : 'none';
+    // Hide all save buttons when terminated
+    if (isTerminated) {
+      document.querySelectorAll('#hr-profile-view button[onclick*="saveHRTab"]').forEach(function(btn){ btn.style.display='none'; });
+    } else {
+      document.querySelectorAll('#hr-profile-view button[onclick*="saveHRTab"]').forEach(function(btn){ btn.style.display=''; });
+    }
   }
 
   async function loadLeaveCalc(userId) {
@@ -7274,19 +7405,142 @@ window.copyInviteLink = function() {
     if(btn){ btn.style.borderBottomColor='var(--gold)'; btn.style.color='var(--gold)'; }
   };
 
-  // ── Terminate / Delete ────────────────────────────────────────────────────────
-  window.hrTerminate = async function() {
-    if(!_hrCurrentUserId||!isAdmin()) return;
-    if(!(await window.lpConfirm('Mark this employee as terminated? Their record will be kept.', { title: 'Terminate employee', confirmLabel: 'Terminate', destructive: true }))) return;
+  // ── Terminate ─────────────────────────────────────────────────────────────────
+  window.hrTerminate = function() {
+    if (!_hrCurrentUserId || !isAdmin()) return;
+
+    // Build the termination modal
+    var ov = document.createElement('div');
+    ov.id = 'hr-terminate-modal';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:9000;display:flex;align-items:center;justify-content:center;padding:20px;';
+
+    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:8px;padding:28px;width:100%;max-width:520px;box-shadow:0 16px 60px rgba(0,0,0,0.7);">'
+      + '<div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--red);font-weight:700;margin-bottom:4px;">Terminate Employee</div>'
+      + '<div id="hr-term-emp-name" style="font-size:17px;font-weight:700;color:var(--white);font-family:Merriweather,serif;margin-bottom:20px;"></div>'
+
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
+
+      + '<div class="mfield" style="grid-column:1/-1;">'
+      + '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Termination Type *</label>'
+      + '<select id="hr-term-type" style="width:100%;padding:8px 10px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:4px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;color-scheme:dark;">'
+      + '<option value="">-- Select type --</option>'
+      + '<option value="Resignation">Resignation</option>'
+      + '<option value="Redundancy">Redundancy</option>'
+      + '<option value="End of Contract">End of Contract</option>'
+      + '<option value="Dismissal">Dismissal</option>'
+      + '<option value="Mutual Agreement">Mutual Agreement</option>'
+      + '<option value="Other">Other</option>'
+      + '</select></div>'
+
+      + '<div class="mfield"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Last Working Day *</label>'
+      + '<input type="date" id="hr-term-lastday" style="width:100%;padding:8px 10px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:4px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;color-scheme:dark;box-sizing:border-box;"></div>'
+
+      + '<div class="mfield"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Final Pay Date</label>'
+      + '<input type="date" id="hr-term-payday" style="width:100%;padding:8px 10px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:4px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;color-scheme:dark;box-sizing:border-box;"></div>'
+
+      + '<div class="mfield" style="grid-column:1/-1;"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Notice Period</label>'
+      + '<select id="hr-term-notice" style="width:100%;padding:8px 10px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:4px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;color-scheme:dark;">'
+      + '<option value="">-- Select --</option>'
+      + '<option value="Full">Full notice served</option>'
+      + '<option value="Partial">Partial notice served</option>'
+      + '<option value="None">No notice served</option>'
+      + '<option value="Waived">Notice waived by company</option>'
+      + '</select></div>'
+
+      + '<div class="mfield" style="grid-column:1/-1;display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid var(--navy-border);border-radius:4px;">'
+      + '<input type="checkbox" id="hr-term-equipment" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;">'
+      + '<label for="hr-term-equipment" style="font-size:13px;color:var(--white);cursor:pointer;">Equipment / access cards returned</label>'
+      + '</div>'
+
+      + '<div class="mfield" style="grid-column:1/-1;"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Notes</label>'
+      + '<textarea id="hr-term-notes" rows="3" placeholder="Additional offboarding notes…" style="width:100%;padding:8px 10px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:4px;color:var(--white);font-family:Lato,sans-serif;font-size:13px;resize:vertical;box-sizing:border-box;"></textarea></div>'
+
+      + '</div>'
+
+      + '<div id="hr-term-error" style="color:var(--red);font-size:12px;min-height:18px;margin-top:10px;"></div>'
+
+      + '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">'
+      + '<button id="hr-term-cancel-btn" style="font-size:11px;padding:8px 20px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">Cancel</button>'
+      + '<button id="hr-term-confirm-btn" style="font-size:11px;padding:8px 20px;background:transparent;border:1px solid var(--red);color:var(--red);border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">Terminate &amp; Revoke Access</button>'
+      + '</div></div>';
+
+    document.body.appendChild(ov);
+
+    // Populate employee name in modal
+    var empNameEl = document.getElementById('hr-term-emp-name');
+    var allU = _hrAllUsers.concat(_hrAllTerminated||[]);
+    var emp = allU.find(function(u){ return u.id === _hrCurrentUserId; });
+    if (empNameEl && emp) empNameEl.textContent = emp.display_name || emp.email || 'This employee';
+
+    ov.querySelector('#hr-term-cancel-btn').onclick = function(){ ov.remove(); };
+    ov.onclick = function(e){ if (e.target === ov) ov.remove(); };
+
+    ov.querySelector('#hr-term-confirm-btn').onclick = async function() {
+      var type    = document.getElementById('hr-term-type').value;
+      var lastDay = document.getElementById('hr-term-lastday').value;
+      var payDay  = document.getElementById('hr-term-payday').value;
+      var notice  = document.getElementById('hr-term-notice').value;
+      var equip   = document.getElementById('hr-term-equipment').checked;
+      var notes   = document.getElementById('hr-term-notes').value.trim();
+      var errEl   = document.getElementById('hr-term-error');
+
+      if (!type)    { errEl.textContent = 'Please select a termination type.'; return; }
+      if (!lastDay) { errEl.textContent = 'Please enter the last working day.'; return; }
+      errEl.textContent = '';
+
+      var btn = ov.querySelector('#hr-term-confirm-btn');
+      btn.disabled = true; btn.textContent = 'Terminating…';
+
+      try {
+        await sbPatch('app_users','?id=eq.'+_hrCurrentUserId, { status:'terminated' });
+        var termPayload = {
+          status:'terminated',
+          terminated_at: new Date().toISOString(),
+          termination_type: type,
+          last_working_day: lastDay || null,
+          final_pay_date:   payDay  || null,
+          notice_period:    notice  || null,
+          equipment_returned: equip,
+          termination_notes:  notes || null
+        };
+        if (_hrCurrentProfile) {
+          await sbPatch('hr_profiles','?id=eq.'+_hrCurrentProfile.id, termPayload);
+        }
+        ov.remove();
+        window.toast && window.toast('Employee terminated — access revoked.', 'success');
+        _hrCurrentUserId = null; _hrCurrentProfile = null;
+        document.getElementById('hr-empty-state').style.display = '';
+        document.getElementById('hr-profile-view').style.display = 'none';
+        loadHRList();
+      } catch(e) {
+        btn.disabled = false; btn.textContent = 'Terminate & Revoke Access';
+        errEl.textContent = 'Error: ' + e.message;
+      }
+    };
+  };
+
+  // ── Reactivate ────────────────────────────────────────────────────────────────
+  window.hrReactivate = async function() {
+    if (!_hrCurrentUserId || !isAdmin()) return;
+    if (!(await window.lpConfirm('Reactivate this employee and restore their Pulse access?', { title: 'Reactivate Employee', confirmLabel: 'Reactivate' }))) return;
     try {
-      await sbPatch('app_users','?id=eq.'+_hrCurrentUserId,{status:'terminated'});
-      if(_hrCurrentProfile) await sbPatch('hr_profiles','?id=eq.'+_hrCurrentProfile.id,{status:'terminated',terminated_at:new Date().toISOString()});
-      window.toast&&window.toast('Employee terminated.','success');
-      _hrCurrentUserId=null; _hrCurrentProfile=null;
-      document.getElementById('hr-empty-state').style.display='';
-      document.getElementById('hr-profile-view').style.display='none';
-      loadHRList();
-    } catch(e){ window.toast&&window.toast('Error: '+e.message,'error'); }
+      await sbPatch('app_users','?id=eq.'+_hrCurrentUserId, { status:'active' });
+      if (_hrCurrentProfile) {
+        await sbPatch('hr_profiles','?id=eq.'+_hrCurrentProfile.id, {
+          status: 'active',
+          terminated_at: null,
+          termination_type: null,
+          last_working_day: null,
+          final_pay_date: null,
+          notice_period: null,
+          equipment_returned: false,
+          termination_notes: null
+        });
+      }
+      window.toast && window.toast('Employee reactivated.', 'success');
+      var uid = _hrCurrentUserId;
+      loadHRList().then(function(){ window.openHRProfile(uid); });
+    } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
 
   window.hrDelete = async function() {
@@ -21051,22 +21305,51 @@ window.ccxPrintRecord = function() {
 
   <!-- HR panel -->
   <div id="people-hr" class="people-panel" style="display:none;">
-  <!-- Hidden employee list kept for JS compatibility -->
-  <div id="hr-employee-list" style="display:none;"></div>
+  <!-- Two-column layout: directory left, profile right -->
+  <div style="display:flex;gap:0;min-height:500px;">
 
-  <!-- Search bar -->
-  <div id="hr-search-bar" style="margin-bottom:20px;position:relative;">
-    <div style="position:relative;">
-      <svg style="position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:0.35;pointer-events:none;" width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.099zm-5.242 1.656a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/></svg>
-      <input id="hr-search-input" type="text" placeholder="Search employees…" autocomplete="off"
-        style="width:100%;padding:11px 16px 11px 36px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-size:13px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;transition:border-color 0.15s;"
-        onfocus="this.style.borderColor='var(--navy-border)'" onblur="this.style.borderColor='var(--navy-border)'">
+    <!-- Left: Employee directory (shown to those with hr_view_directory) -->
+    <div id="hr-directory-panel" style="display:none;width:268px;min-width:268px;border-right:1px solid var(--navy-border);padding-right:0;margin-right:20px;flex-direction:column;gap:0;">
+      <!-- Search -->
+      <div style="padding:0 0 12px 0;position:relative;">
+        <div style="position:relative;">
+          <svg style="position:absolute;left:10px;top:50%;transform:translateY(-50%);opacity:0.35;pointer-events:none;" width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.099zm-5.242 1.656a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/></svg>
+          <input id="hr-dir-search" type="text" placeholder="Filter employees…" autocomplete="off"
+            oninput="window.hrDirFilter(this.value)"
+            style="width:100%;padding:9px 12px 9px 30px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;color:var(--white);font-size:12px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+        </div>
+      </div>
+
+      <!-- Current Employees -->
+      <div style="overflow-y:auto;flex:1;">
+        <div style="font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;padding:8px 12px 6px;border-bottom:1px solid var(--navy-border);background:var(--navy-dark);position:sticky;top:0;z-index:1;">
+          Current Employees
+          <span id="hr-dir-current-count" style="color:var(--muted);font-weight:400;margin-left:6px;"></span>
+        </div>
+        <div id="hr-dir-current-list"></div>
+
+        <!-- Terminated Employees (collapsible) -->
+        <div id="hr-dir-terminated-section" style="display:none;margin-top:4px;">
+          <button onclick="window.hrDirToggleTerminated()" id="hr-dir-terminated-toggle"
+            style="width:100%;text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:8px 12px 6px;border:none;border-bottom:1px solid var(--navy-border);background:var(--navy-dark);cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:Lato,sans-serif;position:sticky;top:0;z-index:1;">
+            <span>Terminated Employees <span id="hr-dir-term-count" style="font-weight:400;margin-left:6px;"></span></span>
+            <span id="hr-dir-term-chevron" style="font-size:10px;transition:transform 0.2s;">&#9660;</span>
+          </button>
+          <div id="hr-dir-terminated-list" style="display:none;"></div>
+        </div>
+      </div>
     </div>
-    <div id="hr-search-drop" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:6px;z-index:400;max-height:280px;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.6);"></div>
-  </div>
 
-  <!-- Profile area (full width) -->
-  <div id="hr-profile-area">
+    <!-- Legacy hidden list kept for JS compatibility -->
+    <div id="hr-employee-list" style="display:none;"></div>
+    <!-- Legacy search bar kept for JS compatibility (hidden) -->
+    <div id="hr-search-bar" style="display:none;">
+      <input id="hr-search-input" type="text" autocomplete="off">
+      <div id="hr-search-drop"></div>
+    </div>
+
+    <!-- Right: Profile area -->
+    <div id="hr-profile-area" style="flex:1;min-width:0;">
       <div id="hr-empty-state" style="display:flex;align-items:center;justify-content:center;min-height:300px;color:var(--muted);font-size:13px;">
         Select an employee to view their profile
       </div>
@@ -21234,8 +21517,8 @@ window.ccxPrintRecord = function() {
       </div><!-- /hr-profile-view -->
     </div><!-- /hr-profile-area -->
 
-<!-- /grid -->
-  </div>
+  </div><!-- /two-column layout -->
+  </div><!-- /people-hr -->
 
   <!-- Annual Leave panel -->
   <div id="people-leave" class="people-panel" style="display:none;">
@@ -26792,6 +27075,23 @@ window.saveAdjModal = async function() {
       _loadJobsInFlight = false;
     }
   }
+
+  // ── Realtime: sign-off gates + dashboard dots ─────────────────────────────
+  // Subscribes to the three sign-off tables so BOM/S.Chain/Liquid pills and
+  // the dashboard status dots refresh automatically when any sign-off changes.
+  (function _initSignoffRealtime() {
+    if (!window._sb) return;
+    var _debounceTimer;
+    function _refresh() {
+      clearTimeout(_debounceTimer);
+      _debounceTimer = setTimeout(function() { loadJobs(); }, 600);
+    }
+    window._sb.channel('signoff_gates')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_tasks' },          _refresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_drygoods_prep' },  _refresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_liquid_signoff' }, _refresh)
+      .subscribe();
+  })();
 
   async function _doLoadJobs() {
     // Load staff map for name lookups
@@ -39374,6 +39674,7 @@ window.saveAdjModal = async function() {
     { key:'roster_view',        label:'View roster & hours',         category:'People' },
     { key:'roster_edit',        label:'Edit roster',                 category:'People' },
     { key:'timesheet_edit',     label:'Edit & delete clock records', category:'People' },
+    { key:'hr_view_directory',  label:'View full employee directory (incl. terminated)', category:'People' },
     { key:'reports_view',       label:'View reports',                category:'Reports' },
     { key:'settings_access',    label:'Access settings',             category:'System' },
     { key:'invite_users',       label:'Invite new users',            category:'System' },
@@ -39394,17 +39695,18 @@ window.saveAdjModal = async function() {
 
   // Default permissions (MD and Ops Dir always get everything)
   var DEFAULT_PERMISSIONS = {
-    managing_director:   { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
-    operations_director: { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,reports_view:1,settings_access:1 },
-    business_analyst:    { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,boms_edit:1,boms_lock:0,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_all:1,reports_view:1,settings_access:1 },
-    commercial_manager:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
-    ecommerce_manager:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
-    production_manager:  { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,boms_edit:0,boms_lock:0,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:1,reports_view:1,settings_access:0 },
-    quality_compliance:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:1,boms_lock:1,labels_manage:1,production_control:0,changeover_override:0,bay_assign:1,bay_release:1,drygoods_edit:0,clients_edit:0,roster_view:0,roster_edit:0,timesheet_edit:0,reports_view:1,settings_access:0 },
-    warehouse_liquid:    { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:0,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:0,boms_lock:0,labels_manage:0,production_control:1,changeover_override:0,bay_assign:0,bay_release:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
-    client_coordinator:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:1,production_control:0,changeover_override:0,bay_assign:1,bay_release:1,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
-    production_operator: { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,production_control:1,changeover_override:0,bay_assign:0,bay_release:1,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:0,settings_access:0 },
-    order_fulfillment:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:0,liquid_products_edit:0,boms_edit:0,boms_lock:0,labels_manage:1,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,reports_view:1,settings_access:0 },
+    managing_director:   { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:1,reports_view:1,settings_access:1 },
+    operations_director: { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:1,reports_view:1,settings_access:1 },
+    business_analyst:    { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,boms_edit:1,boms_lock:0,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_all:1,hr_view_directory:1,reports_view:1,settings_access:1 },
+    financial_controller:{ jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:1,reports_view:1,settings_access:0 },
+    commercial_manager:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:1,settings_access:0 },
+    ecommerce_manager:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:1,settings_access:0 },
+    production_manager:  { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,boms_edit:0,boms_lock:0,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:1,hr_view_directory:0,reports_view:1,settings_access:0 },
+    quality_compliance:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:1,boms_lock:1,labels_manage:1,production_control:0,changeover_override:0,bay_assign:1,bay_release:1,drygoods_edit:0,clients_edit:0,roster_view:0,roster_edit:0,timesheet_edit:0,hr_view_directory:0,reports_view:1,settings_access:0 },
+    warehouse_liquid:    { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:0,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:0,boms_lock:0,labels_manage:0,production_control:1,changeover_override:0,bay_assign:0,bay_release:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:0,settings_access:0 },
+    client_coordinator:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:1,production_control:0,changeover_override:0,bay_assign:1,bay_release:1,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:0,settings_access:0 },
+    production_operator: { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,production_control:1,changeover_override:0,bay_assign:0,bay_release:1,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:0,settings_access:0 },
+    order_fulfillment:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:0,liquid_products_edit:0,boms_edit:0,boms_lock:0,labels_manage:1,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:1,settings_access:0 },
   };
 
   var _permissions = JSON.parse(JSON.stringify(DEFAULT_PERMISSIONS));
@@ -40147,13 +40449,6 @@ window.lvInit = async function(){
     lvRenderKPIs();
     lvRenderHistory();
     lvBindFormEvents();
-
-    // Show manager view for admins / anyone who is a reports-to manager
-    var mgv=document.getElementById('lv-manager-view');
-    if(isLvAdmin()&&mgv){
-      mgv.style.display='';
-      window.lvLoadManagerView();
-    }
   } catch(e) {
     console.error('[LEAVE] lvInit error:', e);
     var hist=document.getElementById('lv-history');
