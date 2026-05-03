@@ -35992,11 +35992,22 @@ window.saveAdjModal = async function() {
     if (!window.canDo || !window.canDo('production_control')) { window.toast && window.toast('Permission denied.', 'error'); return; }
     try {
       var startIso = new Date().toISOString();
-      var patch = { actual_start: startIso, actual_end: null, changeover_start: null, paused_at: null, total_paused_secs: 0 };
-      // If the job never went through auto-changeover (no date_commenced written yet), seed it now
       var existing = _schedJobs.find(function(x) { return x.id === jobId; });
+      var oldPriority = existing && existing.bay_waitlist_priority;
+      var patch = { actual_start: startIso, actual_end: null, changeover_start: null, paused_at: null, total_paused_secs: 0, bay_waitlist_priority: null };
+      // If the job never went through auto-changeover (no date_commenced written yet), seed it now
       if (!existing || !existing.date_commenced) patch.date_commenced = startIso;
       await sbPatch('jobs', '?id=eq.' + jobId, patch);
+      // Close the gap left in the priority queue by shifting all higher priorities down by 1
+      if (oldPriority != null) {
+        try {
+          var above = await sbGet('jobs?bay_waitlist_priority=gte.' + oldPriority + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
+          for (var i = 0; i < (above || []).length; i++) {
+            if (above[i].id === jobId) continue;
+            await sbPatch('jobs', '?id=eq.' + above[i].id, { bay_waitlist_priority: (above[i].bay_waitlist_priority || 0) - 1 });
+          }
+        } catch(e) {}
+      }
       window.toast && window.toast('Job started.', 'success');
       await loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
