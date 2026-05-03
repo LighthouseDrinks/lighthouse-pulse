@@ -7275,7 +7275,7 @@ window.copyInviteLink = function() {
       'hr-city':p.city||'','hr-county':p.county||'','hr-eircode':p.eircode||'',
       'hr-job-title':p.job_title||(u&&window.ROLE_LABELS?window.ROLE_LABELS[u.role]||'':''),'hr-employment-type':p.employment_type||'',
       'hr-start-date':p.employment_start||'','hr-probation-end':p.probation_end||'',
-      'hr-reports-to':p.reports_to||(u&&u.reports_to_id)||'',
+      'hr-reports-to':(u&&u.role==='managing_director')?'':(p.reports_to||(u&&u.reports_to_id)||''),
       'hr-salary':p.salary_amount||'','hr-salary-type':p.salary_type||'',
       'hr-pay-freq':p.payment_frequency||'','hr-overtime':p.overtime_rate||'',
       'hr-leave-entitlement':p.leave_entitlement!=null?p.leave_entitlement:'','hr-leave-balance':p.leave_balance||0,
@@ -7288,11 +7288,18 @@ window.copyInviteLink = function() {
       var el=document.getElementById(id); if(el) el.value=fmap[id];
     });
 
+    // Hide the Reports To field entirely for Managing Directors
+    var rtFieldRow = document.getElementById('hr-reports-to');
+    if (rtFieldRow) {
+      var rtFieldWrap = rtFieldRow.parentNode;
+      if (rtFieldWrap) rtFieldWrap.style.display = (u && u.role === 'managing_director') ? 'none' : '';
+    }
+
     // Ensure the reports-to manager appears as an option in the dropdown
     // (for non-admins the dropdown is only populated with themselves, so the
     // manager's option is missing and the value silently shows blank)
     var rtSel = document.getElementById('hr-reports-to');
-    var rtVal = p.reports_to || (u && u.reports_to_id) || '';
+    var rtVal = (u && u.role === 'managing_director') ? '' : (p.reports_to || (u && u.reports_to_id) || '');
     if (rtSel && rtVal) {
       var optExists = Array.prototype.some.call(rtSel.options, function(o){ return o.value === rtVal; });
       if (!optExists) {
@@ -7398,7 +7405,9 @@ window.copyInviteLink = function() {
       // Update display_name
       if (gv('hr-first-name')) await sbPatch('app_users','?id=eq.'+_hrCurrentUserId,{display_name:gv('hr-first-name')+' '+gv('hr-last-name')});
     } else if (tab==='employment'&&admin) {
-      var reportsToVal = gv('hr-reports-to')||null;
+      var _empTargetUser = (_hrAllUsers||[]).find(function(u){ return u.id===_hrCurrentUserId; }) || {};
+      var _isMDProfile = _empTargetUser.role === 'managing_director';
+      var reportsToVal = _isMDProfile ? null : (gv('hr-reports-to')||null);
       Object.assign(payload,{job_title:gv('hr-job-title'),employment_type:gv('hr-employment-type')||null,
         employment_start:gv('hr-start-date')||null,probation_end:gv('hr-probation-end')||null,
         reports_to:reportsToVal});
@@ -7429,12 +7438,26 @@ window.copyInviteLink = function() {
           var payDone = lp.salary_amount && lp.salary_type;
           var bankDone = lp.iban && lp.bic_swift;
           if(personalDone && employmentDone && payDone && bankDone) {
-            // Find open hr_profile_setup task for this user and complete it
+            // Mark the HR profile itself as complete so the PROFILE PENDING badge clears
+            var profileId = _hrCurrentProfile && _hrCurrentProfile.id;
+            if(profileId) {
+              await sbPatch('hr_profiles','?id=eq.'+profileId,{profile_complete:true,first_login_done:true});
+              if(_hrCompleteProfileIds) _hrCompleteProfileIds.add(_hrCurrentUserId);
+              // Re-render the directory item so the badge disappears immediately
+              var dirItem = document.querySelector('#hr-dir-current-list div[data-uid="'+_hrCurrentUserId+'"], #hr-dir-terminated-list div[data-uid="'+_hrCurrentUserId+'"]');
+              if(dirItem) {
+                var badgeEl = dirItem.querySelector('span[title="HR profile not yet completed"]');
+                if(badgeEl) badgeEl.remove();
+              }
+            }
+            // Find and close any open hr_profile_setup tasks for this user
             var openTasks = await sbGet('job_tasks?task_type=eq.hr_profile_setup&status=in.(pending,accepted)&target_user_id=eq.'+_hrCurrentUserId);
             for(var oti=0; oti<openTasks.length; oti++) {
-              await sbPatch('job_tasks','?id=eq.'+openTasks[oti].id,{status:'completed',completed_at:new Date().toISOString()});
+              await sbPatch('job_tasks','?id=eq.'+openTasks[oti].id,{status:'completed',completed_by:window.CURRENT_USER?window.CURRENT_USER.email:'admin',completed_at:new Date().toISOString()});
             }
-            if(openTasks.length) window.toast&&window.toast('HR profile complete — task closed ✓','success');
+            window.toast&&window.toast('HR profile complete — task closed \u2713','success');
+            // Refresh tasks panel if open so the task disappears from the list
+            if(typeof window.loadMyTasks==='function') window.loadMyTasks();
           }
         }
       } catch(e){ console.warn('HR task auto-complete check failed:',e.message); }
