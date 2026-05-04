@@ -1826,20 +1826,53 @@ async function handleSession(session) {
     var displayName = rows.length ? rows[0].display_name : null;
     var STAFF_ROLES = ['managing_director','operations_director','business_analyst','quality_compliance','financial_controller','commercial_manager','ecommerce_manager','production_manager','warehouse_liquid','client_coordinator','production_operator','order_fulfillment'];
 
-    // Block terminated employees — check status via a separate lightweight query
-    // so that login still works even if the status column hasn't been migrated yet
+    // Block terminated (and pending-termination past their last working day) employees.
+    // Uses a separate lightweight query so login still works if status column is missing.
     try {
-      var statusRes  = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=status', {
+      var statusRes  = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=id,status', {
         headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token }
       });
       if (statusRes.ok) {
         var statusRows = await statusRes.json();
-        if (Array.isArray(statusRows) && statusRows[0] && statusRows[0].status === 'terminated') {
-          await window._sb.auth.signOut();
-          window.CURRENT_USER = null;
-          showLogin();
-          setAuthError('Your Pulse access has been revoked. Please contact your manager if you believe this is an error.');
-          return;
+        if (Array.isArray(statusRows) && statusRows[0]) {
+          var _loginStatus   = statusRows[0].status;
+          var _loginAppId    = statusRows[0].id;
+          var _shouldRevoke  = (_loginStatus === 'terminated');
+
+          // For pending terminations, check whether the last working day has arrived
+          if (!_shouldRevoke && _loginStatus === 'pending_termination') {
+            try {
+              var profRes = await fetch(SUPA_URL + '/rest/v1/hr_profiles?user_id=eq.' + _loginAppId + '&select=last_working_day', {
+                headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token }
+              });
+              if (profRes.ok) {
+                var profRows = await profRes.json();
+                if (Array.isArray(profRows) && profRows[0] && profRows[0].last_working_day) {
+                  var _today = new Date(); _today.setHours(0,0,0,0);
+                  var _lwd   = new Date(profRows[0].last_working_day + 'T00:00:00');
+                  if (_lwd <= _today) { _shouldRevoke = true; }
+                }
+              }
+            } catch(pe) { /* safe to continue if hr_profiles not yet reachable */ }
+          }
+
+          if (_shouldRevoke) {
+            // Flip pending → terminated so future checks are instant
+            if (_loginStatus === 'pending_termination') {
+              try {
+                await fetch(SUPA_URL + '/rest/v1/app_users?id=eq.' + _loginAppId, {
+                  method: 'PATCH',
+                  headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+                  body: JSON.stringify({ status: 'terminated' })
+                });
+              } catch(fe) { /* best-effort flip */ }
+            }
+            await window._sb.auth.signOut();
+            window.CURRENT_USER = null;
+            showLogin();
+            setAuthError('Your Pulse access has been revoked. Please contact your manager if you believe this is an error.');
+            return;
+          }
         }
       }
     } catch(se) { /* status column may not exist yet — safe to continue */ }
@@ -7014,17 +7047,48 @@ window.copyInviteLink = function() {
 
   // ── Load HR list ─────────────────────────────────────────────────────────────
   var _hrAllTerminated = [];
+  var _hrAllPending    = [];
 
   async function loadHRList() {
     var dirPanel = document.getElementById('hr-directory-panel');
 
     try {
       if (canViewDirectory()) {
-        // Fetch ALL users including terminated so we can split them
+        // Fetch ALL users including terminated/pending so we can split them
         var allUsers = await sbGet('app_users?order=display_name.asc&select=id,display_name,role,email,reports_to_id,status');
-        var active     = allUsers.filter(function(u){ return u.status !== 'terminated' && u.role !== 'client'; });
-        var clients    = allUsers.filter(function(u){ return u.status !== 'terminated' && u.role === 'client'; });
+        var active     = allUsers.filter(function(u){ return u.status === 'active' && u.role !== 'client'; });
+        var clients    = allUsers.filter(function(u){ return u.status === 'active' && u.role === 'client'; });
+        var pending    = allUsers.filter(function(u){ return u.status === 'pending_termination'; });
         var terminated = allUsers.filter(function(u){ return u.status === 'terminated'; });
+
+        // Auto-flip any pending user whose last working day has already arrived
+        if (pending.length > 0) {
+          try {
+            var _todayFlip = new Date(); _todayFlip.setHours(0,0,0,0);
+            var pendingIds = pending.map(function(u){ return u.id; }).join(',');
+            var pendProfiles = await sbGet('hr_profiles?user_id=in.('+pendingIds+')&select=user_id,last_working_day');
+            var flippedIds = [];
+            for (var fi = 0; fi < pendProfiles.length; fi++) {
+              var pp = pendProfiles[fi];
+              if (pp.last_working_day && new Date(pp.last_working_day + 'T00:00:00') <= _todayFlip) {
+                try {
+                  await sbPatch('app_users', '?id=eq.'+pp.user_id, { status: 'terminated' });
+                  flippedIds.push(pp.user_id);
+                } catch(fe) { /* best-effort */ }
+              }
+            }
+            if (flippedIds.length > 0) {
+              flippedIds.forEach(function(fid) {
+                var idx = pending.findIndex(function(u){ return u.id === fid; });
+                if (idx >= 0) {
+                  var u = pending.splice(idx, 1)[0];
+                  u.status = 'terminated';
+                  terminated.push(u);
+                }
+              });
+            }
+          } catch(e) { /* auto-flip pass failed silently */ }
+        }
 
         // Fetch complete profiles so we can flag anyone with a pending setup
         try {
@@ -7033,6 +7097,7 @@ window.copyInviteLink = function() {
         } catch(e) { _hrCompleteProfileIds = null; }
 
         _hrAllUsers      = active;
+        _hrAllPending    = pending;
         _hrAllTerminated = terminated;
 
         // Show directory panel
@@ -7044,19 +7109,24 @@ window.copyInviteLink = function() {
         _hrPopulateReportsTo(active);
         _hrRenderDirList(active, 'hr-dir-current-list', false);
         _hrRenderDirList(clients, 'hr-dir-clients-list', false, true);
+        _hrRenderDirList(pending, 'hr-dir-pending-list', true);
         _hrRenderDirList(terminated, 'hr-dir-terminated-list', true);
 
         // Update counts
-        var cc = document.getElementById('hr-dir-current-count');
-        var tc = document.getElementById('hr-dir-term-count');
+        var cc  = document.getElementById('hr-dir-current-count');
+        var pc  = document.getElementById('hr-dir-pending-count');
+        var tc  = document.getElementById('hr-dir-term-count');
         var clc = document.getElementById('hr-dir-clients-count');
         if (cc)  cc.textContent  = '(' + active.length + ')';
+        if (pc)  pc.textContent  = '(' + pending.length + ')';
         if (tc)  tc.textContent  = '(' + terminated.length + ')';
         if (clc) clc.textContent = '(' + clients.length + ')';
 
-        // Show/hide clients and terminated sections based on content
+        // Show/hide clients, pending, and terminated sections based on content
         var clientSec = document.getElementById('hr-dir-clients-section');
         if (clientSec) clientSec.style.display = clients.length ? '' : 'none';
+        var pendSec = document.getElementById('hr-dir-pending-section');
+        if (pendSec) pendSec.style.display = pending.length ? '' : 'none';
         var termSec = document.getElementById('hr-dir-terminated-section');
         if (termSec) termSec.style.display = terminated.length ? '' : 'none';
 
@@ -7118,12 +7188,15 @@ window.copyInviteLink = function() {
     var roleLabel = isClient ? 'Client Account' : (u.role||'').replace(/_/g,' ');
     var roleHtml  = roleLabel ? '<div style="font-size:10px;color:var(--muted);margin-top:1px;text-transform:capitalize;">' + roleLabel + '</div>' : '';
 
-    var profilePending = !isTerminated && !isClient && _hrCompleteProfileIds !== null && !_hrCompleteProfileIds.has(u.id);
-    var badge = isTerminated
-      ? '<span style="font-size:9px;background:rgba(220,53,69,0.15);color:#e05a6a;border:1px solid rgba(220,53,69,0.3);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;flex-shrink:0;">TERMINATED</span>'
-      : profilePending
-        ? '<span title="HR profile not yet completed" style="font-size:9px;background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.35);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;flex-shrink:0;">PROFILE PENDING</span>'
-        : '';
+    var isActuallyPending = u.status === 'pending_termination';
+    var profilePending = !isTerminated && !isClient && !isActuallyPending && _hrCompleteProfileIds !== null && !_hrCompleteProfileIds.has(u.id);
+    var badge = isActuallyPending
+      ? '<span style="font-size:9px;background:rgba(201,168,76,0.12);color:var(--amber);border:1px solid rgba(201,168,76,0.35);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;flex-shrink:0;">PENDING</span>'
+      : (isTerminated && !isActuallyPending)
+        ? '<span style="font-size:9px;background:rgba(220,53,69,0.15);color:#e05a6a;border:1px solid rgba(220,53,69,0.3);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;flex-shrink:0;">TERMINATED</span>'
+        : profilePending
+          ? '<span title="HR profile not yet completed" style="font-size:9px;background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.35);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;flex-shrink:0;">PROFILE PENDING</span>'
+          : '';
 
     item.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;">'
       + nameHtml + badge
@@ -7138,7 +7211,7 @@ window.copyInviteLink = function() {
 
   window.hrDirFilter = function(query) {
     var q = (query||'').toLowerCase().trim();
-    ['hr-dir-current-list','hr-dir-clients-list','hr-dir-terminated-list'].forEach(function(id){
+    ['hr-dir-current-list','hr-dir-clients-list','hr-dir-pending-list','hr-dir-terminated-list'].forEach(function(id){
       var el = document.getElementById(id);
       if (!el) return;
       el.querySelectorAll('div[data-uid]').forEach(function(row){
@@ -7166,6 +7239,15 @@ window.copyInviteLink = function() {
     if (chevron) chevron.style.transform = _hrClientsOpen ? 'rotate(180deg)' : '';
   };
 
+  var _hrPendingOpen = false;
+  window.hrDirTogglePending = function() {
+    _hrPendingOpen = !_hrPendingOpen;
+    var list    = document.getElementById('hr-dir-pending-list');
+    var chevron = document.getElementById('hr-dir-pending-chevron');
+    if (list)    list.style.display      = _hrPendingOpen ? '' : 'none';
+    if (chevron) chevron.style.transform = _hrPendingOpen ? 'rotate(180deg)' : '';
+  };
+
   // ── Reports-To dropdown population (shared helper) ──────────────────────────
   function _hrPopulateReportsTo(users) {
     var rtSel = document.getElementById('hr-reports-to');
@@ -7190,7 +7272,7 @@ window.copyInviteLink = function() {
     document.getElementById('hr-profile-view').style.display = '';
 
     // Highlight selected in directory lists
-    document.querySelectorAll('#hr-dir-current-list div[data-uid], #hr-dir-clients-list div[data-uid], #hr-dir-terminated-list div[data-uid]').forEach(function(el){
+    document.querySelectorAll('#hr-dir-current-list div[data-uid], #hr-dir-clients-list div[data-uid], #hr-dir-pending-list div[data-uid], #hr-dir-terminated-list div[data-uid]').forEach(function(el){
       var selected = el.getAttribute('data-uid') === userId;
       el.style.background      = selected ? 'rgba(201,168,76,0.08)' : 'transparent';
       el.style.borderLeftColor = selected ? 'var(--gold)' : 'transparent';
@@ -7217,32 +7299,41 @@ window.copyInviteLink = function() {
     var profiles = await sbGet('hr_profiles?user_id=eq.'+userId+'&limit=1');
     _hrCurrentProfile = profiles[0] || null;
 
-    // Determine terminated state from app_users OR hr_profiles
-    var allU = _hrAllUsers.concat(_hrAllTerminated||[]);
+    // Determine terminated / pending state from app_users OR hr_profiles
+    var allU = _hrAllUsers.concat(_hrAllPending||[]).concat(_hrAllTerminated||[]);
     var uRecord = allU.find(function(x){ return x.id === userId; }) || {};
-    var isTerminated = uRecord.status === 'terminated' || (_hrCurrentProfile && _hrCurrentProfile.status === 'terminated');
+    var isPending    = uRecord.status === 'pending_termination' || (_hrCurrentProfile && _hrCurrentProfile.status === 'pending_termination');
+    var isTerminated = uRecord.status === 'terminated'          || (_hrCurrentProfile && _hrCurrentProfile.status === 'terminated') || isPending;
 
-    // Terminated status banner
+    // Status banner (amber for pending, red for terminated)
     var existingBanner = document.getElementById('hr-terminated-banner');
     if (existingBanner) existingBanner.remove();
     if (isTerminated && _hrCurrentProfile) {
       var p = _hrCurrentProfile;
-      var termDate  = p.terminated_at  ? new Date(p.terminated_at).toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'}) : '—';
       var termType  = p.termination_type || '—';
       var lastDay   = p.last_working_day  ? new Date(p.last_working_day+'T00:00:00').toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'}) : '—';
       var banner = document.createElement('div');
       banner.id = 'hr-terminated-banner';
-      banner.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:16px;padding:12px 18px;background:rgba(220,53,69,0.1);border:1px solid rgba(220,53,69,0.3);border-radius:6px;margin-bottom:18px;';
-      banner.innerHTML = '<span style="font-size:10px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:#e05a6a;background:rgba(220,53,69,0.18);padding:3px 10px;border-radius:3px;">TERMINATED</span>'
-        + '<span style="font-size:12px;color:var(--muted);">Terminated: <strong style="color:var(--white);">'+termDate+'</strong></span>'
-        + '<span style="font-size:12px;color:var(--muted);">Type: <strong style="color:var(--white);">'+termType+'</strong></span>'
-        + '<span style="font-size:12px;color:var(--muted);">Last day: <strong style="color:var(--white);">'+lastDay+'</strong></span>'
-        + (isAdmin() ? '<button onclick="window.hrReactivate()" style="margin-left:auto;font-size:11px;padding:5px 14px;background:transparent;border:1px solid var(--gold);color:var(--gold);border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">Reactivate</button>' : '');
+      if (isPending) {
+        banner.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:16px;padding:12px 18px;background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.3);border-radius:6px;margin-bottom:18px;';
+        banner.innerHTML = '<span style="font-size:10px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:var(--amber);background:rgba(201,168,76,0.15);padding:3px 10px;border-radius:3px;">PENDING TERMINATION</span>'
+          + '<span style="font-size:12px;color:var(--muted);">Last working day: <strong style="color:var(--white);">'+lastDay+'</strong></span>'
+          + '<span style="font-size:12px;color:var(--muted);">Type: <strong style="color:var(--white);">'+termType+'</strong></span>'
+          + (isAdmin() ? '<button onclick="window.hrReactivate()" style="margin-left:auto;font-size:11px;padding:5px 14px;background:transparent;border:1px solid var(--muted);color:var(--muted);border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">Cancel Scheduled Termination</button>' : '');
+      } else {
+        var termDate  = p.terminated_at  ? new Date(p.terminated_at).toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'}) : '—';
+        banner.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:16px;padding:12px 18px;background:rgba(220,53,69,0.1);border:1px solid rgba(220,53,69,0.3);border-radius:6px;margin-bottom:18px;';
+        banner.innerHTML = '<span style="font-size:10px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:#e05a6a;background:rgba(220,53,69,0.18);padding:3px 10px;border-radius:3px;">TERMINATED</span>'
+          + '<span style="font-size:12px;color:var(--muted);">Terminated: <strong style="color:var(--white);">'+termDate+'</strong></span>'
+          + '<span style="font-size:12px;color:var(--muted);">Type: <strong style="color:var(--white);">'+termType+'</strong></span>'
+          + '<span style="font-size:12px;color:var(--muted);">Last day: <strong style="color:var(--white);">'+lastDay+'</strong></span>'
+          + (isAdmin() ? '<button onclick="window.hrReactivate()" style="margin-left:auto;font-size:11px;padding:5px 14px;background:transparent;border:1px solid var(--gold);color:var(--gold);border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">Reactivate</button>' : '');
+      }
       var profileView = document.getElementById('hr-profile-view');
       if (profileView) profileView.insertBefore(banner, profileView.firstChild);
     }
 
-    // Admin action buttons — show Terminate for active, hide for terminated
+    // Admin action buttons — show Terminate for active only
     var adminBtnsBot = document.getElementById('hr-admin-btns-bottom');
     if (adminBtnsBot) {
       if (isAdmin()) {
@@ -7441,7 +7532,7 @@ window.copyInviteLink = function() {
               await sbPatch('hr_profiles','?id=eq.'+profileId,{profile_complete:true,first_login_done:true});
               if(_hrCompleteProfileIds) _hrCompleteProfileIds.add(_hrCurrentUserId);
               // Re-render the directory item so the badge disappears immediately
-              var dirItem = document.querySelector('#hr-dir-current-list div[data-uid="'+_hrCurrentUserId+'"], #hr-dir-terminated-list div[data-uid="'+_hrCurrentUserId+'"]');
+              var dirItem = document.querySelector('#hr-dir-current-list div[data-uid="'+_hrCurrentUserId+'"], #hr-dir-pending-list div[data-uid="'+_hrCurrentUserId+'"], #hr-dir-terminated-list div[data-uid="'+_hrCurrentUserId+'"]');
               if(dirItem) {
                 var badgeEl = dirItem.querySelector('span[title="HR profile not yet completed"]');
                 if(badgeEl) badgeEl.remove();
@@ -7534,9 +7625,30 @@ window.copyInviteLink = function() {
 
     // Populate employee name in modal
     var empNameEl = document.getElementById('hr-term-emp-name');
-    var allU = _hrAllUsers.concat(_hrAllTerminated||[]);
+    var allU = _hrAllUsers.concat(_hrAllPending||[]).concat(_hrAllTerminated||[]);
     var emp = allU.find(function(u){ return u.id === _hrCurrentUserId; });
     if (empNameEl && emp) empNameEl.textContent = emp.display_name || emp.email || 'This employee';
+
+    // Dynamically update confirm button label based on whether last working day is future
+    var lastDayInput = document.getElementById('hr-term-lastday');
+    var confirmBtn   = document.getElementById('hr-term-confirm-btn');
+    function _updateTermBtnLabel() {
+      var val = lastDayInput.value;
+      if (val) {
+        var _t = new Date(); _t.setHours(0,0,0,0);
+        var _d = new Date(val + 'T00:00:00');
+        if (_d > _t) {
+          confirmBtn.textContent = 'Schedule Termination';
+          confirmBtn.style.borderColor = 'var(--amber)';
+          confirmBtn.style.color       = 'var(--amber)';
+          return;
+        }
+      }
+      confirmBtn.textContent = 'Terminate & Revoke Access';
+      confirmBtn.style.borderColor = 'var(--red)';
+      confirmBtn.style.color       = 'var(--red)';
+    }
+    lastDayInput.addEventListener('change', _updateTermBtnLabel);
 
     ov.querySelector('#hr-term-cancel-btn').onclick = function(){ ov.remove(); };
     ov.onclick = function(e){ if (e.target === ov) ov.remove(); };
@@ -7554,14 +7666,20 @@ window.copyInviteLink = function() {
       if (!lastDay) { errEl.textContent = 'Please enter the last working day.'; return; }
       errEl.textContent = '';
 
+      // Determine whether this is a scheduled (future) or immediate termination
+      var _now = new Date(); _now.setHours(0,0,0,0);
+      var _lwd = new Date(lastDay + 'T00:00:00');
+      var isScheduled = _lwd > _now;
+      var newStatus   = isScheduled ? 'pending_termination' : 'terminated';
+
       var btn = ov.querySelector('#hr-term-confirm-btn');
-      btn.disabled = true; btn.textContent = 'Terminating…';
+      btn.disabled = true; btn.textContent = isScheduled ? 'Scheduling…' : 'Terminating…';
 
       try {
-        await sbPatch('app_users','?id=eq.'+_hrCurrentUserId, { status:'terminated' });
+        await sbPatch('app_users','?id=eq.'+_hrCurrentUserId, { status: newStatus });
         var termPayload = {
-          status:'terminated',
-          terminated_at: new Date().toISOString(),
+          status: newStatus,
+          terminated_at: isScheduled ? null : new Date().toISOString(),
           termination_type: type,
           last_working_day: lastDay || null,
           final_pay_date:   payDay  || null,
@@ -7573,13 +7691,18 @@ window.copyInviteLink = function() {
           await sbPatch('hr_profiles','?id=eq.'+_hrCurrentProfile.id, termPayload);
         }
         ov.remove();
-        window.toast && window.toast('Employee terminated — access revoked.', 'success');
+        var lwdFormatted = _lwd.toLocaleDateString('en-IE', { day:'numeric', month:'short', year:'numeric' });
+        var toastMsg = isScheduled
+          ? 'Termination scheduled for ' + lwdFormatted + ' — access will be revoked at end of that day.'
+          : 'Employee terminated — access revoked.';
+        window.toast && window.toast(toastMsg, 'success');
         _hrCurrentUserId = null; _hrCurrentProfile = null;
         document.getElementById('hr-empty-state').style.display = '';
         document.getElementById('hr-profile-view').style.display = 'none';
         loadHRList();
       } catch(e) {
-        btn.disabled = false; btn.textContent = 'Terminate & Revoke Access';
+        btn.disabled = false;
+        btn.textContent = isScheduled ? 'Schedule Termination' : 'Terminate & Revoke Access';
         errEl.textContent = 'Error: ' + e.message;
       }
     };
@@ -7588,7 +7711,13 @@ window.copyInviteLink = function() {
   // ── Reactivate ────────────────────────────────────────────────────────────────
   window.hrReactivate = async function() {
     if (!_hrCurrentUserId || !isAdmin()) return;
-    if (!(await window.lpConfirm('Reactivate this employee and restore their Pulse access?', { title: 'Reactivate Employee', confirmLabel: 'Reactivate' }))) return;
+    var _isPendingCancel = _hrCurrentProfile && _hrCurrentProfile.status === 'pending_termination';
+    var _confirmMsg   = _isPendingCancel
+      ? 'Cancel the scheduled termination and keep this employee active?'
+      : 'Reactivate this employee and restore their Pulse access?';
+    var _confirmTitle = _isPendingCancel ? 'Cancel Scheduled Termination' : 'Reactivate Employee';
+    var _confirmLabel = _isPendingCancel ? 'Cancel Termination' : 'Reactivate';
+    if (!(await window.lpConfirm(_confirmMsg, { title: _confirmTitle, confirmLabel: _confirmLabel }))) return;
     try {
       await sbPatch('app_users','?id=eq.'+_hrCurrentUserId, { status:'active' });
       if (_hrCurrentProfile) {
@@ -7603,7 +7732,8 @@ window.copyInviteLink = function() {
           termination_notes: null
         });
       }
-      window.toast && window.toast('Employee reactivated.', 'success');
+      var _successMsg = _isPendingCancel ? 'Scheduled termination cancelled.' : 'Employee reactivated.';
+      window.toast && window.toast(_successMsg, 'success');
       var uid = _hrCurrentUserId;
       loadHRList().then(function(){ window.openHRProfile(uid); });
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
@@ -21370,6 +21500,16 @@ window.ccxPrintRecord = function() {
             <span id="hr-dir-clients-chevron" style="font-size:10px;transition:transform 0.2s;">&#9660;</span>
           </button>
           <div id="hr-dir-clients-list" style="display:none;"></div>
+        </div>
+
+        <!-- Pending Termination (collapsible) -->
+        <div id="hr-dir-pending-section" style="display:none;margin-top:4px;">
+          <button onclick="window.hrDirTogglePending()" id="hr-dir-pending-toggle"
+            style="width:100%;text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--amber);font-weight:700;padding:8px 12px 6px;border:none;border-bottom:1px solid var(--navy-border);background:var(--navy-dark);cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:Lato,sans-serif;position:sticky;top:0;z-index:1;">
+            <span>Pending Termination <span id="hr-dir-pending-count" style="font-weight:400;margin-left:6px;"></span></span>
+            <span id="hr-dir-pending-chevron" style="font-size:10px;transition:transform 0.2s;">&#9660;</span>
+          </button>
+          <div id="hr-dir-pending-list" style="display:none;"></div>
         </div>
 
         <!-- Terminated Employees (collapsible) -->
