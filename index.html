@@ -7367,6 +7367,7 @@ window.copyInviteLink = function() {
       'hr-salary':p.salary_amount||'','hr-salary-type':p.salary_type||'',
       'hr-pay-freq':p.payment_frequency||'','hr-overtime':p.overtime_rate||'',
       'hr-leave-entitlement':p.leave_entitlement!=null?p.leave_entitlement:'','hr-leave-balance':p.leave_balance||0,
+      'hr-prior-hours':p.prior_hours_worked!=null?p.prior_hours_worked:'',
       'hr-bank-name':p.bank_account_name||'','hr-bank-bank':p.bank_name||'',
       'hr-bank-iban':p.iban||'','hr-bank-bic':p.bic_swift||'',
       'hr-ec1-name':p.emergency_name_1||'','hr-ec1-rel':p.emergency_relation_1||'','hr-ec1-phone':p.emergency_phone_1||'',
@@ -7411,7 +7412,14 @@ window.copyInviteLink = function() {
     if (uploadBtn) uploadBtn.style.display = isAdmin() ? '' : 'none';
 
     // Part-time leave calc
-    if (p.employment_type === 'part_time') loadLeaveCalc(p.user_id||_hrCurrentUserId);
+    if (p.employment_type === 'part_time') {
+      loadLeaveCalc(p.user_id||_hrCurrentUserId);
+    } else {
+      var calcEl=document.getElementById('hr-leave-calc');
+      if(calcEl) calcEl.style.display='none';
+      var priorRow=document.getElementById('hr-prior-hours-row');
+      if(priorRow) priorRow.style.display='none';
+    }
   }
 
   window.applyHRPermissions = applyHRPermissions;
@@ -7466,18 +7474,25 @@ window.copyInviteLink = function() {
   async function loadLeaveCalc(userId) {
     var calcEl=document.getElementById('hr-leave-calc');
     var contentEl=document.getElementById('hr-leave-calc-content');
+    var priorRow=document.getElementById('hr-prior-hours-row');
     if(!calcEl||!contentEl) return;
+    if(priorRow) priorRow.style.display='';
     try {
-      var events=await sbGet('clock_events?user_id=eq.'+userId+'&order=timestamp.asc&limit=1000');
+      var events=await sbGet('clock_events?user_id=eq.'+userId+'&timestamp=gte.2026-05-18&order=timestamp.asc&limit=1000');
       var totalMs=0, lastIn=null;
       events.forEach(function(e){
         if(e.event_type==='clock_in') lastIn=new Date(e.timestamp);
         else if((e.event_type==='clock_out'||e.event_type==='break_start')&&lastIn){totalMs+=new Date(e.timestamp)-lastIn;lastIn=null;}
       });
-      var hrs=totalMs/3600000, accrued=hrs*0.08;
+      var clockedHrs=totalMs/3600000;
+      var priorHrs=parseFloat((document.getElementById('hr-prior-hours')||{}).value)||0;
+      var totalHrs=clockedHrs+priorHrs;
+      var accrued=totalHrs*0.08;
       calcEl.style.display='';
-      contentEl.innerHTML='Hours on record: <strong style="color:var(--white);">'+hrs.toFixed(1)+'h</strong><br>'
-        +'Accrued (8%): <strong style="color:var(--gold);">'+accrued.toFixed(1)+'h</strong> ≈ '+(accrued/8).toFixed(1)+' days';
+      contentEl.innerHTML=(priorHrs>0?'Prior hours: <strong style="color:var(--white);">'+priorHrs.toFixed(1)+'h</strong><br>':'')
+        +'Clocked since 18 May 2026: <strong style="color:var(--white);">'+clockedHrs.toFixed(1)+'h</strong><br>'
+        +'Total: <strong style="color:var(--white);">'+totalHrs.toFixed(1)+'h</strong><br>'
+        +'Accrued (8%): <strong style="color:var(--gold);">'+accrued.toFixed(1)+'h</strong> \u2248 '+(accrued/8).toFixed(1)+' days';
     } catch(e){ window.logError('holiday hours calc', e); }
   }
 
@@ -7504,7 +7519,8 @@ window.copyInviteLink = function() {
     } else if (tab==='pay'&&admin) {
       Object.assign(payload,{salary_amount:parseFloat(gv('hr-salary'))||null,salary_type:gv('hr-salary-type'),
         payment_frequency:gv('hr-pay-freq'),overtime_rate:parseFloat(gv('hr-overtime'))||null,
-        leave_entitlement:gv('hr-leave-entitlement')?parseFloat(gv('hr-leave-entitlement')):null});
+        leave_entitlement:gv('hr-leave-entitlement')?parseFloat(gv('hr-leave-entitlement')):null,
+        prior_hours_worked:gv('hr-prior-hours')!==''?parseFloat(gv('hr-prior-hours'))||0:null});
     } else if (tab==='bank') {
       Object.assign(payload,{bank_account_name:gv('hr-bank-name'),bank_name:gv('hr-bank-bank'),iban:gv('hr-bank-iban'),bic_swift:gv('hr-bank-bic')});
     } else if (tab==='emergency') {
@@ -21617,6 +21633,13 @@ window.ccxPrintRecord = function() {
               <div class="mfield"><label>Leave Entitlement (days) *</label><input type="number" id="hr-leave-entitlement" class="hr-input hr-admin-field" placeholder="20" step="0.5"></div>
 
             </div>
+            <div id="hr-prior-hours-row" style="display:none;margin-top:12px;">
+              <div class="mfield" style="max-width:260px;">
+                <label>Prior Hours Worked (before 18 May 2026)</label>
+                <input type="number" id="hr-prior-hours" class="hr-input hr-admin-field" placeholder="0" step="0.5" min="0">
+                <div style="font-size:10px;color:var(--muted);margin-top:4px;">Hours worked before Pulse was adopted — included in the 8% accrual calculation.</div>
+              </div>
+            </div>
             <div id="hr-leave-calc" style="display:none;margin-top:14px;padding:12px 14px;background:rgba(201,168,76,0.07);border:1px solid var(--gold-dim);border-radius:5px;font-size:12px;">
               <div style="color:var(--gold);font-weight:700;margin-bottom:6px;">Part-Time Leave Accrual (8% of hours)</div>
               <div id="hr-leave-calc-content" style="color:var(--muted);line-height:1.7;"></div>
@@ -21803,6 +21826,15 @@ window.ccxPrintRecord = function() {
         <button onclick="window.mgmtSetEntitlement()" class="btn btn-gold" style="font-size:11px;padding:8px 16px;margin-bottom:1px;">Save</button>
       </div>
       <div id="mgmt-leave-msg" style="font-size:11px;margin-top:8px;min-height:16px;"></div>
+    </div>
+
+    <!-- Leave Balance Overview -->
+    <div class="card" style="padding:22px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;">&#128197; Leave Balance Overview</div>
+        <button onclick="window.mgmtLoadLeaveOverview()" class="btn btn-outline" style="font-size:10px;padding:4px 12px;">Refresh</button>
+      </div>
+      <div id="mgmt-leave-overview" style="font-size:12px;color:var(--muted);">Loading&hellip;</div>
     </div>
 
   </div>
@@ -41024,6 +41056,67 @@ window.mgmtSetEntitlement = async function(){
     await window.db.insert('hr_profiles',{user_id:empId,leave_entitlement:parseFloat(days)});
   }
   msg.textContent='✓ Entitlement updated.';msg.style.color='var(--green)';
+  window.mgmtLoadLeaveOverview && window.mgmtLoadLeaveOverview();
+};
+
+/* ── Leave Balance Overview ── */
+window.mgmtLoadLeaveOverview = async function(){
+  var el=document.getElementById('mgmt-leave-overview');
+  if(!el) return;
+  el.innerHTML='<span style="color:var(--muted);">Loading\u2026</span>';
+  try {
+    var yr=new Date().getFullYear();
+    var results=await Promise.all([
+      get('app_users?select=id,display_name,email,role&order=display_name.asc&limit=200'),
+      get('hr_profiles?select=user_id,leave_entitlement,employment_type&limit=200'),
+      get('leave_requests?status=neq.cancelled&start_date=gte.'+yr+'-01-01&select=user_id,days,status&limit=500')
+    ]);
+    var users=results[0], profiles=results[1], requests=results[2];
+    var rows=profiles.filter(function(p){ return p.leave_entitlement!=null; }).map(function(p){
+      var u=users.find(function(x){ return x.id===p.user_id; })||{};
+      if(u.role==='client') return null;
+      var reqs=requests.filter(function(r){ return r.user_id===p.user_id; });
+      var used=0, pending=0;
+      reqs.forEach(function(r){
+        var d=parseFloat(r.days)||0;
+        if(r.status==='approved') used+=d;
+        else if(r.status==='pending') pending+=d;
+      });
+      var ent=parseFloat(p.leave_entitlement)||0;
+      var rem=Math.max(0,ent-used-pending);
+      return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, used:used, pending:pending, rem:rem };
+    }).filter(Boolean);
+    if(!rows.length){ el.innerHTML='<span style="color:var(--muted);">No leave entitlements configured yet.</span>'; return; }
+    rows.sort(function(a,b){ return a.name.localeCompare(b.name); });
+    var fmtType=function(t){ return t==='part_time'?'Part-Time':t==='contractor'?'Contractor':'Full-Time'; };
+    var remColor=function(r){ return r<1?'var(--red)':r<=5?'var(--amber)':'var(--green)'; };
+    var html='<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="border-bottom:1px solid var(--navy-border);">'
+      +'<th style="text-align:left;padding:7px 0;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Employee</th>'
+      +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Type</th>'
+      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Entitlement</th>'
+      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Used</th>'
+      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Pending</th>'
+      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Remaining</th>'
+      +'</tr></thead><tbody>';
+    rows.forEach(function(r){
+      var remFmt=r.rem%1===0?r.rem:r.rem.toFixed(1);
+      var usedFmt=r.used%1===0?r.used:r.used.toFixed(1);
+      var pendFmt=r.pending%1===0?r.pending:r.pending.toFixed(1);
+      html+='<tr style="border-bottom:1px solid rgba(36,61,87,0.5);">'
+        +'<td style="padding:9px 0;color:var(--white);font-weight:600;">'+window.escapeHtml(r.name)+'</td>'
+        +'<td style="padding:9px 0;color:var(--muted);">'+fmtType(r.type)+'</td>'
+        +'<td style="text-align:center;padding:9px 0;color:var(--white);">'+r.ent+'</td>'
+        +'<td style="text-align:center;padding:9px 0;">'+usedFmt+'</td>'
+        +'<td style="text-align:center;padding:9px 0;color:var(--amber);">'+pendFmt+'</td>'
+        +'<td style="text-align:center;padding:9px 0;font-weight:700;color:'+remColor(r.rem)+';">'+remFmt+'</td>'
+        +'</tr>';
+    });
+    html+='</tbody></table>';
+    el.innerHTML=html;
+  } catch(e){
+    el.innerHTML='<span style="color:var(--red);font-size:11px;">Error loading leave overview.</span>';
+    window.logError('mgmtLoadLeaveOverview', e);
+  }
 };
 
 /* ── Your Reports ── */
@@ -42081,7 +42174,7 @@ window.loadTimesheet=async function(){
 };
 
 var _oSPT=window.showPeopleTab;
-window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);}};
+window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);setTimeout(window.mgmtLoadLeaveOverview,800);}};
 })();
 </script>
 
