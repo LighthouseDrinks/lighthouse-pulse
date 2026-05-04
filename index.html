@@ -1350,7 +1350,10 @@ async function loadClients() {
   try {
     var rows = await db.select('clients', '?order=name.asc');
     if (rows && rows.length > 0) {
-      APP.clients = rows;
+      APP.clients = rows.filter(function(r) {
+        var s = r.lifecycle_stage || 'client';
+        return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
+      });
       APP.loaded.clients = true;
     }
   } catch(e) {
@@ -4657,7 +4660,7 @@ window.openInviteModal = function() {
       fillClientOptions(window._clients);
     } else {
       sel.innerHTML = '<option value="">— Loading clients… —</option>';
-      db.select('clients', '?select=id,name,is_internal&order=name.asc')
+      db.select('clients', '?select=id,name,is_internal,lifecycle_stage&order=name.asc&lifecycle_stage=not.in.(opportunity,lead,prospect)')
         .then(function(rows) {
           window._clients = rows || [];
           fillClientOptions(window._clients);
@@ -16767,15 +16770,19 @@ window.loadBoms = async function initBoms() {
   }
 
   function _syncClientsGlobal() {
-    window.CLIENTS = CLIENTS;
+    window.CLIENTS = CLIENTS; // keep ALL records — Customers page uses this with its own filter
+    var activeClients = CLIENTS.filter(function(c) {
+      var s = c.lifecycle_stage || 'client';
+      return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
+    });
     if (window.APP) {
-      window.APP.clients = CLIENTS.map(function(c){ return { id: c.id, name: c.company }; });
+      window.APP.clients = activeClients.map(function(c){ return { id: c.id, name: c.company }; });
       window.APP.loaded.clients = true;
     }
     // Also sync into _clients if the inventory module uses it
     if (window._clients) {
       window._clients.length = 0;
-      CLIENTS.forEach(function(c){ window._clients.push({ id: c.id, name: c.company }); });
+      activeClients.forEach(function(c){ window._clients.push({ id: c.id, name: c.company }); });
     }
   }
 
@@ -23488,7 +23495,11 @@ window.openLPModal = function(editId) {
 
   // Populate client dropdown from warm cache (alphabetical, Lighthouse pinned first)
   if (clientSel) {
-    var clients = (window.CLIENTS || window._clients || []).slice().filter(Boolean);
+    var clients = (window.CLIENTS || window._clients || []).slice().filter(function(c) {
+      if (!c) return false;
+      var s = c.lifecycle_stage || 'client';
+      return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
+    });
     clients.sort(function(a,b){
       var aLh = ((a.company||a.name||'').toLowerCase().indexOf('lighthouse')>-1) ? 0 : 1;
       var bLh = ((b.company||b.name||'').toLowerCase().indexOf('lighthouse')>-1) ? 0 : 1;
@@ -23938,7 +23949,7 @@ function ageStr(distDate) {
 window.openContainerModal = async function(editId) {
   var ov = document.getElementById('container-modal-overlay');
   if (!ov) return;
-  if (!_clients.length) _clients = await supa('clients', '?order=name.asc');
+  if (!_clients.length) _clients = await supa('clients', '?order=name.asc&lifecycle_stage=not.in.(opportunity,lead,prospect)');
 
   var gid = function(id){ return document.getElementById(id); };
   gid('cm-edit-id').value = editId || '';
@@ -26018,7 +26029,7 @@ window._checkLabelFields = function(prefix) {
 };
 
 window.openNewSKUModal = async function() {
-  if (!_clients.length) _clients = await supaFetch('clients', '?order=name.asc');
+  if (!_clients.length) _clients = await supaFetch('clients', '?order=name.asc&lifecycle_stage=not.in.(opportunity,lead,prospect)');
   if (!_cats.length)    _cats    = await supaFetch('dry_goods_categories', '?order=sort_order.asc');
 
   var cliSel = document.getElementById('ns-client');
@@ -27386,7 +27397,7 @@ window.saveAdjModal = async function() {
 
     // Load clients
     try {
-      var clients = (window._clients && window._clients.length) ? window._clients : await supaGet('clients?order=name.asc&select=id,name,phone');
+      var clients = (window._clients && window._clients.length) ? window._clients : await supaGet('clients?order=name.asc&select=id,name,phone&lifecycle_stage=not.in.(opportunity,lead,prospect)');
       var cliSel = document.getElementById('njm-client');
       cliSel.innerHTML = '<option value="">— Select client —</option>'
         + clients.map(function(c){ return '<option value="' + c.id + '">' + c.name + '</option>'; }).join('');
