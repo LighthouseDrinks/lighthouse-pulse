@@ -1731,10 +1731,11 @@ function showDashboard(user) {
   var _showCog = _superAdminRoles.indexOf(user.role) >= 0;
   if (sbCogBtn) sbCogBtn.style.display = _showCog ? 'flex' : 'none';
 
-  // Clock button — all staff
+  // Clock button — all staff (desktop only; mobile uses quick-launch tile)
   var clockBtn = document.getElementById('header-clock-btn');
-  if (clockBtn && user.role !== 'client') {
-    clockBtn.style.display = '';
+  if (clockBtn && user.role !== 'client') clockBtn.style.display = '';
+  // initHeaderClock drives both the header button and the quick-launch tile
+  if (user.role !== 'client') {
     setTimeout(function(){ window.initHeaderClock && window.initHeaderClock(); }, 500);
   }
 
@@ -11687,6 +11688,11 @@ window.loadBoms = async function initBoms() {
         <div style="font-size:10px;color:var(--muted);margin-top:3px;">Email your team</div>
       </button>
     </div>
+    <button id="ql-clock-in" onclick="window.headerClockAction&&window.headerClockAction()" style="display:none;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid var(--green);border-radius:6px;padding:16px 14px;cursor:pointer;text-align:left;font-family:Lato,sans-serif;transition:border-color .15s;" onmouseover="this.style.borderColor='var(--green)'" onmouseout="this.style.borderColor='var(--navy-border)';this.style.borderTopColor='var(--green)'">
+      <div id="ql-clock-in-icon" style="font-size:18px;margin-bottom:8px;">⏱</div>
+      <div id="ql-clock-in-label" style="font-size:12px;font-weight:700;color:var(--white);">Clock In</div>
+      <div id="ql-clock-in-sub" style="font-size:10px;color:var(--muted);margin-top:3px;">Log your attendance</div>
+    </button>
   </div>
 
   <div class="two-col">
@@ -18766,6 +18772,12 @@ window.loadBoms = async function initBoms() {
       var _broadcastBtn = document.getElementById('ql-staff-broadcast');
       if (_pricingBtn)   _pricingBtn.style.display  = _isBroadcastRole ? 'none' : '';
       if (_broadcastBtn) _broadcastBtn.style.display = _isBroadcastRole ? ''     : 'none';
+      // Clock In tile — visible for all staff (not client portal users)
+      var _clockTile = document.getElementById('ql-clock-in');
+      if (_clockTile && _role !== 'client') {
+        _clockTile.style.display = '';
+        window._syncQlClockTile && window._syncQlClockTile();
+      }
     }, 50);
     if (name === 'tools') {
       var tg = document.getElementById('tools-grid-view');
@@ -40235,20 +40247,55 @@ window.saveAdjModal = async function() {
       btn.style.color = 'var(--muted)';
       btn.innerHTML = '&#9654; Clock In';
     }
+    syncQlClockTile();
   }
 
-  /* Drop-up menu when clocked in or on break */
+  function syncQlClockTile() {
+    var tile  = document.getElementById('ql-clock-in');
+    var label = document.getElementById('ql-clock-in-label');
+    var sub   = document.getElementById('ql-clock-in-sub');
+    var icon  = document.getElementById('ql-clock-in-icon');
+    if (!tile) return;
+    if (_hClockState === 'clocked_in') {
+      var since = _hClockSince ? new Date(_hClockSince).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'}) : '';
+      tile.style.borderTopColor = 'var(--green)';
+      tile.onmouseover = function(){ this.style.borderColor='var(--green)'; };
+      if (icon)  icon.textContent  = '✅';
+      if (label) label.textContent = 'Clocked In' + (since ? ' · ' + since : '');
+      if (sub)   sub.textContent   = fmtDur(_hClockSince) + ' — tap to clock out';
+    } else if (_hClockState === 'on_break') {
+      tile.style.borderTopColor = 'var(--amber,#e89c3a)';
+      tile.onmouseover = function(){ this.style.borderColor='var(--amber,#e89c3a)'; };
+      if (icon)  icon.textContent  = '☕';
+      if (label) { label.textContent = 'On Break'; label.style.color = 'var(--amber,#e89c3a)'; }
+      if (sub)   sub.textContent   = fmtDur(_hClockSince) + ' — tap to end break';
+    } else {
+      tile.style.borderTopColor = 'var(--green)';
+      tile.onmouseover = function(){ this.style.borderColor='var(--green)'; };
+      if (icon)  icon.textContent  = '⏱';
+      if (label) { label.textContent = 'Clock In'; label.style.color = 'var(--white)'; }
+      if (sub)   sub.textContent   = 'Log your attendance';
+    }
+  }
+  window._syncQlClockTile = syncQlClockTile;
+
+  /* Drop-up/down menu when clocked in or on break */
   function showClockMenu() {
     var ex = document.getElementById('_clock-menu');
     if (ex) { ex.remove(); return; }
+    // On mobile the header button is hidden — anchor to the quick-launch tile instead
     var btn = document.getElementById('header-clock-btn');
-    if (!btn) return;
-    var rect = btn.getBoundingClientRect();
+    var tile = document.getElementById('ql-clock-in');
+    var anchor = (btn && btn.offsetParent) ? btn : (tile && tile.offsetParent ? tile : null);
+    if (!anchor) return;
+    var rect = anchor.getBoundingClientRect();
     var menu = document.createElement('div');
     menu.id = '_clock-menu';
     menu.style.cssText = 'position:fixed;z-index:1100;background:#0e1e2e;border:1px solid rgba(201,168,76,0.25);border-radius:6px;box-shadow:0 8px 32px rgba(0,0,0,0.6);min-width:170px;overflow:hidden;';
-    menu.style.left = rect.left + 'px';
-    menu.style.top = (rect.bottom + 6) + 'px';
+    // Position below the anchor, but clamp to viewport so it never goes off-screen
+    var menuTop = rect.bottom + 6;
+    menu.style.left = Math.min(rect.left, window.innerWidth - 176) + 'px';
+    menu.style.top = menuTop + 'px';
 
     var options = [];
     if (_hClockState === 'clocked_in') {
@@ -40402,9 +40449,9 @@ window.saveAdjModal = async function() {
 
   window.initHeaderClock = async function() {
     await loadHeaderClockState();
-    // Tick every 60s to update duration
+    // Tick every 60s to update duration display on both header btn and quick-launch tile
     if (_hTicker) clearInterval(_hTicker);
-    _hTicker = setInterval(renderHeaderClockBtn, 60000);
+    _hTicker = setInterval(function(){ renderHeaderClockBtn(); syncQlClockTile(); }, 60000);
   };
 
 })();
