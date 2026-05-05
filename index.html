@@ -2175,7 +2175,7 @@ async function loadPortalData(clientId) {
         ? (j.liquid_litres ? Number(j.liquid_litres).toLocaleString() + ' L' : '—')
         : (j.bottle_target ? Number(j.bottle_target).toLocaleString() + ' btls'
           : (j.qty_bottles ? Number(j.qty_bottles).toLocaleString() + ' btls' : '—'));
-      var dateStr = j.bottling_date || j.scheduled_date;
+      var dateStr = j.scheduled_start || j.bottling_date || j.scheduled_date;
       var displayDate = dateStr ? new Date(dateStr).toLocaleDateString('en-IE') : '—';
       var viewBtn = '<button onclick="window.openPortalJobView(\'' + esc(j.id) + '\')" style="background:var(--gold);color:#0a1520;border:none;padding:5px 12px;font-size:11px;font-weight:700;border-radius:3px;cursor:pointer;white-space:nowrap;">View Job →</button>';
       rows.push('<tr>'
@@ -2411,10 +2411,11 @@ async function loadPortalSummary(clientId) {
     var next = await db.select('jobs',
       '?client_id=eq.' + clientId
       + '&stage=not.in.(complete,Complete)'
-      + '&bottling_date=gte.' + nowIso
-      + '&order=bottling_date.asc&limit=1&select=bottling_date,product_name');
+      + '&scheduled_start=not.is.null'
+      + '&scheduled_start=gte.' + nowIso
+      + '&order=scheduled_start.asc&limit=1&select=scheduled_start,product_name');
     if (next && next.length) {
-      _portalSet('portal-kpi-next', _portalFmtDate(next[0].bottling_date));
+      _portalSet('portal-kpi-next', _portalFmtDate(next[0].scheduled_start));
       _portalSet('portal-kpi-next-sub', next[0].product_name || 'Upcoming bottling date');
     } else {
       _portalSet('portal-kpi-next', '—');
@@ -3434,7 +3435,7 @@ window.openPortalJobView = async function(jobId) {
       : (j.bottle_target ? Number(j.bottle_target).toLocaleString() + ' bottles'
         : (j.qty_bottles ? Number(j.qty_bottles).toLocaleString() + ' bottles' : ''));
 
-    var dateStr = j.bottling_date || j.scheduled_date;
+    var dateStr = j.scheduled_start || j.bottling_date || j.scheduled_date;
     var displayDate = dateStr ? new Date(dateStr).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
 
     var createdDate = j.created_at ? new Date(j.created_at).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
@@ -36464,6 +36465,7 @@ window.saveAdjModal = async function() {
     });
 
     // 3. Changeover jobs — render all concurrent changeover blocks + their projected run blocks
+    var _projectedStarts = []; // collect projected starts for all queued/changeover jobs (persisted to DB below)
     var coJobs = _schedJobs.filter(function(j) { return j.changeover_start && !j.actual_start; });
     coJobs.forEach(function(coJob) {
       var coStart = new Date(coJob.changeover_start);
@@ -36480,11 +36482,12 @@ window.saveAdjModal = async function() {
         colour: coJob.colour, style: 'ghost', noteIcon: '',
         bphUsed: bphCo, jobId: coJob.id, productName: coJob.product_name || '',
         bottleTarget: coJob.bottle_target || null, durMins: durCo });
+      _projectedStarts.push({ id: coJob.id, start: coEnd.toISOString() });
       var coSeed = jobEnd > _now ? jobEnd : new Date(_now);
       if (coSeed > projSeedDt) projSeedDt = coSeed;
     });
 
-    // 4. Ghost blocks: next 5 queued jobs — each preceded by an amber changeover block
+    // 4. Ghost blocks: next 5 queued jobs displayed — full queue projected for portal scheduled dates
     var queued = _schedJobs.filter(function(j) {
       return !j.actual_start && !j.changeover_start && j.stage !== 'complete';
     });
@@ -36494,28 +36497,38 @@ window.saveAdjModal = async function() {
       return ap - bp;
     });
     var ghostCount = 0;
-    for (var qi = 0; qi < queued.length && ghostCount < 5; qi++) {
+    for (var qi = 0; qi < queued.length; qi++) {
       var qj = queued[qi];
       if (coJobs.some(function(c) { return c.id === qj.id; })) continue; // already shown as changeover
-      // Amber changeover block before each queued job
+      // Compute projected changeover + job start/end for every queued job
       var coBlockStart = new Date(projSeedDt);
       var coBlockEnd   = calcEndTime(coBlockStart, CHANGEOVER_PROJ_MINS);
-      calBlocks.push({ startDt: coBlockStart, endDt: coBlockEnd,
-        label: 'Changeover \u00b7 ' + (qj.product_name || qj.id),
-        colour: '#f59e0b', style: 'changeover', noteIcon: '',
-        bphUsed: null, jobId: qj.id, productName: qj.product_name || '',
-        bottleTarget: null, durMins: CHANGEOVER_PROJ_MINS });
-      // Ghost job block
       var qBph = _lastBphMap[qj.bom_id] || DEFAULT_BPH;
       var qDur = calcDurationMins(qj.bottle_target, qBph) || CHANGEOVER_PROJ_MINS;
       var gEnd = calcEndTime(coBlockEnd, qDur);
-      calBlocks.push({ startDt: coBlockEnd, endDt: gEnd,
-        label: qj.id + (qj.product_name ? ' \u00b7 ' + qj.product_name : ''),
-        colour: qj.colour, style: 'ghost', noteIcon: '',
-        bphUsed: qBph, jobId: qj.id, productName: qj.product_name || '',
-        bottleTarget: qj.bottle_target || null, durMins: qDur });
+      // Collect projected start for every job in the queue (written to DB below)
+      _projectedStarts.push({ id: qj.id, start: coBlockEnd.toISOString() });
+      // Only render the first 5 as ghost blocks on the calendar
+      if (ghostCount < 5) {
+        calBlocks.push({ startDt: coBlockStart, endDt: coBlockEnd,
+          label: 'Changeover \u00b7 ' + (qj.product_name || qj.id),
+          colour: '#f59e0b', style: 'changeover', noteIcon: '',
+          bphUsed: null, jobId: qj.id, productName: qj.product_name || '',
+          bottleTarget: null, durMins: CHANGEOVER_PROJ_MINS });
+        calBlocks.push({ startDt: coBlockEnd, endDt: gEnd,
+          label: qj.id + (qj.product_name ? ' \u00b7 ' + qj.product_name : ''),
+          colour: qj.colour, style: 'ghost', noteIcon: '',
+          bphUsed: qBph, jobId: qj.id, productName: qj.product_name || '',
+          bottleTarget: qj.bottle_target || null, durMins: qDur });
+        ghostCount++;
+      }
       projSeedDt = gEnd;
-      ghostCount++;
+    }
+    // Persist projected starts to jobs.scheduled_start for all queued/changeover jobs (fire-and-forget)
+    if (_projectedStarts.length && typeof sbPatch === 'function') {
+      _projectedStarts.forEach(function(p) {
+        sbPatch('jobs', '?id=eq.' + p.id, { scheduled_start: p.start }).catch(function(){});
+      });
     }
 
     // ── Calendar HTML ────────────────────────────────────────────────────────────
