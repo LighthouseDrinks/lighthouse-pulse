@@ -13361,7 +13361,7 @@ window.loadBoms = async function initBoms() {
           var col   = j.stage === 'Complete' ? 'var(--green)' : j.stage === 'In Progress' ? 'var(--gold)' : 'var(--muted)';
           var jid   = esc(j.job_id || j.id);
           var name  = esc(j.product_name || '—');
-          var qty   = j.qty_bottles ? Number(j.qty_bottles).toLocaleString() : (j.bottle_target ? Number(j.bottle_target).toLocaleString() : '—');
+          var qty   = j.bottle_target ? Number(j.bottle_target).toLocaleString() : (j.qty_bottles ? Number(j.qty_bottles).toLocaleString() : '—');
           var stage = esc(j.stage || '—');
           var date  = j.bottling_date ? new Date(j.bottling_date).toLocaleDateString('en-IE') : (j.scheduled_date ? new Date(j.scheduled_date).toLocaleDateString('en-IE') : '—');
           return '<tr>'
@@ -17762,7 +17762,7 @@ window.loadBoms = async function initBoms() {
           var col   = j.stage === 'Complete' ? 'var(--green)' : j.stage === 'In Progress' ? 'var(--gold)' : 'var(--muted)';
           var jobId = esc(j.job_id || j.id);
           var name  = esc(j.product_name || '—');
-          var qty   = j.qty_bottles ? Number(j.qty_bottles).toLocaleString() : '—';
+          var qty   = j.bottle_target ? Number(j.bottle_target).toLocaleString() : (j.qty_bottles ? Number(j.qty_bottles).toLocaleString() : '—');
           var stage = esc(j.stage || '—');
           var date  = j.bottling_date ? new Date(j.bottling_date).toLocaleDateString('en-IE') : '—';
           return '<tr>'
@@ -20093,6 +20093,10 @@ window.approveJobSubmission = async function(id, opts) {
     // Create initial tasks and show task assignment popup
     try { window.createInitialTasks && await window.createInitialTasks(newJobId, dilution, chillFiltration, colouring); }
     catch(tErr) { window.logError && window.logError('createInitialTasks', tErr); }
+
+    // Auto-send BOM confirmation to client
+    try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(newJobId); }
+    catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate', bErr); }
 
     // ── Email: notify client ──────────────────────────────────────────────────
     try {
@@ -27284,7 +27288,8 @@ window.saveAdjModal = async function() {
   var _currentJobId = null;
   var _jobStageFilter = 'planning';
   var _staffMap = {}; // uuid -> display_name
-  var _bomDone = {}; // job_id -> true if BOM task completed
+  var _bomDone    = {}; // job_id -> true if client approved BOM
+  var _bomFlagged = {}; // job_id -> true if client flagged a concern
   var _loadJobsInFlight = false; // prevents concurrent loadJobs() race
   var _scDone  = {}; // job_id -> true if supply-chain signed off
   var _lsDone  = {}; // job_id -> true if liquid signed off
@@ -27365,15 +27370,19 @@ window.saveAdjModal = async function() {
         supaGet('jobs?order=created_at.desc&select=*,clients(name)'),
         supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null'),
         supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
-        supaGet('job_tasks?select=job_id&task_type=eq.bom_link&status=eq.completed')
+        supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved'),
+        supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged')
       ]);
-      var rows    = results[0];
-      var scRows  = results[1];
-      var lsRows  = results[2];
-      var bomRows = results[3];
+      var rows        = results[0];
+      var scRows      = results[1];
+      var lsRows      = results[2];
+      var bomRows     = results[3];
+      var bomFlagRows = results[4];
       if (Array.isArray(rows)) _jobs = rows;
       _bomDone = {};
       (bomRows||[]).forEach(function(r){ if (r.job_id) _bomDone[r.job_id] = true; });
+      _bomFlagged = {};
+      (bomFlagRows||[]).forEach(function(r){ if (r.job_id) _bomFlagged[r.job_id] = true; });
       _scDone = {};
       (scRows||[]).forEach(function(r){ if (r.job_id) _scDone[r.job_id] = true; });
       _lsDone = {};
@@ -27462,6 +27471,12 @@ window.saveAdjModal = async function() {
       if (done) return '<span title="' + title + ': complete" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.35);white-space:nowrap;">&#10003; ' + label + '</span>';
       return '<span title="' + title + ': not yet signed off" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);white-space:nowrap;">&#10007; ' + label + '</span>';
     }
+    // Three-state BOM tick: approved (green), flagged concern (amber), pending (red)
+    function bomTick(jobId, label, title) {
+      if (_bomDone[jobId])    return '<span title="' + title + ': client approved" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.35);white-space:nowrap;">&#10003; ' + label + '</span>';
+      if (_bomFlagged[jobId]) return '<span title="' + title + ': client flagged a concern" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.45);white-space:nowrap;">&#9888; ' + label + '</span>';
+      return '<span title="' + title + ': not yet confirmed" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);white-space:nowrap;">&#10007; ' + label + '</span>';
+    }
 
     tbody.innerHTML = list.map(function(j) {
       var stageStyle = STAGE_STYLE[j.stage] || STAGE_STYLE.planning;
@@ -27473,7 +27488,7 @@ window.saveAdjModal = async function() {
       var jid = String(j.id).replace(/'/g, "\\'");
 
       var signoffs = '<div style="display:flex;flex-direction:row;flex-wrap:nowrap;gap:4px;align-items:center;">'
-        + soTick(_bomDone[j.id], 'BOM',     'Bill of Materials Sign-Off')
+        + bomTick(j.id, 'BOM',     'Bill of Materials Sign-Off')
         + soTick(_scDone[j.id], 'S.Chain', 'Supply Chain Sign-Off')
         + soTick(_lsDone[j.id], 'Liquid',  'Liquid Sign-Off')
         + '</div>';
@@ -27517,7 +27532,7 @@ window.saveAdjModal = async function() {
       row += '<div class="mob-d-item"><span class="mob-d-label">Client</span><span class="mob-d-value">' + clientName + '</span></div>';
       row += '<div class="mob-d-item"><span class="mob-d-label">Target</span><span class="mob-d-value">' + target + '</span></div>';
       row += '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Sign-offs</span><span class="mob-d-value" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:2px;">'
-        + soTick(_bomDone[j.id], 'BOM',          'Bill of Materials Sign-Off')
+        + bomTick(j.id, 'BOM',          'Bill of Materials Sign-Off')
         + soTick(_scDone[j.id], 'Supply Chain', 'Supply Chain Sign-Off')
         + soTick(_lsDone[j.id], 'Liquid',        'Liquid Sign-Off')
         + '</span></div>';
@@ -28004,6 +28019,9 @@ window.saveAdjModal = async function() {
         if (saved && saved.id) {
           try { await createInitialTasks(saved.id, dilution, chillFiltration, colouring); }
           catch(tErr) { window.logError && window.logError('createInitialTasks', tErr); }
+          // Auto-send BOM confirmation to client
+          try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(saved.id); }
+          catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate', bErr); }
           // Auto-queue the new planning job at the tail of the bay queue
           try { window._bayAutoQueuePlanning && await window._bayAutoQueuePlanning(); }
           catch(qErr) { window.logError && window.logError('bayAutoQueuePlanning', qErr); }
@@ -28245,7 +28263,6 @@ window.saveAdjModal = async function() {
     var liquidTitle = liquidParts.join(' — ');
 
     var taskDefs = [
-      { task_type:'bom_link',       title:'Bill of Materials Sign Off',  assigned_role:'quality_compliance',  due_date:dueDateStr },
       { task_type:'components',     title:'Supply Chain Sign Off',        assigned_role:'client_coordinator',  due_date:null },
       { task_type:'liquid_signoff', title:'Liquid Sign Off',              assigned_role:'warehouse_liquid',    due_date:dueDateStr }
     ];
@@ -28789,12 +28806,6 @@ window.saveAdjModal = async function() {
           openTaskInJob(jobId, type);
           return false;
         }
-      } else if (type === 'bom_link') {
-        var bomOk = await window._bomClientGate(jobId);
-        if (!bomOk) {
-          openTaskInJob(jobId, type);
-          return false;
-        }
       }
     } catch(e) { console.warn('checkTaskDocDone error:', e.message); }
     return true;
@@ -28952,10 +28963,9 @@ window.saveAdjModal = async function() {
     // ── Gate 1: Planning → Scheduled ─────────────────────────────────────────
     if (nextStage === 'scheduled') {
       var blockers1 = [];
-      var tasks1 = await supaGet('job_tasks?job_id=eq.' + _currentJobId + '&select=task_type,status');
-      var bomTask = tasks1.find(function(t){ return t.task_type === 'bom_link'; });
-      if (!bomTask || bomTask.status !== 'completed') {
-        blockers1.push({ label: 'Bill of Materials', hint: 'Must be confirmed before scheduling.' });
+      var bomApproval = await supaGet('job_bom_approvals?job_id=eq.' + _currentJobId + '&client_decision=eq.approved&limit=1');
+      if (!bomApproval || !bomApproval.length) {
+        blockers1.push({ label: 'Bill of Materials', hint: 'Client must confirm the BOM before scheduling.' });
       }
       // Must be holding a bay. Released bays don't count — the job's dry-goods
       // staging slot has already been torn down.
@@ -34347,9 +34357,47 @@ window.saveAdjModal = async function() {
         + (rec.client_approver_name ? '<div style="font-size:11px;color:var(--muted);margin-top:3px;">Confirmed by: ' + rec.client_approver_name + '</div>' : '')
         + (rec.client_decided_at ? '<div style="font-size:11px;color:var(--muted);">' + new Date(rec.client_decided_at).toLocaleString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) + '</div>' : '');
     } else if (status === 'flagged') {
+      var _esc = window.escapeHtml || function(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+      var _fmtDt = function(iso) {
+        if (!iso) return '';
+        try { return new Date(iso).toLocaleString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch(_){ return iso; }
+      };
       banner = '<div style="font-size:12px;color:#e84f4f;font-weight:700;">&#9888; Client flagged a concern</div>'
-        + (rec.client_approver_name ? '<div style="font-size:11px;color:var(--muted);margin-top:3px;">Flagged by: ' + rec.client_approver_name + '</div>' : '')
-        + (rec.client_notes ? '<div style="font-size:12px;color:#ff9c9c;margin-top:6px;padding:8px;background:rgba(232,79,79,0.08);border-radius:4px;border:1px solid rgba(232,79,79,0.25);">' + (window.escapeHtml ? window.escapeHtml(rec.client_notes) : rec.client_notes) + '</div>' : '');
+        + (rec.client_approver_name || rec.client_decided_at
+            ? '<div style="font-size:11px;color:var(--muted);margin-top:3px;">'
+              + (rec.client_approver_name ? 'Flagged by: ' + _esc(rec.client_approver_name) : '')
+              + (rec.client_decided_at ? ' &middot; ' + _fmtDt(rec.client_decided_at) : '')
+              + '</div>'
+            : '')
+        + (rec.client_notes
+            ? '<div style="font-size:12px;color:#ff9c9c;margin-top:6px;padding:8px;background:rgba(232,79,79,0.08);border-radius:4px;border:1px solid rgba(232,79,79,0.25);line-height:1.5;">'
+              + _esc(rec.client_notes) + '</div>'
+            : '');
+
+      // Render previous flagged rounds from history
+      var _history = Array.isArray(rec.flag_history) ? rec.flag_history : [];
+      if (_history.length) {
+        banner += '<div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);">'
+          + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px;">Previous rounds</div>';
+        _history.forEach(function(h, i) {
+          banner += '<div style="margin-bottom:8px;padding:8px 10px;background:rgba(255,255,255,0.03);border-radius:4px;border-left:2px solid rgba(201,168,76,0.3);">'
+            + '<div style="font-size:10px;font-weight:700;color:var(--gold);margin-bottom:4px;">Round ' + (i + 1)
+              + (h.flagged_at ? ' &middot; <span style="font-weight:400;color:var(--muted);">' + _fmtDt(h.flagged_at) + '</span>' : '') + '</div>'
+            + (h.client_notes
+                ? '<div style="font-size:11px;color:#ff9c9c;margin-bottom:3px;"><span style="color:var(--muted);">Client:</span> ' + _esc(h.client_notes) + '</div>'
+                : '')
+            + (h.staff_response
+                ? '<div style="font-size:11px;color:var(--white);margin-bottom:2px;"><span style="color:var(--muted);">Staff update:</span> ' + _esc(h.staff_response) + '</div>'
+                : '<div style="font-size:11px;color:var(--muted);font-style:italic;">No staff update noted.</div>')
+            + (h.responded_by
+                ? '<div style="font-size:10px;color:var(--muted);margin-top:2px;">by ' + _esc(h.responded_by)
+                  + (h.responded_at ? ' &middot; ' + _fmtDt(h.responded_at) : '') + '</div>'
+                : '')
+            + '</div>';
+        });
+        banner += '</div>';
+      }
+
       actions = '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">'
         + '<button onclick="window._bomResend(\'' + jobId + '\')" style="background:rgba(201,168,76,0.12);border:1px solid var(--gold-dim);color:var(--gold);font-size:11px;padding:6px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;font-weight:700;">Re-send after update</button>'
         + '</div>';
@@ -34358,8 +34406,21 @@ window.saveAdjModal = async function() {
     container.innerHTML = header + banner + actions;
   };
 
-  window._bomSendToClient = async function(jobId) {
-    var to = await window.lpPrompt('Client email address to send BOM confirmation to:', '', { title: 'Send BOM for Confirmation', placeholder: 'client@example.com' });
+  window._bomAutoSendOnCreate = async function(jobId) {
+    try {
+      var jobs = await supaGet('jobs?id=eq.' + jobId + '&select=id,client_id&limit=1');
+      var job = jobs && jobs[0];
+      var prefill = '';
+      if (job && job.client_id) {
+        var cli = await supaGet('clients?id=eq.' + job.client_id + '&select=email&limit=1');
+        if (cli && cli[0] && cli[0].email) prefill = cli[0].email;
+      }
+      await window._bomSendToClient(jobId, prefill);
+    } catch(e) { console.warn('_bomAutoSendOnCreate failed:', e && e.message); }
+  };
+
+  window._bomSendToClient = async function(jobId, prefillEmail) {
+    var to = await window.lpPrompt('Client email address to send BOM confirmation to:', prefillEmail || '', { title: 'Send BOM for Confirmation', placeholder: 'client@example.com' });
     if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to.trim())) {
       window.toast && window.toast('Please enter a valid email address.', 'warn'); return;
     }
@@ -34522,10 +34583,29 @@ window.saveAdjModal = async function() {
   window._bomResend = async function(jobId) {
     var rec = window._bomApprovalCache[jobId];
     if (!rec) return;
-    await supaMut('PATCH', 'job_bom_approvals', '?id=eq.' + rec.id, { client_email_sent_at: null, client_decision: null, client_decided_at: null, client_notes: null, client_approver_name: null });
+    // Prompt staff for what was updated before re-sending (optional but logged)
+    var staffNote = await window.lpPrompt('What was updated in the BOM before re-sending? (optional — this is logged)', '', { title: 'Re-send BOM — Log Change' });
+    // Append flagged round to history before clearing the decision fields
+    var historyEntry = {
+      flagged_by:     rec.client_approver_name || null,
+      flagged_at:     rec.client_decided_at    || null,
+      client_notes:   rec.client_notes         || null,
+      staff_response: (staffNote && staffNote.trim()) || null,
+      responded_by:   window.CURRENT_USER ? window.CURRENT_USER.email : null,
+      responded_at:   new Date().toISOString()
+    };
+    var existingHistory = Array.isArray(rec.flag_history) ? rec.flag_history : [];
+    await supaMut('PATCH', 'job_bom_approvals', '?id=eq.' + rec.id, {
+      flag_history:         existingHistory.concat([historyEntry]),
+      client_email_sent_at: null,
+      client_decision:      null,
+      client_decided_at:    null,
+      client_notes:         null,
+      client_approver_name: null
+    });
     window._bomApprovalCache[jobId] = null;
     await window._renderBomVerification(jobId);
-    window._bomSendToClient(jobId);
+    window._bomSendToClient(jobId, rec.client_email_to || '');
   };
 
   function renderQualityCheckCard(c, type) {
@@ -35542,8 +35622,14 @@ window.saveAdjModal = async function() {
       var client = (j.clients && j.clients.name) || j.client_id || '—';
       var target = j.job_target_type === 'liquid' ? (j.liquid_litres||'—') + ' L' : (j.bottle_target||'—') + ' btls';
       var bomOk = !!_bomDone[j.id], scOk = !!_scDone[j.id], lsOk = !!_lsDone[j.id];
+      var bomFlagged = !!_bomFlagged[j.id];
       function dot(ok) {
         return '<div style="text-align:center;"><span style="width:8px;height:8px;border-radius:50%;display:inline-block;background:' + (ok?'var(--green)':'rgba(201,56,56,0.85)') + ';"></span></div>';
+      }
+      function bomDot() {
+        var bg = bomOk ? 'var(--green)' : bomFlagged ? 'var(--gold)' : 'rgba(201,56,56,0.85)';
+        var title = bomOk ? 'BOM: client approved' : bomFlagged ? 'BOM: client flagged a concern' : 'BOM: awaiting client confirmation';
+        return '<div style="text-align:center;" title="' + title + '"><span style="width:8px;height:8px;border-radius:50%;display:inline-block;background:' + bg + ';"></span></div>';
       }
       var jid = String(j.id).replace(/'/g,"\\'");
       var bayChip = (typeof window._bayChipHTML === 'function') ? window._bayChipHTML(j) : '';
@@ -35552,7 +35638,7 @@ window.saveAdjModal = async function() {
         +   '<div style="font-size:12px;font-weight:600;color:var(--white);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (window.escapeHtml ? window.escapeHtml(j.product_name||'—') : (j.product_name||'—')) + '</div>'
         +   '<div style="font-size:10px;color:var(--muted);margin-top:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span>' + (window.escapeHtml ? window.escapeHtml(client) : client) + ' · ' + target + '</span>' + (bayChip ? bayChip : '') + '</div>'
         + '</div>'
-        + dot(bomOk) + dot(scOk) + dot(lsOk)
+        + bomDot() + dot(scOk) + dot(lsOk)
         + '<div style="padding-left:6px;"><span style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:3px 7px;border-radius:3px;border:1px solid ' + colour + ';color:' + colour + ';white-space:nowrap;">' + label + '</span></div>'
         + '</div>';
     }).join('');
