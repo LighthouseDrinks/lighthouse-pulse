@@ -27439,10 +27439,11 @@ window.saveAdjModal = async function() {
         var cl = _completeLast(a, b);
         if (cl !== 0) return cl;
         var ap = a.bay_waitlist_priority, bp = b.bay_waitlist_priority;
-        if (ap == null && bp == null) return new Date(b.created_at) - new Date(a.created_at);
+        if (ap == null && bp == null) return new Date(a.created_at) - new Date(b.created_at);
         if (ap == null) return 1;
         if (bp == null) return -1;
-        return ap - bp;
+        if (ap !== bp) return ap - bp;
+        return new Date(a.created_at) - new Date(b.created_at); // tie-break matches renderNextJobs
       });
     }
 
@@ -34407,7 +34408,7 @@ window.saveAdjModal = async function() {
         function _bsRow(label, val, skuId) {
           var name = skuId ? _bsName(skuId) : '';
           var display = name || val || '';
-          if (display) snap.components.push({ label: label, value: display, sku: '' });
+          if (display) snap.components.push({ label: label, value: display, sku: skuId || '' });
         }
         _bsRow('Liquid Specification', bomRec.liquid_spec,  bomRec.liquid_sku_id);
         _bsRow('Bottle',               null,                bomRec.bottle_sku_id);
@@ -34444,7 +34445,7 @@ window.saveAdjModal = async function() {
       } else if (b) {
         // Fallback: in-memory BOM (use value || skuId so something always shows even if desc is empty)
         var snap = { product: productName, client: clientName, volume: volume, abv: abv, components: [] };
-        function _snapRow(label, val, sku) { if (val || sku) snap.components.push({ label: label, value: val || sku || '', sku: '' }); }
+        function _snapRow(label, val, sku) { if (val || sku) snap.components.push({ label: label, value: val || sku || '', sku: sku || '' }); }
         _snapRow('Liquid Specification', b.liquid || b.liquidSkuId,  b.liquidSkuId);
         _snapRow('Bottle',               b.bottle || b.bottleSkuId,  b.bottleSkuId);
         _snapRow('ROPP Capsule',         b.ropp   || b.roppSkuId,    b.roppSkuId);
@@ -42867,12 +42868,22 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (components.length) {
       var LBL = 'font-size:11px;font-weight:700;color:var(--muted);padding:8px 14px 8px 0;width:44%;border-bottom:1px solid rgba(36,61,87,0.5);vertical-align:top;white-space:nowrap;';
       var VAL = 'font-size:12px;color:var(--white);padding:8px 0;border-bottom:1px solid rgba(36,61,87,0.5);vertical-align:top;';
+      var HDR = 'font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);padding:6px 14px 6px 0;border-bottom:1px solid rgba(201,168,76,0.2);';
+      var SKU = 'font-size:11px;color:#c9a84c;padding:8px 0;border-bottom:1px solid rgba(36,61,87,0.5);vertical-align:top;font-family:monospace;white-space:nowrap;';
+      var headerRow = '<tr><th style="' + HDR + '">Component</th><th style="' + HDR + '">Description</th><th style="' + HDR + 'text-align:right;">SKU</th></tr>';
       var rows = components.map(function(c) {
-        return '<tr><td style="' + LBL + '">' + esc(c.label) + '</td><td style="' + VAL + '">' + esc(c.value) + '</td></tr>';
+        var skuCell = c.sku
+          ? '<span style="display:inline-block;background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.25);border-radius:3px;padding:2px 7px;font-size:10px;font-weight:700;letter-spacing:0.05em;color:#c9a84c;">' + esc(c.sku) + '</span>'
+          : '<span style="color:var(--muted);font-size:11px;">—</span>';
+        return '<tr>'
+          + '<td style="' + LBL + '">' + esc(c.label) + '</td>'
+          + '<td style="' + VAL + '">' + esc(c.value) + '</td>'
+          + '<td style="' + SKU + 'text-align:right;">' + skuCell + '</td>'
+          + '</tr>';
       }).join('');
       compTable = '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:6px;padding:0 18px;margin-bottom:24px;">'
         + '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;padding:12px 0 8px;">Bill of Materials Components</div>'
-        + '<table style="width:100%;border-collapse:collapse;">' + rows + '</table>'
+        + '<table style="width:100%;border-collapse:collapse;">' + headerRow + rows + '</table>'
         + '</div>';
     }
 
@@ -43138,6 +43149,22 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     }
   }
 
+  // ── Normalise queue: renumber all planning/scheduled jobs to dense 1..n ─
+  // Eliminates gaps and duplicate priority values so every arrow click moves
+  // exactly one visual row. Called after every swap.
+  async function _normalizeQueuePriorities() {
+    try {
+      var rows = await apiGet('jobs?stage=in.(planning,scheduled)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc.nullslast,created_at.asc');
+      if (!rows || !rows.length) return;
+      for (var i = 0; i < rows.length; i++) {
+        var expected = i + 1;
+        if (rows[i].bay_waitlist_priority !== expected) {
+          await apiPatch('jobs', '?id=eq.' + encodeURIComponent(rows[i].id), { bay_waitlist_priority: expected });
+        }
+      }
+    } catch(e) { console.warn('Queue normalize failed:', e && e.message); }
+  }
+
   // ── Reorder: swap priority with adjacent neighbour ──────────────────────
   var _baySwappingJobs = {};   // per-job lock — prevents double-click corruption
   window._bayWaitlistMove = async function(jobId, direction) {
@@ -43177,9 +43204,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(nbId),  { bay_waitlist_priority: myP });
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: nbP });
 
-      // Refresh Bay Board + schedule only — jobs table is already correct from the optimistic update
+      // Compact: renumber all active jobs to dense 1..n so gaps/duplicates can't
+      // cause the next click to skip a visual row. Must finish before we reload UI.
+      await _normalizeQueuePriorities();
+
+      // Reload both pages from the now-clean DB state
       if (typeof window._renderBayBoard === 'function') { try { window._renderBayBoard(); } catch(e){} }
-      if (typeof window.loadSchedule === 'function')    { try { window.loadSchedule();    } catch(e){} }
+      if (typeof window.loadJobs === 'function')         { try { window.loadJobs();         } catch(e){} }
+      if (typeof window.loadSchedule === 'function')     { try { window.loadSchedule();     } catch(e){} }
     } catch(e) {
       window.toast && window.toast('Error moving job: ' + (e && e.message), 'error');
       // Full reload to restore correct state after a failed patch
