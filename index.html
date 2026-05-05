@@ -34369,32 +34369,112 @@ window.saveAdjModal = async function() {
       var clientName = (job.clients && job.clients.name) || '';
       var jobRef = jobId + (job.po_number ? ' / PO: ' + job.po_number : '');
 
-      // Build BOM snapshot from in-memory BOMS array (already loaded, no extra fetch needed)
+      // Fetch BOM fresh from DB to guarantee accurate SKU names and all fields
+      var bomRec = null;
+      if (bomId) {
+        try {
+          var _bomDbRows = await supaGet('boms?id=eq.' + bomId + '&select=*&limit=1');
+          bomRec = _bomDbRows && _bomDbRows[0];
+        } catch(_bfe) { console.warn('BOM fetch failed for snapshot:', _bfe && _bfe.message); }
+      }
+      // Fallback to in-memory if DB fetch failed
       var b = bomId && window.BOMS && window.BOMS.find(function(x){ return x.id === bomId; });
-      var volume = b ? (b.volume || '') : '';
-      var abv    = b ? (b.abv    || '') : '';
+      var volume = bomRec ? (bomRec.volume_cl || '') : (b ? (b.volume || '') : '');
+      var abv    = bomRec ? (bomRec.abv    || '')    : (b ? (b.abv    || '') : '');
+
       var bomSnapshot = null;
-      if (b) {
+      if (bomRec) {
+        // Batch-fetch SKU descriptions for all referenced SKU IDs
+        var _bsIds = [
+          bomRec.liquid_sku_id, bomRec.bottle_sku_id, bomRec.cork_sku_id, bomRec.ropp_sku_id,
+          bomRec.foil_sku_id, bomRec.front_label_sku_id, bomRec.back_label_sku_id, bomRec.neck_label_sku_id,
+          bomRec.shipper_sku_id, bomRec.divider_sku_id, bomRec.string_twine_sku_id, bomRec.monocarton_sku_id,
+          bomRec.gift_tube_sku_id, bomRec.tube_lid_sku_id, bomRec.tin_sku_id
+        ].filter(Boolean);
+        var _bsMap = {};
+        if (_bsIds.length) {
+          try {
+            var _bsSkuRows = await supaGet('dry_goods_skus?id=in.(' + _bsIds.join(',') + ')&select=id,description,volume,abv,region');
+            if (Array.isArray(_bsSkuRows)) {
+              _bsSkuRows.forEach(function(s) { _bsMap[s.id] = window.skuDisplayName ? window.skuDisplayName(s) : (s.description || s.id); });
+            }
+          } catch(_bse) { console.warn('SKU desc fetch failed in BOM snapshot:', _bse && _bse.message); }
+        }
+        function _bsName(id) { return id ? (_bsMap[id] || '') : ''; }
+
+        var ai = (bomRec.additional_info && typeof bomRec.additional_info === 'object') ? bomRec.additional_info : {};
         var snap = { product: productName, client: clientName, volume: volume, abv: abv, components: [] };
-        function _snapRow(label, val, sku) { if (val || sku) snap.components.push({ label: label, value: val || '', sku: sku || '' }); }
+        function _bsRow(label, val, skuId) {
+          var name = skuId ? _bsName(skuId) : '';
+          var display = name || val || '';
+          if (display) snap.components.push({ label: label, value: display, sku: '' });
+        }
+        _bsRow('Liquid Specification', bomRec.liquid_spec,  bomRec.liquid_sku_id);
+        _bsRow('Bottle',               null,                bomRec.bottle_sku_id);
+        _bsRow('ROPP Capsule',         null,                bomRec.ropp_sku_id);
+        _bsRow('Cork',                 null,                bomRec.cork_sku_id);
+        _bsRow('Foil / Heat Shrink',   null,                bomRec.foil_sku_id);
+        _bsRow('Front Label',          null,                bomRec.front_label_sku_id);
+        _bsRow('Back Label',           null,                bomRec.back_label_sku_id);
+        _bsRow('Neck Label',           null,                bomRec.neck_label_sku_id);
+        _bsRow('Shipper',              null,                bomRec.shipper_sku_id);
+        _bsRow('Divider / Insert',     null,                bomRec.divider_sku_id);
+        _bsRow('String / Twine',       null,                bomRec.string_twine_sku_id);
+        _bsRow('Monocarton',           null,                bomRec.monocarton_sku_id);
+        _bsRow('Gift Tube',            null,                bomRec.gift_tube_sku_id);
+        _bsRow('Tube Lid',             null,                bomRec.tube_lid_sku_id);
+        _bsRow('Tin',                  null,                bomRec.tin_sku_id);
+        if (bomRec.chill_filtration)    snap.components.push({ label: 'Chill Filtration',          value: 'Yes',                   sku: '' });
+        if (bomRec.colouring)           snap.components.push({ label: 'Colouring',                  value: 'Yes',                   sku: '' });
+        if (bomRec.colour_spec)         snap.components.push({ label: 'Colour Spec',                value: bomRec.colour_spec,      sku: '' });
+        if (bomRec.bottles_per_shipper) snap.components.push({ label: 'Bottles per Shipper',        value: String(bomRec.bottles_per_shipper), sku: '' });
+        if (ai.labelBarcode)            snap.components.push({ label: 'Label Barcode',              value: ai.labelBarcode,         sku: '' });
+        if (ai.shipperBarcode)          snap.components.push({ label: 'Shipper Barcode',            value: ai.shipperBarcode,       sku: '' });
+        if (ai.intendedMarket)          snap.components.push({ label: 'Intended Market',            value: ai.intendedMarket,       sku: '' });
+        if (ai.dutyStamp)               snap.components.push({ label: 'Duty Stamp',                 value: ai.dutyStamp,            sku: '' });
+        if (ai.annex2)                  snap.components.push({ label: 'Annex II Compliant',         value: ai.annex2,               sku: '' });
+        if (ai.lotNumber)               snap.components.push({ label: 'Lot Number Instructions',    value: ai.lotNumber,            sku: '' });
+        if (ai.pallet)                  snap.components.push({ label: 'Pallet Type',                value: ai.pallet,               sku: '' });
+        if (ai.casesLayer && ai.layersPallet) snap.components.push({ label: 'Pallet Configuration', value: ai.casesLayer + ' cases/layer × ' + ai.layersPallet + ' layers', sku: '' });
+        else if (ai.casesLayer)         snap.components.push({ label: 'Cases per Layer',            value: String(ai.casesLayer),   sku: '' });
+        if (ai.labelPosition)           snap.components.push({ label: 'Label Positioning',          value: ai.labelPosition,        sku: '' });
+        var _bsNotes = ai.notes || bomRec.notes || '';
+        if (_bsNotes)                   snap.components.push({ label: 'Special Instructions',       value: _bsNotes,                sku: '' });
+        bomSnapshot = snap;
+      } else if (b) {
+        // Fallback: in-memory BOM (use value || skuId so something always shows even if desc is empty)
+        var snap = { product: productName, client: clientName, volume: volume, abv: abv, components: [] };
+        function _snapRow(label, val, sku) { if (val || sku) snap.components.push({ label: label, value: val || sku || '', sku: '' }); }
         _snapRow('Liquid Specification', b.liquid || b.liquidSkuId,  b.liquidSkuId);
-        _snapRow('Bottle',               b.bottle,                   b.bottleSkuId);
-        _snapRow('ROPP Capsule',         b.ropp,                     b.roppSkuId);
-        _snapRow('Cork',                 b.cork,                     b.corkSkuId);
-        _snapRow('Foil / Heat Shrink',   b.foil,                     b.foilSkuId);
-        _snapRow('Front Label',          b.labelFront,               b.frontLabelSkuId);
-        _snapRow('Back Label',           b.labelBack,                b.backLabelSkuId);
-        _snapRow('Neck Label',           b.labelNeck,                b.neckLabelSkuId);
-        _snapRow('Shipper',              b.shipper,                  b.shipperSkuId);
-        _snapRow('Divider / Insert',     b.divider,                  b.dividerSkuId);
-        _snapRow('String / Twine',       b.string,                   b.stringTwineSkuId);
-        _snapRow('Monocarton',           b.monocarton,               b.monocartonSkuId);
-        _snapRow('Gift Tube',            b.giftTube,                 b.giftTubeSkuId);
-        _snapRow('Tube Lid',             b.tubeLid,                  b.tubeLidSkuId);
-        _snapRow('Tin',                  b.tin,                      b.tinSkuId);
-        if (b.bottlesPerShipper) snap.components.push({ label: 'Bottles per Shipper', value: String(b.bottlesPerShipper), sku: '' });
-        if (b.intendedMarket)    snap.components.push({ label: 'Intended Market',      value: b.intendedMarket,            sku: '' });
-        if (b.notes)             snap.components.push({ label: 'Special Instructions', value: b.notes,                     sku: '' });
+        _snapRow('Bottle',               b.bottle || b.bottleSkuId,  b.bottleSkuId);
+        _snapRow('ROPP Capsule',         b.ropp   || b.roppSkuId,    b.roppSkuId);
+        _snapRow('Cork',                 b.cork   || b.corkSkuId,    b.corkSkuId);
+        _snapRow('Foil / Heat Shrink',   b.foil   || b.foilSkuId,    b.foilSkuId);
+        _snapRow('Front Label',          b.labelFront || b.frontLabelSkuId, b.frontLabelSkuId);
+        _snapRow('Back Label',           b.labelBack  || b.backLabelSkuId,  b.backLabelSkuId);
+        _snapRow('Neck Label',           b.labelNeck  || b.neckLabelSkuId,  b.neckLabelSkuId);
+        _snapRow('Shipper',              b.shipper    || b.shipperSkuId,    b.shipperSkuId);
+        _snapRow('Divider / Insert',     b.divider    || b.dividerSkuId,    b.dividerSkuId);
+        _snapRow('String / Twine',       b.string     || b.stringTwineSkuId, b.stringTwineSkuId);
+        _snapRow('Monocarton',           b.monocarton || b.monocartonSkuId, b.monocartonSkuId);
+        _snapRow('Gift Tube',            b.giftTube   || b.giftTubeSkuId,   b.giftTubeSkuId);
+        _snapRow('Tube Lid',             b.tubeLid    || b.tubeLidSkuId,    b.tubeLidSkuId);
+        _snapRow('Tin',                  b.tin        || b.tinSkuId,        b.tinSkuId);
+        if (b.chill === 'yes')           snap.components.push({ label: 'Chill Filtration',       value: 'Yes',              sku: '' });
+        if (b.colour === 'yes')          snap.components.push({ label: 'Colouring',               value: 'Yes',              sku: '' });
+        if (b.colourSpec)                snap.components.push({ label: 'Colour Spec',             value: b.colourSpec,       sku: '' });
+        if (b.bottlesPerShipper)         snap.components.push({ label: 'Bottles per Shipper',     value: String(b.bottlesPerShipper), sku: '' });
+        if (b.labelBarcode)              snap.components.push({ label: 'Label Barcode',           value: b.labelBarcode,     sku: '' });
+        if (b.shipperBarcode)            snap.components.push({ label: 'Shipper Barcode',         value: b.shipperBarcode,   sku: '' });
+        if (b.intendedMarket)            snap.components.push({ label: 'Intended Market',         value: b.intendedMarket,   sku: '' });
+        if (b.dutyStamp)                 snap.components.push({ label: 'Duty Stamp',              value: b.dutyStamp,        sku: '' });
+        if (b.annex2)                    snap.components.push({ label: 'Annex II Compliant',      value: b.annex2,           sku: '' });
+        if (b.lotNumber)                 snap.components.push({ label: 'Lot Number Instructions', value: b.lotNumber,        sku: '' });
+        if (b.pallet)                    snap.components.push({ label: 'Pallet Type',             value: b.pallet,           sku: '' });
+        if (b.casesLayer && b.layersPallet) snap.components.push({ label: 'Pallet Configuration', value: b.casesLayer + ' cases/layer × ' + b.layersPallet + ' layers', sku: '' });
+        else if (b.casesLayer)           snap.components.push({ label: 'Cases per Layer',         value: String(b.casesLayer), sku: '' });
+        if (b.labelPosition)             snap.components.push({ label: 'Label Positioning',       value: b.labelPosition,    sku: '' });
+        if (b.notes)                     snap.components.push({ label: 'Special Instructions',    value: b.notes,            sku: '' });
         bomSnapshot = snap;
       }
 
@@ -42778,8 +42858,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var LBL = 'font-size:11px;font-weight:700;color:var(--muted);padding:8px 14px 8px 0;width:44%;border-bottom:1px solid rgba(36,61,87,0.5);vertical-align:top;white-space:nowrap;';
       var VAL = 'font-size:12px;color:var(--white);padding:8px 0;border-bottom:1px solid rgba(36,61,87,0.5);vertical-align:top;';
       var rows = components.map(function(c) {
-        var skuBadge = c.sku ? ' <span style="display:inline-block;font-size:9px;font-weight:700;color:#c9a84c;background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.3);padding:1px 6px;border-radius:2px;letter-spacing:0.06em;vertical-align:middle;margin-left:5px;">' + esc(c.sku) + '</span>' : '';
-        return '<tr><td style="' + LBL + '">' + esc(c.label) + '</td><td style="' + VAL + '">' + esc(c.value) + skuBadge + '</td></tr>';
+        return '<tr><td style="' + LBL + '">' + esc(c.label) + '</td><td style="' + VAL + '">' + esc(c.value) + '</td></tr>';
       }).join('');
       compTable = '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:6px;padding:0 18px;margin-bottom:24px;">'
         + '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:#c9a84c;font-weight:700;padding:12px 0 8px;">Bill of Materials Components</div>'
