@@ -21854,6 +21854,23 @@ window.ccxPrintRecord = function() {
       <div id="mgmt-leave-overview" style="font-size:12px;color:var(--muted);">Loading&hellip;</div>
     </div>
 
+    <!-- Employee Leave History -->
+    <div class="card" style="padding:22px;">
+      <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:16px;">&#128203; Employee Leave History</div>
+      <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+        <div class="mfield" style="margin:0;min-width:220px;">
+          <label style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">Employee</label>
+          <select id="mgmt-hist-emp" class="hr-input" style="color-scheme:dark;margin-top:6px;"><option value="">-- Select --</option></select>
+        </div>
+        <div class="mfield" style="margin:0;">
+          <label style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">Year</label>
+          <select id="mgmt-hist-year" class="hr-input" style="color-scheme:dark;margin-top:6px;width:100px;"></select>
+        </div>
+        <button onclick="window.mgmtLoadEmpHistory()" class="btn btn-gold" style="font-size:11px;padding:8px 16px;margin-bottom:1px;">Load</button>
+      </div>
+      <div id="mgmt-hist-result" style="font-size:12px;color:var(--muted);"></div>
+    </div>
+
   </div>
   </div><!-- /wrapper -->
 </div><!-- /page-people -->
@@ -40779,7 +40796,8 @@ function lvRenderKPIs(){
 function setKPIs(entitlement){
   var used=0, pending=0;
   _lvRequests.forEach(function(r){
-    if(r.status==='cancelled') return; // explicitly skip cancelled
+    if(r.status==='cancelled') return;
+    if((r.leave_category||'annual')!=='annual') return; // only annual leave affects annual balance
     var days=countWeekdays(r.start_date,r.end_date||r.start_date,r.leave_type==='half_day');
     if(r.status==='approved') used+=days;
     else if(r.status==='pending') pending+=days;
@@ -41071,56 +41089,145 @@ window.mgmtLoadLeaveOverview = async function(){
   el.innerHTML='<span style="color:var(--muted);">Loading\u2026</span>';
   try {
     var yr=new Date().getFullYear();
+    var NON_ANNUAL_CATS=['sick','maternity_paternity','compassionate','unpaid','other'];
     var results=await Promise.all([
       get('app_users?select=id,display_name,email,role&order=display_name.asc&limit=200'),
       get('hr_profiles?select=user_id,leave_entitlement,employment_type&limit=200'),
-      get('leave_requests?status=neq.cancelled&start_date=gte.'+yr+'-01-01&select=user_id,days,status&limit=500')
+      get('leave_requests?status=neq.cancelled&start_date=gte.'+yr+'-01-01&select=user_id,days,status,leave_category&limit=500')
     ]);
     var users=results[0], profiles=results[1], requests=results[2];
+    // Track which non-annual categories have any data (to hide empty columns)
+    var activeCats={};
     var rows=profiles.filter(function(p){ return p.leave_entitlement!=null; }).map(function(p){
       var u=users.find(function(x){ return x.id===p.user_id; })||{};
       if(u.role==='client') return null;
       var reqs=requests.filter(function(r){ return r.user_id===p.user_id; });
-      var used=0, pending=0;
+      var annUsed=0, annPend=0;
+      var catDays={};
       reqs.forEach(function(r){
         var d=parseFloat(r.days)||0;
-        if(r.status==='approved') used+=d;
-        else if(r.status==='pending') pending+=d;
+        var cat=r.leave_category||'annual';
+        if(cat==='annual'){
+          if(r.status==='approved') annUsed+=d;
+          else if(r.status==='pending') annPend+=d;
+        } else {
+          if(r.status==='approved'){
+            catDays[cat]=(catDays[cat]||0)+d;
+            activeCats[cat]=true;
+          }
+        }
       });
       var ent=parseFloat(p.leave_entitlement)||0;
-      var rem=Math.max(0,ent-used-pending);
-      return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, used:used, pending:pending, rem:rem };
+      var rem=Math.max(0,ent-annUsed-annPend);
+      return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, annUsed:annUsed, annPend:annPend, rem:rem, catDays:catDays };
     }).filter(Boolean);
     if(!rows.length){ el.innerHTML='<span style="color:var(--muted);">No leave entitlements configured yet.</span>'; return; }
     rows.sort(function(a,b){ return a.name.localeCompare(b.name); });
+    var visibleCats=NON_ANNUAL_CATS.filter(function(c){ return activeCats[c]; });
     var fmtType=function(t){ return t==='part_time'?'Part-Time':t==='contractor'?'Contractor':'Full-Time'; };
     var remColor=function(r){ return r<1?'var(--red)':r<=5?'var(--amber)':'var(--green)'; };
-    var html='<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="border-bottom:1px solid var(--navy-border);">'
-      +'<th style="text-align:left;padding:7px 0;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Employee</th>'
-      +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Type</th>'
-      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Entitlement</th>'
-      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Used</th>'
-      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Pending</th>'
-      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Remaining</th>'
+    var fmt=function(n){ return n%1===0?n:n.toFixed(1); };
+    var thStyle='font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);padding:7px 6px;white-space:nowrap;';
+    var html='<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead>'
+      +'<tr style="border-bottom:2px solid var(--navy-border);">'
+      +'<th style="text-align:left;'+thStyle+'">Employee</th>'
+      +'<th style="text-align:left;'+thStyle+'">Type</th>'
+      +'<th colspan="4" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(201,168,76,0.3);color:var(--gold);">Annual Leave</th>'
+      +(visibleCats.length?'<th colspan="'+visibleCats.length+'" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(74,158,221,0.3);color:#4a9edd;">Other Leave (days taken)</th>':'')
+      +'</tr>'
+      +'<tr style="border-bottom:1px solid var(--navy-border);">'
+      +'<th style="'+thStyle+'"></th><th style="'+thStyle+'"></th>'
+      +'<th style="text-align:center;'+thStyle+'">Entitlement</th>'
+      +'<th style="text-align:center;'+thStyle+'">Used</th>'
+      +'<th style="text-align:center;'+thStyle+'">Pending</th>'
+      +'<th style="text-align:center;'+thStyle+'">Remaining</th>'
+      +visibleCats.map(function(c){ return '<th style="text-align:center;'+thStyle+'">'+window.lvCatLabel(c).replace(' Leave','').replace(' / ',' /')+'</th>'; }).join('')
       +'</tr></thead><tbody>';
     rows.forEach(function(r){
-      var remFmt=r.rem%1===0?r.rem:r.rem.toFixed(1);
-      var usedFmt=r.used%1===0?r.used:r.used.toFixed(1);
-      var pendFmt=r.pending%1===0?r.pending:r.pending.toFixed(1);
       html+='<tr style="border-bottom:1px solid rgba(36,61,87,0.5);">'
-        +'<td style="padding:9px 0;color:var(--white);font-weight:600;">'+window.escapeHtml(r.name)+'</td>'
-        +'<td style="padding:9px 0;color:var(--muted);">'+fmtType(r.type)+'</td>'
-        +'<td style="text-align:center;padding:9px 0;color:var(--white);">'+r.ent+'</td>'
-        +'<td style="text-align:center;padding:9px 0;">'+usedFmt+'</td>'
-        +'<td style="text-align:center;padding:9px 0;color:var(--amber);">'+pendFmt+'</td>'
-        +'<td style="text-align:center;padding:9px 0;font-weight:700;color:'+remColor(r.rem)+';">'+remFmt+'</td>'
+        +'<td style="padding:8px 6px;color:var(--white);font-weight:600;white-space:nowrap;">'+window.escapeHtml(r.name)+'</td>'
+        +'<td style="padding:8px 6px;color:var(--muted);white-space:nowrap;">'+fmtType(r.type)+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;color:var(--white);">'+r.ent+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;">'+fmt(r.annUsed)+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;color:var(--amber);">'+fmt(r.annPend)+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;font-weight:700;color:'+remColor(r.rem)+';">'+fmt(r.rem)+'</td>'
+        +visibleCats.map(function(c){ var d=r.catDays[c]||0; return '<td style="text-align:center;padding:8px 6px;color:'+(d>0?'var(--white)':'rgba(120,147,168,0.4)')+';">'+(d>0?fmt(d):'\u2014')+'</td>'; }).join('')
+        +'</tr>';
+    });
+    html+='</tbody></table></div>';
+    el.innerHTML=html;
+  } catch(e){
+    el.innerHTML='<span style="color:var(--red);font-size:11px;">Error loading leave overview.</span>';
+    window.logError('mgmtLoadLeaveOverview', e);
+  }
+};
+
+/* ── Employee Leave History ── */
+window.mgmtInitHistory = async function(){
+  // Populate employee dropdown
+  var empSel=document.getElementById('mgmt-hist-emp');
+  if(empSel&&empSel.options.length<=1){
+    var users=await get('app_users?order=display_name.asc&select=id,display_name,role&limit=200');
+    users.filter(function(u){return u.role!=='client';}).forEach(function(u){
+      var o=document.createElement('option'); o.value=u.id;
+      o.textContent=u.display_name||u.id.slice(0,8); empSel.appendChild(o);
+    });
+  }
+  // Populate year dropdown (current year + 2 back)
+  var yrSel=document.getElementById('mgmt-hist-year');
+  if(yrSel&&!yrSel.options.length){
+    var curYr=new Date().getFullYear();
+    for(var y=curYr;y>=curYr-2;y--){
+      var o=document.createElement('option'); o.value=y; o.textContent=y;
+      yrSel.appendChild(o);
+    }
+  }
+};
+
+window.mgmtLoadEmpHistory = async function(){
+  var el=document.getElementById('mgmt-hist-result');
+  var empId=(document.getElementById('mgmt-hist-emp')||{}).value;
+  var yr=parseInt((document.getElementById('mgmt-hist-year')||{}).value)||new Date().getFullYear();
+  if(!el) return;
+  if(!empId){el.innerHTML='<span style="color:var(--amber);">Select an employee first.</span>';return;}
+  el.innerHTML='<span style="color:var(--muted);">Loading\u2026</span>';
+  try {
+    var reqs=await get('leave_requests?user_id=eq.'+empId+'&start_date=gte.'+yr+'-01-01&start_date=lte.'+yr+'-12-31&order=start_date.desc&limit=200');
+    if(!reqs.length){el.innerHTML='<span style="color:var(--muted);">No leave records for this employee in '+yr+'.</span>';return;}
+    var fmtD=function(s){if(!s)return '';return new Date(s+'T00:00:00').toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'});};
+    var fmt=function(n){n=parseFloat(n)||0;return n%1===0?n:n.toFixed(1);};
+    var statusColor=function(s){return s==='approved'?'var(--green)':s==='pending'?'var(--amber)':s==='declined'?'var(--red)':'var(--muted)';};
+    var thS='font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);padding:7px 6px;text-align:left;';
+    var html='<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+      +'<thead><tr style="border-bottom:1px solid var(--navy-border);">'
+      +'<th style="'+thS+'">Date(s)</th>'
+      +'<th style="'+thS+'">Category</th>'
+      +'<th style="text-align:center;'+thS+'">Days</th>'
+      +'<th style="'+thS+'">Duration</th>'
+      +'<th style="'+thS+'">Notes</th>'
+      +'<th style="'+thS+'">Source</th>'
+      +'<th style="text-align:right;'+thS+'">Status</th>'
+      +'</tr></thead><tbody>';
+    reqs.forEach(function(r){
+      var dateStr=r.end_date&&r.end_date!==r.start_date?fmtD(r.start_date)+' \u2013 '+fmtD(r.end_date):fmtD(r.start_date);
+      var catLabel=window.lvCatLabel?window.lvCatLabel(r.leave_category||'annual'):'Annual Leave';
+      var dur=r.leave_type==='half_day'?'Half Day':'Full Day(s)';
+      var src=r.applied_by_manager?'Manager':'Employee';
+      html+='<tr style="border-bottom:1px solid rgba(36,61,87,0.4);">'
+        +'<td style="padding:8px 6px;color:var(--white);white-space:nowrap;">'+dateStr+'</td>'
+        +'<td style="padding:8px 6px;color:var(--muted);">'+catLabel+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;color:var(--white);">'+fmt(r.days||r.days_requested||0)+'</td>'
+        +'<td style="padding:8px 6px;color:var(--muted);">'+dur+'</td>'
+        +'<td style="padding:8px 6px;color:var(--muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(r.notes?window.escapeHtml(r.notes):'\u2014')+'</td>'
+        +'<td style="padding:8px 6px;color:var(--muted);">'+src+'</td>'
+        +'<td style="text-align:right;padding:8px 6px;"><span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:'+statusColor(r.status)+';">'+window.escapeHtml(r.status||'')+'</span></td>'
         +'</tr>';
     });
     html+='</tbody></table>';
     el.innerHTML=html;
   } catch(e){
-    el.innerHTML='<span style="color:var(--red);font-size:11px;">Error loading leave overview.</span>';
-    window.logError('mgmtLoadLeaveOverview', e);
+    el.innerHTML='<span style="color:var(--red);font-size:11px;">Error loading history.</span>';
+    window.logError&&window.logError('mgmtLoadEmpHistory',e);
   }
 };
 
@@ -42357,7 +42464,7 @@ window.loadTimesheet=async function(){
 };
 
 var _oSPT=window.showPeopleTab;
-window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);setTimeout(window.mgmtLoadLeaveOverview,800);setTimeout(window.mgmtPopulateEmps,200);setTimeout(window.mgmtPopulateApplyEmps,200);}if(tab==='cal')setTimeout(window.lvCalInit,100);};
+window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);setTimeout(window.mgmtLoadLeaveOverview,800);setTimeout(window.mgmtPopulateEmps,200);setTimeout(window.mgmtPopulateApplyEmps,200);setTimeout(window.mgmtInitHistory,300);}if(tab==='cal')setTimeout(window.lvCalInit,100);};
 })();
 </script>
 
