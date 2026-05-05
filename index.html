@@ -2311,6 +2311,10 @@ function _portalFmtDate(s) {
 
 async function loadPortalSummary(clientId) {
   if (!clientId) return;
+  // Refresh projected start times from the production queue (fire-and-forget)
+  if (typeof window._refreshProjectedStarts === 'function') {
+    window._refreshProjectedStarts().catch(function(){});
+  }
   var FROM = window.PORTAL_DATA_FROM;
 
   // Jobs Completed (all-time; stage written as 'complete' or 'Complete' depending on path)
@@ -36265,6 +36269,55 @@ window.saveAdjModal = async function() {
         .subscribe();
     }
   }
+
+  // Standalone projected-start refresh — called from the client portal on load so
+  // scheduled_start values stay current without requiring the Schedule page to be open.
+  window._refreshProjectedStarts = async function() {
+    try {
+      await loadWorkingOverrides();
+      var jobs = await sbGet('jobs?stage=in.(planning,scheduled)&actual_start=is.null'
+        + '&select=id,bottle_target,bom_id,bay_waitlist_priority,changeover_start'
+        + '&order=bay_waitlist_priority.asc.nullslast,created_at.asc');
+      var bomIds = [];
+      jobs.forEach(function(j) { if (j.bom_id && bomIds.indexOf(j.bom_id) < 0) bomIds.push(j.bom_id); });
+      var lbm = {};
+      if (bomIds.length) {
+        var bphResults = await Promise.all(bomIds.map(function(id) {
+          return getLastActualBph(id).then(function(v) { return { id: id, bph: v }; });
+        }));
+        bphResults.forEach(function(r) { if (r.bph) lbm[r.id] = r.bph; });
+      }
+      // Seed from any currently running jobs
+      var running = await sbGet('jobs?actual_start=not.is.null&actual_end=is.null'
+        + '&select=id,actual_start,bottle_target,bom_id');
+      var seedDt = new Date();
+      running.forEach(function(r) {
+        var bph = lbm[r.bom_id] || DEFAULT_BPH;
+        var dur = calcDurationMins(r.bottle_target, bph) || CHANGEOVER_PROJ_MINS;
+        var end = calcEndTime(new Date(r.actual_start), dur);
+        if (end > seedDt) seedDt = end;
+      });
+      var projections = [];
+      // Changeover jobs — projected start is after their changeover finishes
+      jobs.filter(function(j) { return j.changeover_start; }).forEach(function(j) {
+        var coEnd = calcEndTime(new Date(j.changeover_start), CHANGEOVER_PROJ_MINS);
+        projections.push({ id: j.id, start: coEnd.toISOString() });
+        var dur = calcDurationMins(j.bottle_target, lbm[j.bom_id] || DEFAULT_BPH) || CHANGEOVER_PROJ_MINS;
+        var end = calcEndTime(coEnd, dur);
+        if (end > seedDt) seedDt = end;
+      });
+      // Queued jobs — chain projected starts from the seed
+      jobs.filter(function(j) { return !j.changeover_start; }).forEach(function(j) {
+        var coEnd = calcEndTime(new Date(seedDt), CHANGEOVER_PROJ_MINS);
+        var dur = calcDurationMins(j.bottle_target, lbm[j.bom_id] || DEFAULT_BPH) || CHANGEOVER_PROJ_MINS;
+        projections.push({ id: j.id, start: coEnd.toISOString() });
+        seedDt = calcEndTime(coEnd, dur);
+      });
+      projections.forEach(function(p) {
+        sbPatch('jobs', '?id=eq.' + p.id, { scheduled_start: p.start }).catch(function(){});
+      });
+    } catch(e) {}
+  };
 
   // ── Tick: update timer spans without full re-render ──────────────────────────
   function _tickActiveTimers() {
