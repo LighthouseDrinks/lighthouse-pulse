@@ -25956,19 +25956,22 @@ window.openSKUPanel = async function(skuId) {
         + '<thead><tr style="color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">'
         + '<th style="text-align:left;padding:6px 8px;">Date</th><th style="text-align:left;padding:6px 8px;">Type</th>'
         + '<th style="text-align:right;padding:6px 8px;">Qty</th><th style="text-align:left;padding:6px 8px;">By</th>'
-        + '<th style="text-align:left;padding:6px 8px;">Job</th><th style="text-align:left;padding:6px 8px;">Notes</th></tr></thead>'
+        + '<th style="text-align:left;padding:6px 8px;">Job / Notes</th></tr></thead>'
         + '<tbody>'
         + movements.map(function(m) {
           var isOut = m.quantity < 0 || ['job_depletion','manual_out'].includes(m.movement_type);
           var qtyCol = isOut ? 'var(--red)' : 'var(--green)';
           var qtyStr = (isOut && m.quantity > 0 ? '−' : (m.quantity > 0 ? '+' : '')) + Math.abs(m.quantity).toLocaleString();
+          var jobNotes = m.notes ? '<span style="color:var(--text);">'+m.notes+'</span>' : '';
+          if (m.job_id) {
+            jobNotes += '<span style="display:block;font-family:monospace;font-size:10px;color:var(--muted);margin-top:2px;">'+m.job_id+'</span>';
+          }
           return '<tr style="border-top:1px solid var(--navy-border);">'
             + '<td style="padding:7px 8px;color:var(--muted);font-size:11px;">'+fmtDate(m.created_at)+'</td>'
             + '<td style="padding:7px 8px;color:'+(MT_COL[m.movement_type]||'var(--muted)')+';">'+(MT_LABEL[m.movement_type]||m.movement_type)+'</td>'
             + '<td style="padding:7px 8px;text-align:right;font-weight:700;color:'+qtyCol+';">'+qtyStr+'</td>'
             + '<td style="padding:7px 8px;color:var(--text);font-size:11px;">'+(m.performed_by||'—')+'</td>'
-            + '<td style="padding:7px 8px;font-size:11px;">'+(m.job_id ? '<span style="color:var(--gold);font-family:monospace;">'+m.job_id+'</span>' : '—')+'</td>'
-            + '<td style="padding:7px 8px;color:var(--muted);font-size:11px;">'+(m.notes||'—')+'</td>'
+            + '<td style="padding:7px 8px;font-size:11px;">'+(jobNotes||'—')+'</td>'
             + '</tr>';
         }).join('')
         + '</tbody></table>';
@@ -29568,26 +29571,24 @@ window.saveAdjModal = async function() {
             } catch(e) { console.warn('stock_movements insert failed (non-critical):', e.message); }
           }
 
-          // 3. Insert dry_goods_movements records so Stock History panel reflects the deduction.
-          //    Write one row per batch consumed (batchMovements built in step 1) so batch_id is always present.
+          // 3. Insert one dry_goods_movements record per SKU so the Stock History panel reflects the deduction.
+          //    Uses the first consumed batch's ID to satisfy batch_id; total quantity across all batches.
           var performer = window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email || null) : null;
+          var jobLabel  = job.product_name || job.product || jobId;
           for (var di3m = 0; di3m < deductions.length; di3m++) {
             var dm = deductions[di3m];
-            var batchMoves = dm.batchMovements || [];
-            for (var bmi = 0; bmi < batchMoves.length; bmi++) {
-              var bm = batchMoves[bmi];
-              try {
-                await supaMut('POST', 'dry_goods_movements', '', {
-                  sku_id:        dm.comp.sku_id,
-                  batch_id:      bm.batchId,
-                  movement_type: 'job_depletion',
-                  quantity:      -bm.qty,
-                  job_id:        jobId,
-                  performed_by:  performer,
-                  notes:         'Job completion deduction'
-                });
-              } catch(e) { console.warn('dry_goods_movements insert failed:', e.message); }
-            }
+            if (!dm.batchMovements || !dm.batchMovements.length) continue;
+            try {
+              await supaMut('POST', 'dry_goods_movements', '', {
+                sku_id:        dm.comp.sku_id,
+                batch_id:      dm.batchMovements[0].batchId,
+                movement_type: 'job_depletion',
+                quantity:      -dm.totalDeduct,
+                job_id:        jobId,
+                performed_by:  performer,
+                notes:         jobLabel
+              });
+            } catch(e) { console.warn('dry_goods_movements insert failed:', e.message); }
           }
 
           // 4. Insert job_waste records
