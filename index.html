@@ -29515,11 +29515,13 @@ window.saveAdjModal = async function() {
 
         try {
           // 1. Deduct stock from dry_goods_batches (pinned batch first if scanned, then FIFO for remainder)
+          //    Also record which batches were touched (batchMovements) so step 3 can write accurate history rows.
           for (var di = 0; di < deductions.length; di++) {
             var d       = deductions[di];
             var remaining = d.totalDeduct;
             var batches   = batchMap[d.comp.sku_id] || [];
             var pinned    = pinnedBatch[d.comp.sku_id] || null;
+            d.batchMovements = [];
 
             // If user scanned a specific batch, deduct from it first
             if (pinned) {
@@ -29532,6 +29534,7 @@ window.saveAdjModal = async function() {
                 var newQty     = Math.max(0, pinnedInMap.qty - deductFrom);
                 await supaMut('PATCH', 'dry_goods_batches', '?id=eq.' + pinnedInMap.id, { quantity_remaining: newQty });
                 pinnedInMap.qty = newQty;
+                d.batchMovements.push({ batchId: pinnedInMap.id, qty: deductFrom });
                 remaining -= deductFrom;
               }
             }
@@ -29543,6 +29546,7 @@ window.saveAdjModal = async function() {
               var deductFrom = Math.min(batch.qty, remaining);
               var newQty     = Math.max(0, batch.qty - deductFrom);
               await supaMut('PATCH', 'dry_goods_batches', '?id=eq.' + batch.id, { quantity_remaining: newQty });
+              d.batchMovements.push({ batchId: batch.id, qty: deductFrom });
               remaining -= deductFrom;
             }
           }
@@ -29564,20 +29568,26 @@ window.saveAdjModal = async function() {
             } catch(e) { console.warn('stock_movements insert failed (non-critical):', e.message); }
           }
 
-          // 3. Insert dry_goods_movements records so Stock History panel reflects the deduction
+          // 3. Insert dry_goods_movements records so Stock History panel reflects the deduction.
+          //    Write one row per batch consumed (batchMovements built in step 1) so batch_id is always present.
           var performer = window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email || null) : null;
           for (var di3m = 0; di3m < deductions.length; di3m++) {
             var dm = deductions[di3m];
-            try {
-              await supaMut('POST', 'dry_goods_movements', '', {
-                sku_id:        dm.comp.sku_id,
-                movement_type: 'job_depletion',
-                quantity:      -dm.totalDeduct,
-                job_id:        jobId,
-                performed_by:  performer,
-                notes:         'Job completion deduction'
-              });
-            } catch(e) { console.warn('dry_goods_movements insert failed (non-critical):', e.message); }
+            var batchMoves = dm.batchMovements || [];
+            for (var bmi = 0; bmi < batchMoves.length; bmi++) {
+              var bm = batchMoves[bmi];
+              try {
+                await supaMut('POST', 'dry_goods_movements', '', {
+                  sku_id:        dm.comp.sku_id,
+                  batch_id:      bm.batchId,
+                  movement_type: 'job_depletion',
+                  quantity:      -bm.qty,
+                  job_id:        jobId,
+                  performed_by:  performer,
+                  notes:         'Job completion deduction'
+                });
+              } catch(e) { console.warn('dry_goods_movements insert failed:', e.message); }
+            }
           }
 
           // 4. Insert job_waste records
