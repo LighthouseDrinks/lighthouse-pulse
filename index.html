@@ -1669,25 +1669,45 @@ document.addEventListener('DOMContentLoaded', function() {
     return;  // skip the rest of the auth bootstrap
   }
 
+  // ── Password recovery: check hash BEFORE getSession ────────────────────────
+  // Supabase v2 auto-processes the URL hash on createClient, so by the time
+  // getSession() runs the session is already set from the recovery token —
+  // causing the app to log straight in instead of showing Set New Password.
+  // Sniff the raw hash first and short-circuit when type=recovery.
+  var _rawHash = window.location.hash;
+  if (_rawHash && _rawHash.includes('access_token') && _rawHash.includes('type=recovery')) {
+    var _rParams = new URLSearchParams(_rawHash.replace(/^#/, ''));
+    var _rAt = _rParams.get('access_token');
+    var _rRt = _rParams.get('refresh_token') || '';
+    if (_rAt) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      _sb.auth.setSession({ access_token: _rAt, refresh_token: _rRt }).then(function(r) {
+        if (r.data && r.data.session) {
+          showSetPasswordScreen();
+        } else {
+          showLogin();
+        }
+      }).catch(function() { showLogin(); });
+      return;  // skip getSession entirely
+    }
+  }
+
   // Check for existing session on load
   _sb.auth.getSession().then(function(res) {
     var session = res.data && res.data.session;
     if (session) {
       handleSession(session);
     } else {
-      // Check URL hash for email confirmation token or password recovery
+      // Check URL hash for email confirmation token (invite / magic link)
       var hash = window.location.hash;
       if (hash && hash.includes('access_token')) {
         var params = new URLSearchParams(hash.replace(/^#/, ''));
         var at   = params.get('access_token');
         var rt   = params.get('refresh_token') || '';
-        var type = params.get('type') || '';
         if (at) {
           _sb.auth.setSession({ access_token: at, refresh_token: rt }).then(function(r) {
             window.history.replaceState({}, document.title, window.location.pathname);
-            if (type === 'recovery' && r.data && r.data.session) {
-              showSetPasswordScreen();
-            } else if (r.data && r.data.session) {
+            if (r.data && r.data.session) {
               handleSession(r.data.session);
             } else {
               showLogin();
