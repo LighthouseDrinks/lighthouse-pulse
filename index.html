@@ -1851,10 +1851,12 @@ function showDashboard(user) {
   // Lift the session-resume veil AFTER the correct page is active — no flash possible
   document.documentElement.classList.remove('resuming-session');
 
-  // Trigger KPI loads
+  // Trigger KPI loads and re-run jobs with the authenticated session — the
+  // pre-auth load used the anon key and may have returned empty due to RLS.
   setTimeout(function() {
-    if (typeof window.loadCaskKPI      === 'function') window.loadCaskKPI();
+    if (typeof window.loadCaskKPI        === 'function') window.loadCaskKPI();
     if (typeof window.loadOverviewValues === 'function') window.loadOverviewValues();
+    if (typeof window.loadJobs           === 'function') window.loadJobs();
   }, 400);
   // Poll tasks every 60 seconds so new assignments appear without manual refresh
   if (window._taskPollInterval) clearInterval(window._taskPollInterval);
@@ -27610,34 +27612,25 @@ window.saveAdjModal = async function() {
         staff.forEach(function(u){ _staffMap[u.auth_user_id] = u.display_name || u.auth_user_id.substring(0,8); });
       } catch(e) { window.logError('load staff map', e); }
     }
-    // Load jobs first — this is the critical query; failure here is reported.
-    try {
-      var rows = await supaGet('jobs?order=created_at.desc&select=*,clients(name)');
-      if (Array.isArray(rows)) _jobs = rows;
-    } catch(e) { console.warn('Jobs load error:', e); }
-
-    // Sign-off and approval tables are secondary — load them individually so a
-    // missing/inaccessible table never prevents the jobs list from rendering.
-    try {
-      var scRows = await supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null');
-      _scDone = {};
-      (scRows||[]).forEach(function(r){ if (r.job_id) _scDone[r.job_id] = true; });
-    } catch(e) { _scDone = {}; }
-
-    try {
-      var lsRows = await supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null');
-      _lsDone = {};
-      (lsRows||[]).forEach(function(r){ if (r.job_id) _lsDone[r.job_id] = true; });
-    } catch(e) { _lsDone = {}; }
-
-    try {
-      var bomRows     = await supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved');
-      var bomFlagRows = await supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged');
-      _bomDone = {};
-      (bomRows||[]).forEach(function(r){ if (r.job_id) _bomDone[r.job_id] = true; });
-      _bomFlagged = {};
-      (bomFlagRows||[]).forEach(function(r){ if (r.job_id) _bomFlagged[r.job_id] = true; });
-    } catch(e) { _bomDone = {}; _bomFlagged = {}; }
+    // Fire all queries in parallel; allSettled means one inaccessible table never
+    // blocks the jobs list from rendering.
+    var settled = await Promise.allSettled([
+      supaGet('jobs?order=created_at.desc&select=*,clients(name)'),
+      supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null'),
+      supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
+      supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved'),
+      supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged')
+    ]);
+    if (settled[0].status === 'fulfilled' && Array.isArray(settled[0].value)) _jobs = settled[0].value;
+    else if (settled[0].status === 'rejected') console.warn('Jobs load error:', settled[0].reason);
+    _scDone = {};
+    if (settled[1].status === 'fulfilled') (settled[1].value||[]).forEach(function(r){ if (r.job_id) _scDone[r.job_id] = true; });
+    _lsDone = {};
+    if (settled[2].status === 'fulfilled') (settled[2].value||[]).forEach(function(r){ if (r.job_id) _lsDone[r.job_id] = true; });
+    _bomDone = {};
+    if (settled[3].status === 'fulfilled') (settled[3].value||[]).forEach(function(r){ if (r.job_id) _bomDone[r.job_id] = true; });
+    _bomFlagged = {};
+    if (settled[4].status === 'fulfilled') (settled[4].value||[]).forEach(function(r){ if (r.job_id) _bomFlagged[r.job_id] = true; });
 
     // Auto-promote any 'new' jobs that already have BOM approved + bay held
     _checkAutoPromoteNewJobs();
