@@ -37349,7 +37349,13 @@ window.saveAdjModal = async function() {
 
       if (startVal) {
         patch.actual_start = new Date(startVal).toISOString();
-        if (!j.changeover_start && !coVal) patch.date_commenced = patch.actual_start;
+        // Update date_commenced (Results tab "Date/Time Commenced") when actual_start has
+        // genuinely changed, or was never set. Guard against spurious update when the input
+        // is just pre-filled with the existing value and the user only edited actual_end.
+        var origStartMin = j.actual_start ? new Date(j.actual_start).toISOString().substring(0, 16) : null;
+        var newStartMin  = new Date(startVal).toISOString().substring(0, 16);
+        var startChanged = !origStartMin || newStartMin !== origStartMin;
+        if (startChanged && !coVal) patch.date_commenced = patch.actual_start;
       }
 
       if (endVal) {
@@ -43971,7 +43977,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (!window.canDo || !window.canDo('bay_assign')) { window.toast && window.toast('You don\'t have permission to assign bays.', 'error'); return; }
     try {
       // Check if bay is already occupied — warn but allow a second job
-      var held = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id,product_name&limit=5');
+      var held = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id,product_name&limit=5');
       if (held && held.length) {
         var existingIds = held.map(function(h){ return h.id; }).join(', ');
         var ok = await window.lpConfirm('Bay ' + bayNo + ' already has job' + (held.length > 1 ? 's' : '') + ' ' + existingIds + '. Add a second job to this bay anyway?', { title: 'Bay already occupied', confirmLabel: 'Add anyway' });
@@ -43979,7 +43985,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       }
       // Also check extra_bays (requires SQL migration — skipped silently if column missing)
       try {
-        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id&limit=1');
         if (heldExtra && heldExtra.length) {
           var ok2 = await window.lpConfirm('Bay ' + bayNo + ' is also used as an extra bay by job ' + heldExtra[0].id + '. Add another job anyway?', { title: 'Bay already occupied', confirmLabel: 'Add anyway' });
           if (!ok2) return;
@@ -44034,7 +44040,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       }
       var curBay = me[0].job_bay;
       // Find which bays are free (no active holder)
-      var allHeld = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&select=job_bay');
+      var allHeld = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=job_bay');
       var heldSet = {};
       (allHeld||[]).forEach(function(r){ heldSet[r.job_bay] = true; });
       var free = BAYS.filter(function(n){ return n !== curBay && !heldSet[n]; });
@@ -44064,7 +44070,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       }
       var freedBay = me[0].job_bay;
       // Check whether another job still occupies this bay (shared bay scenario)
-      var remainingInBay = await apiGet('jobs?job_bay=eq.' + freedBay + '&bay_released_at=is.null&id=neq.' + encodeURIComponent(jobId) + '&select=id&limit=1');
+      var remainingInBay = await apiGet('jobs?job_bay=eq.' + freedBay + '&bay_released_at=is.null&stage=not.in.(complete,cancelled)&id=neq.' + encodeURIComponent(jobId) + '&select=id&limit=1');
       var bayStillOccupied = remainingInBay && remainingInBay.length > 0;
       var confirmMsg = bayStillOccupied
         ? 'Remove this job from Bay ' + freedBay + '? The bay will remain occupied by another job. No email will fire. The job\'s priority position is unchanged.'
@@ -44164,7 +44170,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var j = rows[0];
       if (!j.job_bay || j.bay_released_at) { window.toast && window.toast('This job isn\'t currently holding a bay.', 'error'); return; }
       // Check whether another job shares this bay
-      var others = await apiGet('jobs?job_bay=eq.' + j.job_bay + '&bay_released_at=is.null&id=neq.' + encodeURIComponent(jobId) + '&select=id&limit=1');
+      var others = await apiGet('jobs?job_bay=eq.' + j.job_bay + '&bay_released_at=is.null&stage=not.in.(complete,cancelled)&id=neq.' + encodeURIComponent(jobId) + '&select=id&limit=1');
       var bayStillOccupied = others && others.length > 0;
       var confirmMsg = bayStillOccupied
         ? 'Mark this job\'s goods as cleared from Bay ' + j.job_bay + '? Another job still occupies this bay so no email will fire.'
@@ -44199,14 +44205,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       var bayNo = parseInt(ans, 10);
       if (!bayNo || bayNo < 1) { window.toast && window.toast('Enter a valid bay number.', 'error'); return; }
       // Check if bay is occupied — warn but allow
-      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=5');
+      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id&limit=5');
       if (heldPrimary && heldPrimary.length) {
         var existingIds = heldPrimary.map(function(h){ return h.id; }).join(', ');
         var ok = await window.lpConfirm('Bay ' + bayNo + ' already has job' + (heldPrimary.length > 1 ? 's' : '') + ' ' + existingIds + '. Add this job to that bay anyway?', { title: 'Bay already occupied', confirmLabel: 'Add anyway' });
         if (!ok) return;
       }
       try {
-        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id&limit=1');
         if (heldExtra && heldExtra.length) {
           var ok2 = await window.lpConfirm('Bay ' + bayNo + ' is also used as an extra bay by job ' + heldExtra[0].id + '. Add anyway?', { title: 'Bay already occupied', confirmLabel: 'Add anyway' });
           if (!ok2) return;
@@ -44247,14 +44253,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       if (String(me[0].job_bay) === bayNo) { window.toast && window.toast('That is already the primary bay.', 'error'); return; }
       if (existing.indexOf(bayNo) >= 0) { window.toast && window.toast('Bay ' + bayNo + ' is already assigned to this job.', 'error'); return; }
       // Check if bay is occupied — warn but allow a second job
-      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&select=id&limit=5');
+      var heldPrimary = await apiGet('jobs?job_bay=eq.' + bayNo + '&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id&limit=5');
       if (heldPrimary && heldPrimary.length) {
         var existingJobIds = heldPrimary.map(function(h){ return h.id; }).join(', ');
         var okP = await window.lpConfirm('Bay ' + bayNo + ' already has job' + (heldPrimary.length > 1 ? 's' : '') + ' ' + existingJobIds + '. Share this bay anyway?', { title: 'Bay already occupied', confirmLabel: 'Share bay' });
         if (!okP) return;
       }
       try {
-        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&select=id&limit=1');
+        var heldExtra = await apiGet('jobs?extra_bays=cs.{' + bayNo + '}&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id&limit=1');
         if (heldExtra && heldExtra.length) {
           var okE = await window.lpConfirm('Bay ' + bayNo + ' is also used as an extra bay by job ' + heldExtra[0].id + '. Share anyway?', { title: 'Bay already occupied', confirmLabel: 'Share bay' });
           if (!okE) return;
