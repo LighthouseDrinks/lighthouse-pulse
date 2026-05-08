@@ -27793,7 +27793,7 @@ window.saveAdjModal = async function() {
       var bayChip = (_stageActive && typeof window._bayChipHTML === 'function') ? window._bayChipHTML(j) : '';
       var _curRole = window.CURRENT_USER && window.CURRENT_USER.role;
       var _isSuperUser = _curRole === 'managing_director' || _curRole === 'operations_director';
-      var bayEditable = (j.stage === 'new' || j.stage === 'active') && (j.bay_waitlist_priority != null) && (_isSuperUser || (window.canDo && window.canDo('bay_assign')));
+      var bayEditable = (j.stage === 'new' || j.stage === 'active') && (_isSuperUser || (window.canDo && window.canDo('bay_assign')));
       var bayWrapped = '';
       if (bayChip) {
         if (bayEditable) {
@@ -37220,7 +37220,9 @@ window.saveAdjModal = async function() {
   // queued job to match — mirrors _schedAutoChangeover but always overwrites.
   async function _schedEditCascade(jobId, actualEndIso) {
     try {
-      var next = await sbGet('jobs?stage=in.(new,active)&actual_start=is.null&id=neq.' + jobId + '&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=1&select=id');
+      // Find the next job that hasn't started yet (with or without a stale changeover_start).
+      // Unlike _schedAutoChangeover we always overwrite a stale changeover_start.
+      var next = await sbGet('jobs?stage=in.(new,active)&actual_start=is.null&id=neq.' + jobId + '&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=1&select=id,changeover_start');
       if (!next || !next.length) return;
       await sbPatch('jobs', '?id=eq.' + next[0].id, {
         changeover_start: actualEndIso,
@@ -37280,6 +37282,7 @@ window.saveAdjModal = async function() {
         + '<div style="' + row + '">'
           + '<label style="' + lbl + '">Actual End <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;">(leave blank if still running)</span></label>'
           + '<input id="_et_end" type="datetime-local" value="' + isoToLocal(j.actual_end) + '" style="' + inp + '">'
+          + '<div style="font-size:10px;color:var(--gold);margin-top:4px;">&#9432; Setting this marks the job finished and pulls the next queued job into changeover.</div>'
         + '</div>'
         + coRow
         + '<div style="' + row + '">'
@@ -37367,12 +37370,16 @@ window.saveAdjModal = async function() {
 
       await sbPatch('jobs', '?id=eq.' + j.id, patch);
 
-      if (patch.actual_end) await _schedEditCascade(j.id, patch.actual_end);
+      var didFinish = !!patch.actual_end;
+      if (didFinish) await _schedEditCascade(j.id, patch.actual_end);
 
       var overlay = document.getElementById('sched-edit-times-overlay');
       if (overlay) overlay.remove();
-      window.toast && window.toast('Times updated.', 'success');
+
       await loadSchedule();
+
+      var toastMsg = didFinish ? 'Job finished \u2014 times corrected.' : 'Times updated.';
+      window.toast && window.toast(toastMsg, 'success');
     } catch(e) {
       var errEl2 = document.getElementById('_et_err');
       if (errEl2) errEl2.textContent = 'Error saving: ' + (e && e.message);
@@ -43851,8 +43858,19 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 
     try {
       var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,bay_waitlist_priority');
-      if (!me || !me.length || me[0].bay_waitlist_priority == null) return;
+      if (!me || !me.length) return;
       var myP = me[0].bay_waitlist_priority;
+      // Auto-assign to end of queue if this job has no priority yet
+      if (myP == null) {
+        var allP = await apiGet('jobs?stage=in.(new,active)&bay_waitlist_priority=not.is.null&select=bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1');
+        myP = (allP && allP.length) ? allP[0].bay_waitlist_priority + 1 : 1;
+        await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: myP });
+        // Sync local caches immediately so the optimistic swap below works
+        if (typeof window._jobsSwapPriorities === 'function') {
+          var _j = (window._jobs || []).find(function(x){ return x.id === jobId; });
+          if (_j) _j.bay_waitlist_priority = myP;
+        }
+      }
       var nbQuery = direction === 'up'
         ? 'jobs?bay_waitlist_priority=lt.' + myP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1'
         : 'jobs?bay_waitlist_priority=gt.' + myP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc&limit=1';
@@ -43898,30 +43916,48 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (!_canEdit) { window.toast && window.toast('You don\'t have permission to reorder the planning queue.', 'error'); return; }
     try {
       var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,stage,bay_waitlist_priority');
-      if (!me || !me.length || me[0].bay_waitlist_priority == null) return;
+      if (!me || !me.length) return;
       var curP = me[0].bay_waitlist_priority;
+      // If no priority yet, default the prompt to end of queue
+      if (curP == null) {
+        var allP = await apiGet('jobs?stage=in.(new,active)&bay_waitlist_priority=not.is.null&select=bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1');
+        curP = (allP && allP.length) ? allP[0].bay_waitlist_priority + 1 : 1;
+      }
       var ans = await window.lpPrompt('Enter new priority position for this job (1 = top of queue).', String(curP), { title: 'Set queue priority' });
       if (ans == null) return;
       var newP = parseInt(ans, 10);
       if (!newP || newP < 1) { window.toast && window.toast('Enter a positive number.', 'error'); return; }
-      if (newP === curP) return;
-      // Park the row at a sentinel to free up curP
+      var origP = me[0].bay_waitlist_priority; // may be null
+      if (newP === origP) return;
+      if (origP == null) {
+        // No existing position — just insert at newP, shifting others down
+        var ins = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
+        for (var ii = 0; ii < (ins||[]).length; ii++) {
+          await apiPatch('jobs', '?id=eq.' + encodeURIComponent(ins[ii].id), { bay_waitlist_priority: ins[ii].bay_waitlist_priority + 1 });
+        }
+        await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: newP });
+        await auditBay(jobId, me[0].stage, 'Queue priority set to #' + newP + ' (was unassigned)');
+        window.toast && window.toast('Priority set to #' + newP + '.', 'success');
+        window._bayRefreshAll(jobId);
+        return;
+      }
+      // Park the row at a sentinel to free up origP
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: -1 });
-      if (newP < curP) {
-        // Moving up: shift rows in [newP, curP) down by +1 — only new/active
-        var up = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&bay_waitlist_priority=lt.' + curP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
+      if (newP < origP) {
+        // Moving up: shift rows in [newP, origP) down by +1 — only new/active
+        var up = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&bay_waitlist_priority=lt.' + origP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
         for (var i = 0; i < (up||[]).length; i++) {
           await apiPatch('jobs', '?id=eq.' + encodeURIComponent(up[i].id), { bay_waitlist_priority: (up[i].bay_waitlist_priority || 0) + 1 });
         }
       } else {
-        // Moving down: shift rows in (curP, newP] up by -1 — only new/active
-        var dn = await apiGet('jobs?bay_waitlist_priority=gt.' + curP + '&bay_waitlist_priority=lte.' + newP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
+        // Moving down: shift rows in (origP, newP] up by -1 — only new/active
+        var dn = await apiGet('jobs?bay_waitlist_priority=gt.' + origP + '&bay_waitlist_priority=lte.' + newP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
         for (var k = 0; k < (dn||[]).length; k++) {
           await apiPatch('jobs', '?id=eq.' + encodeURIComponent(dn[k].id), { bay_waitlist_priority: (dn[k].bay_waitlist_priority || 0) - 1 });
         }
       }
       await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: newP });
-      await auditBay(jobId, me[0].stage, 'Queue priority set to #' + newP + ' (was #' + curP + ')');
+      await auditBay(jobId, me[0].stage, 'Queue priority set to #' + newP + ' (was #' + origP + ')');
       window.toast && window.toast('Priority set to #' + newP + '.', 'success');
       window._bayRefreshAll(jobId);
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
