@@ -21,7 +21,7 @@ Sidebar sections and pages:
 1. Overview — KPI dashboard, recent activity, weather, clock-in button
 2. Operations:
    • Jobs — create and manage bottling jobs (stages, tasks, attachments, BOM link)
-   • Schedule — calendar view of scheduled jobs
+   • Schedule — calendar view of active jobs
    • Liquid — blending and liquid batch management
    • BOMs — Bill of Materials; clients submit via their portal, staff view/approve here
    • Approvals — queue for client BOM submissions and job requests
@@ -55,18 +55,16 @@ warehouse_liquid, client_coordinator, production_operator, order_fulfillment (Cu
 ════════════════════════════════════════════════════
 JOB WORKFLOW
 ════════════════════════════════════════════════════
-Six stages in order (exact names — no others exist in Pulse):
-  1. Intake — job received; BOM must be approved before progressing; basic details gathered
-  2. Job Prep — three sign-off tasks auto-created:
-       • Bill of Materials Sign Off → assigned to quality_compliance
-       • Supply Chain Sign Off → assigned to client_coordinator
-       • Liquid Sign Off → assigned to warehouse_liquid
-  3. Pre-Production Signoff — all sign-offs complete; awaiting final confirmation before scheduling
-  4. Scheduled — production date confirmed; job appears on Schedule calendar
-  5. In Production — bottling line actively running this job
-  6. Complete — production finished; job closed out
+Three stages in order (exact DB values — no others exist in Pulse):
+  1. new    — job created; BOM being confirmed with client; bay being sought; auto-scheduler computing projected start
+  2. active — BOM client-approved + bay committed; auto-promoted automatically; supply chain and liquid sign-offs completed here before production finishes
+  3. complete — all sign-offs done, production finished, results recorded; job closed out
 
-Stages that do NOT exist: Draft, Quality Check, On Hold, Dispatched, Invoiced.
+Also valid: on_hold, cancelled (can be set at any stage).
+
+Legacy title-case values (Intake, Job Prep, Pre-Production Signoff, Scheduled, In Production) may appear on old rows — they display as New or Active in the UI.
+
+Stages that do NOT exist: Draft, Quality Check, Dispatched, Invoiced, Scheduled (as a current stage — replaced by active).
 Job task statuses: pending, accepted, completed.
 Task types: bom_link, components, liquid_signoff, quality, drygoods_prep, weights_measures, crm, hr_profile_setup.
 
