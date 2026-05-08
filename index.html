@@ -11452,24 +11452,20 @@ function _refreshBomSignedOffJobIds(jobs, done) {
   var s = new Set();
   (jobs || []).forEach(function(j) {
     var bomKey = j.bom_id || j.bomId || j.specId;
-    if (bomKey && (j.stage === 'active' || j.stage === 'on_hold' || j.stage === 'new') && done && done[j.id]) {
+    if (bomKey && (j.stage === 'active' || j.stage === 'on_hold' || j.stage === 'new')) {
       s.add(bomKey);
     }
   });
   window._bomSignedOffJobIds = s;
 }
 
-// Returns the first job row where this BOM has been client-approved and the job
-// is still in progress (new / active / on_hold). Used to warn staff before editing
-// a BOM that is signed off for an uncompleted production run.
+// Returns the first uncompleted job row linked to this BOM (stage new/active/on_hold).
+// Used to warn staff before editing a BOM that is signed off on a live production run.
 async function _bomGetSignedOffJob(bomId) {
   try {
-    var approvals = await window.db.select('job_bom_approvals', '?bom_id=eq.' + bomId + '&client_decision=eq.approved&select=job_id');
-    if (!approvals || !approvals.length) return null;
-    var ids = approvals.map(function(a){ return a.job_id; }).join(',');
-    var jobs = await window.db.select('jobs', '?id=in.(' + ids + ')&stage=in.(new,active,on_hold)&limit=1&select=id,stage');
-    return (jobs && jobs.length) ? jobs[0] : null;
-  } catch(e) { return null; }
+    var rows = await window.db.select('jobs', '?bom_id=eq.' + bomId + '&stage=in.(new,active,on_hold)&limit=1&select=id,stage');
+    return (rows && rows.length) ? rows[0] : null;
+  } catch(e) { console.warn('_bomGetSignedOffJob error:', e); return null; }
 }
 
 // Single action: pending (reject queue) and approved (release lock) both return to draft
@@ -27613,42 +27609,56 @@ window.saveAdjModal = async function() {
         staff.forEach(function(u){ _staffMap[u.auth_user_id] = u.display_name || u.auth_user_id.substring(0,8); });
       } catch(e) { window.logError('load staff map', e); }
     }
+    // Load jobs first — this is the critical query; failure here is reported.
     try {
-      var results = await Promise.all([
-        supaGet('jobs?order=created_at.desc&select=*,clients(name)'),
-        supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null'),
-        supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
-        supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved'),
-        supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged')
-      ]);
-      var rows        = results[0];
-      var scRows      = results[1];
-      var lsRows      = results[2];
-      var bomRows     = results[3];
-      var bomFlagRows = results[4];
+      var rows = await supaGet('jobs?order=created_at.desc&select=*,clients(name)');
       if (Array.isArray(rows)) _jobs = rows;
+    } catch(e) { console.warn('Jobs load error:', e); }
+
+    // Sign-off and approval tables are secondary — load them individually so a
+    // missing/inaccessible table never prevents the jobs list from rendering.
+    try {
+      var scRows = await supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null');
+      _scDone = {};
+      (scRows||[]).forEach(function(r){ if (r.job_id) _scDone[r.job_id] = true; });
+    } catch(e) { _scDone = {}; }
+
+    try {
+      var lsRows = await supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null');
+      _lsDone = {};
+      (lsRows||[]).forEach(function(r){ if (r.job_id) _lsDone[r.job_id] = true; });
+    } catch(e) { _lsDone = {}; }
+
+    try {
+      var bomRows     = await supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved');
+      var bomFlagRows = await supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged');
       _bomDone = {};
       (bomRows||[]).forEach(function(r){ if (r.job_id) _bomDone[r.job_id] = true; });
       _bomFlagged = {};
       (bomFlagRows||[]).forEach(function(r){ if (r.job_id) _bomFlagged[r.job_id] = true; });
-      _scDone = {};
-      (scRows||[]).forEach(function(r){ if (r.job_id) _scDone[r.job_id] = true; });
-      _lsDone = {};
-      (lsRows||[]).forEach(function(r){ if (r.job_id) _lsDone[r.job_id] = true; });
-      // Auto-promote any 'new' jobs that already have BOM approved + bay held
-      _checkAutoPromoteNewJobs();
-      _refreshBomSignedOffJobIds(_jobs, _bomDone);
-      renderJobsTable();
-      updateJobKPIs();
-      loadMyTasks();
-      if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
-    } catch(e) { console.warn('Jobs load error:', e); }
+    } catch(e) { _bomDone = {}; _bomFlagged = {}; }
+
+    // Auto-promote any 'new' jobs that already have BOM approved + bay held
+    _checkAutoPromoteNewJobs();
+    _refreshBomSignedOffJobIds(_jobs, _bomDone);
+    renderJobsTable();
+    updateJobKPIs();
+    loadMyTasks();
+    if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
+  }
+
+  // Normalise a raw stage value (DB may store legacy names like 'Intake',
+  // 'In Production', etc.) to the canonical lowercase key used by filters.
+  function _normStage(stage) {
+    var label = STAGE_LABEL[stage];
+    if (!label) return (stage || '').toLowerCase();
+    return label.toLowerCase().replace(/\s+/g, '_');
   }
 
   function updateJobKPIs() {
-    var p = _jobs.filter(function(j){return j.stage==='new';}).length;
-    var s = _jobs.filter(function(j){return j.stage==='active';}).length;
-    var c = _jobs.filter(function(j){return j.stage==='complete';}).length;
+    var p = _jobs.filter(function(j){return _normStage(j.stage)==='new';}).length;
+    var s = _jobs.filter(function(j){return _normStage(j.stage)==='active';}).length;
+    var c = _jobs.filter(function(j){return _normStage(j.stage)==='complete';}).length;
     var ep = document.getElementById('jobs-kpi-new');
     var es = document.getElementById('jobs-kpi-active');
     var ec = document.getElementById('jobs-kpi-complete');
@@ -27656,7 +27666,7 @@ window.saveAdjModal = async function() {
     if(es) es.textContent = s;
     if(ec) ec.textContent = c;
     // Overview KPI — any job that's not complete or cancelled is "active"
-    var active = _jobs.filter(function(j){ return j.stage !== 'complete' && j.stage !== 'cancelled'; }).length;
+    var active = _jobs.filter(function(j){ var n=_normStage(j.stage); return n !== 'complete' && n !== 'cancelled'; }).length;
     var kpiEl = document.getElementById('kpi-active-jobs');
     var subEl = document.getElementById('kpi-active-jobs-sub');
     if (kpiEl) kpiEl.textContent = active;
@@ -27668,9 +27678,10 @@ window.saveAdjModal = async function() {
     if (!tbody) return;
     var search = (document.getElementById('jobs-search')||{}).value||'';
     var list = _jobs.filter(function(j) {
+      var ns = _normStage(j.stage);
       if (_jobStageFilter === 'live') {
-        if (j.stage !== 'new' && j.stage !== 'active') return false;
-      } else if (_jobStageFilter !== 'all' && j.stage !== _jobStageFilter) return false;
+        if (ns !== 'new' && ns !== 'active') return false;
+      } else if (_jobStageFilter !== 'all' && ns !== _jobStageFilter) return false;
       if (search) {
         var s = search.toLowerCase();
         return (j.id||'').toLowerCase().includes(s)
