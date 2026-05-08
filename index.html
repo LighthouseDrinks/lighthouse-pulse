@@ -36832,6 +36832,7 @@ window.saveAdjModal = async function() {
           h += '<button onclick="window.schedFinishJob(\'' + esc(j.id) + '\')" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--amber);border:none;color:#0d1b2a;padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9632; Finish</button>';
         }
       }
+      if (canControl) h += '<button onclick="window.schedEditActualTimes(\'' + esc(j.id) + '\')" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid rgba(201,168,76,0.35);color:var(--gold);padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9998; Times</button>';
       h += '</div>';
       h += '</div>';
       return h;
@@ -36860,7 +36861,7 @@ window.saveAdjModal = async function() {
       return;
     }
     var arrowCol = canReorder ? ' 52px' : '';
-    var cols = '36px 90px 1fr 140px 80px 80px' + (canControl ? ' 90px' : '') + arrowCol;
+    var cols = '36px 90px 1fr 140px 80px 80px' + (canControl ? ' 120px' : '') + arrowCol;
     var h = '<div style="border:1px solid var(--navy-border);border-radius:4px;overflow:hidden;">';
     h += '<div style="display:grid;grid-template-columns:' + cols + ';gap:8px;align-items:center;padding:7px 12px;background:rgba(255,255,255,0.025);border-bottom:1px solid var(--navy-border);">';
     ['#','Job','Product','Client','Bottles','Last BPH'].forEach(function(lbl, i) {
@@ -36877,7 +36878,7 @@ window.saveAdjModal = async function() {
       h += '<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(j.clientName || '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);text-align:right;">' + (j.bottle_target ? j.bottle_target.toLocaleString() : '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);text-align:right;" data-lastbph="' + esc(j.id) + '"></div>';
-      if (canControl) h += '<div style="text-align:right;"><button onclick="window.schedStartJob(\'' + esc(j.id) + '\')" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green);border:none;color:#0d1b2a;padding:5px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">&#9654; Start</button></div>';
+      if (canControl) h += '<div style="display:flex;gap:4px;justify-content:flex-end;align-items:center;"><button onclick="window.schedStartJob(\'' + esc(j.id) + '\')" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green);border:none;color:#0d1b2a;padding:5px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">&#9654; Start</button><button onclick="window.schedEditActualTimes(\'' + esc(j.id) + '\')" title="Edit actual times" style="font-size:12px;background:transparent;border:1px solid rgba(201,168,76,0.35);color:var(--gold);width:26px;height:26px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;line-height:1;padding:0;">&#9998;</button></div>';
       if (canReorder) h += '<div style="display:flex;gap:3px;justify-content:flex-end;">'
         + '<button onclick="event.stopPropagation();window._bayWaitlistMove&&window._bayWaitlistMove(\'' + esc(j.id) + '\',\'up\')" title="Move up in queue" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);width:22px;height:22px;line-height:20px;padding:0;border-radius:3px;cursor:pointer;font-size:13px;font-weight:700;font-family:Lato,sans-serif;" onmouseover="this.style.background=\'rgba(201,168,76,0.12)\'" onmouseout="this.style.background=\'transparent\'">&#9650;</button>'
         + '<button onclick="event.stopPropagation();window._bayWaitlistMove&&window._bayWaitlistMove(\'' + esc(j.id) + '\',\'down\')" title="Move down in queue" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);width:22px;height:22px;line-height:20px;padding:0;border-radius:3px;cursor:pointer;font-size:13px;font-weight:700;font-family:Lato,sans-serif;" onmouseover="this.style.background=\'rgba(201,168,76,0.12)\'" onmouseout="this.style.background=\'transparent\'">&#9660;</button>'
@@ -37214,6 +37215,172 @@ window.saveAdjModal = async function() {
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
   };
 
+  // ── Edit Actual Times ────────────────────────────────────────────────────────
+  // Cascade: after correcting a job's actual_end, push changeover_start on the next
+  // queued job to match — mirrors _schedAutoChangeover but always overwrites.
+  async function _schedEditCascade(jobId, actualEndIso) {
+    try {
+      var next = await sbGet('jobs?stage=in.(new,active)&actual_start=is.null&id=neq.' + jobId + '&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=1&select=id');
+      if (!next || !next.length) return;
+      await sbPatch('jobs', '?id=eq.' + next[0].id, {
+        changeover_start: actualEndIso,
+        date_commenced:   actualEndIso
+      });
+    } catch(e) { console.warn('Edit cascade error:', e && e.message); }
+  }
+
+  window.schedEditActualTimes = function(jobId) {
+    if (!window.canDo || !window.canDo('production_control')) {
+      window.toast && window.toast('Permission denied.', 'error');
+      return;
+    }
+    var j = (_schedJobs || []).find(function(x) { return x.id === jobId; });
+    if (!j) { window.toast && window.toast('Job not found — reload the schedule and try again.', 'error'); return; }
+
+    function isoToLocal(iso) {
+      if (!iso) return '';
+      var d = new Date(iso);
+      var p = function(n) { return n < 10 ? '0' + n : '' + n; };
+      return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+    }
+
+    var existing = document.getElementById('sched-edit-times-overlay');
+    if (existing) existing.remove();
+
+    var overlay = document.createElement('div');
+    overlay.id = 'sched-edit-times-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.72);display:flex;align-items:center;justify-content:center;font-family:Lato,sans-serif;';
+
+    var showCo = !!j.changeover_start;
+    var lbl = 'font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.45);display:block;margin-bottom:5px;';
+    var inp = 'width:100%;box-sizing:border-box;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.14);border-radius:4px;color:#fff;padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;outline:none;color-scheme:dark;';
+    var row = 'margin-bottom:14px;';
+
+    var coRow = showCo
+      ? '<div style="' + row + '">'
+          + '<label style="' + lbl + '">Changeover Start</label>'
+          + '<input id="_et_co" type="datetime-local" value="' + isoToLocal(j.changeover_start) + '" style="' + inp + '">'
+        + '</div>'
+      : '';
+
+    overlay.innerHTML = ''
+      + '<div style="background:#0d1b2a;border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:24px 28px;width:440px;max-width:95vw;box-shadow:0 16px 48px rgba(0,0,0,0.7);">'
+        + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;">'
+          + '<div>'
+            + '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);margin-bottom:3px;">Edit Actual Times</div>'
+            + '<div style="font-size:14px;font-weight:700;color:#fff;">' + esc(j.product_name || j.id) + '</div>'
+            + '<div style="font-size:10px;color:var(--muted);">' + esc(j.id) + '</div>'
+          + '</div>'
+          + '<button id="_et_close" style="background:none;border:none;color:rgba(255,255,255,0.4);cursor:pointer;font-size:22px;line-height:1;padding:0;">&times;</button>'
+        + '</div>'
+        + '<div style="' + row + '">'
+          + '<label style="' + lbl + '">Actual Start</label>'
+          + '<input id="_et_start" type="datetime-local" value="' + isoToLocal(j.actual_start) + '" style="' + inp + '">'
+        + '</div>'
+        + '<div style="' + row + '">'
+          + '<label style="' + lbl + '">Actual End <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;">(leave blank if still running)</span></label>'
+          + '<input id="_et_end" type="datetime-local" value="' + isoToLocal(j.actual_end) + '" style="' + inp + '">'
+        + '</div>'
+        + coRow
+        + '<div style="' + row + '">'
+          + '<label style="' + lbl + '">Total Paused <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;">(seconds &mdash; current: ' + (j.total_paused_secs || 0) + 's)</span></label>'
+          + '<input id="_et_paused" type="number" min="0" value="' + (j.total_paused_secs || 0) + '" style="' + inp + '">'
+        + '</div>'
+        + '<div style="margin-bottom:4px;">'
+          + '<label style="' + lbl + '">Reason <span style="color:#ef4444;">*</span></label>'
+          + '<input id="_et_reason" type="text" placeholder="e.g. Timer missed at end of shift" maxlength="200" style="' + inp + '">'
+        + '</div>'
+        + '<div id="_et_err" style="color:#ef4444;font-size:12px;min-height:18px;margin-top:4px;"></div>'
+        + '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">'
+          + '<button id="_et_cancel" style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid rgba(255,255,255,0.15);color:rgba(255,255,255,0.5);padding:9px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">Cancel</button>'
+          + '<button id="_et_save" style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--gold);border:none;color:#0d1b2a;padding:9px 18px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">Save Changes</button>'
+        + '</div>'
+      + '</div>';
+
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+    document.getElementById('_et_close').onclick  = function() { overlay.remove(); };
+    document.getElementById('_et_cancel').onclick = function() { overlay.remove(); };
+    document.getElementById('_et_save').onclick   = function() { _schedDoSaveEditedTimes(j, showCo); };
+  };
+
+  async function _schedDoSaveEditedTimes(j, showCo) {
+    var startVal  = (document.getElementById('_et_start')  && document.getElementById('_et_start').value  || '').trim();
+    var endVal    = (document.getElementById('_et_end')    && document.getElementById('_et_end').value    || '').trim();
+    var coVal     = showCo && document.getElementById('_et_co') ? (document.getElementById('_et_co').value || '').trim() : null;
+    var pausedVal = parseInt((document.getElementById('_et_paused') && document.getElementById('_et_paused').value) || '0', 10) || 0;
+    var reason    = (document.getElementById('_et_reason') && document.getElementById('_et_reason').value || '').trim();
+    var errEl     = document.getElementById('_et_err');
+    if (errEl) errEl.textContent = '';
+
+    if (!reason) { if (errEl) errEl.textContent = 'A reason is required.'; return; }
+
+    var startDt = startVal ? new Date(startVal) : null;
+    var endDt   = endVal   ? new Date(endVal)   : null;
+    var now     = new Date();
+
+    if (startDt && isNaN(startDt.getTime())) { if (errEl) errEl.textContent = 'Actual Start is not a valid date/time.'; return; }
+    if (endDt   && isNaN(endDt.getTime()))   { if (errEl) errEl.textContent = 'Actual End is not a valid date/time.';   return; }
+    if (startDt && startDt > now)            { if (errEl) errEl.textContent = 'Actual Start cannot be in the future.'; return; }
+    if (endDt   && endDt   > now)            { if (errEl) errEl.textContent = 'Actual End cannot be in the future.';   return; }
+    if (startDt && endDt && endDt <= startDt){ if (errEl) errEl.textContent = 'Actual End must be after Actual Start.'; return; }
+
+    var warnParts = [];
+    function outsideShift(dt) {
+      if (!dt) return false;
+      var mins = dt.getHours() * 60 + dt.getMinutes();
+      return mins < 7 * 60 || mins > 21 * 60;
+    }
+    if (outsideShift(startDt)) warnParts.push('start');
+    if (outsideShift(endDt))   warnParts.push('end');
+    if (warnParts.length && !confirm('Warning: the ' + warnParts.join(' and ') + ' time(s) fall outside production hours (07:00–21:00). Save anyway?')) return;
+
+    var saveBtn = document.getElementById('_et_save');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving\u2026'; }
+
+    try {
+      var patch = { total_paused_secs: pausedVal };
+
+      if (startVal) {
+        patch.actual_start = new Date(startVal).toISOString();
+        if (!j.changeover_start && !coVal) patch.date_commenced = patch.actual_start;
+      }
+
+      if (endVal) {
+        patch.actual_end     = new Date(endVal).toISOString();
+        patch.date_completed = patch.actual_end;
+        patch.paused_at      = null;
+      } else if (j.actual_end && startVal) {
+        patch.actual_end     = null;
+        patch.date_completed = null;
+      }
+
+      if (showCo && coVal) {
+        patch.changeover_start = new Date(coVal).toISOString();
+        patch.date_commenced   = patch.changeover_start;
+      }
+
+      var who  = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'Unknown';
+      var when = new Date().toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+      var note = '[Corrected ' + when + ' by ' + who + ': ' + reason + ']';
+      patch.schedule_notes = (j.schedule_notes ? j.schedule_notes + ' ' : '') + note;
+
+      await sbPatch('jobs', '?id=eq.' + j.id, patch);
+
+      if (patch.actual_end) await _schedEditCascade(j.id, patch.actual_end);
+
+      var overlay = document.getElementById('sched-edit-times-overlay');
+      if (overlay) overlay.remove();
+      window.toast && window.toast('Times updated.', 'success');
+      await loadSchedule();
+    } catch(e) {
+      var errEl2 = document.getElementById('_et_err');
+      if (errEl2) errEl2.textContent = 'Error saving: ' + (e && e.message);
+      var saveBtn2 = document.getElementById('_et_save');
+      if (saveBtn2) { saveBtn2.disabled = false; saveBtn2.textContent = 'Save Changes'; }
+    }
+  }
+
   // ── Calendar block popup ─────────────────────────────────────────────────────
   window._schedCalClick = function(evt, rawJson) {
     evt.stopPropagation();
@@ -37261,6 +37428,11 @@ window.saveAdjModal = async function() {
       }
     }
     html += '</div>';
+    if (d.jobId && d.style !== 'ghost' && window.canDo && window.canDo('production_control')) {
+      html += '<div style="border-top:1px solid rgba(255,255,255,0.07);margin-top:10px;padding-top:10px;">';
+      html += '<a href="javascript:void(0)" onclick="document.getElementById(\'sched-cal-popup\').style.display=\'none\';window.schedEditActualTimes&&window.schedEditActualTimes(\'' + (d.jobId || '').replace(/'/g, '') + '\')" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--gold);text-decoration:none;">&#9998; Edit Times</a>';
+      html += '</div>';
+    }
     pop.innerHTML = html;
 
     // Position near cursor, keep within viewport
