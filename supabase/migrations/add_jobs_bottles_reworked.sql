@@ -1,0 +1,1 @@
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS bottles_reworked integer NOT NULL DEFAULT 0;
