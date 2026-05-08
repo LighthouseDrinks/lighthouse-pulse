@@ -27579,15 +27579,24 @@ window.saveAdjModal = async function() {
   }
 
   // ── Load jobs ────────────────────────────────────────────────────────────────
+  var _loadJobsPending = false; // queues a retry if a second call arrives while in-flight
   async function loadJobs() {
-    // Prevent two fetches from running simultaneously — the second caller simply
-    // returns; the first will call loadOverviewCurrentJobs() when it completes.
-    if (_loadJobsInFlight) return;
+    if (_loadJobsInFlight) {
+      // Don't drop the request — queue a retry for when the current load finishes.
+      _loadJobsPending = true;
+      return;
+    }
     _loadJobsInFlight = true;
+    _loadJobsPending = false;
     try {
       await _doLoadJobs();
     } finally {
       _loadJobsInFlight = false;
+      // If a caller was blocked while we were running, honour it now.
+      if (_loadJobsPending) {
+        _loadJobsPending = false;
+        setTimeout(loadJobs, 300);
+      }
     }
   }
 
@@ -27675,6 +27684,8 @@ window.saveAdjModal = async function() {
     var tbody = document.getElementById('jobs-tbody-new');
     if (!tbody) return;
     var search = (document.getElementById('jobs-search')||{}).value||'';
+    // DIAG — remove after confirmed working
+    console.log('[renderJobsTable] jobs:', _jobs.length, '| filter:', _jobStageFilter);
     var list = _jobs.filter(function(j) {
       var ns = _normStage(j.stage);
       if (_jobStageFilter !== 'live' && _jobStageFilter !== 'all' && ns !== _jobStageFilter) return false;
@@ -27903,7 +27914,12 @@ window.saveAdjModal = async function() {
     if (btn) { btn.style.borderBottomColor = 'var(--gold)'; btn.style.color = 'var(--gold)'; }
     var hint = document.getElementById('jobs-live-hint');
     if (hint) hint.style.display = (stage === 'live') ? '' : 'none';
-    window.renderJobsTable();
+    // If _jobs is empty the data load hasn't finished (or failed) — trigger it now.
+    if (!_jobs.length && !_loadJobsInFlight) {
+      loadJobs();
+    } else {
+      window.renderJobsTable();
+    }
   };
 
   // ── New Job Modal ─────────────────────────────────────────────────────────────
