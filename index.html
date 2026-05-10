@@ -21225,6 +21225,10 @@ window._approvalsBadgePoll = async function() {
     <!-- ── Header ──────────────────────────────────────────────────────────── -->
     <header class="plant-header">
       <div class="plant-header-logo">Lighthouse Drinks</div>
+      <div class="plant-header-center">
+        <span id="plant-header-date" class="plant-header-meta"></span>
+        <span id="plant-header-shift" class="plant-header-shift"></span>
+      </div>
       <div class="plant-header-right">
         <span id="plant-clock" class="plant-clock">00:00:00</span>
         <button class="plant-fullscreen-btn" onclick="window.plantToggleFullscreen()">&#x26F6; Fullscreen</button>
@@ -21248,9 +21252,9 @@ window._approvalsBadgePoll = async function() {
             <span id="plant-elapsed-label" class="plant-elapsed-label">Running:</span>
             <span id="plant-elapsed-time" class="plant-elapsed-time">00:00:00</span>
           </div>
-          <div class="plant-est-row">
-            <span class="plant-est-label">Est. end:</span>
-            <span id="plant-est-value" class="plant-est-value">—</span>
+          <div class="plant-active-bph-row">
+            <span class="plant-elapsed-label">Live rate:</span>
+            <span id="plant-active-bph" class="plant-active-bph-value">—</span>
           </div>
           <div id="plant-progress-section" class="plant-progress-wrap">
             <div class="plant-progress-bar-bg">
@@ -46545,7 +46549,7 @@ if (typeof _origOpenDD === 'function') {
   function _renderNextJobs() {
     var el = document.getElementById('plant-next-jobs');
     if (!el) return;
-    var q = _nextQueued().slice(0,3);
+    var q = _nextQueued().slice(0,2);
     if (!q.length) {
       el.innerHTML = '<div style="color:var(--muted);font-size:24px;padding:20px 0;">No jobs queued</div>';
       return;
@@ -46602,47 +46606,45 @@ if (typeof _origOpenDD === 'function') {
   function _renderBphStrip() {
     var el = document.getElementById('plant-bph-bars');
     if (!el) return;
-    var now = new Date();
-    var todayH = now.getHours();
-    var startH = Math.floor(DAY_START_MIN/60); // 7
-    if (todayH < startH) { el.innerHTML=''; return; }
+
+    // 13 fixed productive slots — drops only 16-17 (full break) and 21+ (after close)
+    var FIXED_SLOTS = [7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20];
+    var nowH = new Date().getHours();
 
     // Map data by local hour
     var byHour = {};
     _hourlyBars.forEach(function(b){ byHour[new Date(b.hourUtc).getHours()] = b; });
 
     // Compute bph for each column
-    var cols = [];
-    for (var h=startH; h<=todayH; h++) {
-      var d    = byHour[h];
-      var tot  = (h===todayH) ? _currentHourTotal() : (d?d.totalBottles:0);
-      var bph  = _barBph(tot, h);
-      cols.push({ h:h, tot:tot, bph:bph, cur:(h===todayH) });
-    }
+    var cols = FIXED_SLOTS.map(function(h) {
+      var isCurrent = (h === nowH);
+      var isPast    = (h < nowH) || (nowH > 20); // after close = all past
+      var d         = byHour[h];
+      var tot       = isCurrent ? _currentHourTotal() : (d ? d.totalBottles : 0);
+      var bph       = (isPast || isCurrent) ? _barBph(tot, h) : 0;
+      var label     = pad2(h) + '\u2013' + pad2(h + 1);
+      return { h:h, tot:tot, bph:bph, isCurrent:isCurrent, isPast:isPast, label:label };
+    });
 
     var maxBph = 0;
     cols.forEach(function(c){ if(c.bph>maxBph) maxBph=c.bph; });
     if (maxBph===0) maxBph=1;
-    var BAR_MAX = 72;
+    var BAR_MAX = 60;
 
-    // Split into two rows: first half (morning) and second half (afternoon/evening)
-    var half = Math.ceil(cols.length / 2);
+    // Split into two rows: 7 (morning) + 6 (afternoon/evening)
+    var half = Math.ceil(cols.length / 2); // 7
     var rows = [cols.slice(0, half), cols.slice(half)];
 
     function renderCol(c) {
       var fillH  = c.bph>0 ? Math.max(4, Math.round(c.bph/maxBph*BAR_MAX)) : 2;
-      var valTxt = c.bph>0 ? c.bph.toLocaleString() : '—';
-      var hrLbl  = c.cur ? 'NOW' : pad2(c.h);
-      var colCls = 'plant-bph-col'+(c.cur?' current':'')+(c.bph===0?' empty':'');
-      var rateSub= c.cur && _liveBph>0
-        ? '<div class="plant-bph-rate-sub">~'+_liveBph.toLocaleString()+' bph</div>' : '';
+      var valTxt = (c.isPast || c.isCurrent) && c.bph>0 ? c.bph.toLocaleString() : '\u2014';
+      var colCls = 'plant-bph-col'+(c.isCurrent?' current':'')+(c.bph===0?' empty':'');
       return '<div class="'+colCls+'" id="plant-bph-col-'+c.h+'">'
         +'<div class="plant-bph-value" id="plant-bph-val-'+c.h+'">'+valTxt+'</div>'
-        +rateSub
         +'<div class="plant-bph-bar-bg" style="height:'+BAR_MAX+'px;">'
         +  '<div class="plant-bph-bar-fill" id="plant-bph-fill-'+c.h+'" style="height:'+fillH+'px;"></div>'
         +'</div>'
-        +'<div class="plant-bph-hour">'+hrLbl+'</div>'
+        +'<div class="plant-bph-hour">'+c.label+'</div>'
         +'</div>';
     }
 
@@ -46656,34 +46658,32 @@ if (typeof _origOpenDD === 'function') {
     var h      = new Date().getHours();
     var valEl  = document.getElementById('plant-bph-val-'+h);
     var fillEl = document.getElementById('plant-bph-fill-'+h);
-    var colEl  = document.getElementById('plant-bph-col-'+h);
     if (!valEl||!fillEl) return;
 
-    // Re-compute bph for all bars to maintain correct relative scaling
-    var byHour={};
+    // Re-compute maxBph from the same FIXED_SLOTS used by _renderBphStrip
+    var FIXED_SLOTS = [7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20];
+    var nowH  = h;
+    var byHour = {};
     _hourlyBars.forEach(function(b){ byHour[new Date(b.hourUtc).getHours()]=b; });
-    var maxBph=0;
-    var startH=Math.floor(DAY_START_MIN/60);
-    var todayH=new Date().getHours();
-    for(var hh=startH; hh<=todayH; hh++){
-      var d=byHour[hh];
-      var tot=(hh===todayH)?_currentHourTotal():(d?d.totalBottles:0);
-      var b=_barBph(tot,hh);
-      if(b>maxBph) maxBph=b;
-    }
-    if(maxBph===0) maxBph=1;
-    var BAR_MAX=72;
+    var maxBph = 0;
+    FIXED_SLOTS.forEach(function(hh) {
+      var isPast = (hh < nowH) || (nowH > 20);
+      var isCur  = (hh === nowH);
+      if (!isPast && !isCur) return;
+      var d   = byHour[hh];
+      var tot = isCur ? _currentHourTotal() : (d ? d.totalBottles : 0);
+      var b   = _barBph(tot, hh);
+      if (b > maxBph) maxBph = b;
+    });
+    if (maxBph===0) maxBph=1;
+    var BAR_MAX = 60;
 
     var curTot = _currentHourTotal();
     var curBph = _barBph(curTot, h);
     var fillH  = curBph>0 ? Math.max(4, Math.round(curBph/maxBph*BAR_MAX)) : 2;
 
-    valEl.textContent    = curBph>0 ? curBph.toLocaleString() : '—';
-    fillEl.style.height  = fillH+'px';
-
-    // Live rate subtitle
-    var subEl = colEl && colEl.querySelector('.plant-bph-rate-sub');
-    if (subEl) subEl.textContent = _liveBph>0 ? '~'+_liveBph.toLocaleString()+' bph' : '';
+    valEl.textContent   = curBph>0 ? curBph.toLocaleString() : '\u2014';
+    fillEl.style.height = fillH+'px';
   }
 
   /* ── 1-second tick ───────────────────────────────────────────────────────── */
@@ -46709,14 +46709,14 @@ if (typeof _origOpenDD === 'function') {
     var ck = document.getElementById('plant-clock');
     if(ck) ck.textContent = pad2(now.getHours())+':'+pad2(now.getMinutes())+':'+pad2(now.getSeconds());
 
-    // Footer
-    var fd = document.getElementById('plant-footer-date');
-    if(fd) fd.textContent = fmtDate(now);
-    var fs = document.getElementById('plant-footer-shift');
-    if(fs){
+    // Header — date and shift status
+    var hd = document.getElementById('plant-header-date');
+    if(hd) hd.textContent = fmtDate(now);
+    var hs = document.getElementById('plant-header-shift');
+    if(hs){
       var m=now.getHours()*60+now.getMinutes(), inProd=false;
       for(var i=0;i<PROD_WINDOWS.length;i++){ if(m>=PROD_WINDOWS[i][0]&&m<PROD_WINDOWS[i][1]){inProd=true;break;} }
-      fs.textContent = inProd ? 'In Production' : 'Out of Hours';
+      hs.textContent = inProd ? 'In Production' : 'Out of Hours';
     }
 
     // Hour-rollover detection → re-query hourly data
@@ -46746,18 +46746,6 @@ if (typeof _origOpenDD === 'function') {
           if(pf)  pf.style.width     = pct.toFixed(1)+'%';
           if(pp)  pp.textContent     = Math.floor(pct)+'%';
           if(btg) btg.innerHTML      = toGo.toLocaleString()+' <span>bottles to go</span>';
-        }
-
-        // Est. end — live BPH only, shows — if not available
-        var estEl = document.getElementById('plant-est-value');
-        if(estEl){
-          if(_liveBph>0 && _activeJob.bottle_target){
-            var rem  = Math.max(_activeJob.bottle_target - _runningCount, 0);
-            var msL  = (rem / _liveBph) * 3600000;
-            estEl.textContent = fmtTime(new Date(Date.now()+msL));
-          } else {
-            estEl.textContent = '—';
-          }
         }
 
       } else if (_activeJob.changeover_start && !_activeJob.actual_start) {
@@ -46826,6 +46814,8 @@ if (typeof _origOpenDD === 'function') {
       } else {
         _liveBph = 0;
       }
+      var abphEl = document.getElementById('plant-active-bph');
+      if (abphEl) abphEl.textContent = _liveBph > 0 ? _liveBph.toLocaleString() + ' bph' : '\u2014';
       _updateCurrentBar();
     } catch(e) {}
   }
