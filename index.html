@@ -46289,7 +46289,9 @@ if (typeof _origOpenDD === 'function') {
   var _workingOverrides = {};
   var _tick1sId         = null;
   var _tick30sId        = null;
-  var _rtChannel        = null;
+  var _rtChannel        = null;   // line_events sensor channel
+  var _jobsRtChannel    = null;   // jobs table channel
+  var _jobsRtDebounce   = null;
   var _authWired        = false;
   var _lastHour         = -1;     // for hour-rollover detection
 
@@ -46694,6 +46696,10 @@ if (typeof _origOpenDD === 'function') {
         try { window._sb.removeChannel(_rtChannel); } catch(e2) {}
         _rtChannel = null;
       }
+      if (_jobsRtChannel && window._sb) {
+        try { window._sb.removeChannel(_jobsRtChannel); } catch(e3) {}
+        _jobsRtChannel = null;
+      }
       return;
     }
 
@@ -46772,6 +46778,30 @@ if (typeof _origOpenDD === 'function') {
 
     // Keep current bar value in sync every second
     _updateCurrentBar();
+  }
+
+  /* ── Re-query jobs on realtime change (changeover, start, complete, etc.) ── */
+  async function _reloadJobs() {
+    try {
+      var jobs = await pdGet(
+        'jobs?stage=in.(new,active)' +
+        '&select=id,product_name,bottle_target,job_bay,actual_start,actual_end,' +
+        'paused_at,total_paused_secs,changeover_start,scheduled_start,stage,' +
+        'bay_waitlist_priority,created_at,clients(name)' +
+        '&order=bay_waitlist_priority.asc.nullslast,created_at.asc'
+      );
+      _jobs = jobs || [];
+      var activeJobs = _jobs.filter(function(j){
+        return !j.actual_end && (j.actual_start || j.changeover_start);
+      });
+      activeJobs.sort(function(a,b){
+        return new Date(b.actual_start||b.changeover_start) - new Date(a.actual_start||a.changeover_start);
+      });
+      _activeJob = activeJobs.length ? activeJobs[0] : null;
+      _renderLeft();
+      _renderNextJobs();
+      _renderBays();
+    } catch(e) {}
   }
 
   /* ── Re-query hourly data on hour rollover ───────────────────────────────── */
@@ -46933,6 +46963,17 @@ if (typeof _origOpenDD === 'function') {
                 setTimeout(function(){ fillEl && fillEl.classList.remove('flash'); }, 800);
               }
             })
+        .subscribe();
+    }
+
+    /* Jobs realtime — any job change re-renders left panel, next jobs, bay cards */
+    if (!_jobsRtChannel && window._sb) {
+      _jobsRtChannel = window._sb
+        .channel('plant_jobs')
+        .on('postgres_changes', { event:'*', schema:'public', table:'jobs' }, function() {
+          clearTimeout(_jobsRtDebounce);
+          _jobsRtDebounce = setTimeout(_reloadJobs, 300);
+        })
         .subscribe();
     }
   };
