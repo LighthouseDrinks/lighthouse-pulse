@@ -4379,6 +4379,17 @@ window.loadPortalDryGoods = async function(clientId) {
       onSite[b.sku_id] = (onSite[b.sku_id] || 0) + Number(b.quantity_remaining || 0);
     });
 
+    // Load movement history for all client SKUs so clients can see per-SKU activity
+    var movsBySkuId = {};
+    try {
+      var allMovements = await db.select('dry_goods_movements',
+        '?sku_id=in.(' + skuIds.join(',') + ')&order=created_at.desc&limit=200');
+      (allMovements || []).forEach(function(m) {
+        if (!movsBySkuId[m.sku_id]) movsBySkuId[m.sku_id] = [];
+        movsBySkuId[m.sku_id].push(m);
+      });
+    } catch(e) { /* movement history is non-critical */ }
+
     // Load saved cost prices into cache (RLS restricts to this client automatically)
     window._portalDgCostCache = {};
     try {
@@ -4436,13 +4447,20 @@ window.loadPortalDryGoods = async function(clientId) {
         +       '<th style="text-align:right;">Line Value</th>'
         +     '</tr></thead>'
         +     '<tbody>';
+      var PORTAL_MT_LABEL = { goods_in:'Goods In', job_depletion:'Job Depletion', manual_in:'Manual In', manual_out:'Manual Out', adjustment:'Adjustment', transfer_in:'Transfer In', transfer_out:'Transfer Out', client_collection:'Client Collection' };
+      var PORTAL_MT_COL   = { goods_in:'var(--green)', job_depletion:'var(--amber)', manual_in:'var(--green)', manual_out:'var(--red)', adjustment:'var(--muted)', transfer_in:'var(--blue,#4a90d9)', transfer_out:'var(--blue,#4a90d9)', client_collection:'var(--blue,#4a90d9)' };
       rows.forEach(function(s) {
         var qty  = Number(onSite[s.id] || 0);
         var cost = window._portalDgGetCost(clientId, s.id);
         var desc = esc(window.skuDisplayName(s) || '—');
         var qtyCol = qty > 0 ? 'var(--white)' : 'var(--muted)';
+        var skuMovs = movsBySkuId[s.id] || [];
+        var histBtnLabel = skuMovs.length ? ('History (' + skuMovs.length + ')') : 'No history';
+        var histBtn = '<button class="portal-dg-hist-toggle" data-sku-id="' + esc(s.id) + '" data-label="' + esc(histBtnLabel) + '"'
+          + ' style="margin-top:5px;display:block;background:none;border:none;color:var(--gold);font-size:10px;letter-spacing:0.05em;cursor:' + (skuMovs.length ? 'pointer' : 'default') + ';padding:0;opacity:' + (skuMovs.length ? '1' : '0.35') + ';">'
+          + '&#9660; ' + histBtnLabel + '</button>';
         html += '<tr data-sku-id="' + esc(s.id) + '">'
-          +   '<td style="color:var(--white);white-space:normal;word-break:break-word;">' + desc + '</td>'
+          +   '<td style="color:var(--white);white-space:normal;word-break:break-word;">' + desc + histBtn + '</td>'
           +   '<td style="text-align:left;"><span style="font-size:11px;font-weight:700;color:var(--gold);background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.25);padding:2px 7px;border-radius:3px;letter-spacing:0.06em;white-space:nowrap;">' + esc(s.id) + '</span></td>'
           +   '<td style="text-align:right;color:' + qtyCol + ';font-weight:600;">' + qty.toLocaleString() + '</td>'
           +   '<td style="text-align:right;">'
@@ -4454,6 +4472,34 @@ window.loadPortalDryGoods = async function(clientId) {
           +       'placeholder="0.00">'
           +   '</td>'
           +   '<td style="text-align:right;" class="portal-dg-line-value" data-sku-id="' + esc(s.id) + '" data-qty="' + qty + '">—</td>'
+          + '</tr>';
+        // Hidden history row — collapsed by default, toggled by the button above
+        var histRows = skuMovs.map(function(m) {
+          var isOut  = m.quantity < 0 || ['job_depletion','manual_out','client_collection'].includes(m.movement_type);
+          var qtyStr = (isOut && m.quantity > 0 ? '−' : (!isOut && m.quantity < 0 ? '' : (m.quantity > 0 ? '+' : ''))) + Math.abs(Number(m.quantity || 0)).toLocaleString();
+          var qtyC   = isOut ? 'var(--red)' : 'var(--green)';
+          var typeLabel = PORTAL_MT_LABEL[m.movement_type] || m.movement_type;
+          var typeCol   = PORTAL_MT_COL[m.movement_type]   || 'var(--muted)';
+          var dateStr   = m.created_at ? m.created_at.substring(0,10) : '—';
+          return '<tr style="border-top:1px solid rgba(255,255,255,0.05);">'
+            + '<td style="padding:5px 8px;font-size:11px;color:var(--muted);">' + dateStr + '</td>'
+            + '<td style="padding:5px 8px;font-size:11px;color:' + typeCol + ';">' + typeLabel + '</td>'
+            + '<td style="padding:5px 8px;font-size:11px;font-weight:700;color:' + qtyC + ';text-align:right;">' + qtyStr + '</td>'
+            + '<td colspan="2" style="padding:5px 8px;font-size:11px;color:var(--muted);">' + (m.notes ? esc(m.notes) : '—') + '</td>'
+            + '</tr>';
+        }).join('');
+        html += '<tr id="portal-dg-hist-' + esc(s.id) + '" style="display:none;">'
+          +   '<td colspan="5" style="padding:0 0 10px 0;background:rgba(0,0,0,0.2);">'
+          +     '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+          +       '<thead><tr style="color:var(--muted);font-size:10px;letter-spacing:0.06em;text-transform:uppercase;border-bottom:1px solid rgba(255,255,255,0.08);">'
+          +         '<th style="padding:6px 8px;text-align:left;">Date</th>'
+          +         '<th style="padding:6px 8px;text-align:left;">Type</th>'
+          +         '<th style="padding:6px 8px;text-align:right;">Qty</th>'
+          +         '<th colspan="2" style="padding:6px 8px;text-align:left;">Notes</th>'
+          +       '</tr></thead>'
+          +       '<tbody>' + (histRows || '<tr><td colspan="5" style="padding:10px 8px;color:var(--muted);font-size:11px;">No movements recorded.</td></tr>') + '</tbody>'
+          +     '</table>'
+          +   '</td>'
           + '</tr>';
         catRows.push({ id: s.id, description: window.skuDisplayName(s) || s.description || '', qty: qty });
       });
@@ -4472,6 +4518,18 @@ window.loadPortalDryGoods = async function(clientId) {
 
     body.innerHTML = html;
     window._portalDgLastLoad = { clientId: clientId, groups: exportGroups };
+
+    // Wire up per-SKU history row toggles
+    body.addEventListener('click', function(e) {
+      var btn = e.target.closest ? e.target.closest('.portal-dg-hist-toggle') : null;
+      if (!btn || !btn.dataset.label) return;
+      var skuId  = btn.dataset.skuId;
+      var histTr = document.getElementById('portal-dg-hist-' + skuId);
+      if (!histTr) return;
+      var open = histTr.style.display !== 'none';
+      histTr.style.display = open ? 'none' : '';
+      btn.innerHTML = (open ? '&#9660; ' : '&#9650; ') + btn.dataset.label;
+    });
 
     // Initial total recalculation using cached (DB-loaded) cost prices
     window._portalDgRecalcAll();
@@ -26174,8 +26232,8 @@ window.openSKUPanel = async function(skuId) {
     if (!movements.length) {
       histEl.innerHTML = '<div style="color:var(--muted);font-size:13px;text-align:center;padding:24px;">No movement history yet.</div>';
     } else {
-      var MT_LABEL = { goods_in:'📦 Goods In', job_depletion:'🏭 Job Depletion', manual_in:'➕ Manual In', manual_out:'➖ Manual Out', adjustment:'📋 Adjustment', transfer_in:'⇄ Transfer In', transfer_out:'⇄ Transfer Out' };
-      var MT_COL   = { goods_in:'var(--green)', job_depletion:'var(--amber)', manual_in:'var(--green)', manual_out:'var(--red)', adjustment:'var(--muted)', transfer_in:'var(--blue)', transfer_out:'var(--blue)' };
+      var MT_LABEL = { goods_in:'📦 Goods In', job_depletion:'🏭 Job Depletion', manual_in:'➕ Manual In', manual_out:'➖ Manual Out', adjustment:'📋 Adjustment', transfer_in:'⇄ Transfer In', transfer_out:'⇄ Transfer Out', client_collection:'📤 Client Collection' };
+      var MT_COL   = { goods_in:'var(--green)', job_depletion:'var(--amber)', manual_in:'var(--green)', manual_out:'var(--red)', adjustment:'var(--muted)', transfer_in:'var(--blue,#4a90d9)', transfer_out:'var(--blue,#4a90d9)', client_collection:'var(--blue,#4a90d9)' };
       histEl.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
         + '<thead><tr style="color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">'
         + '<th style="text-align:left;padding:6px 8px;">Date</th><th style="text-align:left;padding:6px 8px;">Type</th>'
@@ -26183,7 +26241,7 @@ window.openSKUPanel = async function(skuId) {
         + '<th style="text-align:left;padding:6px 8px;">Job / Notes</th></tr></thead>'
         + '<tbody>'
         + movements.map(function(m) {
-          var isOut = m.quantity < 0 || ['job_depletion','manual_out'].includes(m.movement_type);
+          var isOut = m.quantity < 0 || ['job_depletion','manual_out','client_collection'].includes(m.movement_type);
           var qtyCol = isOut ? 'var(--red)' : 'var(--green)';
           var qtyStr = (isOut && m.quantity > 0 ? '−' : (m.quantity > 0 ? '+' : '')) + Math.abs(m.quantity).toLocaleString();
           var jobNotes = m.notes ? '<span style="color:var(--text);">'+m.notes+'</span>' : '';
@@ -29475,10 +29533,16 @@ window.saveAdjModal = async function() {
       ov.id   = 'dg-deduct-overlay';
       ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.92);z-index:100030;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto;font-family:Lato,sans-serif;';
 
-      // Build initial waste values and pinned-batch state (skuId -> batch object or null)
-      var wasteVals  = {};
-      var pinnedBatch = {};
-      dryComps.forEach(function(c){ wasteVals[c.sku_id] = 0; });
+      // Build initial waste values, client-collection state, and pinned-batch state
+      var wasteVals      = {};
+      var collectEnabled = {}; // skuId -> bool: client collecting remainder?
+      var collectVals    = {}; // skuId -> number: editable collection qty
+      var pinnedBatch    = {};
+      dryComps.forEach(function(c){
+        wasteVals[c.sku_id]      = 0;
+        collectEnabled[c.sku_id] = false;
+        collectVals[c.sku_id]    = 0;
+      });
 
       function calcRow(c, waste) {
         var isCaseItem = c.item_name && (c.item_name.toLowerCase().indexOf('shipper') > -1 || c.item_name.toLowerCase().indexOf('divider') > -1);
@@ -29488,13 +29552,21 @@ window.saveAdjModal = async function() {
         } else {
           qtyPerUnit = c.qty_required != null ? parseFloat(c.qty_required) : actualBottles;
         }
-        var baseDeduct  = isCaseItem ? qtyPerUnit : qtyPerUnit; // already factored
-        var totalDeduct = baseDeduct + parseInt(waste || 0);
+        var baseDeduct   = qtyPerUnit;
+        var wasteQty     = parseInt(waste || 0);
         var currentStock = stockMap[c.sku_id] != null ? stockMap[c.sku_id] : null;
+        // Maximum the client can collect = whatever is genuinely left after production + waste
+        var maxCollect   = currentStock != null ? Math.max(0, currentStock - baseDeduct - wasteQty) : 0;
+        var collectQty   = collectEnabled[c.sku_id] ? Math.min(parseInt(collectVals[c.sku_id] || 0), maxCollect) : 0;
+        var totalDeduct  = baseDeduct + wasteQty + collectQty;
+        // Hard cap — total can never exceed what is physically in stock
+        if (currentStock != null) totalDeduct = Math.min(totalDeduct, currentStock);
         var stockAfter   = currentStock != null ? Math.max(0, currentStock - totalDeduct) : null;
-        var belowZero    = currentStock != null && (currentStock - totalDeduct) < 0;
+        var belowZero    = false; // hard cap prevents below-zero
         var noStock      = currentStock == null;
-        return { qtyPerUnit: qtyPerUnit, totalDeduct: totalDeduct, currentStock: currentStock, stockAfter: stockAfter, belowZero: belowZero, noStock: noStock };
+        return { qtyPerUnit: qtyPerUnit, baseDeduct: baseDeduct, wasteQty: wasteQty, collectQty: collectQty,
+                 totalDeduct: totalDeduct, currentStock: currentStock, stockAfter: stockAfter,
+                 belowZero: belowZero, noStock: noStock, maxCollect: maxCollect };
       }
 
       function renderTable() {
@@ -29529,6 +29601,15 @@ window.saveAdjModal = async function() {
             + '<td style="padding:6px 8px;text-align:center;">'
             +   '<input type="number" min="0" step="1" value="' + waste + '" data-sku="' + esc(c.sku_id) + '" class="dg-waste-inp" style="width:64px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:4px 6px;font-size:12px;border-radius:3px;text-align:right;">'
             + '</td>'
+            + '<td style="padding:6px 8px;text-align:center;' + (r.noStock ? 'opacity:0.35;pointer-events:none;' : '') + '">'
+            +   '<input type="checkbox" class="dg-collect-chk" data-sku="' + esc(c.sku_id) + '"'
+            +     (collectEnabled[c.sku_id] ? ' checked' : '')
+            +     (r.noStock ? ' disabled' : '')
+            +     ' style="accent-color:var(--gold);cursor:pointer;width:14px;height:14px;vertical-align:middle;">'
+            +   '<input type="number" min="0" step="1" value="' + (collectEnabled[c.sku_id] ? collectVals[c.sku_id] : 0) + '"'
+            +     ' data-sku="' + esc(c.sku_id) + '" data-max="' + r.maxCollect + '" class="dg-collect-inp"'
+            +     ' style="width:58px;margin-top:4px;display:' + (collectEnabled[c.sku_id] ? 'block' : 'none') + ';background:var(--navy-dark);border:1px solid rgba(212,175,55,0.55);color:var(--gold);padding:4px 6px;font-size:12px;border-radius:3px;text-align:right;">'
+            + '</td>'
             + '<td id="dg-total-' + c.sku_id + '" style="padding:9px 8px;text-align:right;font-size:12px;font-weight:700;color:var(--white);">' + r.totalDeduct.toLocaleString() + '</td>'
             + '<td style="padding:9px 8px;text-align:right;font-size:12px;color:' + (r.noStock ? '#ffa000' : 'var(--text)') + ';">' + stockCurDisp + '</td>'
             + '<td id="dg-safter-' + c.sku_id + '" style="padding:9px 8px;text-align:right;font-size:12px;font-weight:700;color:' + (r.belowZero ? 'var(--red,#e05757)' : r.noStock ? '#ffa000' : 'var(--green)') + ';">' + (r.stockAfter != null ? r.stockAfter.toLocaleString() : '—') + '</td>'
@@ -29548,12 +29629,13 @@ window.saveAdjModal = async function() {
           + '</div>'
           + '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">Review quantities to deduct based on <strong style="color:var(--white);">' + actualBottles.toLocaleString() + ' bottles produced</strong>. Enter any waste per component, then confirm to complete the job and update stock.</div>'
           + '<div style="overflow-x:auto;">'
-          + '<table style="width:100%;border-collapse:collapse;min-width:560px;">'
+          + '<table style="width:100%;border-collapse:collapse;min-width:680px;">'
           + '<thead><tr style="border-bottom:2px solid var(--navy-border);">'
           +   '<th style="text-align:left;padding:8px 8px 10px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Component</th>'
           +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;">BOM Qty / Unit</th>'
           +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Actual Units</th>'
           +   '<th style="text-align:center;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Waste</th>'
+          +   '<th style="text-align:center;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:rgba(212,175,55,0.8);white-space:nowrap;">Client Collecting</th>'
           +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;">Total to Deduct</th>'
           +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;">Current Stock</th>'
           +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;">Stock After</th>'
@@ -29707,30 +29789,75 @@ window.saveAdjModal = async function() {
       document.body.appendChild(ov);
       document.body.style.overflow = 'hidden';
 
-      // Live-update only the affected cells when a waste input changes — never re-render
-      // the whole table, which would destroy the focused input and lose the cursor.
-      ov.addEventListener('input', function(e) {
-        if (!e.target.classList.contains('dg-waste-inp')) return;
-        var skuId = e.target.dataset.sku;
-        wasteVals[skuId] = Math.max(0, parseInt(e.target.value || 0) || 0);
-        var c = dryComps.find(function(x){ return x.sku_id === skuId; });
-        if (!c) return;
-        var r = calcRow(c, wasteVals[skuId]);
+      // Shared helper — surgically update the three calculated cells for a given SKU row.
+      function _updateRowCells(skuId, r) {
         var compTd = document.getElementById('dg-comp-' + skuId);
-        if (compTd) compTd.style.background = r.belowZero ? 'rgba(224,87,87,0.08)' : r.noStock ? 'rgba(255,160,0,0.06)' : '';
+        if (compTd) compTd.style.background = r.noStock ? 'rgba(255,160,0,0.06)' : '';
         var warnEl = document.getElementById('dg-warn-' + skuId);
-        if (warnEl) warnEl.innerHTML = r.belowZero
-          ? '<div style="font-size:10px;color:var(--red,#e05757);margin-top:2px;">Stock will go below zero — will be set to 0</div>'
-          : r.noStock
-            ? '<div style="font-size:10px;color:#ffa000;margin-top:2px;">&#9888; No stock record — will be skipped</div>'
-            : '';
+        if (warnEl) warnEl.innerHTML = r.noStock
+          ? '<div style="font-size:10px;color:#ffa000;margin-top:2px;">&#9888; No stock record — will be skipped</div>'
+          : '';
         var totalEl = document.getElementById('dg-total-' + skuId);
         if (totalEl) totalEl.textContent = r.totalDeduct.toLocaleString();
         var safterEl = document.getElementById('dg-safter-' + skuId);
         if (safterEl) {
           safterEl.textContent = r.stockAfter != null ? r.stockAfter.toLocaleString() : '—';
-          safterEl.style.color = r.belowZero ? 'var(--red,#e05757)' : r.noStock ? '#ffa000' : 'var(--green)';
+          safterEl.style.color = r.noStock ? '#ffa000' : 'var(--green)';
         }
+      }
+
+      // Live-update cells when waste inputs change — no table re-render, focus is never lost.
+      ov.addEventListener('input', function(e) {
+        var isWaste   = e.target.classList.contains('dg-waste-inp');
+        var isCollect = e.target.classList.contains('dg-collect-inp');
+        if (!isWaste && !isCollect) return;
+        var skuId = e.target.dataset.sku;
+        var c = dryComps.find(function(x){ return x.sku_id === skuId; });
+        if (!c) return;
+
+        if (isWaste) {
+          wasteVals[skuId] = Math.max(0, parseInt(e.target.value || 0) || 0);
+          // Re-calculate maxCollect with new waste and re-cap any existing collect value
+          var r0 = calcRow(c, wasteVals[skuId]);
+          if (collectEnabled[skuId] && collectVals[skuId] > r0.maxCollect) {
+            collectVals[skuId] = r0.maxCollect;
+            var cInp = ov.querySelector('.dg-collect-inp[data-sku="' + skuId + '"]');
+            if (cInp) { cInp.value = collectVals[skuId]; cInp.dataset.max = r0.maxCollect; }
+          } else {
+            var cInp2 = ov.querySelector('.dg-collect-inp[data-sku="' + skuId + '"]');
+            if (cInp2) cInp2.dataset.max = r0.maxCollect;
+          }
+        } else {
+          // Collection qty input
+          var maxC   = parseInt(e.target.dataset.max || 0) || 0;
+          var parsed = Math.max(0, parseInt(e.target.value || 0) || 0);
+          collectVals[skuId] = Math.min(parsed, maxC);
+          if (parsed > maxC) e.target.value = collectVals[skuId]; // correct over-entry in-place
+        }
+
+        _updateRowCells(skuId, calcRow(c, wasteVals[skuId]));
+      });
+
+      // Checkbox change — show/hide the collection qty input and pre-fill with remainder.
+      ov.addEventListener('change', function(e) {
+        if (!e.target.classList.contains('dg-collect-chk')) return;
+        var skuId = e.target.dataset.sku;
+        var c = dryComps.find(function(x){ return x.sku_id === skuId; });
+        if (!c) return;
+        collectEnabled[skuId] = e.target.checked;
+        var r = calcRow(c, wasteVals[skuId]);
+        if (e.target.checked) {
+          collectVals[skuId] = r.maxCollect; // pre-fill with the true remainder
+        } else {
+          collectVals[skuId] = 0;
+        }
+        var collectInp = ov.querySelector('.dg-collect-inp[data-sku="' + skuId + '"]');
+        if (collectInp) {
+          collectInp.style.display = e.target.checked ? 'block' : 'none';
+          collectInp.value         = collectVals[skuId];
+          collectInp.dataset.max   = r.maxCollect;
+        }
+        _updateRowCells(skuId, calcRow(c, wasteVals[skuId]));
       });
 
       // Handle camera scan button and clear-pin button clicks
@@ -29743,8 +29870,13 @@ window.saveAdjModal = async function() {
           pinnedBatch[clearBtn.dataset.sku] = null;
           var tbody = document.getElementById('dg-dd-tbody');
           if (tbody) tbody.innerHTML = renderTable();
+          // renderTable sets values from state — these loops correct anything the browser may reset
           ov.querySelectorAll('.dg-waste-inp').forEach(function(inp) {
             inp.value = wasteVals[inp.dataset.sku] || 0;
+          });
+          ov.querySelectorAll('.dg-collect-inp').forEach(function(inp) {
+            inp.value = collectVals[inp.dataset.sku] || 0;
+            inp.style.display = collectEnabled[inp.dataset.sku] ? 'block' : 'none';
           });
         }
       });
@@ -29765,13 +29897,21 @@ window.saveAdjModal = async function() {
         confirmBtn.disabled = true;
         confirmBtn.textContent = 'Processing…';
 
-        // Build deduction list
+        // Build deduction list — include production qty, collect qty, and waste separately
         var deductions = [];
         dryComps.forEach(function(c) {
           var waste = parseInt(wasteVals[c.sku_id] || 0);
           var r = calcRow(c, waste);
           if (r.noStock) return; // skip — no stock record
-          deductions.push({ comp: c, waste: waste, totalDeduct: r.totalDeduct, stockBefore: r.currentStock, stockAfter: r.stockAfter });
+          deductions.push({
+            comp:            c,
+            waste:           waste,
+            totalDeduct:     r.totalDeduct,
+            productionDeduct: r.baseDeduct + r.wasteQty, // BOM use + waste (excludes client collection)
+            collectQty:      r.collectQty,
+            stockBefore:     r.currentStock,
+            stockAfter:      r.stockAfter
+          });
         });
 
         try {
@@ -29829,24 +29969,41 @@ window.saveAdjModal = async function() {
             } catch(e) { console.warn('stock_movements insert failed (non-critical):', e.message); }
           }
 
-          // 3. Insert one dry_goods_movements record per SKU so the Stock History panel reflects the deduction.
-          //    Uses the first consumed batch's ID to satisfy batch_id; total quantity across all batches.
+          // 3. Insert dry_goods_movements records:
+          //    - job_depletion for what production consumed (BOM qty + waste)
+          //    - client_collection (separate line) for the collected remainder, if applicable
           var performer = window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email || null) : null;
           var jobLabel  = job.product_name || job.product || jobId;
           for (var di3m = 0; di3m < deductions.length; di3m++) {
             var dm = deductions[di3m];
             if (!dm.batchMovements || !dm.batchMovements.length) continue;
-            try {
-              await supaMut('POST', 'dry_goods_movements', '', {
-                sku_id:        dm.comp.sku_id,
-                batch_id:      dm.batchMovements[0].batchId,
-                movement_type: 'job_depletion',
-                quantity:      -dm.totalDeduct,
-                job_id:        jobId,
-                performed_by:  performer,
-                notes:         jobLabel
-              });
-            } catch(e) { console.warn('dry_goods_movements insert failed:', e.message); }
+            var firstBatchId = dm.batchMovements[0].batchId;
+            if (dm.productionDeduct > 0) {
+              try {
+                await supaMut('POST', 'dry_goods_movements', '', {
+                  sku_id:        dm.comp.sku_id,
+                  batch_id:      firstBatchId,
+                  movement_type: 'job_depletion',
+                  quantity:      -dm.productionDeduct,
+                  job_id:        jobId,
+                  performed_by:  performer,
+                  notes:         jobLabel
+                });
+              } catch(e) { console.warn('dry_goods_movements (job_depletion) insert failed:', e.message); }
+            }
+            if (dm.collectQty > 0) {
+              try {
+                await supaMut('POST', 'dry_goods_movements', '', {
+                  sku_id:        dm.comp.sku_id,
+                  batch_id:      firstBatchId,
+                  movement_type: 'client_collection',
+                  quantity:      -dm.collectQty,
+                  job_id:        jobId,
+                  performed_by:  performer,
+                  notes:         jobLabel + ' \u00b7 client collection'
+                });
+              } catch(e) { console.warn('dry_goods_movements (client_collection) insert failed:', e.message); }
+            }
           }
 
           // 4. Insert job_waste records
