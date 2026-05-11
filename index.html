@@ -30484,8 +30484,11 @@ window.saveAdjModal = async function() {
     try {
       var comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
 
-      // Auto-init from BOM if empty or stale
-      if (!comps.length || comps.every(function(c){ return !c.sku_id && !c.item_name; })) {
+      // Auto-init from BOM if empty, stale, or a liquid-target job with no qty_required values yet
+      var j_preseed = _jobs.find(function(x){ return x.id === jobId; });
+      var allQtyNull = comps.length > 0 && comps.every(function(c){ return c.qty_required == null; });
+      var isLiquidMissingQtys = j_preseed && j_preseed.job_target_type === 'liquid' && allQtyNull;
+      if (!comps.length || comps.every(function(c){ return !c.sku_id && !c.item_name; }) || isLiquidMissingQtys) {
         if (comps.length) await supaMut('DELETE','job_components','?job_id=eq.'+jobId, null);
         await window.initComponentsFromBOM(jobId, true);
         comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
@@ -30935,14 +30938,24 @@ window.saveAdjModal = async function() {
         var unitPrice = priceMap[skuId] != null ? priceMap[skuId] : null;
 
         // Qty logic: shippers and dividers = ceil(bottles / case_size), others = bottle target
+        // For liquid-target jobs, derive bottle count from liquid_litres + BOM volume, with dilution if ABV data is available
+        var effectiveBottles = j.bottle_target;
+        if (!effectiveBottles && j.job_target_type === 'liquid' && j.liquid_litres && bom.volume_cl) {
+          var capL = bom.volume_cl / 100;
+          var workingLitres = j.liquid_litres;
+          if (j.abv_in && j.bottling_abv) {
+            workingLitres = (j.liquid_litres * j.abv_in) / j.bottling_abv;
+          }
+          effectiveBottles = Math.floor(workingLitres / capL) || null;
+        }
         var isCaseItem = skuCols[i].col === 'shipper_sku_id' || skuCols[i].col === 'divider_sku_id';
         var qty;
-        if (isCaseItem && j.bottle_target && bom.bottles_per_shipper) {
-          qty = Math.ceil(j.bottle_target / bom.bottles_per_shipper);
+        if (isCaseItem && effectiveBottles && bom.bottles_per_shipper) {
+          qty = Math.ceil(effectiveBottles / bom.bottles_per_shipper);
         } else if (skuCols[i].col === 'liquid_sku_id') {
           qty = null; // liquid qty is in litres, handled separately
         } else {
-          qty = j.bottle_target || null;
+          qty = effectiveBottles || null;
         }
 
         await supaMut('POST','job_components','', {
