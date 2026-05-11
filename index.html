@@ -6718,6 +6718,18 @@ window.copyInviteLink = function() {
         </select>
         <div class="field-hint">All dry goods dropdowns are populated from this client's inventory records</div>
       </div>
+      <div id="bm-lh-stock-row" style="margin-top:12px;display:none;align-items:center;gap:10px;">
+        <button id="bm-include-lh-stock" type="button" onclick="toggleLhStock()"
+          style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;padding:5px 12px;cursor:pointer;display:flex;align-items:center;gap:6px;letter-spacing:0.04em;"
+          onmouseover="if(!window._bomIncludeLhStock){this.style.borderColor='var(--gold-dim)';this.style.color='var(--gold)';}"
+          onmouseout="if(!window._bomIncludeLhStock){this.style.borderColor='var(--navy-border)';this.style.color='var(--muted)';}">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.5.5 0 0 1 .5.5V7.5h6a.5.5 0 0 1 0 1h-6v6a.5.5 0 0 1-1 0v-6h-6a.5.5 0 0 1 0-1h6V1.5A.5.5 0 0 1 8 1z"/></svg>
+          Include Lighthouse Stock
+        </button>
+        <span id="bm-lh-stock-hint" style="font-size:11px;color:var(--muted);display:none;">
+          Lighthouse Drinks items shown with [LH] prefix
+        </span>
+      </div>
     </div>
 
     <!-- SECTION 1: Product Identity -->
@@ -10461,6 +10473,30 @@ function renderBoms() {
 
 // ── Modal ────────────────────────────────────────────────────────────────────
 
+// Whether to append Lighthouse Drinks (CLI-000) dry goods to the BOM dropdowns
+window._bomIncludeLhStock = false;
+
+window.toggleLhStock = function() {
+  window._bomIncludeLhStock = !window._bomIncludeLhStock;
+  var btn  = el('bm-include-lh-stock');
+  var hint = el('bm-lh-stock-hint');
+  if (btn) {
+    if (window._bomIncludeLhStock) {
+      btn.style.borderColor  = 'var(--gold)';
+      btn.style.color        = 'var(--gold)';
+      btn.style.background   = 'rgba(201,168,76,0.08)';
+      btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg> Lighthouse Stock Included';
+    } else {
+      btn.style.borderColor  = 'var(--navy-border)';
+      btn.style.color        = 'var(--muted)';
+      btn.style.background   = 'transparent';
+      btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.5.5 0 0 1 .5.5V7.5h6a.5.5 0 0 1 0 1h-6v6a.5.5 0 0 1-1 0v-6h-6a.5.5 0 0 1 0-1h6V1.5A.5.5 0 0 1 8 1z"/></svg> Include Lighthouse Stock';
+    }
+  }
+  if (hint) hint.style.display = window._bomIncludeLhStock ? '' : 'none';
+  onBomClientChange();
+};
+
 // Category → dropdown mapping for BOM components
 // Maps exact DB category names (lowercase) → BOM dropdown IDs
 // Supports both old broad names and new specific subcategory names
@@ -10518,6 +10554,10 @@ var BOM_DROPDOWNS = [
 window.onBomClientChange = async function() {
   var clientId = gv('bm-client');
 
+  // Show/hide the LH stock toggle — not applicable when Lighthouse is the selected client
+  var lhRow = el('bm-lh-stock-row');
+  if (lhRow) lhRow.style.display = (clientId && clientId !== 'CLI-000') ? 'flex' : 'none';
+
   // Reset all component dropdowns
   BOM_DROPDOWNS.forEach(function(d) {
     var s = el(d.id);
@@ -10563,11 +10603,15 @@ window.onBomClientChange = async function() {
       }
     }
 
-    skus.forEach(function(sku) {
+    function routeSkuToBuckets(sku, labelPrefix) {
       var catName = (catMap[sku.category_id] || '').toLowerCase().trim();
       var stock   = stockMap[sku.id] || 0;
-      var entry   = { id: sku.id, label: window.skuDisplayName(sku) + ' — ' + stock + ' in stock', desc: window.skuDisplayName(sku) };
-
+      var prefix  = labelPrefix || '';
+      var entry   = {
+        id:    sku.id,
+        label: prefix + window.skuDisplayName(sku) + ' — ' + stock + ' in stock',
+        desc:  prefix + window.skuDisplayName(sku)
+      };
       if (BOM_CAT_MAP[catName]) {
         BOM_CAT_MAP[catName].forEach(function(dropId) { pushToBucket(dropId, entry); });
         return;
@@ -10577,7 +10621,15 @@ window.onBomClientChange = async function() {
           BOM_CAT_MAP[key].forEach(function(dropId) { pushToBucket(dropId, entry); });
         }
       });
-    });
+    }
+
+    skus.forEach(function(sku) { routeSkuToBuckets(sku, ''); });
+
+    // Append Lighthouse Drinks (CLI-000) dry goods when the toggle is active
+    if (window._bomIncludeLhStock && clientId !== 'CLI-000') {
+      var lhSkus = await window.db.select('dry_goods_skus', '?client_id=eq.CLI-000&is_active=eq.true&order=description.asc');
+      lhSkus.forEach(function(sku) { routeSkuToBuckets(sku, '[LH] '); });
+    }
 
     // Populate dry goods dropdowns
     BOM_DROPDOWNS.forEach(function(d) {
@@ -11155,6 +11207,19 @@ function closeBomModal() {
   var ov = el('bom-modal-overlay');
   if (ov) ov.style.display = 'none';
   document.body.style.overflow = '';
+  // Reset LH stock toggle so the next BOM opens clean
+  if (window._bomIncludeLhStock) {
+    window._bomIncludeLhStock = false;
+    var btn  = el('bm-include-lh-stock');
+    var hint = el('bm-lh-stock-hint');
+    if (btn) {
+      btn.style.borderColor = 'var(--navy-border)';
+      btn.style.color       = 'var(--muted)';
+      btn.style.background  = 'transparent';
+      btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.5.5 0 0 1 .5.5V7.5h6a.5.5 0 0 1 0 1h-6v6a.5.5 0 0 1-1 0v-6h-6a.5.5 0 0 1 0-1h6V1.5A.5.5 0 0 1 8 1z"/></svg> Include Lighthouse Stock';
+    }
+    if (hint) hint.style.display = 'none';
+  }
 }
 
 async function saveBomDraft() {
