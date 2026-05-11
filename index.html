@@ -9938,6 +9938,16 @@ async function saveJob(){
   if(!product)  { await window.lpAlert('Please enter a Product Full Name.', { variant: 'warn' }); return; }
   if(!clientId) { await window.lpAlert('Please select a client.', { variant: 'warn' }); return; }
 
+  // BOM must be approved before a job can be created
+  var _legacySpecId = (function(){ var e=el('mf-specid'); return e?e.value.trim():''; })();
+  if (_legacySpecId) {
+    var _legacyBom = (window.BOMS || []).find(function(b){ return b.id === _legacySpecId; });
+    if (_legacyBom && _legacyBom.status !== 'approved') {
+      await window.lpAlert('BOM must be approved before a job can be created.', { variant: 'warn' });
+      return;
+    }
+  }
+
   function gv(id){ var e=el(id); return e?e.value.trim():''; }
   var target   = gv('mf-target')||'Liquid';
   var dilution = gv('mf-dilution')||'No';
@@ -20357,13 +20367,15 @@ window.approveJobSubmission = async function(id, opts) {
     var chillFiltration = false, colouring = false, bottlingAbv = null, dilution = false;
     if (s.bom_id) {
       try {
-        var bomRes = await db.select('boms', '?id=eq.' + s.bom_id + '&select=chill_filtration,colouring,colour_spec,bottling_abv&limit=1');
-        if (bomRes && bomRes[0]) {
-          chillFiltration = !!bomRes[0].chill_filtration;
-          colouring       = !!bomRes[0].colouring;
-          bottlingAbv     = bomRes[0].bottling_abv || null;
-          dilution        = !!bottlingAbv;
+        var bomRes = await db.select('boms', '?id=eq.' + s.bom_id + '&select=bom_status,chill_filtration,colouring,colour_spec,bottling_abv&limit=1');
+        if (!bomRes || !bomRes[0] || bomRes[0].bom_status !== 'approved') {
+          window.toast && window.toast('Cannot approve: the linked BOM is not approved.', 'error');
+          return;
         }
+        chillFiltration = !!bomRes[0].chill_filtration;
+        colouring       = !!bomRes[0].colouring;
+        bottlingAbv     = bomRes[0].bottling_abv || null;
+        dilution        = !!bottlingAbv;
       } catch(_e) {}
     }
 
@@ -28151,8 +28163,8 @@ window.saveAdjModal = async function() {
       cliSel.innerHTML = '<option value="">— Select client —</option>'
         + clients.map(function(c){ return '<option value="' + c.id + '">' + c.name + '</option>'; }).join('');
 
-      // Load BOMs with all liquid control fields
-      _njmBoms = await supaGet('boms?order=product_name.asc&select=id,product_name,client_id,abv,volume_cl,bottling_abv,chill_filtration,colouring,colour_spec,bph,bottles_per_shipper');
+      // Load approved BOMs only — draft/pending BOMs cannot be used to create a job
+      _njmBoms = await supaGet('boms?bom_status=eq.approved&order=product_name.asc&select=id,product_name,bom_status,client_id,abv,volume_cl,bottling_abv,chill_filtration,colouring,colour_spec,bph,bottles_per_shipper');
       var bomSel = document.getElementById('njm-bom');
       bomSel.innerHTML = '<option value="">— Select BOM to auto-populate job —</option>'
         + _njmBoms.map(function(b){ return '<option value="' + b.id + '">' + b.product_name + '</option>'; }).join('');
@@ -28448,6 +28460,16 @@ window.saveAdjModal = async function() {
     var isLiquid = document.getElementById('njm-target-liquid').checked;
     if (isLiquid && !gv('njm-litres-in'))    { window.toast && window.toast('Litres of liquid required is required.','error'); return; }
     if (!isLiquid && !gv('njm-bottle-target')) { window.toast && window.toast('Bottle target is required.','error'); return; }
+
+    // BOM must be approved before a job can be created
+    if (!editId) {
+      var _selectedBomId = gv('njm-bom');
+      var _selectedBom = (_njmBoms || []).find(function(b){ return b.id === _selectedBomId; });
+      if (_selectedBom && _selectedBom.bom_status !== 'approved') {
+        window.toast && window.toast('BOM must be approved before a job can be created.', 'error');
+        return;
+      }
+    }
 
     var btn = document.getElementById('njm-save-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
