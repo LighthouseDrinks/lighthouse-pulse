@@ -47037,9 +47037,32 @@ if (typeof _origOpenDD === 'function') {
 
 <script>
 (function(){
-  var LS_KEY = 'lh_ecom_stock_value';
+  var DB_KEY = 'ecom_stock_value';
+  var LS_KEY = 'lh_ecom_stock_value'; // legacy fallback
+  var _cachedVal = null; // numeric or null
 
-  // Parse a formatted currency string like "€12,500.00" → 12500
+  // ── DB helpers (window.db is always available at this point) ─────────────────
+  function _dbGet() {
+    return window.db.select('app_settings', '?key=eq.' + DB_KEY + '&limit=1')
+      .then(function(rows){ return rows && rows.length ? rows[0].value : null; })
+      .catch(function(){ return null; });
+  }
+  function _dbUpsert(val) {
+    return window.db.select('app_settings', '?key=eq.' + DB_KEY + '&limit=1&select=id')
+      .then(function(rows) {
+        if (rows && rows.length) {
+          return window.db.update('app_settings', '?key=eq.' + DB_KEY, { value: String(val) });
+        } else {
+          return window.db.insert('app_settings', { key: DB_KEY, value: String(val) });
+        }
+      });
+  }
+  function _dbDelete() {
+    return window.db.update('app_settings', '?key=eq.' + DB_KEY, { value: null })
+      .catch(function(){});
+  }
+
+  // ── Shared helpers ────────────────────────────────────────────────────────────
   function _parseCurrencyEl(id) {
     var el = document.getElementById(id);
     if (!el) return 0;
@@ -47076,25 +47099,34 @@ if (typeof _origOpenDD === 'function') {
   }
 
   function _renderEcomStock(val) {
+    _cachedVal = (val === null || val === undefined || val === '') ? null : parseFloat(val);
     var el = document.getElementById('kpi-ecom-stock-value');
     if (!el) return;
-    if (val === null || val === undefined || val === '') {
-      el.textContent = '—';
-    } else {
-      var n = parseFloat(val);
-      el.textContent = isNaN(n) ? '—' : '€' + n.toLocaleString('en-IE', {minimumFractionDigits:2, maximumFractionDigits:2});
-    }
+    el.textContent = (_cachedVal === null || isNaN(_cachedVal))
+      ? '—'
+      : '€' + _cachedVal.toLocaleString('en-IE', {minimumFractionDigits:2, maximumFractionDigits:2});
   }
 
-  // Load persisted value on startup
-  _renderEcomStock(localStorage.getItem(LS_KEY));
+  // Load from DB on startup; fall back to localStorage for backward compatibility
+  _dbGet().then(function(dbVal) {
+    if (dbVal !== null && dbVal !== '') {
+      _renderEcomStock(dbVal);
+      localStorage.removeItem(LS_KEY); // clean up legacy entry
+    } else {
+      var legacy = localStorage.getItem(LS_KEY);
+      if (legacy !== null) {
+        _renderEcomStock(legacy);
+        // Migrate legacy value into DB silently
+        _dbUpsert(parseFloat(legacy)).then(function(){ localStorage.removeItem(LS_KEY); }).catch(function(){});
+      }
+    }
+  });
 
   window.openEcomStockModal = function() {
     var overlay = document.getElementById('ecom-stock-overlay');
     var input   = document.getElementById('ecom-stock-input');
     if (!overlay) return;
-    var stored = localStorage.getItem(LS_KEY);
-    input.value = stored !== null ? stored : '';
+    input.value = _cachedVal !== null ? _cachedVal : '';
     overlay.style.display = 'flex';
     requestAnimationFrame(function(){ overlay.style.opacity = '1'; });
     setTimeout(function(){ input.focus(); input.select(); }, 80);
@@ -47110,17 +47142,22 @@ if (typeof _origOpenDD === 'function') {
   window.saveEcomStockValue = function() {
     var input = document.getElementById('ecom-stock-input');
     var raw   = input ? input.value.trim() : '';
+    var saveBtn = document.querySelector('#ecom-stock-overlay .btn-gold');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+    var done = function() {
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+      _updateTotalStockValue();
+      window.closeEcomStockModal();
+    };
     if (raw === '') {
-      localStorage.removeItem(LS_KEY);
       _renderEcomStock(null);
+      _dbDelete().then(done).catch(done);
     } else {
       var n = parseFloat(raw);
-      if (isNaN(n)) return;
-      localStorage.setItem(LS_KEY, n);
+      if (isNaN(n)) { if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; } return; }
       _renderEcomStock(n);
+      _dbUpsert(n).then(done).catch(done);
     }
-    _updateTotalStockValue();
-    window.closeEcomStockModal();
   };
 })();
 </script>
