@@ -22102,7 +22102,7 @@ window.ccxPrintRecord = function() {
   <div id="people-leave" class="people-panel" style="display:none;">
     <div id="lv-employee-view">
       <!-- KPI strip -->
-      <div id="lv-kpi-strip" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px;">
+      <div id="lv-kpi-strip" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:22px;">
         <div class="card" style="padding:14px;text-align:center;">
           <div style="font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);margin-bottom:5px;">Entitlement</div>
           <div id="lv-kpi-ent" style="font-size:22px;font-weight:700;color:var(--gold);">—</div>
@@ -22122,6 +22122,11 @@ window.ccxPrintRecord = function() {
           <div style="font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);margin-bottom:5px;">Remaining</div>
           <div id="lv-kpi-rem" style="font-size:22px;font-weight:700;color:var(--green);">—</div>
           <div style="font-size:10px;color:var(--muted);">days available</div>
+        </div>
+        <div class="card" style="padding:14px;text-align:center;">
+          <div style="font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);margin-bottom:5px;">Accrued</div>
+          <div id="lv-kpi-accrued" style="font-size:22px;font-weight:700;color:var(--white);">—</div>
+          <div style="font-size:10px;color:var(--muted);">days accrued YTD</div>
         </div>
       </div>
 
@@ -42093,6 +42098,21 @@ function setKPIs(entitlement){
   uEl.textContent=used%1===0?used:used.toFixed(1);
   pEl.textContent=pending%1===0?pending:pending.toFixed(1);
   rEl.textContent=rem%1===0?rem:rem.toFixed(1);
+  var accrued=0;
+  if(_lvProfile){
+    var aYr=new Date().getFullYear();
+    var aToday=new Date(); aToday.setHours(0,0,0,0);
+    var aSoy=new Date(aYr,0,1);
+    var aEoy=new Date(aYr,11,31);
+    var aTotalDays=(aEoy-aSoy)/864e5;
+    var aAccrualStart=aSoy;
+    if(_lvProfile.employment_start){var asd=new Date(_lvProfile.employment_start);if(asd>aAccrualStart)aAccrualStart=asd;}
+    var aElapsed=Math.min(aTotalDays,Math.max(0,(aToday-aAccrualStart)/864e5));
+    var aRawEnt=parseFloat(_lvProfile.leave_entitlement)||0;
+    accrued=Math.round(aRawEnt*(aElapsed/aTotalDays)*10)/10;
+  }
+  var aEl=document.getElementById('lv-kpi-accrued');
+  if(aEl) aEl.textContent=accrued%1===0?accrued:accrued.toFixed(1);
 }
 
 /* ── Leave history ── */
@@ -42373,7 +42393,7 @@ window.mgmtLoadLeaveOverview = async function(){
     var NON_ANNUAL_CATS=['sick','maternity_paternity','compassionate','unpaid','other'];
     var results=await Promise.all([
       get('app_users?select=id,display_name,email,role&order=display_name.asc&limit=200'),
-      get('hr_profiles?select=user_id,leave_entitlement,employment_type&limit=200'),
+      get('hr_profiles?select=user_id,leave_entitlement,employment_type,employment_start&limit=200'),
       get('leave_requests?status=neq.cancelled&start_date=gte.'+yr+'-01-01&select=user_id,days,status,leave_category&limit=500')
     ]);
     var users=results[0], profiles=results[1], requests=results[2];
@@ -42400,7 +42420,13 @@ window.mgmtLoadLeaveOverview = async function(){
       });
       var ent=parseFloat(p.leave_entitlement)||0;
       var rem=Math.max(0,ent-annUsed-annPend);
-      return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, annUsed:annUsed, annPend:annPend, rem:rem, catDays:catDays };
+      var mSoy=new Date(yr,0,1),mEoy=new Date(yr,11,31),mTd=(mEoy-mSoy)/864e5;
+      var mAs=mSoy;
+      if(p.employment_start){var msd=new Date(p.employment_start);if(msd>mAs)mAs=msd;}
+      var mToday=new Date();mToday.setHours(0,0,0,0);
+      var mEl=Math.min(mTd,Math.max(0,(mToday-mAs)/864e5));
+      var accrued=Math.round(ent*(mEl/mTd)*10)/10;
+      return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, annUsed:annUsed, annPend:annPend, rem:rem, accrued:accrued, catDays:catDays };
     }).filter(Boolean);
     if(!rows.length){ el.innerHTML='<span style="color:var(--muted);">No leave entitlements configured yet.</span>'; return; }
     rows.sort(function(a,b){ return a.name.localeCompare(b.name); });
@@ -42413,7 +42439,7 @@ window.mgmtLoadLeaveOverview = async function(){
       +'<tr style="border-bottom:2px solid var(--navy-border);">'
       +'<th style="text-align:left;'+thStyle+'">Employee</th>'
       +'<th style="text-align:left;'+thStyle+'">Type</th>'
-      +'<th colspan="4" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(201,168,76,0.3);color:var(--gold);">Annual Leave</th>'
+      +'<th colspan="5" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(201,168,76,0.3);color:var(--gold);">Annual Leave</th>'
       +(visibleCats.length?'<th colspan="'+visibleCats.length+'" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(74,158,221,0.3);color:#4a9edd;">Other Leave (days taken)</th>':'')
       +'</tr>'
       +'<tr style="border-bottom:1px solid var(--navy-border);">'
@@ -42422,6 +42448,7 @@ window.mgmtLoadLeaveOverview = async function(){
       +'<th style="text-align:center;'+thStyle+'">Used</th>'
       +'<th style="text-align:center;'+thStyle+'">Pending</th>'
       +'<th style="text-align:center;'+thStyle+'">Remaining</th>'
+      +'<th style="text-align:center;'+thStyle+'">Accrued</th>'
       +visibleCats.map(function(c){ return '<th style="text-align:center;'+thStyle+'">'+window.lvCatLabel(c).replace(' Leave','').replace(' / ',' /')+'</th>'; }).join('')
       +'</tr></thead><tbody>';
     rows.forEach(function(r){
@@ -42432,6 +42459,7 @@ window.mgmtLoadLeaveOverview = async function(){
         +'<td style="text-align:center;padding:8px 6px;">'+fmt(r.annUsed)+'</td>'
         +'<td style="text-align:center;padding:8px 6px;color:var(--amber);">'+fmt(r.annPend)+'</td>'
         +'<td style="text-align:center;padding:8px 6px;font-weight:700;color:'+remColor(r.rem)+';">'+fmt(r.rem)+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;color:var(--white);">'+fmt(r.accrued)+'</td>'
         +visibleCats.map(function(c){ var d=r.catDays[c]||0; return '<td style="text-align:center;padding:8px 6px;color:'+(d>0?'var(--white)':'rgba(120,147,168,0.4)')+';">'+(d>0?fmt(d):'\u2014')+'</td>'; }).join('')
         +'</tr>';
     });
