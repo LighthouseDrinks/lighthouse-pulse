@@ -42510,7 +42510,7 @@ window.mgmtLoadEmpHistory = async function(){
   if(!empId){el.innerHTML='<span style="color:var(--amber);">Select an employee first.</span>';return;}
   el.innerHTML='<span style="color:var(--muted);">Loading\u2026</span>';
   try {
-    var reqs=await get('leave_requests?user_id=eq.'+empId+'&start_date=gte.'+yr+'-01-01&start_date=lte.'+yr+'-12-31&order=start_date.desc&limit=200');
+    var reqs=await get('leave_requests?user_id=eq.'+empId+'&status=neq.cancelled&start_date=gte.'+yr+'-01-01&start_date=lte.'+yr+'-12-31&order=start_date.desc&limit=200');
     if(!reqs.length){el.innerHTML='<span style="color:var(--muted);">No leave records for this employee in '+yr+'.</span>';return;}
     var fmtD=function(s){if(!s)return '';return new Date(s+'T00:00:00').toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'});};
     var fmt=function(n){n=parseFloat(n)||0;return n%1===0?n:n.toFixed(1);};
@@ -42720,8 +42720,17 @@ window.mgmtApplyLeave = async function(){
   if(new Date(to)<new Date(from)){msg.textContent='End date must be after start date.';msg.style.color='var(--red)';return;}
   var days=countWeekdays(from,to,typ==='half_day');
   if(days===0){msg.textContent='No working days in that range.';msg.style.color='var(--amber)';return;}
+  var applyBtn=document.querySelector('button[onclick*="mgmtApplyLeave"]');
+  if(applyBtn) applyBtn.disabled=true;
   msg.textContent='Saving\u2026'; msg.style.color='var(--muted)';
   try {
+    var overlap=await get('leave_requests?user_id=eq.'+empId+'&status=neq.cancelled&start_date=lte.'+to+'&end_date=gte.'+from+'&limit=1');
+    if(overlap.length){
+      msg.textContent='\u26a0 An overlapping leave record already exists for this employee in that date range.';
+      msg.style.color='var(--amber)';
+      if(applyBtn) applyBtn.disabled=false;
+      return;
+    }
     await post('leave_requests',{user_id:empId,leave_type:typ,leave_category:cat,start_date:from,end_date:to,days:days,days_requested:days,notes:notes,status:'approved',applied_by_manager:true});
     msg.textContent='\u2713 Leave applied.'; msg.style.color='var(--green)';
     document.getElementById('mgmt-apply-from').value='';
@@ -42754,7 +42763,8 @@ window.mgmtApplyLeave = async function(){
         +'</div>';
       await window.sendEmail({to:[emp.email],subject:'Leave Applied \u2013 '+dateStr,html:html});
     } catch(e){ console.warn('mgmtApplyLeave email failed:',e.message); }
-  } catch(e){ msg.textContent='Error: '+(e.message||e).toString().slice(0,80); msg.style.color='var(--red)'; }
+    if(applyBtn) applyBtn.disabled=false;
+  } catch(e){ msg.textContent='Error: '+(e.message||e).toString().slice(0,80); msg.style.color='var(--red)'; if(applyBtn) applyBtn.disabled=false; }
 };
 
 /* ── Leave Calendar ── */
@@ -42810,6 +42820,9 @@ window.lvCalRender=async function(yr,mo){
       grid.innerHTML='<span style="color:var(--muted);font-size:12px;">No leave recorded for this month.</span>';
       if(legend) legend.innerHTML=''; return;
     }
+    // Detect today for column highlight
+    var _calNow=new Date();
+    var todayD=(_calNow.getFullYear()===yr&&_calNow.getMonth()===mo)?_calNow.getDate():null;
     // Day headers
     var dayNames=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
     var html='<table style="border-collapse:collapse;font-size:11px;min-width:100%;">';
@@ -42818,7 +42831,11 @@ window.lvCalRender=async function(yr,mo){
       var dow=new Date(yr,mo,d).getDay(); // 0=Sun
       var dn=dayNames[dow===0?6:dow-1];
       var isWe=dow===0||dow===6;
-      html+='<th style="text-align:center;padding:4px 2px;min-width:28px;font-size:9px;color:'+(isWe?'rgba(120,147,168,0.4)':'var(--muted)')+';">'+d+'<br><span style="font-size:8px;">'+dn+'</span></th>';
+      var isToday=d===todayD;
+      html+='<th style="text-align:center;padding:4px 2px;min-width:28px;font-size:9px;'
+        +'color:'+(isToday?'var(--gold)':isWe?'rgba(120,147,168,0.4)':'var(--muted)')+';'
+        +(isToday?'border-bottom:2px solid var(--gold);':'')+'">'
+        +d+'<br><span style="font-size:8px;">'+dn+'</span></th>';
     }
     html+='</tr></thead><tbody>';
     // Employee rows
@@ -42830,15 +42847,17 @@ window.lvCalRender=async function(yr,mo){
       for(var d=1;d<=daysInMonth;d++){
         var dow2=new Date(yr,mo,d).getDay();
         var isWe2=dow2===0||dow2===6;
+        var isTodayCell=d===todayD;
+        var cellBg=isTodayCell?'rgba(201,168,76,0.07)':isWe2?'rgba(20,40,60,0.3)':'transparent';
         if(days[d]){
           var isPending=days[d].status==='pending';
           var cellStyle='background:'+color+';opacity:'+(isPending?'0.4':'0.85')+';border-radius:2px;';
           if(isPending) cellStyle+='border:1px dashed '+color+';background:transparent;color:'+color+';';
           var title=window.lvCatLabel(days[d].cat)+(isPending?' (Pending)':'');
-          html+='<td style="padding:4px 2px;text-align:center;" title="'+window.escapeHtml(title)+'">';
+          html+='<td style="padding:4px 2px;text-align:center;background:'+cellBg+';" title="'+window.escapeHtml(title)+'">';
           html+='<div style="'+cellStyle+'width:20px;height:20px;margin:0 auto;"></div></td>';
         } else {
-          html+='<td style="padding:4px 2px;background:'+(isWe2?'rgba(20,40,60,0.3)':'transparent')+';"></td>';
+          html+='<td style="padding:4px 2px;background:'+cellBg+';"></td>';
         }
       }
       html+='</tr>';
