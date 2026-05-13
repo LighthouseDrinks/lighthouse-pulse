@@ -36844,6 +36844,10 @@ window.saveAdjModal = async function() {
   var _bankHolidayDates   = {};   // "YYYY-MM-DD" -> true  (ROI public holidays)
   var _workingOverrides   = {};   // "YYYY-MM-DD" -> true  (non-working days marked working)
   var _lastBphMap         = {};   // bom_id -> last actual BPH
+  var _schedBomDone    = {};   // job_id -> true if BOM client-approved
+  var _schedBomFlagged = {};   // job_id -> true if BOM client-flagged
+  var _schedScDone     = {};   // job_id -> true if supply-chain signed off
+  var _schedLsDone     = {};   // job_id -> true if liquid signed off
 
   // ── Supabase helpers ─────────────────────────────────────────────────────────
   function sbGet(path) {
@@ -37341,11 +37345,21 @@ window.saveAdjModal = async function() {
       return;
     }
     var arrowCol = canReorder ? ' 52px' : '';
-    var cols = '36px 90px 1fr 140px 80px 80px' + (canControl ? ' 120px' : '') + arrowCol;
+    var cols = '36px 90px 1fr 140px 80px 80px 80px 170px' + (canControl ? ' 120px' : '') + arrowCol;
+    // Gate pill helpers (BOM is three-state: approved/flagged/pending)
+    function _gBomTick(jobId) {
+      if (_schedBomDone[jobId])    return '<span title="BOM: client approved" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.35);white-space:nowrap;">&#10003; BOM</span>';
+      if (_schedBomFlagged[jobId]) return '<span title="BOM: client flagged a concern" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.45);white-space:nowrap;">&#9888; BOM</span>';
+      return '<span title="BOM: not yet confirmed" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);white-space:nowrap;">&#10007; BOM</span>';
+    }
+    function _gSoTick(done, lbl) {
+      if (done) return '<span title="' + lbl + ': complete" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.35);white-space:nowrap;">&#10003; ' + lbl + '</span>';
+      return '<span title="' + lbl + ': not yet signed off" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);white-space:nowrap;">&#10007; ' + lbl + '</span>';
+    }
     var h = '<div style="border:1px solid var(--navy-border);border-radius:4px;overflow:hidden;">';
     h += '<div style="display:grid;grid-template-columns:' + cols + ';gap:8px;align-items:center;padding:7px 12px;background:rgba(255,255,255,0.025);border-bottom:1px solid var(--navy-border);">';
-    ['#','Job','Product','Client','Bottles','Last BPH'].forEach(function(lbl, i) {
-      h += '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);' + (i >= 4 ? 'text-align:right;' : '') + '">' + lbl + '</div>';
+    ['#','Job','Product','Client','Bottles','Liquid','Last BPH','Gates'].forEach(function(lbl, i) {
+      h += '<div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);' + (i >= 4 && i <= 6 ? 'text-align:right;' : '') + '">' + lbl + '</div>';
     });
     if (canControl) h += '<div></div>';
     if (canReorder) h += '<div></div>';
@@ -37357,7 +37371,9 @@ window.saveAdjModal = async function() {
       h += '<div style="font-size:12px;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(j.product_name || '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(j.clientName || '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);text-align:right;">' + (j.bottle_target ? j.bottle_target.toLocaleString() : '—') + '</div>';
+      h += '<div style="font-size:11px;color:var(--muted);text-align:right;">' + (j.job_target_type === 'liquid' && j.liquid_litres ? Number(j.liquid_litres).toLocaleString() + ' L' : '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);text-align:right;" data-lastbph="' + esc(j.id) + '"></div>';
+      h += '<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">' + _gBomTick(j.id) + _gSoTick(_schedScDone[j.id], 'S.Chain') + _gSoTick(_schedLsDone[j.id], 'Liquid') + '</div>';
       if (canControl) h += '<div style="display:flex;gap:4px;justify-content:flex-end;align-items:center;"><button onclick="window.schedStartJob(\'' + esc(j.id) + '\')" ' + (lineOccupied ? 'disabled title="Another job is already running or in changeover" ' : '') + 'style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green);border:none;color:#0d1b2a;padding:5px 10px;border-radius:3px;font-family:Lato,sans-serif;' + (lineOccupied ? 'opacity:0.4;cursor:not-allowed;' : 'cursor:pointer;') + '">&#9654; Start</button><button onclick="window.schedEditActualTimes(\'' + esc(j.id) + '\')" title="Edit actual times" style="font-size:12px;background:transparent;border:1px solid rgba(201,168,76,0.35);color:var(--gold);width:26px;height:26px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;line-height:1;padding:0;">&#9998;</button></div>';
       if (canReorder) h += '<div style="display:flex;gap:3px;justify-content:flex-end;">'
         + '<button onclick="event.stopPropagation();window._bayWaitlistMove&&window._bayWaitlistMove(\'' + esc(j.id) + '\',\'up\')" title="Move up in queue" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);width:22px;height:22px;line-height:20px;padding:0;border-radius:3px;cursor:pointer;font-size:13px;font-weight:700;font-family:Lato,sans-serif;" onmouseover="this.style.background=\'rgba(201,168,76,0.12)\'" onmouseout="this.style.background=\'transparent\'">&#9650;</button>'
