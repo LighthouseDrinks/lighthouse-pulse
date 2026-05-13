@@ -31374,6 +31374,9 @@ window.saveAdjModal = async function() {
     html += frow('Date / Time Job Commenced', inp('commenced', j.date_commenced ? j.date_commenced.slice(0,16) : '', '', 'datetime-local') + (j.date_commenced ? autoFilledNote : ''), true);
     html += frow('Date / Time Job Ended', inp('completed', j.date_completed ? j.date_completed.slice(0,16) : '', '', 'datetime-local') + (j.date_completed ? autoFilledNote : ''), true);
     html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub('Production hours from line start to finish (changeover excluded, breaks and weekends excluded)'));
+    html += '<div style="display:flex;justify-content:flex-end;margin-top:4px;margin-bottom:8px;">'
+      + '<button data-job="' + jobId + '" onclick="window.saveResultsTimes(this.dataset.job)" style="background:transparent;border:1px solid var(--blue);color:#60a5fa;font-size:11px;font-weight:700;padding:5px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Save Times</button>'
+      + '</div>';
     html += frow('Actual Bottling Rate Achieved', inp('bottling-rate', autoRate, 'Auto-calculated', 'number', true) + sub('Bottles ÷ actual job hours = bottles per hour'));
     html += frow('Line Clearance Checklist Complete', cb('line-clearance', !!j.line_clearance_complete, 'Confirmed complete'), true);
     html += frow('Bottles Reworked', inp('bottles-reworked', j.bottles_reworked||0, '0 if none', 'number') + sub('Number of bottles sent back for rework'));
@@ -31455,6 +31458,24 @@ window.saveAdjModal = async function() {
     if (compEl) compEl.onchange = recalcHours;
     if (hoursEl) hoursEl.oninput = recalcRate;
   }
+
+  window.saveResultsTimes = async function(jobId) {
+    var gv = function(id) { var e = document.getElementById('res-'+id); return e ? e.value.trim() : null; };
+    var commenced = gv('commenced');
+    var completed  = gv('completed');
+    if (!commenced) { window.toast && window.toast('Please enter Date / Time Job Commenced.', 'error'); return; }
+    var patch = {
+      date_commenced: new Date(commenced).toISOString(),
+      date_completed: completed ? new Date(completed).toISOString() : null
+    };
+    var hoursEl = document.getElementById('res-hours');
+    if (hoursEl && hoursEl.value) patch.actual_job_hours = parseFloat(hoursEl.value) || null;
+    try {
+      await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, patch);
+      window.toast && window.toast('Times saved.', 'success');
+      await loadJobs();
+    } catch(e) { window.toast && window.toast('Error saving times: ' + e.message, 'error'); }
+  };
 
   window.saveResults = async function(jobId) {
     var _saveRole = window.CURRENT_USER && window.CURRENT_USER.role;
@@ -42048,10 +42069,12 @@ function lvRenderKPIs(){
     var uEl=document.getElementById('lv-kpi-used');
     var pEl=document.getElementById('lv-kpi-pend');
     var rEl=document.getElementById('lv-kpi-rem');
+    var aEl2=document.getElementById('lv-kpi-accrued');
     if(eEl) eEl.textContent='—';
     if(uEl) uEl.textContent='—';
     if(pEl) pEl.textContent='—';
     if(rEl) rEl.textContent='—';
+    if(aEl2) aEl2.textContent='—';
     var strip=document.getElementById('lv-kpi-strip');
     if(strip){
       var note=document.getElementById('lv-await-note');
@@ -42108,12 +42131,12 @@ function setKPIs(entitlement){
     var aToday=new Date(); aToday.setHours(0,0,0,0);
     var aSoy=new Date(aYr,0,1);
     var aEoy=new Date(aYr,11,31);
-    var aTotalDays=(aEoy-aSoy)/864e5;
     var aAccrualStart=aSoy;
     if(_lvProfile.employment_start){var asd=new Date(_lvProfile.employment_start);if(asd>aAccrualStart)aAccrualStart=asd;}
-    var aElapsed=Math.min(aTotalDays,Math.max(0,(aToday-aAccrualStart)/864e5));
-    var aRawEnt=parseFloat(_lvProfile.leave_entitlement)||0;
-    accrued=Math.round(aRawEnt*(aElapsed/aTotalDays)*10)/10;
+    var aElapsed=Math.max(0,(aToday-aAccrualStart)/864e5);
+    // Period spans accrualStart → Dec 31; use entitlement proportional to that window
+    var aPeriodDays=Math.max(1,(aEoy-aAccrualStart)/864e5);
+    accrued=Math.round(entitlement*(aElapsed/aPeriodDays)*10)/10;
   }
   var aEl=document.getElementById('lv-kpi-accrued');
   if(aEl) aEl.textContent=accrued%1===0?accrued:accrued.toFixed(1);
@@ -42424,12 +42447,13 @@ window.mgmtLoadLeaveOverview = async function(){
       });
       var ent=parseFloat(p.leave_entitlement)||0;
       var rem=Math.max(0,ent-annUsed-annPend);
-      var mSoy=new Date(yr,0,1),mEoy=new Date(yr,11,31),mTd=(mEoy-mSoy)/864e5;
+      var mSoy=new Date(yr,0,1),mEoy=new Date(yr,11,31);
       var mAs=mSoy;
       if(p.employment_start){var msd=new Date(p.employment_start);if(msd>mAs)mAs=msd;}
       var mToday=new Date();mToday.setHours(0,0,0,0);
-      var mEl=Math.min(mTd,Math.max(0,(mToday-mAs)/864e5));
-      var accrued=Math.round(ent*(mEl/mTd)*10)/10;
+      var mPeriod=Math.max(1,(mEoy-mAs)/864e5);
+      var mEl=Math.min(mPeriod,Math.max(0,(mToday-mAs)/864e5));
+      var accrued=Math.round(ent*(mEl/mPeriod)*10)/10;
       return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, annUsed:annUsed, annPend:annPend, rem:rem, accrued:accrued, catDays:catDays };
     }).filter(Boolean);
     if(!rows.length){ el.innerHTML='<span style="color:var(--muted);">No leave entitlements configured yet.</span>'; return; }
