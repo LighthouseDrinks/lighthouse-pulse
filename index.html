@@ -27783,9 +27783,10 @@ window.saveAdjModal = async function() {
       _debounceTimer = setTimeout(function() { loadJobs(); }, 600);
     }
     window._sb.channel('signoff_gates')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_tasks' },          _refresh)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_drygoods_prep' },  _refresh)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_liquid_signoff' }, _refresh)
+      .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_tasks' },          _refresh)
+      .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_drygoods_prep' },  _refresh)
+      .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_liquid_signoff' }, _refresh)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'jobs' },               _refresh)
       .subscribe();
   })();
 
@@ -27824,6 +27825,11 @@ window.saveAdjModal = async function() {
     updateJobKPIs();
     loadMyTasks();
     if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
+    // If the Results tab is currently open for a job, re-render it with the refreshed data
+    var resultsPanel = document.getElementById('jd-tab-results');
+    if (_currentJobId && resultsPanel && resultsPanel.style.display !== 'none') {
+      loadResultsTab(_currentJobId);
+    }
   }
 
   // Normalise a raw stage value (DB may store legacy names like 'Intake',
@@ -28479,6 +28485,11 @@ window.saveAdjModal = async function() {
       if (editId) {
         await supaMut('PATCH', 'jobs', '?id=eq.' + editId, payload);
         saved = { id: editId };
+        // Resync supply chain qty_required — abv_in is read from _jobs now (before loadJobs overwrites it)
+        // because payload always sets abv_in: null (liquid assignment fields are managed separately)
+        var _existingJob = (_jobs || []).find(function(x){ return x.id === editId; }) || {};
+        var _resyncData = Object.assign({}, payload, { abv_in: _existingJob.abv_in || null });
+        try { await window.resyncComponentQtys(editId, _resyncData); } catch(e) { window.logError && window.logError('resyncComponentQtys', e); }
         window.toast && window.toast('Job updated.', 'success');
         window.closeNewJobModal();
         await loadJobs();
@@ -30930,6 +30941,48 @@ window.saveAdjModal = async function() {
     } catch(e) { if (!silent) window.toast && window.toast('Error: '+e.message,'error'); }
   };
 
+  // Patches only qty_required on existing job_components rows — preserves PO numbers,
+  // order status, delivery dates, exclusions, and all other tracking fields.
+  // jobData must contain: bom_id, job_target_type, bottle_target, liquid_litres, abv_in, bottling_abv
+  window.resyncComponentQtys = async function(jobId, jobData) {
+    if (!jobData || !jobData.bom_id) return;
+    try {
+      var bomRows = await supaGet('boms?id=eq.' + jobData.bom_id + '&select=liquid_sku_id,bottle_sku_id,shipper_sku_id,divider_sku_id,volume_cl,bottles_per_shipper,bottling_abv,abv');
+      if (!bomRows || !bomRows.length) return;
+      var bom = bomRows[0];
+
+      // Compute effective bottle count once — same logic as initComponentsFromBOM
+      var effectiveBottles = jobData.bottle_target || null;
+      if (!effectiveBottles && jobData.job_target_type === 'liquid' && jobData.liquid_litres && bom.volume_cl) {
+        var capL = bom.volume_cl / 100;
+        var workingLitres = jobData.liquid_litres;
+        if (jobData.abv_in && jobData.bottling_abv) {
+          workingLitres = (jobData.liquid_litres * jobData.abv_in) / jobData.bottling_abv;
+        }
+        effectiveBottles = Math.floor(workingLitres / capL) || null;
+      }
+
+      var comps = await supaGet('job_components?job_id=eq.' + jobId);
+      if (!comps || !comps.length) return;
+
+      for (var i = 0; i < comps.length; i++) {
+        var c = comps[i];
+        var qty;
+        if (c.sku_id && c.sku_id === bom.liquid_sku_id) {
+          qty = null;
+        } else if (c.sku_id && (c.sku_id === bom.shipper_sku_id || c.sku_id === bom.divider_sku_id)) {
+          qty = (effectiveBottles && bom.bottles_per_shipper)
+            ? Math.ceil(effectiveBottles / bom.bottles_per_shipper)
+            : effectiveBottles;
+        } else {
+          qty = effectiveBottles;
+        }
+        try { await supaMut('PATCH', 'job_components', '?id=eq.' + c.id, { qty_required: qty }); }
+        catch(pErr) { window.logError && window.logError('resyncComponentQtys patch', pErr); }
+      }
+    } catch(e) { window.logError && window.logError('resyncComponentQtys', e); }
+  };
+
   window.updateComponent = async function(id, field, value) {
     if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) { window.toast && window.toast('You do not have permission to edit supply chain components.', 'error'); return; }
     try { var p={}; p[field]=value; await supaMut('PATCH','job_components','?id=eq.'+id,p); }
@@ -31207,7 +31260,14 @@ window.saveAdjModal = async function() {
     var el = document.getElementById('jd-results-content');
     if (!el) return;
     el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px 0;">Loading…</div>';
-    var j = _jobs.find(function(x){ return x.id === jobId; });
+    var j = null;
+    try {
+      var freshRows = await supaGet('jobs?id=eq.' + jobId + '&select=*,clients(name)');
+      j = (freshRows && freshRows[0]) || null;
+      // Keep _jobs cache in sync so save/email helpers see the latest data
+      if (j) { var idx = _jobs.findIndex(function(x){ return x.id === jobId; }); if (idx >= 0) _jobs[idx] = j; }
+    } catch(e) { window.logError && window.logError('loadResultsTab fresh fetch', e); }
+    if (!j) j = _jobs.find(function(x){ return x.id === jobId; });
     if (!j) { el.innerHTML = '<div style="color:var(--red);">Job not found.</div>'; return; }
 
     // Pull BOM for case/pallet info
