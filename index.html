@@ -31376,9 +31376,6 @@ window.saveAdjModal = async function() {
     html += frow('Date / Time Job Commenced', inp('commenced', j.date_commenced ? j.date_commenced.slice(0,16) : '', '', 'datetime-local') + (j.date_commenced ? autoFilledNote : ''), true);
     html += frow('Date / Time Job Ended', inp('completed', j.date_completed ? j.date_completed.slice(0,16) : '', '', 'datetime-local') + (j.date_completed ? autoFilledNote : ''), true);
     html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub('Production hours from line start to finish (changeover excluded, breaks and weekends excluded)'));
-    html += '<div style="display:flex;justify-content:flex-end;margin-top:4px;margin-bottom:8px;">'
-      + '<button data-job="' + jobId + '" onclick="window.saveResultsTimes(this.dataset.job)" style="background:transparent;border:1px solid var(--blue);color:#60a5fa;font-size:11px;font-weight:700;padding:5px 14px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Save Times</button>'
-      + '</div>';
     html += frow('Actual Bottling Rate Achieved', inp('bottling-rate', autoRate, 'Auto-calculated', 'number', true) + sub('Bottles ÷ actual job hours = bottles per hour'));
     html += frow('Line Clearance Checklist Complete', cb('line-clearance', !!j.line_clearance_complete, 'Confirmed complete'), true);
     html += frow('Bottles Reworked', inp('bottles-reworked', j.bottles_reworked||0, '0 if none', 'number') + sub('Number of bottles sent back for rework'));
@@ -31461,24 +31458,6 @@ window.saveAdjModal = async function() {
     if (hoursEl) hoursEl.oninput = recalcRate;
   }
 
-  window.saveResultsTimes = async function(jobId) {
-    var gv = function(id) { var e = document.getElementById('res-'+id); return e ? e.value.trim() : null; };
-    var commenced = gv('commenced');
-    var completed  = gv('completed');
-    if (!commenced) { window.toast && window.toast('Please enter Date / Time Job Commenced.', 'error'); return; }
-    var patch = {
-      date_commenced: new Date(commenced).toISOString(),
-      date_completed: completed ? new Date(completed).toISOString() : null
-    };
-    var hoursEl = document.getElementById('res-hours');
-    if (hoursEl && hoursEl.value) patch.actual_job_hours = parseFloat(hoursEl.value) || null;
-    try {
-      await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, patch);
-      window.toast && window.toast('Times saved.', 'success');
-      await loadJobs();
-    } catch(e) { window.toast && window.toast('Error saving times: ' + e.message, 'error'); }
-  };
-
   window.saveResults = async function(jobId) {
     var _saveRole = window.CURRENT_USER && window.CURRENT_USER.role;
     var _canSaveResults = _saveRole === 'managing_director' || _saveRole === 'operations_director'
@@ -31490,45 +31469,58 @@ window.saveAdjModal = async function() {
       if (e.type === 'checkbox') return e.checked;
       return e.value.trim();
     };
-    var required = [
-      ['lot-no','Batch / Lot No'], ['bottles','Total Bottles Produced'],
-      ['cases','Total Cases'],     ['commenced','Date / Time Commenced'],
-      ['completed','Date / Time Ended'],
-      ['signed-by','Production Manager Name'], ['signed-at','Sign-Off Date']
-    ];
-    for (var i = 0; i < required.length; i++) {
-      var val = gv(required[i][0]);
-      if (val === null || val === '') {
-        window.toast && window.toast(required[i][1] + ' is required.', 'error');
-        var el = document.getElementById('res-' + required[i][0]);
-        if (el) { el.style.borderColor = 'var(--red)'; el.focus(); }
-        return;
-      }
-    }
-    if (!gv('line-clearance')) { window.toast && window.toast('Line Clearance must be confirmed.', 'error'); return; }
-    if (!gv('delivery-cleared')) { window.toast && window.toast('Delivery must be cleared with Management.', 'error'); return; }
-
     var commenced = gv('commenced');
     var completed  = gv('completed');
+
+    // Completion fields — only required when the user is doing a full sign-off
+    // (indicated by any one of lot-no, bottles, signed-by, or signed-at being filled in)
+    var _completionAttempted = !!(gv('lot-no') || gv('bottles') || gv('signed-by') || gv('signed-at'));
+    if (_completionAttempted) {
+      var required = [
+        ['lot-no','Batch / Lot No'], ['bottles','Total Bottles Produced'],
+        ['cases','Total Cases'],     ['commenced','Date / Time Commenced'],
+        ['completed','Date / Time Ended'],
+        ['signed-by','Production Manager Name'], ['signed-at','Sign-Off Date']
+      ];
+      for (var i = 0; i < required.length; i++) {
+        var val = gv(required[i][0]);
+        if (val === null || val === '') {
+          window.toast && window.toast(required[i][1] + ' is required.', 'error');
+          var el = document.getElementById('res-' + required[i][0]);
+          if (el) { el.style.borderColor = 'var(--red)'; el.focus(); }
+          return;
+        }
+      }
+      if (!gv('line-clearance')) { window.toast && window.toast('Line Clearance must be confirmed.', 'error'); return; }
+      if (!gv('delivery-cleared')) { window.toast && window.toast('Delivery must be cleared with Management.', 'error'); return; }
+    } else if (!commenced) {
+      window.toast && window.toast('Please enter at least the Date / Time Job Commenced.', 'error');
+      var commEl2 = document.getElementById('res-commenced');
+      if (commEl2) { commEl2.style.borderColor = 'var(--red)'; commEl2.focus(); }
+      return;
+    }
+
     var payload = {
-      lot_number:              gv('lot-no') || null,
-      actual_bottles_produced: parseInt(gv('bottles')) || null,
-      actual_cases:            parseInt(gv('cases')) || null,
       date_commenced:          commenced ? new Date(commenced).toISOString() : null,
       date_completed:          completed ? new Date(completed).toISOString() : null,
-      actual_job_hours:        parseFloat(gv('hours')) || null,
-      line_clearance_complete: true,
-      bottles_reworked:        parseInt(gv('bottles-reworked')) || 0,
-      cost_per_unit:           parseFloat(gv('cost-per-unit')) || null,
-      delivery_cleared:        true,
-      results_notes:           gv('notes') || null,
-      results_signed_by:       gv('signed-by') || null,
-      results_signed_at:       gv('signed-at') ? gv('signed-at') + 'T00:00:00Z' : null,
-      cbw_new_rotation_no:     gv('cbw-new-rotation') || null
+      actual_job_hours:        parseFloat(gv('hours')) || null
     };
+    if (_completionAttempted) {
+      payload.lot_number              = gv('lot-no') || null;
+      payload.actual_bottles_produced = parseInt(gv('bottles')) || null;
+      payload.actual_cases            = parseInt(gv('cases')) || null;
+      payload.line_clearance_complete = true;
+      payload.bottles_reworked        = parseInt(gv('bottles-reworked')) || 0;
+      payload.cost_per_unit           = parseFloat(gv('cost-per-unit')) || null;
+      payload.delivery_cleared        = true;
+      payload.results_notes           = gv('notes') || null;
+      payload.results_signed_by       = gv('signed-by') || null;
+      payload.results_signed_at       = gv('signed-at') ? gv('signed-at') + 'T00:00:00Z' : null;
+      payload.cbw_new_rotation_no     = gv('cbw-new-rotation') || null;
+    }
     try {
       await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, payload);
-      window.toast && window.toast('Results saved.', 'success');
+      window.toast && window.toast(_completionAttempted ? 'Results saved.' : 'Times saved.', 'success');
       await loadJobs();
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
