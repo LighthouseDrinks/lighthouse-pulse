@@ -10359,7 +10359,7 @@ function renderBoms() {
     var rawVolAbv   = (b.volume ? b.volume + 'cl' : '') + (b.abv ? (b.volume ? ' / ' : '') + b.abv + '%' : '');
     var volAbv      = esc(rawVolAbv || '—');
     var bid         = esc(b.id);
-    var product     = esc(b.product);
+    var product     = esc(window.bomDisplayName(b));
     var labelFront  = esc(b.labelFront || '');
     var linkedHtml  = linked
       ? '<span style="color:var(--gold-light);font-weight:700;">' + linked + '</span>'
@@ -23340,9 +23340,23 @@ window.openVesselDetail = async function(vesselId) {
     var batches = [];
     try { batches = await supa('liquid_containers', '?vessel_id=eq.' + vesselId + '&order=created_at.desc&select=*'); } catch(e){}
 
-    // Vessel history log
+    // Vessel history log — fetch by vessel_id AND by any container IDs linked to this vessel
     var vesselHistory = [];
-    try { vesselHistory = await supa('vessel_history', '?vessel_id=eq.' + vesselId + '&order=created_at.desc'); } catch(e){}
+    try {
+      var histByVessel = await supa('vessel_history', '?vessel_id=eq.' + vesselId + '&order=created_at.desc').catch(function(){ return []; });
+      var containerIds = batches.map(function(b){ return b.id; });
+      var histByContainer = [];
+      if (containerIds.length) {
+        histByContainer = await supa('vessel_history', '?container_id=in.(' + containerIds.join(',') + ')&vessel_id=is.null&order=created_at.desc').catch(function(){ return []; });
+      }
+      // Merge and sort by created_at descending, deduplicate by id
+      var seen = {};
+      vesselHistory = histByVessel.concat(histByContainer).filter(function(h){
+        if (seen[h.id]) return false;
+        seen[h.id] = true;
+        return true;
+      }).sort(function(a, b){ return new Date(b.created_at) - new Date(a.created_at); });
+    } catch(e){}
 
     var esc = window.escapeHtml || function(s){ return String(s||''); };
     var stCol = _vrStatusColour[vessel.status] || 'var(--muted)';
@@ -25155,11 +25169,11 @@ window.archiveContainer = async function(id) {
     await window.db.update('liquid_containers', '?id=eq.' + id, { archived: true, archived_at: new Date().toISOString(), archived_by: who });
     toastMsg('Container archived.');
 
-    // Write a vessel history entry if this container is linked to a vessel
-    if (c.vessel_id) {
-      var histNote = 'Liquid batch ' + (c.reference || id) + ' archived.' + (result.note ? ' Reason: ' + result.note : '');
-      await window.db.insert('vessel_history', { vessel_id: c.vessel_id, note: histNote, created_by: who }).catch(function(e){ toastMsg && toastMsg('History note not saved: ' + (e.message||e), 'warn'); });
-    }
+    // Always write a history entry (vessel_id and container_id may both be present, or just one)
+    var archNote = 'Liquid batch ' + (c.reference || id) + ' archived.' + (result.note ? ' Reason: ' + result.note : '');
+    var archPayload = { note: archNote, created_by: who, container_id: id };
+    if (c.vessel_id) archPayload.vessel_id = c.vessel_id;
+    await window.db.insert('vessel_history', archPayload).catch(function(e){ toastMsg && toastMsg('History note not saved: ' + (e.message||e), 'warn'); });
 
     await loadLiquid();
   } catch(e) { logError('archiveContainer', e); toastMsg('Error archiving container: ' + e.message, 'error'); }
@@ -25258,6 +25272,14 @@ window.unarchiveContainer = async function(id) {
   try {
     await window.db.update('liquid_containers', '?id=eq.' + id, { archived: false, archived_at: null, archived_by: null });
     toastMsg('Container restored to active inventory.');
+
+    // Write a history entry for the restore
+    var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'unknown';
+    var restoreNote = 'Liquid batch ' + (c.reference || id) + ' restored to active inventory.';
+    var restorePayload = { note: restoreNote, created_by: who, container_id: id };
+    if (c.vessel_id) restorePayload.vessel_id = c.vessel_id;
+    await window.db.insert('vessel_history', restorePayload).catch(function(e){ toastMsg && toastMsg('History note not saved: ' + (e.message||e), 'warn'); });
+
     await loadLiquid();
   } catch(e) { logError('unarchiveContainer', e); toastMsg('Error restoring container: ' + e.message, 'error'); }
 };
