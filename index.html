@@ -24987,9 +24987,11 @@ window.openLiqView = async function(id) {
     // ── History ──
     var HLABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out',
       transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal',
-      edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In' };
+      edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In',
+      container_archived:'Archived', container_restored:'Restored', container_adjusted:'Adjusted', container_created:'Created' };
     var HCOLS = { add:'var(--green)', dilution:'var(--amber)', blend_input:'#3b82f6', blend_output:'var(--gold)', blend_inplace:'var(--gold)',
-      transfer_from:'var(--red)', transfer_to:'var(--green)', disgorge_out:'#a78bfa', disgorge_in:'#7c3aed' };
+      transfer_from:'var(--red)', transfer_to:'var(--green)', disgorge_out:'#a78bfa', disgorge_in:'#7c3aed',
+      container_archived:'var(--muted)', container_restored:'var(--green)' };
 
     html += sectionHd('History (last 20 events)');
     if (hist && hist.length) {
@@ -25172,11 +25174,23 @@ window.archiveContainer = async function(id) {
     await window.db.update('liquid_containers', '?id=eq.' + id, { archived: true, archived_at: new Date().toISOString(), archived_by: who });
     toastMsg('Container archived.');
 
-    // Always write a history entry (vessel_id and container_id may both be present, or just one)
-    var archNote = 'Liquid batch ' + (c.reference || id) + ' archived.' + (result.note ? ' Reason: ' + result.note : '');
-    var archPayload = { note: archNote, created_by: who, container_id: id };
-    if (c.vessel_id) archPayload.vessel_id = c.vessel_id;
-    await window.db.insert('vessel_history', archPayload).catch(function(e){ console.error('vessel_history insert failed:', e); toastMsg('History note not saved: ' + (e.message||e), 'error'); });
+    // Write to the existing liquid_history log so it appears in the History panel
+    if (window._writeBlendHistory) {
+      await window._writeBlendHistory({
+        container_id:      id,
+        container_ref:     c.reference || null,
+        event_type:        'container_archived',
+        litres_before:     parseFloat(c.current_litres || 0),
+        litres_after:      parseFloat(c.current_litres || 0),
+        lpa_before:        parseFloat(c.current_lpa || 0),
+        lpa_after:         parseFloat(c.current_lpa || 0),
+        abv_before:        parseFloat(c.abv || 0),
+        abv_after:         parseFloat(c.abv || 0),
+        notes:             result.note || null,
+        performed_by_name: who,
+        performed_by_id:   window.CURRENT_USER ? (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id) : null
+      });
+    }
 
     await loadLiquid();
   } catch(e) { logError('archiveContainer', e); toastMsg('Error archiving container: ' + e.message, 'error'); }
@@ -25276,12 +25290,24 @@ window.unarchiveContainer = async function(id) {
     await window.db.update('liquid_containers', '?id=eq.' + id, { archived: false, archived_at: null, archived_by: null });
     toastMsg('Container restored to active inventory.');
 
-    // Write a history entry for the restore
+    // Write to the existing liquid_history log
     var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'unknown';
-    var restoreNote = 'Liquid batch ' + (c.reference || id) + ' restored to active inventory.';
-    var restorePayload = { note: restoreNote, created_by: who, container_id: id };
-    if (c.vessel_id) restorePayload.vessel_id = c.vessel_id;
-    await window.db.insert('vessel_history', restorePayload).catch(function(e){ console.error('vessel_history insert failed:', e); toastMsg('History note not saved: ' + (e.message||e), 'error'); });
+    if (window._writeBlendHistory) {
+      await window._writeBlendHistory({
+        container_id:      id,
+        container_ref:     c.reference || null,
+        event_type:        'container_restored',
+        litres_before:     parseFloat(c.current_litres || 0),
+        litres_after:      parseFloat(c.current_litres || 0),
+        lpa_before:        parseFloat(c.current_lpa || 0),
+        lpa_after:         parseFloat(c.current_lpa || 0),
+        abv_before:        parseFloat(c.abv || 0),
+        abv_after:         parseFloat(c.abv || 0),
+        notes:             null,
+        performed_by_name: who,
+        performed_by_id:   window.CURRENT_USER ? (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id) : null
+      });
+    }
 
     await loadLiquid();
   } catch(e) { logError('unarchiveContainer', e); toastMsg('Error restoring container: ' + e.message, 'error'); }
