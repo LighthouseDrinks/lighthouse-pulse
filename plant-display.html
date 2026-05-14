@@ -138,8 +138,20 @@ body { display: flex; flex-direction: column; }
 }
 #co-elapsed.overdue { color: #e84040; }
 #active:has(#active-content[data-state="changeover"]) #co-elapsed { display: inline; }
-/* Bigger CHANGEOVER label when in changeover state */
+/* Running timer — hidden by default, shown inline next to badge in running/paused state */
+#run-elapsed {
+  display: none;
+  font-size: 62px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #3dba78;
+  margin-left: 24px;
+  line-height: 1;
+}
+#active:has(#active-content[data-state="running"]) #run-elapsed { display: inline; }
+/* Bigger status label in changeover and running/paused states */
 #active:has(#active-content[data-state="changeover"]) #status-lbl { font-size: 44px; }
+#active:has(#active-content[data-state="running"])    #status-lbl { font-size: 44px; }
 
 /* Content area fills the remaining space. State managed by data-state attribute. */
 #active-content {
@@ -165,14 +177,15 @@ body { display: flex; flex-direction: column; }
 #run-block {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 20px;
   flex: 1;
   min-height: 0;
 }
 #job-name {
-  font-size: 44px;
+  font-size: 64px;
   font-weight: 900;
-  line-height: 1.1;
+  line-height: 1.05;
   color: #ffffff;
   overflow: hidden;
   display: -webkit-box;
@@ -180,8 +193,9 @@ body { display: flex; flex-direction: column; }
   -webkit-box-orient: vertical;
 }
 #job-meta {
-  font-size: 26px;
-  color: rgba(255,255,255,0.75);
+  font-size: 30px;
+  color: rgba(255,255,255,0.85);
+  margin-top: -10px;
 }
 .stat-row {
   display: flex;
@@ -490,6 +504,7 @@ body { display: flex; flex-direction: column; }
         <span class="dot grey" id="status-dot"></span>
         <span id="status-lbl" class="grey">Loading</span>
         <span id="co-elapsed">00:00:00</span>
+        <span id="run-elapsed">00:00:00</span>
       </div>
 
       <!-- State-switched content -->
@@ -499,10 +514,6 @@ body { display: flex; flex-direction: column; }
         <div id="run-block">
           <div id="job-name">—</div>
           <div id="job-meta">—</div>
-          <div class="stat-row">
-            <span class="stat-lbl">Running</span>
-            <span class="timer" id="elapsed-time">00:00:00</span>
-          </div>
           <div class="stat-row">
             <span class="stat-lbl">Live rate</span>
             <span class="rate" id="active-bph">—</span>
@@ -921,7 +932,7 @@ function tick() {
       const elapsed = Math.max(0,
         calcProdSecs(new Date(_activeJob.actual_start), endDt) - (_activeJob.total_paused_secs || 0)
       );
-      const et = document.getElementById('elapsed-time');
+      const et = document.getElementById('run-elapsed');
       if (et) et.textContent = fmtSecs(elapsed);
     } else if (_activeJob.changeover_start && !_activeJob.actual_start) {
       const coS = Math.max(0, calcProdSecs(new Date(_activeJob.changeover_start), now));
@@ -982,7 +993,7 @@ async function reloadJobs() {
     );
     _activeJob = active.length ? active[0] : null;
     renderLeft(); renderNextJobs(); renderBays();
-  } catch(e) {}
+  } catch(e) { console.warn('[PD] reloadJobs error:', e); }
 }
 
 async function reloadHourly() {
@@ -995,7 +1006,7 @@ async function reloadHourly() {
       hourUtc: r.hour_utc, totalBottles: r.total_bottles || 0, lastEventAt: r.last_event_at
     }));
     renderBph();
-  } catch(e) {}
+  } catch(e) { console.warn('[PD] reloadHourly error:', e); }
 }
 
 async function pollLive() {
@@ -1010,7 +1021,7 @@ async function pollLive() {
     const bphEl = document.getElementById('active-bph');
     if (bphEl) bphEl.textContent = _liveBph > 0 ? _liveBph.toLocaleString() + ' bph' : '—';
     updateLiveTile();
-  } catch(e) {}
+  } catch(e) { console.warn('[PD] pollLive error:', e); }
 }
 
 // ── Fullscreen toggle ─────────────────────────────────────────
@@ -1111,6 +1122,8 @@ document.addEventListener('DOMContentLoaded', async function () {
   _tick1s   = setInterval(tick, 1000);
   tick();
   _tick30s  = setInterval(pollLive, 30000);
+  // Polling fallback — catches job state changes even if realtime drops
+  setInterval(reloadJobs, 10000);
 
   // Realtime — bottle counter (line 1)
   _rtLine = _sb.channel('pd_line_events_1')

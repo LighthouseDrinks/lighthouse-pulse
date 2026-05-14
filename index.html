@@ -977,7 +977,7 @@ window._lhNotifyEmails = async function() {
     var rows = await window.db.select('app_users',
       '?role=in.(' + LH_NOTIFY_ROLES.join(',') + ')&select=email') || [];
     return rows.map(function(r){ return r.email; }).filter(Boolean);
-  } catch(_e) { return []; }
+  } catch(_e) { console.error('[notify] Failed to fetch LH staff emails:', _e); return []; }
 };
 
 // ── Email helper: fetch client user email from a submission's submitted_by ────
@@ -2277,12 +2277,17 @@ window.doSetNewPassword = async function() {
     if (sucEl) sucEl.classList.add('show');
     if (btn) btn.textContent = 'Done!';
     setTimeout(async function() {
-      var sessionRes = await window._sb.auth.getSession();
-      var screen = document.getElementById('set-password-screen');
-      if (screen) screen.style.display = 'none';
-      if (sessionRes.data && sessionRes.data.session) {
-        await handleSession(sessionRes.data.session);
-      } else {
+      try {
+        var sessionRes = await window._sb.auth.getSession();
+        var screen = document.getElementById('set-password-screen');
+        if (screen) screen.style.display = 'none';
+        if (sessionRes.data && sessionRes.data.session) {
+          await handleSession(sessionRes.data.session);
+        } else {
+          showLogin();
+        }
+      } catch(e) {
+        console.error('[set-password] Post-update session error:', e);
         showLogin();
       }
     }, 1500);
@@ -7300,15 +7305,15 @@ window.copyInviteLink = function() {
         // Declare newUserId first, then fetch reports_to_id
         var newUserId = window.CURRENT_USER.app_user_id || window.CURRENT_USER.id;
         var fullName = payload.first_name + ' ' + payload.last_name;
-        console.log('[TASK] newUserId:', newUserId, 'name:', fullName);
+        if (window.DEBUG) console.log('[TASK] newUserId:', newUserId, 'name:', fullName);
         var newUsersRow = await sbGet('app_users?id=eq.'+newUserId+'&select=reports_to_id&limit=1');
         var reportsToId = (newUsersRow[0] && newUsersRow[0].reports_to_id) || null;
-        console.log('[TASK] reportsToId:', reportsToId);
+        if (window.DEBUG) console.log('[TASK] reportsToId:', reportsToId);
         if(reportsToId) {
           var mgrRow = await sbGet('app_users?id=eq.'+reportsToId+'&select=auth_user_id,role&limit=1');
           var mgrAuthId = mgrRow[0] && mgrRow[0].auth_user_id;
           var mgrRole  = (mgrRow[0] && mgrRow[0].role) || 'managing_director';
-          console.log('[TASK] mgrAuthId:', mgrAuthId, 'mgrRole:', mgrRole);
+          if (window.DEBUG) console.log('[TASK] mgrAuthId:', mgrAuthId, 'mgrRole:', mgrRole);
           if(mgrAuthId) {
             var taskResult = await sbPost('job_tasks', {
               job_id: null,
@@ -7320,7 +7325,7 @@ window.copyInviteLink = function() {
               notes: 'New employee ' + fullName + ' has registered.',
               target_user_id: newUserId
             });
-            console.log('[TASK] created:', taskResult);
+            if (window.DEBUG) console.log('[TASK] created:', taskResult);
           } else {
             console.error('[TASK] no mgrAuthId found for reportsToId:', reportsToId);
           }
@@ -28855,7 +28860,7 @@ window.saveAdjModal = async function() {
 
       var staffOptions = '<option value="" style="background:#0d1b2a;color:#fff;">— Unassigned —</option>'
         + staffList.map(function(u){
-            var n = u.display_name || u.auth_user_id.substring(0,8);
+            var n = u.display_name || (u.auth_user_id ? u.auth_user_id.substring(0,8) : 'unknown');
             return '<option value="' + u.auth_user_id + '" style="background:#0d1b2a;color:#fff;">' + n + ' (' + (u.role||'').replace(/_/g,' ') + ')</option>';
           }).join('');
 
@@ -30566,6 +30571,7 @@ window.saveAdjModal = async function() {
         + '<th style="text-align:center;padding:8px 12px;white-space:nowrap;">Order</th>'
         + '<th style="padding:8px 12px;min-width:80px;">Qty Ord.</th>'
         + '<th style="padding:8px 12px;min-width:140px;">Exp. Delivery</th>'
+        + '<th style="padding:8px 12px;min-width:140px;">Supplier</th>'
         + '<th style="text-align:center;padding:8px 12px;white-space:nowrap;" title="Exclude item — no stock deduction on completion, not printed on picking list">Exclude</th>'
         + '</tr></thead><tbody></tbody>';
       el.appendChild(tbl);
@@ -30599,7 +30605,8 @@ window.saveAdjModal = async function() {
           + '<td style="padding:7px 12px;text-align:center;"></td>'   // col 5: order
           + '<td style="padding:4px 12px;"></td>'                     // col 6: qty ord.
           + '<td style="padding:4px 12px;"></td>'                     // col 7: exp. delivery
-          + '<td style="padding:7px 12px;text-align:center;"></td>';  // col 8: exclude
+          + '<td style="padding:4px 12px;"></td>'                     // col 8: supplier
+          + '<td style="padding:7px 12px;text-align:center;"></td>';  // col 9: exclude
 
         // col 4: On-site checkbox — N/A dash if excluded, otherwise auto-ticked when stock >= required
         if (isExcluded) {
@@ -30642,7 +30649,17 @@ window.saveAdjModal = async function() {
         dtIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid,'expected_delivery',this.value); };
         tr.cells[7].appendChild(dtIn);
 
-        // col 8: Exclude toggle button — awaits the PATCH then updates the row in-place (no full tab reload)
+        // col 8: Supplier
+        var supplierIn = document.createElement('input');
+        supplierIn.type = 'text';
+        supplierIn.value = c.supplier || '';
+        supplierIn.placeholder = 'Supplier name';
+        supplierIn.style.cssText = inpStyle;
+        if (isExcluded) { supplierIn.disabled = true; supplierIn.style.opacity = '0.3'; supplierIn.style.cursor = 'not-allowed'; }
+        supplierIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid, 'supplier', this.value || null); };
+        tr.cells[8].appendChild(supplierIn);
+
+        // col 9: Exclude toggle button — awaits the PATCH then updates the row in-place (no full tab reload)
         var cbNA = document.createElement('button');
         cbNA.textContent = isExcluded ? '✕ Excluded' : 'Exclude';
         cbNA.dataset.excl = isExcluded ? '1' : '0';
@@ -30650,7 +30667,7 @@ window.saveAdjModal = async function() {
         cbNA.style.cssText = isExcluded
           ? 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--amber);background:rgba(201,168,76,0.15);color:var(--amber);white-space:nowrap;'
           : 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--navy-border);background:transparent;color:var(--muted);white-space:nowrap;';
-        cbNA.onclick = (function(rowCid, rowTr, rowCbOrder, rowQtyIn, rowDtIn, rowSufficient, rowOnSiteStr, rowOnSiteColor, btn) {
+        cbNA.onclick = (function(rowCid, rowTr, rowCbOrder, rowQtyIn, rowDtIn, rowSupplierIn, rowSufficient, rowOnSiteStr, rowOnSiteColor, btn) {
           return async function() {
             var excl = btn.dataset.excl !== '1';
             var cb = btn;
@@ -30698,6 +30715,10 @@ window.saveAdjModal = async function() {
             rowDtIn.disabled = excl || rowSufficient;
             rowDtIn.style.opacity = (excl || rowSufficient) ? '0.3' : '';
             rowDtIn.style.cursor  = (excl || rowSufficient) ? 'not-allowed' : '';
+            // Supplier (col 8)
+            rowSupplierIn.disabled = excl;
+            rowSupplierIn.style.opacity = excl ? '0.3' : '';
+            rowSupplierIn.style.cursor  = excl ? 'not-allowed' : '';
             // Re-enable the button and update its appearance
             cb.dataset.excl = excl ? '1' : '0';
             cb.textContent  = excl ? '✕ Excluded' : 'Exclude';
@@ -30707,8 +30728,8 @@ window.saveAdjModal = async function() {
             cb.disabled = false;
             cb.style.opacity = '';
           };
-        })(cid, tr, cbOrder, qtyIn, dtIn, sufficient, onSiteStr, onSiteColor, cbNA);
-        tr.cells[8].appendChild(cbNA);
+        })(cid, tr, cbOrder, qtyIn, dtIn, supplierIn, sufficient, onSiteStr, onSiteColor, cbNA);
+        tr.cells[9].appendChild(cbNA);
 
         tbody.appendChild(tr);
       });
@@ -37088,7 +37109,8 @@ window.saveAdjModal = async function() {
       if (typeof window._renderBayBoard === 'function') window._renderBayBoard();
     } catch(e) { console.warn('Schedule load error:', e); }
 
-    // 1-second tick for live timers
+    // 1-second tick for live timers + 60-second calendar re-render for active changeovers
+    var _calTickCounter = 0;
     _schedTimerInterval = setInterval(function() {
       var page = document.getElementById('page-schedule');
       if (!page || !page.classList.contains('active')) {
@@ -37100,6 +37122,13 @@ window.saveAdjModal = async function() {
         return;
       }
       _tickActiveTimers();
+      _calTickCounter++;
+      if (_calTickCounter >= 60) {
+        _calTickCounter = 0;
+        if (_schedJobs && _schedJobs.some(function(j) { return j.changeover_start && !j.actual_start; })) {
+          renderCalendar();
+        }
+      }
     }, 1000);
 
     // Realtime subscription — only subscribe once
@@ -37410,7 +37439,7 @@ window.saveAdjModal = async function() {
     var coJobs = _schedJobs.filter(function(j) { return j.changeover_start && !j.actual_start; });
     coJobs.forEach(function(coJob) {
       var coStart = new Date(coJob.changeover_start);
-      var coEnd   = calcEndTime(coStart, CHANGEOVER_PROJ_MINS);
+      var coEnd   = new Date(_now); // grow with real time — block right-edge = current moment
       calBlocks.push({ startDt: coStart, endDt: coEnd,
         label: 'Changeover \u00b7 ' + (coJob.product_name || coJob.id), colour: '#f59e0b', style: 'changeover', noteIcon: '',
         bphUsed: null, jobId: coJob.id, productName: coJob.product_name || '',
@@ -37925,6 +37954,11 @@ window.saveAdjModal = async function() {
     html += '<div style="border-top:1px solid rgba(255,255,255,0.07);padding-top:10px;display:flex;flex-direction:column;gap:6px;">';
     html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">' + (isChangeover ? 'Starts' : 'Proj. start') + '</span><span style="color:#fff;font-weight:600;">' + fmtDt(d.start) + '</span></div>';
     html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">' + (isChangeover ? 'Ends' : 'Proj. finish') + '</span><span style="color:#fff;font-weight:600;">' + fmtDt(d.end) + '</span></div>';
+    if (isChangeover) {
+      var totalMs  = new Date(d.end) - new Date(d.start);
+      var totalMin = Math.round(totalMs / 60000);
+      html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">Total time</span><span style="color:#f59e0b;font-weight:700;">' + fmtMins(totalMin) + '</span></div>';
+    }
     if (!isChangeover) {
       if (d.durMins) html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">Proj. job hours</span><span style="color:#fff;font-weight:600;">' + fmtMins(d.durMins) + ' <span style="font-weight:400;font-size:9px;color:var(--muted);">(productive)</span></span></div>';
       if (d.bottles) html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="color:var(--muted);">Total bottles</span><span style="color:#fff;font-weight:600;">' + Number(d.bottles).toLocaleString() + ' btls</span></div>';
@@ -41655,32 +41689,34 @@ window.saveAdjModal = async function() {
   document.addEventListener('DOMContentLoaded', function() {
     var attempts = 0;
     var poll = setInterval(async function() {
-      if (window.CURRENT_USER || attempts > 30) {
-        clearInterval(poll);
-        if (window.CURRENT_USER) {
-          await loadPermissions();
-          var role = window.CURRENT_USER.role;
-          if (role==='managing_director'||role==='operations_director'||role==='business_analyst') {
-            var sbBtn = document.getElementById('settings-sb-btn');
-            if (sbBtn) sbBtn.style.display = 'flex';
+      try {
+        if (window.CURRENT_USER || attempts > 30) {
+          clearInterval(poll);
+          if (window.CURRENT_USER) {
+            await loadPermissions();
+            var role = window.CURRENT_USER.role;
+            if (role==='managing_director'||role==='operations_director'||role==='business_analyst') {
+              var sbBtn = document.getElementById('settings-sb-btn');
+              if (sbBtn) sbBtn.style.display = 'flex';
+            }
+            // Re-apply Quick Launch tile states now that real DB permissions are loaded
+            var _perms = window.CURRENT_PERMISSIONS && window.CURRENT_PERMISSIONS[role];
+            var _super = role==='managing_director'||role==='operations_director'||role==='business_analyst';
+            function _qlSet(id, permKey) {
+              var el = document.getElementById(id);
+              if (!el) return;
+              var allowed = _super || (_perms && !!_perms[permKey]);
+              el.style.opacity = allowed ? '1' : '0.4';
+              el.style.cursor  = allowed ? 'pointer' : 'not-allowed';
+              el.style.filter  = allowed ? '' : 'grayscale(0.4)';
+            }
+            _qlSet('ql-new-job', 'jobs_create');
+            _qlSet('ql-new-sku', 'drygoods_edit');
+            _qlSet('ql-new-bom', 'boms_edit');
           }
-          // Re-apply Quick Launch tile states now that real DB permissions are loaded
-          var _perms = window.CURRENT_PERMISSIONS && window.CURRENT_PERMISSIONS[role];
-          var _super = role==='managing_director'||role==='operations_director'||role==='business_analyst';
-          function _qlSet(id, permKey) {
-            var el = document.getElementById(id);
-            if (!el) return;
-            var allowed = _super || (_perms && !!_perms[permKey]);
-            el.style.opacity = allowed ? '1' : '0.4';
-            el.style.cursor  = allowed ? 'pointer' : 'not-allowed';
-            el.style.filter  = allowed ? '' : 'grayscale(0.4)';
-          }
-          _qlSet('ql-new-job', 'jobs_create');
-          _qlSet('ql-new-sku', 'drygoods_edit');
-          _qlSet('ql-new-bom', 'boms_edit');
         }
-      }
-      attempts++;
+        attempts++;
+      } catch(e) { console.error('[permissions] Poll error:', e); clearInterval(poll); }
     }, 300);
   });
 
@@ -41842,30 +41878,30 @@ window.saveAdjModal = async function() {
       var rows = await gfRes.json();
       if(!Array.isArray(rows)) rows=[];
       var g = rows[0];
-      console.log('[GEO] geofence_settings row:', JSON.stringify(g));
+      if (window.DEBUG) console.log('[GEO] geofence_settings row:', JSON.stringify(g));
       if(!g||!g.latitude||!g.longitude){
-        console.log('[GEO] Not configured — passing through');
+        if (window.DEBUG) console.log('[GEO] Not configured — passing through');
         return {within:true,allowed:true,unconfigured:true};
       }
       var role = window.CURRENT_USER&&window.CURRENT_USER.role||'';
       var remoteRoles = g.allow_remote_roles||[];
-      console.log('[GEO] role='+role+' remoteRoles='+JSON.stringify(remoteRoles));
+      if (window.DEBUG) console.log('[GEO] role='+role+' remoteRoles='+JSON.stringify(remoteRoles));
       if(remoteRoles.indexOf(role)>=0){
-        console.log('[GEO] Role is remote-allowed — bypassing fence');
+        if (window.DEBUG) console.log('[GEO] Role is remote-allowed — bypassing fence');
         return {within:false,allowed:true,remote:true};
       }
       // Get device position
-      console.log('[GEO] Requesting GPS position...');
+      if (window.DEBUG) console.log('[GEO] Requesting GPS position...');
       var pos = await new Promise(function(res,rej){
         if(!navigator.geolocation){rej(new Error('Geolocation not supported'));return;}
         navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000,maximumAge:30000});
       });
       var dist = getDistanceMetres(pos.coords.latitude,pos.coords.longitude,g.latitude,g.longitude);
       var within = dist <= (g.radius_metres||200);
-      console.log('[GEO] Position: '+pos.coords.latitude+','+pos.coords.longitude+' Distance: '+Math.round(dist)+'m Radius: '+(g.radius_metres||200)+'m Within: '+within);
+      if (window.DEBUG) console.log('[GEO] Position: '+pos.coords.latitude+','+pos.coords.longitude+' Distance: '+Math.round(dist)+'m Radius: '+(g.radius_metres||200)+'m Within: '+within);
       return {within:within,allowed:within,distance:Math.round(dist),radius:g.radius_metres||200};
     } catch(e){
-      console.log('[GEO] Error in checkGeofence:', e.message);
+      console.error('[GEO] Error in checkGeofence:', e.message);
       // Fail CLOSED — don't silently allow on error, surface it
       return {within:false,allowed:false,error:e.message};
     }
@@ -44207,8 +44243,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
               + (notes ? '<p><strong>Client notes:</strong><br>' + notes.replace(/\n/g,'<br>') + '</p>' : '')
               + '<p>Log in to Lighthouse Pulse to view the job.</p>'
           })
-        }).catch(function(){});
-      } catch(_) {}
+        }).catch(function(e){ console.warn('[BOM] Staff notification email failed to send:', e); });
+      } catch(_e) { console.warn('[BOM] Staff notification block threw:', _e); }
       renderBomBody(Object.assign({}, rec, { client_decision: decision, client_approver_name: name, client_notes: notes }));
     }).catch(function(e) {
       if (confirmBtn) confirmBtn.disabled = false;

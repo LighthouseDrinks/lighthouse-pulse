@@ -277,11 +277,12 @@ Deno.serve(async (req: Request) => {
         normalize: true,
       });
 
-      const { data: chunks } = await adminClient.rpc('match_peat_chunks', {
+      const { data: chunks, error: chunksError } = await adminClient.rpc('match_peat_chunks', {
         query_embedding: Array.from(queryEmbedding as number[]),
         match_count: 5,
         match_threshold: 0.3,
       });
+      if (chunksError) console.warn('[peat-chat] match_peat_chunks RPC error (continuing without context):', chunksError.message);
 
       if (chunks && chunks.length > 0) {
         contextText = '\n\n---\nRelevant knowledge base content:\n' +
