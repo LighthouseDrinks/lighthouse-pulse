@@ -743,7 +743,7 @@
         <div style="grid-column:1/-1;">
           <label class="pbm-label">Product Name *</label>
           <input type="text" id="pbm-product" class="pbm-input" placeholder="e.g. Temple Bar 10YO Single Malt">
-          <div class="pbm-hint">Don't include bottle size in the name — it's captured below</div>
+          <div class="pbm-hint">Product name only — no volume, no ABV, no region. These are combined automatically in records and job selection.</div>
         </div>
         <div>
           <label class="pbm-label">Bottle Size (cl) *</label>
@@ -6746,7 +6746,7 @@ window.copyInviteLink = function() {
       <div class="mfield span2">
         <label>Product Full Name <span style="color:var(--red);">*</span></label>
         <input type="text" id="bm-product" placeholder="e.g. Clancy's Single Malt 12yr">
-        <div class="field-hint">This is the reference name for the BOM</div>
+        <div class="field-hint">Product name only — no volume, no ABV, no region. These are combined automatically in records and job selection.</div>
       </div>
     </div>
 
@@ -18708,16 +18708,16 @@ window.loadBoms = async function initBoms() {
           <div class="mfield">
             <label>Status</label>
             <input type="hidden" id="vm-original-status" value="">
-            <select id="vm-status" onchange="window._vmToggleDecommissionReason(this.value)">
+            <select id="vm-status" onchange="window._vmToggleArchiveReason(this.value)">
               <option value="available">Available</option>
               <option value="in_use">In Use</option>
               <option value="maintenance">Maintenance</option>
-              <option value="decommissioned">Decommissioned</option>
+              <option value="archived">Archived</option>
             </select>
           </div>
-          <div id="vm-decommission-reason-wrap" class="mfield" style="display:none;">
-            <label style="color:var(--amber);">Reason for Decommissioning</label>
-            <textarea id="vm-decommission-reason" rows="2" placeholder="Optional — explain why this vessel is being decommissioned…"></textarea>
+          <div id="vm-archive-reason-wrap" class="mfield" style="display:none;">
+            <label style="color:var(--amber);">Reason for Archiving</label>
+            <textarea id="vm-archive-reason" rows="2" placeholder="Optional — explain why this vessel is being archived…"></textarea>
           </div>
           <div class="mfield">
             <label>Purchase Price (€)</label>
@@ -20166,9 +20166,7 @@ window.viewJobSubmission = async function(id) {
       try {
         var br = await window.db.select('boms', '?id=eq.' + s.bom_id + '&select=product_name,volume_cl,abv&limit=1');
         if (br && br[0]) {
-          bomDisplay = br[0].product_name || s.bom_id;
-          if (br[0].volume_cl) bomDisplay += ' · ' + br[0].volume_cl + 'cl';
-          if (br[0].abv)       bomDisplay += ' · ' + br[0].abv + '% ABV';
+          bomDisplay = window.bomDisplayName(br[0]) || s.bom_id;
         }
       } catch(_e) {}
     }
@@ -22681,8 +22679,8 @@ window.fixLegacyVesselNames = async function() {
 
       // 4. Delete the old vessel record
       await window.db.delete('vessels', '?id=eq.' + encodeURIComponent(p.old)).catch(function(de){
-        // If delete blocked by FK, just decommission — it will be hidden from the register
-        window.db.update('vessels', '?id=eq.' + encodeURIComponent(p.old), { status: 'decommissioned' }).catch(function(){});
+        // If delete blocked by FK, just archive — it will be hidden from the register
+        window.db.update('vessels', '?id=eq.' + encodeURIComponent(p.old), { status: 'archived' }).catch(function(){});
       });
 
       renamed++;
@@ -22739,7 +22737,7 @@ window.loadVesselRegister = async function() {
   if (tbody) tbody.innerHTML = '<tr><td colspan="10" style="color:var(--muted);text-align:center;padding:32px;">Loading…</td></tr>';
 
   try {
-    _vrVessels = await supa('vessels', '?status=neq.decommissioned&order=id.asc&select=*');
+    _vrVessels = await supa('vessels', '?status=neq.archived&order=id.asc&select=*');
   } catch(e) {
     _vrVessels = [];
     if (tbody && (e.message||'').indexOf('relation') > -1) {
@@ -22940,7 +22938,7 @@ window._vrPopulateVesselDropdown = function(typeFilter) {
   if (!sel) return;
   var vessels = allVessels.filter(function(v){
     if (typeFilter && v.vessel_type !== typeFilter) return false;
-    if (v.status === 'decommissioned') return false;
+    if (v.status === 'archived') return false;
     return true;
   });
   var typeLabel = typeFilter ? (_vrTypeLabel[typeFilter] || typeFilter) : 'Vessel';
@@ -23169,9 +23167,9 @@ window._vmUpdateCodePreview = function() {
   el.textContent = prefix + String(maxN + 1).padStart(3, '0');
 };
 
-window._vmToggleDecommissionReason = function(status) {
-  var wrap = document.getElementById('vm-decommission-reason-wrap');
-  if (wrap) wrap.style.display = (status === 'decommissioned') ? '' : 'none';
+window._vmToggleArchiveReason = function(status) {
+  var wrap = document.getElementById('vm-archive-reason-wrap');
+  if (wrap) wrap.style.display = (status === 'archived') ? '' : 'none';
 };
 
 window.openVesselModal = function(editId) {
@@ -23190,8 +23188,8 @@ window.openVesselModal = function(editId) {
   document.getElementById('vm-last-inspected').value= '';
   document.getElementById('vm-next-inspection').value= '';
   document.getElementById('vm-notes').value         = '';
-  document.getElementById('vm-decommission-reason').value = '';
-  window._vmToggleDecommissionReason('available');
+  document.getElementById('vm-archive-reason').value = '';
+  window._vmToggleArchiveReason('available');
   document.getElementById('vessel-modal-title').textContent = editId ? 'Edit Vessel' : 'Register Vessel';
   var printQrBtn = document.getElementById('vm-print-qr-btn');
   if (printQrBtn) printQrBtn.style.display = editId ? '' : 'none';
@@ -23212,7 +23210,7 @@ window.openVesselModal = function(editId) {
       document.getElementById('vm-last-inspected').value  = v.last_inspected || '';
       document.getElementById('vm-next-inspection').value = v.next_inspection || '';
       document.getElementById('vm-notes').value           = v.notes || '';
-      window._vmToggleDecommissionReason(v.status || 'available');
+      window._vmToggleArchiveReason(v.status || 'available');
       if (preview) preview.textContent = v.id;
     }
   } else {
@@ -23264,15 +23262,15 @@ window.saveVessel = async function() {
       await window.db.update('vessels', '?id=eq.' + editId, payload);
       window.toast && window.toast('Vessel ' + editId + ' updated.', 'success');
 
-      // Write a vessel_history note if the status changed to or from decommissioned
+      // Write a vessel_history note if the status changed to or from archived
       var oldStatus = document.getElementById('vm-original-status').value;
       var newStatus = payload.status;
       var who = window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email || null) : null;
-      if (newStatus === 'decommissioned' && oldStatus !== 'decommissioned') {
-        var reason = (document.getElementById('vm-decommission-reason').value || '').trim();
-        var histNote = 'Vessel decommissioned.' + (reason ? ' Reason: ' + reason : '');
+      if (newStatus === 'archived' && oldStatus !== 'archived') {
+        var reason = (document.getElementById('vm-archive-reason').value || '').trim();
+        var histNote = 'Vessel archived.' + (reason ? ' Reason: ' + reason : '');
         await window.db.insert('vessel_history', { vessel_id: editId, note: histNote, created_by: who }).catch(function(){});
-      } else if (oldStatus === 'decommissioned' && newStatus !== 'decommissioned') {
+      } else if (oldStatus === 'archived' && newStatus !== 'archived') {
         var reactNote = 'Vessel reactivated (status set to: ' + newStatus + ').';
         await window.db.insert('vessel_history', { vessel_id: editId, note: reactNote, created_by: who }).catch(function(){});
       }
@@ -25127,11 +25125,42 @@ window.saveContainer = async function() {
 window.archiveContainer = async function(id) {
   var c = _liquid.find(function(x){ return x.id === id; });
   if (!c) return;
-  if (!(await window.lpConfirm('Archive container ' + c.reference + '? It will be hidden from inventory but all history is preserved. You can restore it at any time.', { title: 'Archive container', confirmLabel: 'Archive' }))) return;
+
+  // Custom confirm + note dialog
+  var result = await new Promise(function(resolve) {
+    var ov = document.createElement('div');
+    ov.className = 'lp-dialog-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:100020;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
+    ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:26px 28px 22px;max-width:440px;width:100%;box-shadow:0 16px 48px rgba(0,0,0,0.45);">'
+      + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:8px;">Archive Container</div>'
+      + '<div style="font-size:13px;color:var(--muted);line-height:1.65;margin-bottom:16px;">Archive container <strong style="color:var(--white);">' + (window.escapeHtml ? window.escapeHtml(c.reference || id) : (c.reference || id)) + '</strong>? It will be hidden from inventory but all history is preserved. You can restore it at any time.</div>'
+      + '<div style="margin-bottom:20px;">'
+      + '<label style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;display:block;margin-bottom:6px;">Reason for archiving (optional)</label>'
+      + '<textarea class="lp-archive-note" rows="2" placeholder="e.g. emptied and cleaned, sent to distillery…" style="width:100%;box-sizing:border-box;padding:9px 11px;border-radius:4px;border:1px solid var(--navy-border);background:var(--navy-dark,#0a1628);color:var(--white);font-size:12px;font-family:Lato,sans-serif;resize:vertical;"></textarea>'
+      + '</div>'
+      + '<div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">'
+      + '<button type="button" class="lp-dlg-x" style="padding:9px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">Cancel</button>'
+      + '<button type="button" class="lp-dlg-ok" style="padding:9px 20px;background:var(--gold);border:none;border-radius:4px;color:var(--navy-dark,#0a1628);cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">Archive</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('.lp-dlg-x').onclick  = function() { ov.remove(); resolve(null); };
+    ov.querySelector('.lp-dlg-ok').onclick = function() { var note = ov.querySelector('.lp-archive-note').value.trim(); ov.remove(); resolve({ confirmed: true, note: note }); };
+    ov.onclick = function(e) { if (e.target === ov) { ov.remove(); resolve(null); } };
+  });
+
+  if (!result || !result.confirmed) return;
+
   try {
     var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'unknown';
     await window.db.update('liquid_containers', '?id=eq.' + id, { archived: true, archived_at: new Date().toISOString(), archived_by: who });
     toastMsg('Container archived.');
+
+    // Write a vessel history entry if this container is linked to a vessel
+    if (c.vessel_id) {
+      var histNote = 'Liquid batch ' + (c.reference || id) + ' archived.' + (result.note ? ' Reason: ' + result.note : '');
+      await window.db.insert('vessel_history', { vessel_id: c.vessel_id, note: histNote, created_by: who }).catch(function(){});
+    }
+
     await loadLiquid();
   } catch(e) { logError('archiveContainer', e); toastMsg('Error archiving container: ' + e.message, 'error'); }
 };
@@ -26708,6 +26737,24 @@ window.skuDisplayName = function(sku) {
   return extras ? base + ' — ' + extras : base;
 };
 
+// ── BOM display name helper ───────────────────────────────────────────────────
+// Builds the human-readable BOM label for dropdowns and single-line displays.
+// Handles both in-memory BOMS shape (product/volume) and raw DB rows (product_name/volume_cl).
+// e.g. "Clancy's Single Malt 12yr — 70cl · 46% · EU/ROW"
+// Only use this in single-composite-line contexts (job dropdowns, approval views).
+// Do NOT use in tables that already show volume/ABV in separate columns.
+window.bomDisplayName = function(bom) {
+  if (!bom) return '';
+  var base   = bom.product_name || bom.product || '';
+  var volRaw = bom.volume_cl    || bom.volume  || '';
+  var vol    = volRaw ? String(volRaw).replace(/cl$/i, '').trim() + 'cl' : '';
+  var abv    = bom.abv ? String(bom.abv).replace(/%$/, '').trim() + '%' : '';
+  var ai     = (bom.additional_info && typeof bom.additional_info === 'object') ? bom.additional_info : {};
+  var market = ai.intendedMarket || bom.intendedMarket || '';
+  var extras = [vol, abv, market].filter(Boolean).join(' · ');
+  return extras ? base + ' — ' + extras : base;
+};
+
 // ── Label field visibility helper ────────────────────────────────────────────
 // Shows/hides Volume, Region, and (for back labels) Barcode fields based on
 // the selected category name. prefix is 'ns' (new) or 'es' (edit).
@@ -28193,7 +28240,7 @@ window.saveAdjModal = async function() {
       _njmBoms = await supaGet('boms?bom_status=eq.approved&order=product_name.asc&select=id,product_name,bom_status,client_id,abv,volume_cl,bottling_abv,chill_filtration,colouring,colour_spec,bph,bottles_per_shipper');
       var bomSel = document.getElementById('njm-bom');
       bomSel.innerHTML = '<option value="">— Select BOM to auto-populate job —</option>'
-        + _njmBoms.map(function(b){ return '<option value="' + b.id + '">' + b.product_name + '</option>'; }).join('');
+        + _njmBoms.map(function(b){ return '<option value="' + b.id + '">' + window.bomDisplayName(b) + '</option>'; }).join('');
     } catch(e) { console.warn('Modal load error:', e); }
 
     if (!editId) {
@@ -38254,7 +38301,7 @@ window.saveAdjModal = async function() {
         .filter(function(c){ return c.vessel_id; })
         .map(function(c){ return c.vessel_id; });
       var vestDests = window._vrVessels.filter(function(v){
-        if (v.status === 'decommissioned') return false;
+        if (v.status === 'archived') return false;
         if (excludeTypes && excludeTypes.indexOf(v.vessel_type) >= 0) return false;
         if (onlyTypes    && onlyTypes.indexOf(v.vessel_type)    < 0) return false;
         if (activeBatchVesselIds.indexOf(v.id) >= 0) return false;
@@ -38277,7 +38324,7 @@ window.saveAdjModal = async function() {
         .filter(function(c){ return c.vessel_id; })
         .map(function(c){ return c.vessel_id; });
       var srcVessels = window._vrVessels.filter(function(v){
-        if (v.status === 'decommissioned') return false;
+        if (v.status === 'archived') return false;
         if (excludeTypes && excludeTypes.indexOf(v.vessel_type) >= 0) return false;
         if (onlyTypes    && onlyTypes.indexOf(v.vessel_type)    < 0) return false;
         if (srcBatchVesselIds.indexOf(v.id) >= 0) return false; // already shown above via _bl
@@ -39801,7 +39848,7 @@ window.saveAdjModal = async function() {
       var dlSrcBatchVesselIds = _bl.filter(function(c){ return c.vessel_id; }).map(function(c){ return c.vessel_id; });
       var dlSrcVessels = window._vrVessels.filter(function(v){
         if (v.vessel_type === 'cask') return false;
-        if (v.status === 'decommissioned') return false;
+        if (v.status === 'archived') return false;
         if (dlSrcBatchVesselIds.indexOf(v.id) >= 0) return false;
         return true;
       });
@@ -39837,7 +39884,7 @@ window.saveAdjModal = async function() {
     if (window._vrVessels && window._vrVessels.length) {
       var activeBatchVesselIds = _bl.filter(function(c){ return c.vessel_id; }).map(function(c){ return c.vessel_id; });
       var vesselDests = window._vrVessels.filter(function(v){
-        if (v.status === 'decommissioned') return false;
+        if (v.status === 'archived') return false;
         if (v.vessel_type === 'cask') return false;
         if (excludeIds.indexOf('__vessel__' + v.id) >= 0) return false;
         if (activeBatchVesselIds.indexOf(v.id) >= 0) return false;
@@ -40036,7 +40083,7 @@ window.saveAdjModal = async function() {
     if (window._vrVessels && window._vrVessels.length) {
       var activeBatchVesselIds = _bl.filter(function(c){ return c.vessel_id; }).map(function(c){ return c.vessel_id; });
       var vesselDests = window._vrVessels.filter(function(v){
-        if (v.status === 'decommissioned') return false;
+        if (v.status === 'archived') return false;
         if (v.vessel_type === 'cask') return false;
         if (activeBatchVesselIds.indexOf(v.id) >= 0) return false;
         return true;
