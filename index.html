@@ -18707,12 +18707,17 @@ window.loadBoms = async function initBoms() {
           </div>
           <div class="mfield">
             <label>Status</label>
-            <select id="vm-status">
+            <input type="hidden" id="vm-original-status" value="">
+            <select id="vm-status" onchange="window._vmToggleDecommissionReason(this.value)">
               <option value="available">Available</option>
               <option value="in_use">In Use</option>
               <option value="maintenance">Maintenance</option>
               <option value="decommissioned">Decommissioned</option>
             </select>
+          </div>
+          <div id="vm-decommission-reason-wrap" class="mfield" style="display:none;">
+            <label style="color:var(--amber);">Reason for Decommissioning</label>
+            <textarea id="vm-decommission-reason" rows="2" placeholder="Optional — explain why this vessel is being decommissioned…"></textarea>
           </div>
           <div class="mfield">
             <label>Purchase Price (€)</label>
@@ -23164,6 +23169,11 @@ window._vmUpdateCodePreview = function() {
   el.textContent = prefix + String(maxN + 1).padStart(3, '0');
 };
 
+window._vmToggleDecommissionReason = function(status) {
+  var wrap = document.getElementById('vm-decommission-reason-wrap');
+  if (wrap) wrap.style.display = (status === 'decommissioned') ? '' : 'none';
+};
+
 window.openVesselModal = function(editId) {
   var m = document.getElementById('vessel-modal');
   if (!m) return;
@@ -23174,11 +23184,14 @@ window.openVesselModal = function(editId) {
   document.getElementById('vm-owner').value         = 'Lighthouse Drinks';
   document.getElementById('vm-location').value      = '';
   document.getElementById('vm-status').value        = 'available';
+  document.getElementById('vm-original-status').value = '';
   document.getElementById('vm-price').value         = '';
   document.getElementById('vm-purchase-date').value = '';
   document.getElementById('vm-last-inspected').value= '';
   document.getElementById('vm-next-inspection').value= '';
   document.getElementById('vm-notes').value         = '';
+  document.getElementById('vm-decommission-reason').value = '';
+  window._vmToggleDecommissionReason('available');
   document.getElementById('vessel-modal-title').textContent = editId ? 'Edit Vessel' : 'Register Vessel';
   var printQrBtn = document.getElementById('vm-print-qr-btn');
   if (printQrBtn) printQrBtn.style.display = editId ? '' : 'none';
@@ -23187,17 +23200,19 @@ window.openVesselModal = function(editId) {
   if (editId) {
     var v = _vrVessels.find(function(x){ return x.id === editId; });
     if (v) {
-      document.getElementById('vm-code-override').value  = v.id;
-      document.getElementById('vm-type').value           = v.vessel_type || '';
-      document.getElementById('vm-capacity').value       = v.capacity_litres || '';
-      document.getElementById('vm-owner').value          = v.owner || 'Lighthouse Drinks';
-      document.getElementById('vm-location').value       = v.location || '';
-      document.getElementById('vm-status').value         = v.status || 'available';
-      document.getElementById('vm-price').value          = v.purchase_price || '';
-      document.getElementById('vm-purchase-date').value  = v.purchase_date || '';
-      document.getElementById('vm-last-inspected').value = v.last_inspected || '';
-      document.getElementById('vm-next-inspection').value= v.next_inspection || '';
-      document.getElementById('vm-notes').value          = v.notes || '';
+      document.getElementById('vm-code-override').value   = v.id;
+      document.getElementById('vm-type').value            = v.vessel_type || '';
+      document.getElementById('vm-capacity').value        = v.capacity_litres || '';
+      document.getElementById('vm-owner').value           = v.owner || 'Lighthouse Drinks';
+      document.getElementById('vm-location').value        = v.location || '';
+      document.getElementById('vm-status').value          = v.status || 'available';
+      document.getElementById('vm-original-status').value = v.status || 'available';
+      document.getElementById('vm-price').value           = v.purchase_price || '';
+      document.getElementById('vm-purchase-date').value   = v.purchase_date || '';
+      document.getElementById('vm-last-inspected').value  = v.last_inspected || '';
+      document.getElementById('vm-next-inspection').value = v.next_inspection || '';
+      document.getElementById('vm-notes').value           = v.notes || '';
+      window._vmToggleDecommissionReason(v.status || 'available');
       if (preview) preview.textContent = v.id;
     }
   } else {
@@ -23248,6 +23263,20 @@ window.saveVessel = async function() {
     if (editId) {
       await window.db.update('vessels', '?id=eq.' + editId, payload);
       window.toast && window.toast('Vessel ' + editId + ' updated.', 'success');
+
+      // Write a vessel_history note if the status changed to or from decommissioned
+      var oldStatus = document.getElementById('vm-original-status').value;
+      var newStatus = payload.status;
+      var who = window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email || null) : null;
+      if (newStatus === 'decommissioned' && oldStatus !== 'decommissioned') {
+        var reason = (document.getElementById('vm-decommission-reason').value || '').trim();
+        var histNote = 'Vessel decommissioned.' + (reason ? ' Reason: ' + reason : '');
+        await window.db.insert('vessel_history', { vessel_id: editId, note: histNote, created_by: who }).catch(function(){});
+      } else if (oldStatus === 'decommissioned' && newStatus !== 'decommissioned') {
+        var reactNote = 'Vessel reactivated (status set to: ' + newStatus + ').';
+        await window.db.insert('vessel_history', { vessel_id: editId, note: reactNote, created_by: who }).catch(function(){});
+      }
+
       window.closeVesselModal();
     } else {
       payload.id = newId;
@@ -23312,6 +23341,10 @@ window.openVesselDetail = async function(vesselId) {
     // All liquid batches ever linked to this vessel (including archived)
     var batches = [];
     try { batches = await supa('liquid_containers', '?vessel_id=eq.' + vesselId + '&order=created_at.desc&select=*'); } catch(e){}
+
+    // Vessel history log
+    var vesselHistory = [];
+    try { vesselHistory = await supa('vessel_history', '?vessel_id=eq.' + vesselId + '&order=created_at.desc'); } catch(e){}
 
     var esc = window.escapeHtml || function(s){ return String(s||''); };
     var stCol = _vrStatusColour[vessel.status] || 'var(--muted)';
@@ -23391,6 +23424,21 @@ window.openVesselDetail = async function(vesselId) {
           + '</tr>';
       });
       html += '</tbody></table>';
+    }
+
+    // Vessel History section
+    html += '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;font-weight:700;margin-top:24px;">Vessel History</div>';
+    if (!vesselHistory.length) {
+      html += '<div style="font-size:12px;color:var(--muted);padding:8px 0 4px;">No history entries recorded.</div>';
+    } else {
+      vesselHistory.forEach(function(h) {
+        var ts = h.created_at ? new Date(h.created_at).toLocaleString('en-IE', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
+        var byStr = h.created_by ? ' &mdash; ' + esc(h.created_by) : '';
+        html += '<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);">'
+          + '<div style="font-size:12px;color:var(--white);margin-bottom:3px;">' + esc(h.note) + '</div>'
+          + '<div style="font-size:10px;color:var(--muted);">' + esc(ts) + byStr + '</div>'
+          + '</div>';
+      });
     }
 
     content.innerHTML = html;
@@ -36719,10 +36767,7 @@ window.saveAdjModal = async function() {
       statusEl.textContent = 'Opening vessel record…';
       setTimeout(function() {
         window.closeScanner();
-        if (window.showPage) window.showPage('vessels', document.getElementById('sbnav-vessels'));
-        setTimeout(function() {
-          if (window.openVesselDetail) window.openVesselDetail(data.vessel_id);
-        }, 350);
+        if (window.openVesselDetail) window.openVesselDetail(data.vessel_id);
       }, 700);
     }
     // Liquid container: {id, ref, type}
@@ -36731,9 +36776,8 @@ window.saveAdjModal = async function() {
       resultEl.style.display = 'block';
       statusEl.textContent = 'Opening record…';
       setTimeout(function() {
-        goToInventory('liquid', function() {
-          if (window.editContainer) window.editContainer(data.id);
-        });
+        window.closeScanner();
+        if (window.openLiqView) window.openLiqView(data.id);
       }, 700);
     }
     // Dry goods batch: {batch, sku, desc, qty, date}
