@@ -36973,6 +36973,7 @@ window.saveAdjModal = async function() {
   var _schedTimerInterval = null;
   var _schedRtChannel     = null;
   var _schedRtDebounce    = null;
+  var _schedSuppressRt    = false;  // true while own sbPatch writes are in-flight
   var _bankHolidayDates   = {};   // "YYYY-MM-DD" -> true  (ROI public holidays)
   var _workingOverrides   = {};   // "YYYY-MM-DD" -> true  (non-working days marked working)
   var _lastBphMap         = {};   // bom_id -> last actual BPH
@@ -37309,6 +37310,7 @@ window.saveAdjModal = async function() {
       _schedRtChannel = window._sb
         .channel('schedule_jobs')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, function() {
+          if (_schedSuppressRt) return;
           clearTimeout(_schedRtDebounce);
           _schedRtDebounce = setTimeout(function() { loadSchedule(); }, 300);
         })
@@ -37511,7 +37513,7 @@ window.saveAdjModal = async function() {
       h += '<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(j.clientName || '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);text-align:right;">' + (j.bottle_target ? j.bottle_target.toLocaleString() : '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);text-align:right;">' + (j.job_target_type === 'liquid' && j.liquid_litres ? Number(j.liquid_litres).toLocaleString() + ' L' : '—') + '</div>';
-      h += '<div style="font-size:11px;color:var(--muted);text-align:right;" data-lastbph="' + esc(j.id) + '"></div>';
+      h += '<div style="font-size:11px;color:var(--muted);text-align:right;min-width:62px;" data-lastbph="' + esc(j.id) + '">&nbsp;</div>';
       h += '<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">' + _gBomTick(j.id) + _gSoTick(_schedScDone[j.id], 'S.Chain') + _gSoTick(_schedLsDone[j.id], 'Liquid') + '</div>';
       if (canControl) h += '<div style="display:flex;justify-content:flex-end;align-items:center;"><button onclick="window.schedStartJob(\'' + esc(j.id) + '\')" ' + (lineOccupied ? 'disabled title="Another job is already running or in changeover" ' : '') + 'style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green);border:none;color:#0d1b2a;padding:5px 10px;border-radius:3px;font-family:Lato,sans-serif;' + (lineOccupied ? 'opacity:0.4;cursor:not-allowed;' : 'cursor:pointer;') + '">&#9654; Start</button></div>';
       if (canReorder) h += '<div style="display:flex;gap:3px;justify-content:flex-end;">'
@@ -37531,7 +37533,7 @@ window.saveAdjModal = async function() {
       if (!j.bom_id) return;
       getLastActualBph(j.bom_id).then(function(bph) {
         var cell = el.querySelector('[data-lastbph="' + j.id + '"]');
-        if (cell) cell.textContent = bph != null ? bph + ' BPH' : '';
+        if (cell) cell.textContent = bph != null ? bph + ' BPH' : '\u00a0';
       });
     });
   }
@@ -37673,9 +37675,13 @@ window.saveAdjModal = async function() {
       projSeedDt = gEnd;
     }
     // Persist projected starts to jobs.scheduled_start for all queued/changeover jobs (fire-and-forget)
+    // Suppress the Realtime listener while these writes land so they don't trigger a re-render loop.
     if (_projectedStarts.length && typeof sbPatch === 'function') {
-      _projectedStarts.forEach(function(p) {
-        sbPatch('jobs', '?id=eq.' + p.id, { scheduled_start: p.start }).catch(function(){});
+      _schedSuppressRt = true;
+      Promise.all(_projectedStarts.map(function(p) {
+        return sbPatch('jobs', '?id=eq.' + p.id, { scheduled_start: p.start }).catch(function(){});
+      })).finally(function() {
+        setTimeout(function() { _schedSuppressRt = false; }, 1500);
       });
     }
 
@@ -45083,6 +45089,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   window._renderBayBoard = async function() {
     var el = document.getElementById('bay-board-content');
     if (!el) return;
+    // Lock the container height before replacing content so surrounding layout doesn't shift.
+    if (el.offsetHeight > 0) el.style.minHeight = el.offsetHeight + 'px';
     el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px 0;">Loading bay status…</div>';
     try {
       // Auto-queue any planning jobs without a priority before we paint
@@ -45165,8 +45173,10 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       html += '</div>';
 
       el.innerHTML = html;
+      el.style.minHeight = '';
     } catch(e) {
       el.innerHTML = '<div style="color:var(--red);font-size:12px;padding:10px 0;">Error loading bay board: ' + esc(e && e.message) + '</div>';
+      el.style.minHeight = '';
     }
   };
 
