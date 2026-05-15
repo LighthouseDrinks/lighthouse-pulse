@@ -1696,6 +1696,16 @@ document.addEventListener('DOMContentLoaded', function() {
     return;  // skip the rest of the auth bootstrap
   }
 
+  // ── Xero OAuth callback ──────────────────────────────────────────────────
+  if (window.location.pathname === '/xero-callback') {
+    var _xp = new URLSearchParams(window.location.search);
+    sessionStorage.setItem('xero_pending_callback', JSON.stringify({
+      code: _xp.get('code'), state: _xp.get('state'),
+      error: _xp.get('error'), error_description: _xp.get('error_description')
+    }));
+    window.history.replaceState({}, '', '/');
+  }
+
   // ── Password recovery: check hash BEFORE getSession ────────────────────────
   // Supabase v2 auto-processes the URL hash on createClient, so by the time
   // getSession() runs the session is already set from the recovery token —
@@ -1862,6 +1872,11 @@ function showDashboard(user) {
   var _showCog = _superAdminRoles.indexOf(user.role) >= 0;
   if (sbCogBtn) sbCogBtn.style.display = _showCog ? 'flex' : 'none';
 
+  // Finance nav item (sidebar) — finance roles
+  var _financeRoles = ['managing_director','operations_director','financial_controller','business_analyst','ecommerce_manager'];
+  var _sbFinBtn = document.getElementById('sbnav-finance');
+  if (_sbFinBtn) _sbFinBtn.style.display = (_financeRoles.indexOf(user.role) >= 0) ? 'flex' : 'none';
+
   // Header sign-out button — all staff (non-client)
   var hdrSignoutBtn = document.getElementById('header-signout-btn');
   if (hdrSignoutBtn && user.role !== 'client') hdrSignoutBtn.style.display = '';
@@ -1888,7 +1903,7 @@ function showDashboard(user) {
 
   // Restore last page from URL hash on refresh; default to overview on fresh login
   var _hashPage = (window.location.hash || '').replace('#', '').trim();
-  var _validPages = ['overview','jobs','schedule','blending','boms','approvals','pipeline','clients','inventory','drygoods','liquid','suppliers','my-tasks','people','knowledge','ask-peat','tools','reports','vessels'];
+  var _validPages = ['overview','jobs','schedule','blending','boms','approvals','pipeline','clients','inventory','drygoods','liquid','suppliers','my-tasks','people','knowledge','ask-peat','tools','reports','vessels','finance'];
   if (_hashPage === 'drygoods' || _hashPage === 'liquid') {
     // Inventory sub-tabs: navToInvTab manages page + active sidebar state
     var _invNavEl = document.getElementById('sbnav-' + _hashPage);
@@ -5291,6 +5306,9 @@ window.copyInviteLink = function() {
     <div class="sb-item" id="sbnav-reports" onclick="showPage('reports',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 0h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm0 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H4zm1 2h6v1H5V3zm0 2h6v1H5V5zm0 2h4v1H5V7z"/></svg>Reports
     </div>
+    <div class="sb-item" id="sbnav-finance" style="display:none;" onclick="showPage('finance',this)">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm8-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm-2 3a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/></svg>Finance
+    </div>
   </div>
   <!-- Bottom -->
   <div class="sb-bottom">
@@ -5408,6 +5426,10 @@ window.copyInviteLink = function() {
     <div class="mob-drawer-item" onclick="window.closeMoreDrawer();window.openScanner()">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 .5A.5.5 0 0 1 .5 0h3a.5.5 0 0 1 0 1H1v2.5a.5.5 0 0 1-1 0v-3zm12 0a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0V1h-2.5a.5.5 0 0 1-.5-.5zM.5 12a.5.5 0 0 1 .5.5V15h2.5a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5v-3a.5.5 0 0 1 .5-.5zm15 0a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1 0-1H15v-2.5a.5.5 0 0 1 .5-.5z"/></svg>
       Scan QR
+    </div>
+    <div class="mob-drawer-item" onclick="window.closeMoreDrawer();showPage('finance',document.getElementById('sbnav-finance'))">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm8-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm-2 3a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/></svg>
+      Finance
     </div>
   </div>
 </div>
@@ -46793,6 +46815,844 @@ if (typeof _origOpenDD === 'function') {
   };
 })();
 </script>
+
+<!-- ── FINANCE MODULE ───────────────────────────────────────── -->
+<script>
+(function() {
+  'use strict';
+
+  // ── Constants ──────────────────────────────────────────────────────────────
+  var XERO_EF        = 'https://anhawgzgxoywophqbmji.supabase.co/functions/v1/xero-oauth';
+  var FIN_CREDS_ROLES = ['managing_director','operations_director','financial_controller'];
+  var FIN_FULL_ROLES  = ['managing_director','operations_director','financial_controller','business_analyst'];
+  var FIN_ALL_ROLES   = ['managing_director','operations_director','financial_controller','business_analyst','ecommerce_manager'];
+
+  var MAPPING_ORDER = [
+    'bottling_sales','ecommerce_sales','freight_courier','stock_on_hand',
+    'gift_cards','colouring_charges','chill_filtration','pallet_supply',
+    'outbound_revenue','label_application'
+  ];
+  var MAPPING_LABELS = {
+    bottling_sales:    'Bottling Sales',
+    ecommerce_sales:   'Ecommerce Sales',
+    freight_courier:   'Freight & Courier',
+    stock_on_hand:     'Stock on Hand (Asset)',
+    gift_cards:        'Gift Cards',
+    colouring_charges: 'Colouring Charges',
+    chill_filtration:  'Chill Filtration',
+    pallet_supply:     'Pallet Supply',
+    outbound_revenue:  'Outbound Revenue',
+    label_application: 'Label Application'
+  };
+  var REVENUE_TAX_OPTIONS = [
+    { value: 'OUTPUT',          label: 'OUTPUT (Standard VAT 23%)' },
+    { value: 'OUTPUT2',         label: 'OUTPUT2 (Reduced VAT 13.5%)' },
+    { value: 'ZERORATEDOUTPUT', label: 'ZERORATEDOUTPUT (Zero Rated 0%)' },
+    { value: 'NONE',            label: 'NONE (No VAT)' },
+    { value: 'EXEMPTOUTPUT',    label: 'EXEMPTOUTPUT (Exempt)' }
+  ];
+  var ASSET_TAX_OPTIONS = [
+    { value: 'BASEXCLUDED', label: 'BASEXCLUDED (Tax Exempt)' },
+    { value: 'NONE',        label: 'NONE (No VAT)' }
+  ];
+
+  var _finCurrentTab        = 'overview';
+  var _finAccounts          = null;   // cached from list_accounts
+  var _finContacts          = null;   // cached from list_contacts
+  var _finReconnectRequired = false;  // set when auto-refresh finds token permanently invalid
+
+  // ── Edge function wrapper ──────────────────────────────────────────────────
+  async function callXeroEF(body) {
+    var sess  = await window._sb.auth.getSession();
+    var token = sess.data && sess.data.session ? sess.data.session.access_token : null;
+    var res = await fetch(XERO_EF, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify(body)
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Xero function error');
+    return data;
+  }
+  window._callXeroEF = callXeroEF;
+
+  // ── Tab switcher ───────────────────────────────────────────────────────────
+  window.showFinTab = function(key, btn) {
+    document.querySelectorAll('.fin-panel').forEach(function(p) { p.style.display = 'none'; });
+    document.querySelectorAll('#fin-tabs .inv-tab').forEach(function(b) { b.classList.remove('active'); });
+    var panel = document.getElementById('fin-panel-' + key);
+    if (panel) panel.style.display = '';
+    if (btn)   btn.classList.add('active');
+    _finCurrentTab = key;
+    if (key === 'settings') window.loadFinSettings();
+    if (key === 'mappings') window.loadFinMappings();
+  };
+
+  // ── Connection dot helper ──────────────────────────────────────────────────
+  function _updateDots(isConnected) {
+    var dot1 = document.getElementById('fin-xero-dot');
+    var dot2 = document.getElementById('fin-settings-dot');
+    var col  = isConnected ? 'var(--green)' : 'var(--red)';
+    var ttip = isConnected ? 'Xero connected' : 'Xero disconnected';
+    if (dot1) { dot1.style.background = col; dot1.title = ttip; }
+    if (dot2) { dot2.style.background = col; }
+  }
+
+  // ── loadFinancePage ────────────────────────────────────────────────────────
+  window.loadFinancePage = async function() {
+    var cu = window.CURRENT_USER;
+    if (!cu || FIN_ALL_ROLES.indexOf(cu.role) < 0) {
+      if (window.showPage) window.showPage('overview', document.getElementById('sbnav-overview'));
+      return;
+    }
+
+    // ecommerce_manager — hide all tabs except Stores
+    var isEcom = cu.role === 'ecommerce_manager';
+    if (isEcom) {
+      document.querySelectorAll('#fin-tabs .inv-tab').forEach(function(b) {
+        var key = (b.id || '').replace('fin-tab-', '');
+        b.style.display = (key === 'stores') ? '' : 'none';
+      });
+      window.showFinTab('stores', document.getElementById('fin-tab-stores'));
+      return;
+    }
+
+    // Fetch connection state
+    try {
+      var rows = await window.db.select('xero_connection_public', '?is_active=eq.true&limit=1');
+      var conn = rows && rows.length ? rows[0] : null;
+      _updateDots(!!conn);
+
+      // Auto-refresh if token expiry within 5 minutes
+      if (conn && conn.token_expiry) {
+        var expMs = new Date(conn.token_expiry).getTime() - Date.now();
+        if (expMs < 5 * 60 * 1000) {
+          callXeroEF({ action: 'refresh' }).then(function(r) {
+            if (r && r.error === 'reconnect_required') {
+              _finReconnectRequired = true;
+              _updateDots(false);
+              // If Settings is the currently open panel, reload it so the CTA appears
+              if (_finCurrentTab === 'settings') window.loadFinSettings && window.loadFinSettings();
+            } else if (r && r.error) {
+              _updateDots(false);
+            } else {
+              _finReconnectRequired = false;
+              _updateDots(true);
+            }
+          }).catch(function() { _updateDots(false); });
+        }
+      }
+    } catch(e) {
+      console.error('loadFinancePage connection check:', e);
+    }
+
+    // Show last active tab or default
+    var tabBtn = document.getElementById('fin-tab-' + _finCurrentTab);
+    window.showFinTab(_finCurrentTab, tabBtn || document.getElementById('fin-tab-overview'));
+  };
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function _fmtDate(iso) {
+    if (!iso) return '—';
+    try { return new Date(iso).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' }); }
+    catch(e) { return iso.slice(0,10); }
+  }
+
+  function _esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // ── loadFinSettings ────────────────────────────────────────────────────────
+  window.loadFinSettings = async function() {
+    var body = document.getElementById('fin-settings-body');
+    if (!body) return;
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading…</div>';
+
+    var cu = window.CURRENT_USER;
+    if (!cu) return;
+    var isCreds = FIN_CREDS_ROLES.indexOf(cu.role) >= 0;
+
+    // Fetch in parallel
+    var credsStatus, conn;
+    try {
+      var results = await Promise.all([
+        callXeroEF({ action: 'credentials_status' }),
+        window.db.select('xero_connection_public', '?is_active=eq.true&limit=1')
+      ]);
+      credsStatus = results[0];
+      conn = results[1] && results[1].length ? results[1][0] : null;
+    } catch(e) {
+      body.innerHTML = '<div style="color:var(--red);font-size:13px;">Error loading settings: ' + _esc(e.message) + '</div>';
+      return;
+    }
+
+    var hasCreds   = !!(credsStatus.has_client_id && credsStatus.has_client_secret);
+    var isActive   = !!conn;
+    _updateDots(isActive);
+
+    // Determine current step
+    var step = hasCreds ? (isActive ? 3 : 2) : 1;
+
+    var stepStyle = function(n) {
+      return n === step
+        ? 'padding:6px 14px;border:1px solid var(--gold);background:rgba(201,168,76,0.15);color:var(--gold);font-weight:700;'
+        : 'padding:6px 14px;border:1px solid var(--navy-border);background:var(--navy-mid);color:var(--muted);';
+    };
+    var borderRadius = ['border-radius:3px 0 0 3px;', '', 'border-radius:0 3px 3px 0;'];
+
+    var html = '';
+
+    // Step indicator
+    html += '<div style="display:flex;align-items:center;gap:0;margin-bottom:24px;font-size:12px;">';
+    html += '<span id="fin-step-1" style="' + stepStyle(1) + borderRadius[0] + '">1. Set credentials</span>';
+    html += '<span style="color:var(--muted);padding:0 4px;">→</span>';
+    html += '<span id="fin-step-2" style="' + stepStyle(2) + borderRadius[1] + '">2. Connect Xero</span>';
+    html += '<span style="color:var(--muted);padding:0 4px;">→</span>';
+    html += '<span id="fin-step-3" style="' + stepStyle(3) + borderRadius[2] + '">3. Map clients</span>';
+    html += '</div>';
+
+    // Card 1 — Credentials (creds roles only)
+    if (isCreds) {
+      var credStatusHtml = hasCreds
+        ? '<span style="color:var(--green);">● Credentials set</span>'
+        : '<span style="color:var(--amber);">● Not yet configured</span>';
+
+      html += '<div class="card" style="margin-bottom:20px;">';
+      html += '<div class="card-title" style="margin-bottom:16px;">Xero App Credentials</div>';
+      html += '<div style="margin-bottom:8px;font-size:12px;color:var(--muted);">Client ID and Client Secret are obtained from your Xero Developer app. Required before you can press Connect Xero.</div>';
+      html += '<div style="margin-bottom:12px;">';
+      html += '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Client ID</label>';
+      html += '<input id="fin-cred-client-id" type="text" placeholder="Enter Xero Client ID" style="width:100%;max-width:440px;background:var(--navy-dark,#0a1628);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;border-radius:3px;box-sizing:border-box;font-family:Lato,sans-serif;">';
+      html += '</div>';
+      html += '<div style="margin-bottom:12px;">';
+      html += '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Client Secret</label>';
+      html += '<div style="display:flex;gap:8px;align-items:center;">';
+      html += '<input id="fin-cred-client-secret" type="password" placeholder="Enter Xero Client Secret" style="width:100%;max-width:440px;background:var(--navy-dark,#0a1628);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;border-radius:3px;box-sizing:border-box;font-family:Lato,sans-serif;">';
+      html += '<button onclick="window._finToggleSecret()" id="fin-secret-toggle-btn" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:6px 10px;border-radius:3px;cursor:pointer;font-size:11px;font-family:Lato,sans-serif;white-space:nowrap;">Show</button>';
+      html += '</div></div>';
+      html += '<div style="margin-bottom:14px;font-size:12px;" id="fin-creds-status">' + credStatusHtml + '</div>';
+      html += '<button class="btn btn-gold" onclick="window._finSaveCreds()" id="fin-save-creds-btn">Save Credentials</button>';
+      html += '</div>';
+    }
+
+    // Card 2 — Xero Connection
+    html += '<div class="card" style="margin-bottom:20px;">';
+    html += '<div class="card-title" style="margin-bottom:16px;">Xero Connection</div>';
+    if (isActive && conn) {
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">';
+      html += '<span style="width:10px;height:10px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0;"></span>';
+      html += '<span style="font-size:13px;color:var(--white);">Connected to <strong>' + _esc(conn.tenant_name) + '</strong></span>';
+      html += '</div>';
+      html += '<div style="font-size:12px;color:var(--muted);margin-bottom:16px;">Connected ' + _fmtDate(conn.connected_at) + '</div>';
+      html += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+      html += '<button class="btn btn-outline" onclick="window._finTestConnection()">Test Connection</button>';
+      html += '<button class="btn btn-outline" onclick="window._finDisconnect()" style="border-color:var(--red);color:var(--red);">Disconnect</button>';
+      html += '</div>';
+    } else {
+      var connectDisabled = !hasCreds;
+      var connectTitle    = connectDisabled ? ' title="Set Client ID and Secret first"' : '';
+      if (_finReconnectRequired) {
+        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">';
+        html += '<span style="width:10px;height:10px;border-radius:50%;background:var(--red);display:inline-block;flex-shrink:0;"></span>';
+        html += '<span style="font-size:13px;color:var(--amber);">Xero connection expired — reconnect required.</span>';
+        html += '</div>';
+        html += '<div style="font-size:12px;color:var(--muted);margin-bottom:16px;">Your Xero authorisation has been revoked or expired. Click below to re-authenticate.</div>';
+        html += '<button class="btn btn-gold" id="fin-connect-btn" onclick="window._finConnectXero()"'
+              + (connectDisabled ? ' disabled style="opacity:0.5;cursor:not-allowed;"' : '')
+              + connectTitle + '>Reconnect Xero</button>';
+      } else {
+        html += '<button class="btn btn-gold" id="fin-connect-btn" onclick="window._finConnectXero()"'
+              + (connectDisabled ? ' disabled style="opacity:0.5;cursor:not-allowed;"' : '')
+              + connectTitle + '>Connect Xero</button>';
+      }
+      if (connectDisabled) {
+        html += '<div style="margin-top:8px;font-size:12px;color:var(--amber);">Set credentials above before connecting.</div>';
+      }
+    }
+    html += '</div>';
+
+    // Card 3 — Client Xero Mapping
+    html += '<div class="card" id="fin-client-mapping-card">';
+    html += '<div class="card-title" style="margin-bottom:16px;">Client Xero Mapping</div>';
+    html += '<div id="fin-mapping-body"><div style="color:var(--muted);font-size:13px;">Loading clients…</div></div>';
+    html += '</div>';
+
+    body.innerHTML = html;
+
+    // Load client mapping asynchronously
+    _loadClientMappingCard(isActive);
+  };
+
+  // ── Client Mapping card ────────────────────────────────────────────────────
+  async function _loadClientMappingCard(isConnected) {
+    var mapBody = document.getElementById('fin-mapping-body');
+    if (!mapBody) return;
+
+    try {
+      var [clients, appUsers] = await Promise.all([
+        window.db.select('clients', '?order=name.asc&select=id,name,lifecycle_stage,xero_contact_id,xero_contact_mapped_at,xero_contact_mapped_by'),
+        window.db.select('app_users', '?select=id,display_name,email')
+      ]);
+
+      var userMap = {};
+      (appUsers || []).forEach(function(u) { userMap[u.id] = u.display_name || u.email || u.id; });
+
+      // Fetch contacts if connected
+      var contacts = [];
+      if (isConnected) {
+        mapBody.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading Xero contacts…</div>';
+        try {
+          var cResult = await callXeroEF({ action: 'list_contacts' });
+          contacts = cResult.contacts || [];
+          _finContacts = contacts;
+        } catch(e) {
+          console.warn('list_contacts failed:', e);
+        }
+      }
+
+      _renderClientMapping(clients || [], contacts, userMap, isConnected, mapBody);
+    } catch(e) {
+      if (mapBody) mapBody.innerHTML = '<div style="color:var(--red);font-size:13px;">Error: ' + _esc(e.message) + '</div>';
+    }
+  }
+
+  function _normName(s) {
+    return String(s || '').toLowerCase().trim()
+      .replace(/[^a-z0-9 ]/g, '')
+      .replace(/\b(ltd|limited|llc|inc|group|co)\b/g, '')
+      .replace(/\s+/g, ' ').trim();
+  }
+
+  function _renderClientMapping(clients, contacts, userMap, isConnected, container) {
+    var HIDDEN_STAGES = ['opportunity','lead','prospect'];
+    var activeClients = clients.filter(function(c) { return HIDDEN_STAGES.indexOf(c.lifecycle_stage) < 0; });
+    var mappedTotal   = activeClients.filter(function(c) { return !!c.xero_contact_id; }).length;
+
+    var html = '';
+    html += '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px;">';
+    html += '<span style="font-size:13px;color:var(--text);" id="fin-map-counter">' + mappedTotal + ' of ' + activeClients.length + ' clients mapped to Xero.</span>';
+    html += '<input id="fin-map-search" type="text" placeholder="Search clients" oninput="window._finFilterMapping()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;width:180px;">';
+    html += '<select id="fin-map-stage" onchange="window._finFilterMapping()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">';
+    html += '<option value="active">Active only</option>';
+    html += '<option value="all">All</option>';
+    html += '</select>';
+    if (isConnected) {
+      html += '<button class="btn btn-outline" onclick="window._finSuggestMatches()" style="font-size:11px;padding:5px 12px;">Suggest matches</button>';
+    }
+    html += '</div>';
+
+    html += '<div id="fin-map-hidden-note" style="font-size:12px;color:var(--muted);margin-bottom:8px;display:none;"></div>';
+
+    html += '<div style="overflow-x:auto;">';
+    html += '<table class="data-table" id="fin-map-table">';
+    html += '<thead><tr><th>Client</th><th>Xero Contact</th><th>Mapped on</th><th>Mapped by</th></tr></thead>';
+    html += '<tbody id="fin-map-tbody">';
+    html += _renderMappingRows(activeClients, contacts, userMap, isConnected, true);
+    html += '</tbody></table></div>';
+
+    container.innerHTML = html;
+    container.dataset.clients  = JSON.stringify(activeClients);
+    container.dataset.contacts = JSON.stringify(contacts);
+    container.dataset.usermap  = JSON.stringify(userMap);
+
+    window._finMapClients  = activeClients;
+    window._finMapContacts = contacts;
+    window._finMapUserMap  = userMap;
+    window._finIsConnected = isConnected;
+  }
+
+  function _renderMappingRows(clientList, contacts, userMap, isConnected, activeOnly) {
+    var HIDDEN_STAGES = ['opportunity','lead','prospect'];
+    var rows = '';
+    clientList.forEach(function(c) {
+      if (activeOnly && HIDDEN_STAGES.indexOf(c.lifecycle_stage) >= 0) return;
+      var isMapped = !!c.xero_contact_id;
+      var rowStyle = isMapped ? '' : 'style="background:rgba(232,156,58,0.06);"';
+      rows += '<tr ' + rowStyle + ' data-cid="' + _esc(c.id) + '" id="fin-map-row-' + _esc(c.id) + '">';
+      rows += '<td>' + _esc(c.name) + '</td>';
+      rows += '<td>' + _buildContactSelect(c, contacts, isConnected) + '</td>';
+      rows += '<td id="fin-map-date-' + _esc(c.id) + '">' + _fmtDate(c.xero_contact_mapped_at) + '</td>';
+      rows += '<td id="fin-map-by-' + _esc(c.id) + '">' + _esc(userMap[c.xero_contact_mapped_by] || (c.xero_contact_mapped_by ? c.xero_contact_mapped_by : '—')) + '</td>';
+      rows += '</tr>';
+    });
+    return rows;
+  }
+
+  function _buildContactSelect(client, contacts, isConnected) {
+    if (!isConnected) {
+      return '<span style="color:var(--muted);font-size:12px;">Connect Xero to map</span>';
+    }
+    var sel = '<select onchange="window._finMapContact(\'' + _esc(client.id) + '\',this.value)" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;max-width:240px;">';
+    sel += '<option value="">— Select contact —</option>';
+    contacts.forEach(function(ct) {
+      var sel_ = ct.ContactID === client.xero_contact_id ? ' selected' : '';
+      sel += '<option value="' + _esc(ct.ContactID) + '"' + sel_ + '>' + _esc(ct.Name) + (ct.EmailAddress ? ' (' + _esc(ct.EmailAddress) + ')' : '') + '</option>';
+    });
+    sel += '</select>';
+    return sel;
+  }
+
+  window._finMapContact = async function(clientId, contactId) {
+    var cu = window.CURRENT_USER;
+    try {
+      await window.db.update('clients', '?id=eq.' + clientId, {
+        xero_contact_id:          contactId || null,
+        xero_contact_mapped_at:   contactId ? new Date().toISOString() : null,
+        xero_contact_mapped_by:   contactId ? (cu && cu.app_user_id) : null
+      });
+      // Update inline cells
+      var dateEl = document.getElementById('fin-map-date-' + clientId);
+      var byEl   = document.getElementById('fin-map-by-' + clientId);
+      if (dateEl) dateEl.textContent = contactId ? _fmtDate(new Date().toISOString()) : '—';
+      if (byEl)   byEl.textContent   = contactId ? ((window._finMapUserMap && cu ? (window._finMapUserMap[cu.app_user_id] || cu.display_name || cu.email || '—') : '—')) : '—';
+
+      // Update row background
+      var row = document.getElementById('fin-map-row-' + clientId);
+      if (row) row.style.background = contactId ? '' : 'rgba(232,156,58,0.06)';
+
+      // Update cached client
+      if (window._finMapClients) {
+        window._finMapClients.forEach(function(c) {
+          if (c.id === clientId) {
+            c.xero_contact_id = contactId || null;
+            c.xero_contact_mapped_at = contactId ? new Date().toISOString() : null;
+            c.xero_contact_mapped_by = contactId ? (cu && cu.app_user_id) : null;
+          }
+        });
+      }
+
+      // Update counter
+      var mapped = (window._finMapClients || []).filter(function(c) { return !!c.xero_contact_id; }).length;
+      var counter = document.getElementById('fin-map-counter');
+      if (counter) counter.textContent = mapped + ' of ' + (window._finMapClients || []).length + ' clients mapped to Xero.';
+
+      // Show tick
+      var sel = document.querySelector('#fin-map-row-' + clientId + ' select');
+      if (sel) {
+        var origColor = sel.style.borderColor;
+        sel.style.borderColor = 'var(--green)';
+        setTimeout(function() { sel.style.borderColor = origColor; }, 1500);
+      }
+      window.toast && window.toast('Saved.', 'success');
+    } catch(e) {
+      window.lpAlert && window.lpAlert('Error saving: ' + e.message);
+    }
+  };
+
+  window._finFilterMapping = function() {
+    var search = (document.getElementById('fin-map-search') || {}).value || '';
+    var stage  = (document.getElementById('fin-map-stage')  || {}).value || 'active';
+    var tbody  = document.getElementById('fin-map-tbody');
+    if (!tbody) return;
+    var HIDDEN_STAGES = ['opportunity','lead','prospect'];
+    var clients  = window._finMapClients  || [];
+    var contacts = window._finMapContacts || [];
+    var userMap  = window._finMapUserMap  || {};
+    var conn     = window._finIsConnected;
+
+    var filtered = clients.filter(function(c) {
+      if (stage === 'active' && HIDDEN_STAGES.indexOf(c.lifecycle_stage) >= 0) return false;
+      if (search && c.name.toLowerCase().indexOf(search.toLowerCase()) < 0) return false;
+      return true;
+    });
+
+    var totalShown = filtered.length;
+    var totalActive = stage === 'active' ? clients.filter(function(c) { return HIDDEN_STAGES.indexOf(c.lifecycle_stage) < 0; }).length : clients.length;
+    var hidden = totalActive - totalShown;
+    var noteEl = document.getElementById('fin-map-hidden-note');
+    if (noteEl) {
+      if (hidden > 0) {
+        noteEl.style.display = '';
+        noteEl.textContent = '(' + hidden + ' hidden by current filter)';
+      } else {
+        noteEl.style.display = 'none';
+      }
+    }
+
+    tbody.innerHTML = _renderMappingRows(filtered, contacts, userMap, conn, false);
+  };
+
+  window._finSuggestMatches = function() {
+    var clients  = window._finMapClients  || [];
+    var contacts = window._finMapContacts || [];
+    if (!contacts.length) { window.toast && window.toast('No Xero contacts loaded.', 'error'); return; }
+
+    var suggestions = 0;
+    clients.forEach(function(c) {
+      if (c.xero_contact_id) return;
+      var normClient = _normName(c.name);
+      var bestMatch  = null;
+      var bestConf   = null;
+      contacts.forEach(function(ct) {
+        var normXero = _normName(ct.Name);
+        if (normClient === normXero) { bestMatch = ct; bestConf = 'high'; }
+        else if (!bestMatch && (normClient.indexOf(normXero) >= 0 || normXero.indexOf(normClient) >= 0)) {
+          bestMatch = ct; bestConf = 'medium';
+        }
+      });
+      if (bestMatch) {
+        var row = document.getElementById('fin-map-row-' + c.id);
+        if (!row) return;
+        var sel = row.querySelector('select');
+        if (!sel) return;
+        sel.value = bestMatch.ContactID;
+        var confColor = bestConf === 'high' ? 'var(--green)' : 'var(--amber)';
+        sel.style.borderColor = confColor;
+        sel.title = bestConf.charAt(0).toUpperCase() + bestConf.slice(1) + ' confidence match — review before saving';
+        suggestions++;
+      }
+    });
+    window.toast && window.toast('Suggested ' + suggestions + ' match' + (suggestions === 1 ? '' : 'es') + '. Review and save each row.', 'success');
+  };
+
+  // ── Credentials helpers ────────────────────────────────────────────────────
+  window._finToggleSecret = function() {
+    var inp = document.getElementById('fin-cred-client-secret');
+    var btn = document.getElementById('fin-secret-toggle-btn');
+    if (!inp) return;
+    if (inp.type === 'password') { inp.type = 'text'; if (btn) btn.textContent = 'Hide'; }
+    else                         { inp.type = 'password'; if (btn) btn.textContent = 'Show'; }
+  };
+
+  window._finSaveCreds = async function() {
+    var btn = document.getElementById('fin-save-creds-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      var cid = (document.getElementById('fin-cred-client-id')     || {}).value || '';
+      var sec = (document.getElementById('fin-cred-client-secret') || {}).value || '';
+      var payload = { action: 'save_credentials' };
+      if (cid.trim()) payload.client_id     = cid.trim();
+      if (sec.trim()) payload.client_secret = sec.trim();
+      if (!payload.client_id && !payload.client_secret) {
+        window.toast && window.toast('Enter Client ID or Secret first.', 'error');
+        return;
+      }
+      await callXeroEF(payload);
+      window.toast && window.toast('Credentials saved.', 'success');
+      // Re-check status and re-render settings
+      await window.loadFinSettings();
+    } catch(e) {
+      window.lpAlert && window.lpAlert('Error saving credentials: ' + e.message);
+    } finally {
+      var btn2 = document.getElementById('fin-save-creds-btn');
+      if (btn2) { btn2.disabled = false; btn2.textContent = 'Save Credentials'; }
+    }
+  };
+
+  // ── Connect / Disconnect / Test ────────────────────────────────────────────
+  window._finConnectXero = async function() {
+    try {
+      var state = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+        .map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+      sessionStorage.setItem('xero_oauth_state', state);
+      var data = await callXeroEF({ action: 'authorize_url', state: state, origin: window.location.origin });
+      window.location.href = data.url;
+    } catch(e) {
+      window.lpAlert && window.lpAlert('Error starting Xero connection: ' + e.message);
+    }
+  };
+
+  window._finDisconnect = function() {
+    window.lpConfirm && window.lpConfirm('Disconnect Xero? This will not affect your Xero account.', {
+      onConfirm: async function() {
+        try {
+          await callXeroEF({ action: 'disconnect' });
+          _finReconnectRequired = false;
+          window.toast && window.toast('Xero disconnected.', 'success');
+          _updateDots(false);
+          await window.loadFinSettings();
+        } catch(e) {
+          window.lpAlert && window.lpAlert('Error disconnecting: ' + e.message);
+        }
+      }
+    });
+  };
+
+  window._finTestConnection = async function() {
+    try {
+      var data = await callXeroEF({ action: 'test_connection' });
+      window.toast && window.toast('Connected — ' + data.organisation_name, 'success');
+    } catch(e) {
+      window.lpAlert && window.lpAlert('Connection test failed: ' + e.message);
+    }
+  };
+
+  // ── loadFinMappings ────────────────────────────────────────────────────────
+  window.loadFinMappings = async function() {
+    var body = document.getElementById('fin-mappings-body');
+    if (!body) return;
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading mappings…</div>';
+
+    var mappings, isConnected;
+    try {
+      var rows = await window.db.select('xero_connection_public', '?is_active=eq.true&limit=1');
+      isConnected = !!(rows && rows.length);
+      var mRows = await window.db.select('xero_mappings', '?order=created_at.asc');
+      mappings = mRows || [];
+    } catch(e) {
+      body.innerHTML = '<div style="color:var(--red);font-size:13px;">Error: ' + _esc(e.message) + '</div>';
+      return;
+    }
+
+    // Sort by display order
+    mappings.sort(function(a, b) {
+      return MAPPING_ORDER.indexOf(a.mapping_key) - MAPPING_ORDER.indexOf(b.mapping_key);
+    });
+
+    var allBlank = mappings.every(function(m) { return !m.xero_account_code; });
+    var accounts = [];
+
+    var html = '<div class="card">';
+    html += '<div class="card-title" style="margin-bottom:16px;">Xero Mappings</div>';
+
+    if (allBlank) {
+      html += '<div style="color:var(--muted);font-size:12px;margin-bottom:12px;">Set the Xero account each Pulse activity should post to. Save by tabbing out or pressing Enter.</div>';
+    }
+    if (!isConnected) {
+      html += '<div style="color:var(--muted);font-size:12px;margin-bottom:12px;">Connect Xero to pick accounts from a list.</div>';
+    }
+
+    html += '<div style="overflow-x:auto;">';
+    html += '<table class="data-table" id="fin-mappings-table">';
+    html += '<thead><tr><th>Mapping</th><th>Xero Account Code</th><th>Xero Account Name</th><th>Tax Type</th><th></th></tr></thead>';
+    html += '<tbody id="fin-mappings-tbody">';
+
+    mappings.forEach(function(m) {
+      var isAsset = m.mapping_key === 'stock_on_hand';
+      var taxOpts = isAsset ? ASSET_TAX_OPTIONS : REVENUE_TAX_OPTIONS;
+      var taxSel  = '<select data-mid="' + _esc(m.id) + '" data-field="xero_tax_type" onchange="window._finSaveMapping(this)" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;width:100%;">';
+      taxOpts.forEach(function(opt) {
+        var sel = opt.value === m.xero_tax_type ? ' selected' : '';
+        taxSel += '<option value="' + _esc(opt.value) + '"' + sel + '>' + _esc(opt.label) + '</option>';
+      });
+      taxSel += '</select>';
+
+      // Account code cell
+      var codeCell;
+      if (isConnected) {
+        codeCell = '<select id="fin-acc-sel-' + _esc(m.id) + '" data-mid="' + _esc(m.id) + '" data-field="xero_account_code" onchange="window._finAccountCodePick(this)" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;min-width:180px;">';
+        codeCell += '<option value="">— Loading accounts… —</option>';
+        codeCell += '</select>';
+      } else {
+        codeCell = '<input type="text" data-mid="' + _esc(m.id) + '" data-field="xero_account_code" value="' + _esc(m.xero_account_code || '') + '" placeholder="e.g. 200" onblur="window._finSaveMapping(this)" onkeydown="if(event.key===\'Enter\')this.blur()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;width:120px;">';
+      }
+
+      html += '<tr id="fin-map-mrow-' + _esc(m.id) + '">';
+      html += '<td style="white-space:nowrap;font-weight:600;">' + _esc(MAPPING_LABELS[m.mapping_key] || m.mapping_key) + '</td>';
+      html += '<td>' + codeCell + '</td>';
+      html += '<td><input type="text" id="fin-accname-' + _esc(m.id) + '" data-mid="' + _esc(m.id) + '" data-field="xero_account_name" value="' + _esc(m.xero_account_name || '') + '" placeholder="Account name" onblur="window._finSaveMapping(this)" onkeydown="if(event.key===\'Enter\')this.blur()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;width:200px;"></td>';
+      html += '<td>' + taxSel + '</td>';
+      html += '<td id="fin-map-tick-' + _esc(m.id) + '" style="color:var(--green);font-size:14px;min-width:20px;"></td>';
+      html += '</tr>';
+    });
+
+    html += '</tbody></table></div></div>';
+    body.innerHTML = html;
+
+    // Populate account dropdowns if connected
+    if (isConnected) {
+      _loadAccountsForMappings(mappings);
+    }
+  };
+
+  async function _loadAccountsForMappings(mappings) {
+    try {
+      var result = await callXeroEF({ action: 'list_accounts' });
+      _finAccounts = result.accounts || [];
+    } catch(e) {
+      console.warn('list_accounts failed:', e);
+      _finAccounts = [];
+    }
+
+    // Populate each dropdown
+    mappings.forEach(function(m) {
+      var sel = document.getElementById('fin-acc-sel-' + m.id);
+      if (!sel) return;
+      var html = '<option value="">— Select account —</option>';
+      (_finAccounts || []).forEach(function(a) {
+        var selected = a.Code === m.xero_account_code ? ' selected' : '';
+        html += '<option value="' + _esc(a.Code) + '"' + selected + '>' + _esc(a.Code) + ' — ' + _esc(a.Name) + '</option>';
+      });
+      sel.innerHTML = html;
+    });
+  }
+
+  window._finAccountCodePick = function(sel) {
+    var mid  = sel.dataset.mid;
+    var code = sel.value;
+    // Auto-fill account name
+    var matched = (_finAccounts || []).find(function(a) { return a.Code === code; });
+    var nameInp = document.getElementById('fin-accname-' + mid);
+    if (nameInp && matched) nameInp.value = matched.Name;
+    // Save
+    _doSaveMapping(mid, { xero_account_code: code, xero_account_name: (matched ? matched.Name : (nameInp ? nameInp.value : '')) });
+  };
+
+  window._finSaveMapping = function(el) {
+    var mid   = el.dataset.mid;
+    var field = el.dataset.field;
+    var val   = el.value;
+    if (field === 'xero_tax_type') {
+      _doSaveMapping(mid, { xero_tax_type: val });
+    } else {
+      var nameInp = document.getElementById('fin-accname-' + mid);
+      _doSaveMapping(mid, { xero_account_code: (field === 'xero_account_code' ? val : undefined), xero_account_name: (nameInp ? nameInp.value : val) });
+    }
+  };
+
+  async function _doSaveMapping(mid, fields) {
+    var cu = window.CURRENT_USER;
+    var payload = Object.assign({}, fields, {
+      updated_at: new Date().toISOString(),
+      updated_by: cu && cu.app_user_id
+    });
+    // Remove undefined
+    Object.keys(payload).forEach(function(k) { if (payload[k] === undefined) delete payload[k]; });
+    try {
+      await window.db.update('xero_mappings', '?id=eq.' + mid, payload);
+      var tick = document.getElementById('fin-map-tick-' + mid);
+      if (tick) {
+        tick.textContent = '✓';
+        setTimeout(function() { if (tick) tick.textContent = ''; }, 1500);
+      }
+      window.toast && window.toast('Saved.', 'success');
+    } catch(e) {
+      window.lpAlert && window.lpAlert('Error saving mapping: ' + e.message);
+    }
+  }
+
+  // ── Post-auth hook: Xero OAuth callback handler ────────────────────────────
+  function _xeroCallbackHandler(user) {
+    var pendingRaw = sessionStorage.getItem('xero_pending_callback');
+    var storedState = sessionStorage.getItem('xero_oauth_state');
+    if (!pendingRaw) return;
+
+    sessionStorage.removeItem('xero_pending_callback');
+    sessionStorage.removeItem('xero_oauth_state');
+
+    var pending;
+    try { pending = JSON.parse(pendingRaw); } catch(e) { return; }
+
+    // Navigate to Finance > Settings
+    function _goFinSettings() {
+      if (window.showPage) window.showPage('finance', document.getElementById('sbnav-finance'));
+      setTimeout(function() { window.showFinTab && window.showFinTab('settings', document.getElementById('fin-tab-settings')); }, 100);
+    }
+
+    if (pending.error) {
+      _goFinSettings();
+      setTimeout(function() {
+        window.lpAlert && window.lpAlert(pending.error_description || pending.error);
+      }, 200);
+      return;
+    }
+
+    if (pending.state !== storedState) {
+      _goFinSettings();
+      setTimeout(function() {
+        window.lpAlert && window.lpAlert('Connection rejected (state mismatch). For security, please try Connect Xero again.');
+      }, 200);
+      return;
+    }
+
+    // Exchange code via edge function
+    callXeroEF({
+      action:       'callback',
+      code:         pending.code,
+      redirect_uri: window.location.origin + '/xero-callback'
+    }).then(function(data) {
+      _finReconnectRequired = false;
+      _goFinSettings();
+      setTimeout(function() {
+        window.toast && window.toast('Connected to ' + data.tenant_name, 'success');
+        if (data.tenant_changed) {
+          window.toast && window.toast('Client mappings cleared — new Xero organisation connected.', 'success');
+        }
+        window.loadFinSettings && window.loadFinSettings();
+        _updateDots(true);
+      }, 300);
+    }).catch(function(e) {
+      _goFinSettings();
+      setTimeout(function() {
+        var msg = e.message || 'Unknown error';
+        if (msg === 'reconnect_required') {
+          window.lpAlert && window.lpAlert('Your Xero connection has expired. Please reconnect.');
+        } else {
+          window.lpAlert && window.lpAlert('Xero connection failed: ' + msg);
+        }
+      }, 200);
+    });
+  }
+
+  // Register on the post-auth hook array (with immediate-run fallback)
+  window.onUserAuthenticated = window.onUserAuthenticated || [];
+  if (!Array.isArray(window.onUserAuthenticated)) window.onUserAuthenticated = [];
+  window.onUserAuthenticated.push(_xeroCallbackHandler);
+
+  // Immediate fallback: if CURRENT_USER is already set when this script runs
+  if (window.CURRENT_USER) {
+    setTimeout(function() { _xeroCallbackHandler(window.CURRENT_USER); }, 0);
+  }
+
+  // Expose loadFinancePage so showPage('finance') can call it
+  // Hook into showPage — finance page calls loadFinancePage on show
+  var _origShowPage = window.showPage;
+  if (typeof _origShowPage === 'function') {
+    window.showPage = function(page, navEl) {
+      _origShowPage(page, navEl);
+      if (page === 'finance') {
+        setTimeout(function() { window.loadFinancePage && window.loadFinancePage(); }, 50);
+      }
+    };
+  }
+
+})();
+</script>
+
+<!-- ── FINANCE ─────────────────────────────────────────────── -->
+<div id="page-finance" class="page">
+  <div class="wrapper">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+      <div class="page-label">Finance</div>
+      <span id="fin-xero-dot" style="width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;margin-right:4px;" title="Xero disconnected"></span>
+    </div>
+    <div class="page-heading" style="margin-bottom:20px;">Finance</div>
+
+    <!-- Sub-nav -->
+    <div id="fin-tabs" style="display:flex;gap:0;margin-bottom:24px;border-bottom:2px solid var(--navy-border);">
+      <button class="inv-tab active" id="fin-tab-overview"  onclick="window.showFinTab('overview',this)">Overview</button>
+      <button class="inv-tab"        id="fin-tab-invoices"  onclick="window.showFinTab('invoices',this)">Invoices</button>
+      <button class="inv-tab"        id="fin-tab-aged"      onclick="window.showFinTab('aged',this)">Aged Debtors</button>
+      <button class="inv-tab"        id="fin-tab-jobs"      onclick="window.showFinTab('jobs',this)">Jobs to Invoice</button>
+      <button class="inv-tab"        id="fin-tab-stores"    onclick="window.showFinTab('stores',this)">Stores</button>
+      <button class="inv-tab"        id="fin-tab-mappings"  onclick="window.showFinTab('mappings',this)">Xero Mappings</button>
+      <button class="inv-tab"        id="fin-tab-settings"  onclick="window.showFinTab('settings',this)"><span id="fin-settings-dot" style="width:7px;height:7px;border-radius:50%;background:var(--red);display:inline-block;margin-right:5px;vertical-align:middle;"></span>Settings</button>
+    </div>
+
+    <!-- Panels -->
+    <div class="fin-panel" id="fin-panel-overview">
+      <div class="card"><div class="card-title">Overview</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+    </div>
+    <div class="fin-panel" id="fin-panel-invoices" style="display:none;">
+      <div class="card"><div class="card-title">Invoices</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+    </div>
+    <div class="fin-panel" id="fin-panel-aged" style="display:none;">
+      <div class="card"><div class="card-title">Aged Debtors</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+    </div>
+    <div class="fin-panel" id="fin-panel-jobs" style="display:none;">
+      <div class="card"><div class="card-title">Jobs to Invoice</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+    </div>
+    <div class="fin-panel" id="fin-panel-stores" style="display:none;">
+      <div class="card"><div class="card-title">Stores</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+    </div>
+    <div class="fin-panel" id="fin-panel-mappings" style="display:none;">
+      <div id="fin-mappings-body"><div style="color:var(--muted);font-size:13px;">Loading mappings…</div></div>
+    </div>
+    <div class="fin-panel" id="fin-panel-settings" style="display:none;">
+      <div id="fin-settings-body"><div style="color:var(--muted);font-size:13px;">Loading…</div></div>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>
