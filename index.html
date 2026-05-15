@@ -1664,16 +1664,29 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // ── Xero OAuth callback — capture BEFORE createClient ──────────────────────
   // Supabase JS v2 auto-intercepts ?code= during createClient (PKCE flow) and
-  // strips it from the URL before our handler can read it. Capture it first,
-  // then clean the URL so Supabase doesn't try to exchange a Xero code.
-  if (window.location.pathname === '/xero-callback') {
+  // strips it from the URL before our handler can read it. Capture it first.
+  //
+  // Cloudflare Pages may 308-redirect /xero-callback → /?code=...&state=...
+  // so we detect the callback at EITHER pathname. At / we only treat it as a
+  // Xero callback when the state param matches what we stored before the OAuth
+  // redirect (preventing false-positive on any other ?code= query params).
+  (function() {
     var _xp = new URLSearchParams(window.location.search);
-    sessionStorage.setItem('xero_pending_callback', JSON.stringify({
-      code: _xp.get('code'), state: _xp.get('state'),
-      error: _xp.get('error'), error_description: _xp.get('error_description')
-    }));
-    window.history.replaceState({}, '', '/');
-  }
+    var _xCode  = _xp.get('code');
+    var _xState = _xp.get('state');
+    var _xErr   = _xp.get('error');
+    var _storedState = sessionStorage.getItem('xero_oauth_state');
+    var _isXeroCb = (window.location.pathname === '/xero-callback') ||
+      (_xErr && _storedState && _xp.get('state') === _storedState) ||
+      (_xCode && _storedState && _xState === _storedState);
+    if (_isXeroCb) {
+      sessionStorage.setItem('xero_pending_callback', JSON.stringify({
+        code: _xCode, state: _xState,
+        error: _xErr, error_description: _xp.get('error_description')
+      }));
+      window.history.replaceState({}, '', '/');
+    }
+  }());
 
   window._sb = window.supabase.createClient(SUPA_URL, SUPA_KEY, {
     auth: { storageKey: 'lhd-auth', persistSession: true, autoRefreshToken: true }
