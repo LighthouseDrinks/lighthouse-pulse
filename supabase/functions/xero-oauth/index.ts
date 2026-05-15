@@ -225,7 +225,7 @@ Deno.serve(async (req: Request) => {
       const origin       = (body.origin as string) || '';
       const state        = (body.state  as string) || '';
       const redirectUri  = `${origin}/xero-callback`;
-      const scope        = 'openid profile email accounting.transactions accounting.contacts accounting.settings offline_access';
+      const scope        = 'openid profile email accounting.invoices accounting.payments accounting.contacts accounting.settings offline_access';
       const params = new URLSearchParams({
         response_type: 'code',
         client_id:     clientId,
