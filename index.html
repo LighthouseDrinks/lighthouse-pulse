@@ -1987,7 +1987,8 @@ async function handleSession(session) {
     var uid   = session.user.id;
     var email = session.user.email;
     var token = session.access_token;
-    var res   = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=id,role,client_id,display_name,clients!app_users_client_id_fkey(name)', {
+    // Single query fetches role, status, and client name in one round trip
+    var res   = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=id,role,status,client_id,display_name,clients!app_users_client_id_fkey(name)', {
       headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token }
     });
     var rows = await res.json();
@@ -2001,16 +2002,11 @@ async function handleSession(session) {
     var STAFF_ROLES = ['managing_director','operations_director','business_analyst','quality_compliance','financial_controller','commercial_manager','ecommerce_manager','production_manager','warehouse_liquid','client_coordinator','production_operator','order_fulfillment'];
 
     // Block terminated (and pending-termination past their last working day) employees.
-    // Uses a separate lightweight query so login still works if status column is missing.
     try {
-      var statusRes  = await fetch(SUPA_URL + '/rest/v1/app_users?auth_user_id=eq.' + uid + '&select=id,status', {
-        headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + token }
-      });
-      if (statusRes.ok) {
-        var statusRows = await statusRes.json();
-        if (Array.isArray(statusRows) && statusRows[0]) {
-          var _loginStatus   = statusRows[0].status;
-          var _loginAppId    = statusRows[0].id;
+      if (Array.isArray(rows) && rows[0]) {
+        var _loginStatus   = rows[0].status;
+        var _loginAppId    = rows[0].id;
+        if (true) { // scope wrapper preserved for nested try/catch structure below
           var _shouldRevoke  = (_loginStatus === 'terminated');
 
           // For pending terminations, check whether the last working day has arrived
@@ -2052,8 +2048,8 @@ async function handleSession(session) {
     } catch(se) { /* status column may not exist yet — safe to continue */ }
 
     window.CURRENT_USER = { id: uid, app_user_id: appUserId, email: email, role: role, client_id: clientId, client_name: clientName, display_name: displayName };
-    // Store email in app_users for settings panel display
-    try { await window.db.update('app_users', '?auth_user_id=eq.' + uid, { email: email }); } catch(e) { window.logError('store user email', e); }
+    // Store email in app_users for settings panel display (fire-and-forget — does not block login)
+    window.db.update('app_users', '?auth_user_id=eq.' + uid, { email: email }).catch(function(e) { window.logError('store user email', e); });
     if (role === 'client') {
       showPortal(window.CURRENT_USER);
     } else if (STAFF_ROLES.indexOf(role) !== -1) {
@@ -41839,7 +41835,7 @@ window.saveAdjModal = async function() {
     }
   };
 
-  // Load system settings on app init (so Resend key is available immediately)
+  // Load system settings — called after auth by showDashboard; not called on init
   async function loadSystemSettingsGlobal() {
     try {
       var rows = await sbGet('app_settings?key=eq.system&limit=1');
@@ -41853,7 +41849,6 @@ window.saveAdjModal = async function() {
       }
     } catch(e) { window.logError('load system settings', e); }
   }
-  loadSystemSettingsGlobal();
   window.loadSystemSettingsGlobal = loadSystemSettingsGlobal;
 
   // ── Open/close ───────────────────────────────────────────────────────────────
