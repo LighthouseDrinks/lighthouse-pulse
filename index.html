@@ -47122,6 +47122,11 @@ if (typeof _origOpenDD === 'function') {
     var mapBody = document.getElementById('fin-mapping-body');
     if (!mapBody) return;
 
+    // #region agent log
+    var _dbg = function(msg, data, hyp) { fetch('http://127.0.0.1:7747/ingest/f2b8cfd5-4d0d-490f-b66e-c19fe7e036d9',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9e4922'},body:JSON.stringify({sessionId:'9e4922',location:'index.html:_loadClientMappingCard',message:msg,data:data,hypothesisId:hyp,timestamp:Date.now()})}).catch(function(){}); };
+    _dbg('ENTRY', {isConnected:isConnected, forceRefresh:forceRefresh, hasCachedContacts:!!_finContacts, cachedCount:(_finContacts||[]).length, fin429Until:_fin429Until, now:Date.now()}, 'A,B,C,D,E');
+    // #endregion
+
     try {
       var [clients, appUsers] = await Promise.all([
         window.db.select('clients', '?order=name.asc&select=id,name,lifecycle_stage,xero_contact_id,xero_contact_mapped_at,xero_contact_mapped_by'),
@@ -47139,21 +47144,37 @@ if (typeof _origOpenDD === 'function') {
         if (_fin429Until > now) {
           var secsLeft = Math.ceil((_fin429Until - now) / 1000);
           _finContactsError = 'Rate limited — retry in ' + secsLeft + 's';
+          // #region agent log
+          _dbg('429_COOLDOWN_ACTIVE', {secsLeft:secsLeft}, 'A');
+          // #endregion
           _startCountdown(mapBody, clients, userMap, isConnected);
           return;
         }
         mapBody.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading Xero contacts…</div>';
         _finContactsError = null;
+        // #region agent log
+        var _fetchStart = Date.now();
+        _dbg('FETCH_START', {timeoutMs:60000}, 'A,B,C,D');
+        // #endregion
         try {
           var cResult = await callXeroEF({ action: 'list_contacts' }, 60000); // 60s timeout
+          // #region agent log
+          _dbg('FETCH_SUCCESS', {elapsedMs:Date.now()-_fetchStart, contactCount:(cResult.contacts||[]).length}, 'A,B,C,D');
+          // #endregion
           contacts = cResult.contacts || [];
           _finContacts = contacts;
           _fin429Until = 0;
         } catch(e) {
+          // #region agent log
+          _dbg('FETCH_ERROR', {elapsedMs:Date.now()-_fetchStart, errorName:e.name, errorMsg:e.message, isAbort:e.name==='AbortError'}, 'A,B,C,D,E');
+          // #endregion
           console.warn('list_contacts failed:', e);
           _finContactsError = e.message || String(e);
           var isRateLimit = (e.message || '').toLowerCase().indexOf('rate limit') !== -1
                          || (e.message || '').indexOf('429') !== -1;
+          // #region agent log
+          _dbg('ERROR_PATH', {isRateLimit:isRateLimit, errorMsg:_finContactsError}, 'A,E');
+          // #endregion
           if (isRateLimit) {
             _fin429Until = Date.now() + 62000; // 62s cooldown
             _startCountdown(mapBody, clients, userMap, isConnected);
@@ -47166,10 +47187,17 @@ if (typeof _origOpenDD === 'function') {
             +   'onclick="window._finRefreshContacts()">Retry</button></div>';
           return;
         }
+      } else {
+        // #region agent log
+        _dbg('SKIPPED_FETCH', {reason: !isConnected ? 'not_connected' : 'already_cached', contactCount:contacts.length}, 'D,E');
+        // #endregion
       }
 
       _renderClientMapping(clients || [], contacts, userMap, isConnected, mapBody);
     } catch(e) {
+      // #region agent log
+      _dbg('OUTER_CATCH', {errorMsg:e.message}, 'E');
+      // #endregion
       if (mapBody) mapBody.innerHTML = '<div style="color:var(--red);font-size:13px;">Error: ' + _esc(e.message) + '</div>';
     }
   }
