@@ -47749,37 +47749,118 @@ if (typeof _origOpenDD === 'function') {
   // ═══════════════════════════════════════════════════════════════════════════
   // ── INVOICES (Xero AR list + chase emails) ─────────────────────────────────
   // ═══════════════════════════════════════════════════════════════════════════
-  window._finInvoices    = null;  // cached
-  window._finChaseLog    = null;  // cached chase history
+  // Per-preset cache so switching between Overdue / Last 30 / YTD doesn't
+  // re-pull from Xero unless the user explicitly hits Refresh on that preset.
+  window._finInvoicesByPreset = {}; // { overdue: [...], ytd: [...], ... }
+  window._finChaseLog         = null;
+  window._finCurrentPreset    = null; // selected preset
+  window._finCurrentCustom    = { from: '', to: '' };
+  window._finInvoices          = null; // current view's invoices (back-compat)
   var _finInvFilters = { status: 'all', search: '', from: '', to: '', sort: 'newest' };
 
-  window.loadFinInvoices = async function() {
+  var FIN_INV_PRESETS = [
+    { id: 'overdue',  label: 'Overdue',       desc: 'All unpaid invoices past their due date' },
+    { id: 'last_30',  label: 'Last 30 Days',  desc: 'Invoices issued in the last 30 days' },
+    { id: 'last_90',  label: 'Last 90 Days',  desc: 'Invoices issued in the last 90 days' },
+    { id: 'ytd',      label: 'Year to Date',  desc: 'Invoices since Jan 1 — also used by Overview' },
+    { id: 'custom',   label: 'Custom Range',  desc: 'Pick your own from/to dates' }
+  ];
+
+  window.loadFinInvoices = function() {
     var body = document.getElementById('fin-invoices-body');
     if (!body) return;
-    if (window._finInvoices) {
+    // If a preset is already chosen for this session, show it. Otherwise, the chooser.
+    if (window._finCurrentPreset && window._finInvoicesByPreset[window._finCurrentPreset]) {
+      window._finInvoices = window._finInvoicesByPreset[window._finCurrentPreset];
       _renderFinInvoices(body);
-      return;
-    }
-    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading invoices from Xero…</div>';
-    try {
-      var results = await Promise.all([
-        callXeroEF({ action: 'list_invoices' }, 60000),
-        callCreditEF({ action: 'list_chase_log' }, 10000).catch(function() { return { log: [] }; })
-      ]);
-      window._finInvoices = results[0].invoices || [];
-      window._finChaseLog = results[1].log || [];
-      _renderFinInvoices(body);
-    } catch(e) {
-      body.innerHTML = '<div class="card"><div style="color:var(--red);font-size:13px;">'
-        + 'Could not load invoices: ' + _esc(e.message)
-        + '</div><button class="btn btn-outline" style="margin-top:12px;" onclick="window._finReloadInvoices()">Retry</button></div>';
+    } else {
+      _renderInvoicePresetChooser(body);
     }
   };
 
-  window._finReloadInvoices = function() {
-    window._finInvoices = null;
-    window._finChaseLog = null;
+  function _renderInvoicePresetChooser(container) {
+    var html = '';
+    html += '<div class="card" style="margin-bottom:14px;">';
+    html += '<div class="card-title" style="margin-bottom:6px;">Choose a view</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:18px;">Pick what to load. Smaller views are faster and don\'t use the Xero API rate limit.</div>';
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;">';
+    FIN_INV_PRESETS.forEach(function(p) {
+      html += '<button onclick="window._finPickInvoicePreset(\'' + p.id + '\')" '
+           + 'style="text-align:left;background:var(--navy-mid);border:1px solid var(--navy-border);'
+           + 'color:var(--white);padding:14px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;'
+           + 'transition:border-color 0.15s;" '
+           + 'onmouseover="this.style.borderColor=\'var(--gold)\'" '
+           + 'onmouseout="this.style.borderColor=\'var(--navy-border)\'">'
+           + '<div style="font-size:13px;font-weight:700;color:var(--gold);margin-bottom:4px;">' + p.label + '</div>'
+           + '<div style="font-size:11px;color:var(--muted);">' + p.desc + '</div>'
+           + '</button>';
+    });
+    html += '</div>';
+    html += '<div id="fin-inv-custom-range" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--navy-border);">'
+         + '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:end;">'
+         + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">From</label>'
+         + '<input id="fin-inv-custom-from" type="date" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;"></div>'
+         + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">To (optional)</label>'
+         + '<input id="fin-inv-custom-to" type="date" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;"></div>'
+         + '<button class="btn btn-gold" onclick="window._finPickInvoicePreset(\'custom\', true)">Load Custom Range</button>'
+         + '</div></div>';
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  window._finPickInvoicePreset = async function(presetId, customConfirmed) {
+    // Custom: first click shows the date fields; second click (with dates) loads.
+    if (presetId === 'custom' && !customConfirmed) {
+      var existing = document.getElementById('fin-inv-custom-range');
+      if (existing) existing.style.display = 'block';
+      return;
+    }
+
+    var dateFrom = '', dateTo = '';
+    if (presetId === 'custom') {
+      dateFrom = ((document.getElementById('fin-inv-custom-from') || {}).value || '').trim();
+      dateTo   = ((document.getElementById('fin-inv-custom-to')   || {}).value || '').trim();
+      if (!dateFrom) { window.toast && window.toast('Pick a From date.', 'warn'); return; }
+      window._finCurrentCustom = { from: dateFrom, to: dateTo };
+    }
+
+    window._finCurrentPreset = presetId;
+    var body = document.getElementById('fin-invoices-body');
+    if (!body) return;
+    body.innerHTML = '<div class="card"><div style="color:var(--muted);font-size:13px;">Loading invoices from Xero…</div></div>';
+
+    try {
+      var payload = { action: 'list_invoices', preset: presetId };
+      if (presetId === 'custom') { payload.date_from = dateFrom; payload.date_to = dateTo; }
+      var results = await Promise.all([
+        callXeroEF(payload, 60000),
+        callCreditEF({ action: 'list_chase_log' }, 10000).catch(function() { return { log: [] }; })
+      ]);
+      window._finInvoicesByPreset[presetId] = results[0].invoices || [];
+      window._finChaseLog = results[1].log || [];
+      window._finInvoices = window._finInvoicesByPreset[presetId];
+      _renderFinInvoices(body);
+    } catch(e) {
+      window._finCurrentPreset = null;
+      body.innerHTML = '<div class="card"><div style="color:var(--red);font-size:13px;">'
+        + 'Could not load invoices: ' + _esc(e.message)
+        + '</div><button class="btn btn-outline" style="margin-top:12px;" onclick="window._finPickInvoicePreset(\'' + presetId + '\', true)">Retry</button>'
+        + '<button class="btn btn-outline" style="margin-top:12px;margin-left:8px;" onclick="window._finChangeInvoiceView()">Change view</button>'
+        + '</div>';
+    }
+  };
+
+  window._finChangeInvoiceView = function() {
+    window._finCurrentPreset = null;
     window.loadFinInvoices();
+  };
+
+  window._finReloadInvoices = function() {
+    if (!window._finCurrentPreset) { window.loadFinInvoices(); return; }
+    delete window._finInvoicesByPreset[window._finCurrentPreset];
+    var p = window._finCurrentPreset;
+    window._finCurrentPreset = null;
+    window._finPickInvoicePreset(p, true);
   };
 
   function _invoiceStatus(inv) {
@@ -47811,6 +47892,21 @@ if (typeof _origOpenDD === 'function') {
   function _renderFinInvoices(container) {
     var invoices = window._finInvoices || [];
     var html = '';
+
+    // Active preset banner
+    var presetMeta = null;
+    for (var pi = 0; pi < FIN_INV_PRESETS.length; pi++) {
+      if (FIN_INV_PRESETS[pi].id === window._finCurrentPreset) { presetMeta = FIN_INV_PRESETS[pi]; break; }
+    }
+    var presetLabel = presetMeta ? presetMeta.label : (window._finCurrentPreset || '');
+    if (window._finCurrentPreset === 'custom') {
+      presetLabel += ' (' + (window._finCurrentCustom.from || '?') + (window._finCurrentCustom.to ? ' → ' + window._finCurrentCustom.to : '') + ')';
+    }
+    html += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">';
+    html += '<span style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">View</span>';
+    html += '<span style="font-size:13px;color:var(--gold);font-weight:600;">' + _esc(presetLabel) + '</span>';
+    html += '<button class="btn btn-outline" style="font-size:10px;padding:4px 9px;margin-left:auto;" onclick="window._finChangeInvoiceView()">Change view</button>';
+    html += '</div>';
 
     // Filter bar
     html += '<div class="card" style="margin-bottom:14px;">';
@@ -48157,11 +48253,15 @@ if (typeof _origOpenDD === 'function') {
     if (!body) return;
     body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading overview…</div>';
 
-    // Need invoices loaded — fetch if cache is cold
-    if (!window._finInvoices) {
+    // Overview always needs YTD data. Reuse the YTD cache from the Invoices tab
+    // if it's already loaded, otherwise fetch it now.
+    var ytdCache = window._finInvoicesByPreset && window._finInvoicesByPreset.ytd;
+    if (!ytdCache) {
       try {
-        var r = await callXeroEF({ action: 'list_invoices' }, 60000);
-        window._finInvoices = r.invoices || [];
+        var r = await callXeroEF({ action: 'list_invoices', preset: 'ytd' }, 60000);
+        if (!window._finInvoicesByPreset) window._finInvoicesByPreset = {};
+        window._finInvoicesByPreset.ytd = r.invoices || [];
+        ytdCache = window._finInvoicesByPreset.ytd;
       } catch(e) {
         body.innerHTML = '<div class="card"><div style="color:var(--red);font-size:13px;">'
           + 'Could not load invoices: ' + _esc(e.message)
@@ -48169,6 +48269,8 @@ if (typeof _origOpenDD === 'function') {
         return;
       }
     }
+    // For Overview rendering, expose YTD invoices as _finInvoices
+    window._finInvoices = ytdCache;
 
     // Stock value: re-use the existing app_settings.ecom_stock_value
     var stockValue = 0;
@@ -48249,7 +48351,7 @@ if (typeof _origOpenDD === 'function') {
            + ';padding:5px 12px;font-size:11px;font-weight:600;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;text-transform:uppercase;">'
            + r.l + '</button>';
     });
-    html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;margin-left:auto;" onclick="window._finReloadInvoices();window.loadFinOverview()">Refresh</button>';
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;margin-left:auto;" onclick="window._finRefreshOverview()">Refresh</button>';
     html += '</div></div>';
 
     // KPI cards
@@ -48281,6 +48383,11 @@ if (typeof _origOpenDD === 'function') {
 
   window._finSetOverviewRange = function(r) {
     _finOverviewRange = r;
+    window.loadFinOverview();
+  };
+
+  window._finRefreshOverview = function() {
+    if (window._finInvoicesByPreset) delete window._finInvoicesByPreset.ytd;
     window.loadFinOverview();
   };
 
