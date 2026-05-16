@@ -369,7 +369,13 @@ Deno.serve(async (req: Request) => {
       let page = 1;
       while (true) {
         const params = `pageSize=100&page=${page}`;
-        const { status, data } = await xeroGet('/api.xro/2.0/Contacts', refreshResult.accessToken!, refreshResult.tenantId!, params);
+        let { status, data } = await xeroGet('/api.xro/2.0/Contacts', refreshResult.accessToken!, refreshResult.tenantId!, params);
+        // Retry once on 429 after 65 seconds
+        if (status === 429) {
+          console.warn('[xero-oauth] 429 rate limit on Contacts, waiting 65s...');
+          await new Promise((r) => setTimeout(r, 65_000));
+          ({ status, data } = await xeroGet('/api.xro/2.0/Contacts', refreshResult.accessToken!, refreshResult.tenantId!, params));
+        }
         if (status !== 200) return err(`Xero Contacts API error ${status}: ${JSON.stringify(data).slice(0,300)}`, 400);
         const contacts = ((data?.Contacts ?? []) as Array<Record<string, unknown>>)
           .filter((c) => c.ContactStatus === 'ACTIVE');
