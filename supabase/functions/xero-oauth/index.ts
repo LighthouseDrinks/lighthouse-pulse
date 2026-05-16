@@ -234,7 +234,7 @@ Deno.serve(async (req: Request) => {
       const origin       = (body.origin as string) || '';
       const state        = (body.state  as string) || '';
       const redirectUri  = `${origin}/xero-callback`;
-      const scope        = 'openid profile email accounting.invoices accounting.payments accounting.contacts accounting.settings offline_access';
+      const scope        = 'openid profile email accounting.invoices accounting.payments accounting.contacts accounting.settings accounting.reports.profitandloss.read accounting.reports.aged.read offline_access';
       const params = new URLSearchParams({
         response_type: 'code',
         client_id:     clientId,
@@ -311,34 +311,77 @@ Deno.serve(async (req: Request) => {
     }
 
     // ── disconnect ────────────────────────────────────────────────────────────
+    // Does THREE things to ensure a clean disconnect that forces re-consent on
+    // the next Connect (so newly-added scopes actually take effect):
+    //   1. Marks our local xero_connection row inactive (UI stops showing connected)
+    //   2. Calls Xero's /connections/{id} DELETE — removes the app authorization
+    //      from the Xero org entirely. Without this, Xero will silently re-issue
+    //      tokens on reconnect without showing the consent screen, and the
+    //      previously-consented scopes will be reused.
+    //   3. Revokes the refresh token — invalidates the token grant.
     if (action === 'disconnect') {
-      // Get access token for revocation (best-effort)
       const { data: conn } = await adminClient
         .from('xero_connection')
-        .select('access_token, refresh_token')
+        .select('access_token, refresh_token, tenant_id')
         .eq('is_active', true)
         .maybeSingle();
 
+      // Mark inactive locally first so the UI reflects immediately even if the
+      // remote calls below are slow.
       await adminClient
         .from('xero_connection')
         .update({ is_active: false, disconnected_at: new Date().toISOString() })
         .eq('is_active', true);
 
-      // Best-effort revocation — ignore errors
-      if (conn?.refresh_token) {
-        const { clientId, clientSecret } = await getXeroCreds(adminClient);
-        if (clientId && clientSecret) {
-          const revokeUrl = XERO_REVOKE_URL;
-          console.log('[xero-oauth] request: POST', revokeUrl);
-          const rRes = await fetch(revokeUrl, {
+      const { clientId, clientSecret } = await getXeroCreds(adminClient);
+
+      // 2) Remove the Xero-side connection record so a future authorize call
+      //    forces the user to consent again (essential when we've added new
+      //    scopes like accounting.reports.profitandloss.read).
+      if (conn?.access_token && conn?.tenant_id) {
+        try {
+          console.log('[xero-oauth] request: GET https://api.xero.com/connections');
+          const listRes = await fetch('https://api.xero.com/connections', {
+            headers: {
+              Authorization: `Bearer ${conn.access_token}`,
+              Accept:        'application/json',
+            },
+          });
+          console.log('[xero-oauth] response:', listRes.status, '(list connections)');
+          if (listRes.ok) {
+            const connections = await listRes.json() as Array<{ id: string; tenantId: string }>;
+            const match = connections.find((c) => c.tenantId === conn.tenant_id);
+            if (match) {
+              console.log('[xero-oauth] request: DELETE https://api.xero.com/connections/' + match.id);
+              const delRes = await fetch(`https://api.xero.com/connections/${match.id}`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${conn.access_token}` },
+              });
+              console.log('[xero-oauth] response:', delRes.status, '(delete connection)');
+            } else {
+              console.log('[xero-oauth] no matching Xero connection for tenant', conn.tenant_id);
+            }
+          }
+        } catch (e) {
+          console.warn('[xero-oauth] connection delete failed (non-fatal):', e);
+        }
+      }
+
+      // 3) Revoke the refresh token so all derived access tokens become invalid.
+      if (conn?.refresh_token && clientId && clientSecret) {
+        try {
+          console.log('[xero-oauth] request: POST', XERO_REVOKE_URL);
+          const rRes = await fetch(XERO_REVOKE_URL, {
             method: 'POST',
             headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              Authorization: basicAuth(clientId, clientSecret),
+              'Content-Type':  'application/x-www-form-urlencoded',
+              Authorization:   basicAuth(clientId, clientSecret),
             },
             body: new URLSearchParams({ token: conn.refresh_token }).toString(),
-          }).catch(() => null);
-          console.log('[xero-oauth] response:', rRes?.status ?? 'error', '(revocation, best-effort)');
+          });
+          console.log('[xero-oauth] response:', rRes.status, '(token revocation)');
+        } catch (e) {
+          console.warn('[xero-oauth] token revocation failed (non-fatal):', e);
         }
       }
 
@@ -365,27 +408,365 @@ Deno.serve(async (req: Request) => {
       const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
       if (!refreshResult.ok) return json({ error: refreshResult.error });
 
+      // pageSize=1000 (Xero's max) fetches all contacts in 1 call for most accounts.
+      // summaryOnly=true returns only ContactID + Name — tiny payload, fast.
+      // ContactStatus filter applied server-side to avoid fetching archived contacts.
       const allContacts: unknown[] = [];
       let page = 1;
+      const PAGE_SIZE = 1000;
+      const t0 = Date.now();
       while (true) {
-        const params = `pageSize=100&page=${page}`;
+        const params = `pageSize=${PAGE_SIZE}&page=${page}&summaryOnly=true&ContactStatus=ACTIVE`;
+        console.log(`[xero-oauth] list_contacts page=${page} elapsed=${Date.now()-t0}ms`);
         const { status, data } = await xeroGet('/api.xro/2.0/Contacts', refreshResult.accessToken!, refreshResult.tenantId!, params);
         if (status === 429) return err('Xero rate limit hit — please wait 60 seconds and try again', 429);
         if (status !== 200) return err(`Xero Contacts API error ${status}: ${JSON.stringify(data).slice(0,300)}`, 400);
-        const contacts = ((data?.Contacts ?? []) as Array<Record<string, unknown>>)
-          .filter((c) => c.ContactStatus === 'ACTIVE');
-        allContacts.push(...contacts);
-        const rawPage = (data?.Contacts ?? []) as unknown[];
-        if (rawPage.length < 100) break;
+        const page_contacts = (data?.Contacts ?? []) as Array<Record<string, unknown>>;
+        console.log(`[xero-oauth] list_contacts page=${page} got=${page_contacts.length} elapsed=${Date.now()-t0}ms`);
+        allContacts.push(...page_contacts);
+        if (page_contacts.length < PAGE_SIZE) break;
         page++;
       }
+      console.log(`[xero-oauth] list_contacts done total=${allContacts.length} elapsed=${Date.now()-t0}ms`);
 
       const simplified = (allContacts as Array<Record<string, unknown>>).map((c) => ({
         ContactID:    c.ContactID,
         Name:         c.Name,
-        EmailAddress: c.EmailAddress,
+        EmailAddress: c.EmailAddress ?? null,
       }));
       return json({ contacts: simplified });
+    }
+
+    // ── search_contacts ───────────────────────────────────────────────────────
+    if (action === 'search_contacts') {
+      const query = ((body.query as string) || '').trim();
+      if (!query || query.length < 2) return json({ contacts: [] });
+      const { clientId, clientSecret } = await getXeroCreds(adminClient);
+      if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
+      const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
+      if (!refreshResult.ok) return json({ error: refreshResult.error });
+
+      const params = `searchTerm=${encodeURIComponent(query)}&summaryOnly=true&pageSize=20`;
+      console.log(`[xero-oauth] search_contacts query="${query}"`);
+      const { status, data } = await xeroGet('/api.xro/2.0/Contacts', refreshResult.accessToken!, refreshResult.tenantId!, params);
+      if (status === 429) return err('Xero rate limit — please wait a moment and try again', 429);
+      if (status !== 200) return err(`Xero Contacts API error ${status}`, 400);
+      const contacts = ((data?.Contacts ?? []) as Array<Record<string, unknown>>)
+        .filter((c) => c.ContactStatus === 'ACTIVE')
+        .map((c) => ({ ContactID: c.ContactID, Name: c.Name, EmailAddress: c.EmailAddress ?? null }));
+      console.log(`[xero-oauth] search_contacts returned ${contacts.length} results`);
+      return json({ contacts });
+    }
+
+    // ── get_contacts_by_ids ───────────────────────────────────────────────────
+    if (action === 'get_contacts_by_ids') {
+      const ids = ((body.ids as string[]) || []).filter(Boolean).slice(0, 100);
+      if (!ids.length) return json({ contacts: [] });
+      const { clientId, clientSecret } = await getXeroCreds(adminClient);
+      if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
+      const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
+      if (!refreshResult.ok) return json({ error: refreshResult.error });
+
+      const params = `IDs=${ids.join(',')}&summaryOnly=true`;
+      console.log(`[xero-oauth] get_contacts_by_ids count=${ids.length}`);
+      const { status, data } = await xeroGet('/api.xro/2.0/Contacts', refreshResult.accessToken!, refreshResult.tenantId!, params);
+      if (status !== 200) return err(`Xero Contacts API error ${status}`, 400);
+      const contacts = ((data?.Contacts ?? []) as Array<Record<string, unknown>>)
+        .map((c) => ({ ContactID: c.ContactID, Name: c.Name, EmailAddress: c.EmailAddress ?? null }));
+      console.log(`[xero-oauth] get_contacts_by_ids returned ${contacts.length} contacts`);
+      return json({ contacts });
+    }
+
+    // ── list_invoices ─────────────────────────────────────────────────────────
+    // Server-side filtering by preset so we only fetch what the user asked for,
+    // dramatically reducing payload + rate-limit risk vs. pulling YTD by default.
+    //
+    // Presets (one is required):
+    //   overdue       — AUTHORISED only, wide date window, filter overdue client-side here
+    //   last_30       — invoices issued in last 30 days, all statuses
+    //   last_90       — invoices issued in last 90 days, all statuses
+    //   ytd           — invoices issued since Jan 1, all statuses
+    //   custom        — caller provides date_from / date_to (YYYY-MM-DD)
+    //
+    // No summaryOnly: we need Contact.EmailAddress for chase emails. Volume is
+    // controlled by the preset choice.
+    if (action === 'list_invoices') {
+      const preset   = ((body.preset as string) || '').trim();
+      const dateFromIn = ((body.date_from as string) || '').trim();
+      const dateToIn   = ((body.date_to   as string) || '').trim();
+      if (!preset) return err('Missing preset parameter', 400);
+
+      const { clientId, clientSecret } = await getXeroCreds(adminClient);
+      if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
+      const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
+      if (!refreshResult.ok) return json({ error: refreshResult.error });
+
+      const now      = new Date();
+      const isoDate  = (d: Date) => d.toISOString().split('T')[0];
+      const daysAgo  = (n: number) => { const d = new Date(now); d.setDate(d.getDate() - n); return d; };
+
+      let dateFrom = '';
+      let dateTo   = '';
+      let statuses = 'AUTHORISED,PAID';
+      let postFilterOverdue = false;
+
+      if (preset === 'overdue') {
+        // Wide net so we catch invoices issued long ago that are still due.
+        // We then filter overdue client-side here in the function.
+        dateFrom = '2020-01-01';
+        statuses = 'AUTHORISED';
+        postFilterOverdue = true;
+      } else if (preset === 'last_30') {
+        dateFrom = isoDate(daysAgo(30));
+      } else if (preset === 'last_90') {
+        dateFrom = isoDate(daysAgo(90));
+      } else if (preset === 'ytd') {
+        dateFrom = `${now.getFullYear()}-01-01`;
+      } else if (preset === 'custom') {
+        if (!dateFromIn) return err('custom preset requires date_from', 400);
+        dateFrom = dateFromIn;
+        if (dateToIn) dateTo = dateToIn;
+      } else {
+        return err(`Unknown preset: ${preset}`, 400);
+      }
+
+      const PAGE_SIZE = 1000;
+      const allInvoices: Array<Record<string, unknown>> = [];
+      let page = 1;
+      const t0 = Date.now();
+      while (true) {
+        const parts: string[] = [
+          `Statuses=${statuses}`,
+          `DateFrom=${dateFrom}`,
+          `page=${page}`,
+          `pageSize=${PAGE_SIZE}`,
+        ];
+        if (dateTo) parts.push(`DateTo=${dateTo}`);
+        const params = parts.join('&');
+        console.log(`[xero-oauth] list_invoices preset=${preset} page=${page} elapsed=${Date.now() - t0}ms`);
+        const { status, data } = await xeroGet('/api.xro/2.0/Invoices', refreshResult.accessToken!, refreshResult.tenantId!, params);
+        if (status === 429) {
+          // Surface which limit was hit if Xero told us
+          return err('Xero rate limit hit — please wait 60 seconds and try again', 429);
+        }
+        if (status !== 200) return err(`Xero Invoices API error ${status}: ${JSON.stringify(data).slice(0,300)}`, 400);
+
+        const invoices = (data?.Invoices ?? []) as Array<Record<string, unknown>>;
+        const accrec = invoices.filter((i) => i.Type === 'ACCREC');
+        allInvoices.push(...accrec);
+        console.log(`[xero-oauth] list_invoices page=${page} got=${invoices.length} accrec=${accrec.length}`);
+        if (invoices.length < PAGE_SIZE) break;
+        page++;
+      }
+      console.log(`[xero-oauth] list_invoices done total=${allInvoices.length} elapsed=${Date.now() - t0}ms`);
+
+      const today = isoDate(now);
+      const simplified = allInvoices
+        .filter((i) => {
+          if (!postFilterOverdue) return true;
+          // Overdue = past DueDate AND still has balance
+          return (i.DueDate as string) < today && Number(i.AmountDue ?? 0) > 0;
+        })
+        .map((i) => {
+          const contact = (i.Contact ?? {}) as Record<string, unknown>;
+          return {
+            InvoiceID:      i.InvoiceID,
+            InvoiceNumber:  i.InvoiceNumber,
+            Reference:      i.Reference ?? null,
+            Date:           i.Date,
+            DueDate:        i.DueDate,
+            Status:         i.Status,
+            AmountDue:      i.AmountDue ?? 0,
+            AmountPaid:     i.AmountPaid ?? 0,
+            Total:          i.Total ?? 0,
+            CurrencyCode:   i.CurrencyCode ?? 'EUR',
+            Contact: {
+              ContactID:    contact.ContactID,
+              Name:         contact.Name,
+              EmailAddress: contact.EmailAddress ?? null,
+            },
+          };
+        });
+      return json({ invoices: simplified, preset, date_from: dateFrom, date_to: dateTo || null, count: simplified.length });
+    }
+
+    // ── overview_metrics ──────────────────────────────────────────────────────
+    // Returns pre-aggregated finance KPIs without pulling every invoice. Uses
+    // Xero's Reports endpoints: P&L for YTD/last month/monthly chart, and Aged
+    // Receivables for outstanding + overdue totals.
+    //
+    // Output shape:
+    //   {
+    //     ytd_revenue:       number,
+    //     last_month_revenue: number,
+    //     monthly: { '2026-01': 1234, '2026-02': 2345, ... },     // for chart
+    //     outstanding_total: number,
+    //     overdue_total:     number,
+    //     overdue_count:     number,
+    //     generated_at:      iso string
+    //   }
+    if (action === 'overview_metrics') {
+      const { clientId, clientSecret } = await getXeroCreds(adminClient);
+      if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
+      const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
+      if (!refreshResult.ok) return json({ error: refreshResult.error });
+
+      const now      = new Date();
+      const year     = now.getFullYear();
+      const month    = now.getMonth(); // 0-11
+      const today    = now.toISOString().split('T')[0];
+      const yearEnd  = `${year}-12-31`;
+
+      // ── 1) P&L — monthly columns Jan..Dec of current year ───────────────
+      // toDate=YYYY-12-31, periods=11, timeframe=MONTH → 12 monthly columns
+      // The header row gives the period labels; the Income section's SummaryRow
+      // gives the totals.
+      const plParams = `toDate=${yearEnd}&periods=11&timeframe=MONTH`;
+      const { status: plStatus, data: plData } = await xeroGet(
+        '/api.xro/2.0/Reports/ProfitAndLoss', refreshResult.accessToken!, refreshResult.tenantId!, plParams,
+      );
+      if (plStatus !== 200) return err(`Xero P&L API error ${plStatus}: ${JSON.stringify(plData).slice(0,200)}`, 400);
+
+      // Parse the report
+      const plReport = ((plData?.Reports ?? []) as Array<Record<string, unknown>>)[0];
+      const plRows   = ((plReport?.Rows ?? []) as Array<Record<string, unknown>>);
+
+      // Headers row — first cell is label, rest are period labels e.g. "Jan 2026"
+      const headerRow = plRows.find((r) => r.RowType === 'Header');
+      const headerCells = ((headerRow?.Cells ?? []) as Array<Record<string, unknown>>);
+      const monthLabels = headerCells.slice(1).map((c) => String(c.Value ?? ''));
+
+      // Find Income section and its SummaryRow ("Total Income")
+      const incomeSection = plRows.find((r) => r.RowType === 'Section' && (r.Title === 'Income' || r.Title === 'Revenue'));
+      const incomeRows    = ((incomeSection?.Rows ?? []) as Array<Record<string, unknown>>);
+      const totalRow      = incomeRows.find((r) => r.RowType === 'SummaryRow');
+      const totalCells    = ((totalRow?.Cells ?? []) as Array<Record<string, unknown>>);
+      const monthlyValues = totalCells.slice(1).map((c) => Number(c.Value ?? 0));
+
+      // Build monthly object keyed by YYYY-MM for the chart
+      const monthly: Record<string, number> = {};
+      for (let i = 0; i < 12; i++) {
+        const key = `${year}-${String(i + 1).padStart(2, '0')}`;
+        monthly[key] = monthlyValues[i] ?? 0;
+      }
+
+      const ytdRevenue       = monthlyValues.reduce((s, n) => s + (Number.isFinite(n) ? n : 0), 0);
+      const lastMonthIdx     = month - 1; // 0-based; if January, this is -1 → use Dec last year? No — show 0 to keep current-year semantics
+      const lastMonthRevenue = lastMonthIdx >= 0 ? (monthlyValues[lastMonthIdx] ?? 0) : 0;
+
+      // ── 2) Aged Receivables — outstanding + overdue ─────────────────────
+      // Some Xero accounts return this endpoint slowly or not at all (depending
+      // on chart of accounts setup). We make it best-effort so the Overview
+      // still renders if it fails.
+      let outstandingTotal = 0;
+      let overdueTotal     = 0;
+      let overdueCount     = 0;
+      try {
+        const arParams = `date=${today}`;
+        const { status: arStatus, data: arData } = await xeroGet(
+          '/api.xro/2.0/Reports/AgedReceivablesByContact', refreshResult.accessToken!, refreshResult.tenantId!, arParams,
+        );
+        if (arStatus === 200) {
+          const arReport = ((arData?.Reports ?? []) as Array<Record<string, unknown>>)[0];
+          const arRows   = ((arReport?.Rows ?? []) as Array<Record<string, unknown>>);
+
+          // Total row is a Section with a SummaryRow. Cells (in order):
+          //   [Label, Current, 1-30, 31-60, 61-90, Older, Total]
+          // We walk all rows looking for a SummaryRow with 7 cells.
+          function walk(rows: Array<Record<string, unknown>>) {
+            for (const r of rows) {
+              if (r.RowType === 'SummaryRow') {
+                const cells = ((r.Cells ?? []) as Array<Record<string, unknown>>);
+                if (cells.length >= 7) {
+                  // Last cell is total. Buckets 2..5 are overdue (1-30, 31-60, 61-90, 90+).
+                  outstandingTotal = Number(cells[6]?.Value ?? 0);
+                  overdueTotal =
+                      Number(cells[2]?.Value ?? 0)
+                    + Number(cells[3]?.Value ?? 0)
+                    + Number(cells[4]?.Value ?? 0)
+                    + Number(cells[5]?.Value ?? 0);
+                }
+              }
+              if (r.RowType === 'Row') {
+                const cells = ((r.Cells ?? []) as Array<Record<string, unknown>>);
+                if (cells.length >= 7) {
+                  const buckets =
+                      Number(cells[2]?.Value ?? 0)
+                    + Number(cells[3]?.Value ?? 0)
+                    + Number(cells[4]?.Value ?? 0)
+                    + Number(cells[5]?.Value ?? 0);
+                  if (buckets > 0) overdueCount++;
+                }
+              }
+              if (Array.isArray(r.Rows)) walk(r.Rows as Array<Record<string, unknown>>);
+            }
+          }
+          walk(arRows);
+        } else {
+          console.warn('[xero-oauth] AgedReceivablesByContact non-200:', arStatus);
+        }
+      } catch (e) {
+        console.warn('[xero-oauth] AgedReceivablesByContact error (non-fatal):', e);
+      }
+
+      return json({
+        ytd_revenue:        ytdRevenue,
+        last_month_revenue: lastMonthRevenue,
+        last_month_label:   lastMonthIdx >= 0 ? monthLabels[lastMonthIdx] : null,
+        monthly,
+        outstanding_total: outstandingTotal,
+        overdue_total:     overdueTotal,
+        overdue_count:     overdueCount,
+        generated_at:      now.toISOString(),
+      });
+    }
+
+    // ── find_or_create_contact ────────────────────────────────────────────────
+    // Exact email match using OData == operator. If not found, creates a new
+    // contact with the given name + email. Used by future server-side flows
+    // (the ecommerce-sync edge function implements its own equivalent).
+    if (action === 'find_or_create_contact') {
+      const email = ((body.email as string) || '').trim();
+      const name  = ((body.name  as string) || '').trim();
+      if (!email) return err('email is required', 400);
+      const { clientId, clientSecret } = await getXeroCreds(adminClient);
+      if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
+      const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
+      if (!refreshResult.ok) return json({ error: refreshResult.error });
+
+      // OData equality is == (single = is a syntax error in Xero's query language)
+      const whereClause = `EmailAddress=="${email.replace(/"/g, '\\"')}"`;
+      const findParams  = `where=${encodeURIComponent(whereClause)}&summaryOnly=true`;
+      const { status: findStatus, data: findData } = await xeroGet(
+        '/api.xro/2.0/Contacts',
+        refreshResult.accessToken!,
+        refreshResult.tenantId!,
+        findParams,
+      );
+      if (findStatus !== 200) return err(`Xero contact lookup failed: ${findStatus}`, 400);
+      const existing = ((findData?.Contacts ?? []) as Array<Record<string, unknown>>)[0];
+      if (existing?.ContactID) {
+        return json({ contact_id: existing.ContactID, created: false });
+      }
+
+      // Create
+      const createUrl = `${XERO_API}/api.xro/2.0/Contacts`;
+      console.log('[xero-oauth] request: POST', createUrl);
+      const createRes = await fetch(createUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${refreshResult.accessToken}`,
+          'Xero-tenant-id': refreshResult.tenantId!,
+          'Content-Type':   'application/json',
+          'Accept':         'application/json',
+        },
+        body: JSON.stringify({ Contacts: [{ Name: name || email, EmailAddress: email }] }),
+      });
+      const createData = await createRes.json().catch(() => ({}));
+      console.log('[xero-oauth] response:', createRes.status, JSON.stringify(createData).slice(0, 300));
+      if (createRes.status !== 200) return err(`Xero contact create failed: ${createRes.status}`, 400);
+      const created = ((createData?.Contacts ?? []) as Array<Record<string, unknown>>)[0];
+      return json({ contact_id: created?.ContactID, created: true });
     }
 
     // ── list_accounts ─────────────────────────────────────────────────────────
