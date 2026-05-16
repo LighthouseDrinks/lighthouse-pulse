@@ -46912,6 +46912,10 @@ if (typeof _origOpenDD === 'function') {
     _finCurrentTab = key;
     if (key === 'settings') window.loadFinSettings();
     if (key === 'mappings') window.loadFinMappings();
+    if (key === 'overview') window.loadFinOverview && window.loadFinOverview();
+    if (key === 'invoices') window.loadFinInvoices && window.loadFinInvoices();
+    if (key === 'jobs')     window.loadFinJobs     && window.loadFinJobs();
+    if (key === 'stores')   window.loadFinStores   && window.loadFinStores();
   };
 
   // ── Connection dot helper ──────────────────────────────────────────────────
@@ -47589,6 +47593,1228 @@ if (typeof _origOpenDD === 'function') {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ── FINANCE PHASE 2: Jobs to Invoice, Invoices, Stores, Overview ──────────
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  var ECOMMERCE_EF    = 'https://anhawgzgxoywophqbmji.supabase.co/functions/v1/ecommerce-sync';
+  var CREDIT_CTRL_EF  = 'https://anhawgzgxoywophqbmji.supabase.co/functions/v1/credit-control';
+
+  var PAYMENT_TERMS_OPTIONS = [
+    { value: 'on_receipt', label: 'Due on receipt' },
+    { value: '7_days',     label: 'Net 7 days' },
+    { value: '14_days',    label: 'Net 14 days' },
+    { value: '30_days',    label: 'Net 30 days (default)' },
+    { value: '45_days',    label: 'Net 45 days' },
+    { value: '60_days',    label: 'Net 60 days' },
+    { value: 'eom',        label: 'End of month' }
+  ];
+
+  // ── Generic edge function caller ───────────────────────────────────────────
+  async function callEF(url, body, timeoutMs) {
+    var sess  = await window._sb.auth.getSession();
+    var token = sess.data && sess.data.session ? sess.data.session.access_token : null;
+    var controller = new AbortController();
+    var timer = timeoutMs ? setTimeout(function(){ controller.abort(); }, timeoutMs) : null;
+    var res;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + (token || SUPA_KEY),
+          'Content-Type':  'application/json'
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+    } catch(e) {
+      if (timer) clearTimeout(timer);
+      if (e.name === 'AbortError') throw new Error('Request timed out');
+      throw e;
+    }
+    if (timer) clearTimeout(timer);
+    var rawText = await res.text();
+    var data;
+    try { data = JSON.parse(rawText); } catch(e) {
+      throw new Error('Edge function returned non-JSON: ' + rawText.slice(0, 120));
+    }
+    if (!res.ok) throw new Error(data.error || 'Edge function error (HTTP ' + res.status + ')');
+    return data;
+  }
+  function callEcomEF(body, timeoutMs)   { return callEF(ECOMMERCE_EF,   body, timeoutMs); }
+  function callCreditEF(body, timeoutMs) { return callEF(CREDIT_CTRL_EF, body, timeoutMs); }
+
+  // ── Currency formatter ─────────────────────────────────────────────────────
+  function _fmtCur(amount, ccy) {
+    var n = Number(amount);
+    if (!isFinite(n)) n = 0;
+    var symbol = ccy === 'GBP' ? '£' : ccy === 'USD' ? '$' : '€';
+    return symbol + n.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function _daysBetween(later, earlier) {
+    var ms = new Date(later).getTime() - new Date(earlier).getTime();
+    return Math.floor(ms / (1000 * 60 * 60 * 24));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ── JOBS TO INVOICE ────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  window.loadFinJobs = async function() {
+    var body = document.getElementById('fin-jobs-body');
+    if (!body) return;
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading jobs…</div>';
+    try {
+      // Completed jobs that haven't been pushed to Xero yet.
+      // Stage is stored as either 'complete' or 'Complete' historically.
+      var jobs = await window.db.select(
+        'jobs',
+        '?select=id,product_name,po_number,bottle_target,actual_bottles_produced,date_completed,stage,invoice_payment_terms,clients(name)'
+        + '&stage=in.(complete,Complete)'
+        + '&xero_invoice_id=is.null'
+        + '&order=date_completed.desc'
+        + '&limit=500'
+      );
+      _renderFinJobs(jobs || [], body);
+    } catch(e) {
+      body.innerHTML = '<div style="color:var(--red);font-size:13px;">Error loading jobs: ' + _esc(e.message) + '</div>';
+    }
+  };
+
+  function _renderFinJobs(jobs, container) {
+    var html = '';
+    html += '<div class="card" style="margin-bottom:14px;padding:14px 18px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.25);">';
+    html += '<div style="font-size:13px;color:var(--gold);font-weight:600;">Xero invoice push launching soon</div>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-top:4px;">Set payment terms now so each job is ready when push goes live.</div>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<div class="card-title" style="margin-bottom:16px;">Jobs to Invoice ('
+         + jobs.length + ')</div>';
+
+    if (jobs.length === 0) {
+      html += '<div style="color:var(--muted);font-size:13px;padding:20px 0;">No completed uninvoiced jobs.</div>';
+    } else {
+      html += '<div style="overflow-x:auto;"><table class="data-table">';
+      html += '<thead><tr>'
+           + '<th>Client</th><th>Job ID</th><th>Product</th><th>PO #</th>'
+           + '<th>Completed</th><th style="text-align:right;">Bottles</th><th>Payment Terms</th>'
+           + '</tr></thead><tbody>';
+
+      jobs.forEach(function(j) {
+        var clientName = (j.clients && j.clients.name) || '—';
+        var bottles    = j.actual_bottles_produced || j.bottle_target || '—';
+        var terms      = j.invoice_payment_terms || '30_days';
+        html += '<tr>'
+             + '<td>' + _esc(clientName) + '</td>'
+             + '<td><span style="font-family:monospace;font-size:11px;color:var(--muted);">' + _esc(j.id) + '</span></td>'
+             + '<td>' + _esc(j.product_name || '—') + '</td>'
+             + '<td>' + _esc(j.po_number || '—') + '</td>'
+             + '<td>' + _fmtDate(j.date_completed) + '</td>'
+             + '<td style="text-align:right;font-variant-numeric:tabular-nums;">'
+             + (bottles === '—' ? '—' : Number(bottles).toLocaleString()) + '</td>'
+             + '<td>' + _buildPaymentTermsSelect(j.id, terms) + '</td>'
+             + '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  function _buildPaymentTermsSelect(jobId, current) {
+    var opts = PAYMENT_TERMS_OPTIONS.map(function(o) {
+      return '<option value="' + _esc(o.value) + '"' + (o.value === current ? ' selected' : '') + '>' + _esc(o.label) + '</option>';
+    }).join('');
+    return '<select onchange="window._finSaveJobTerms(\'' + _esc(jobId) + '\', this)" '
+         + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+         + 'padding:5px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">' + opts + '</select>';
+  }
+
+  window._finSaveJobTerms = async function(jobId, sel) {
+    var newVal = sel.value;
+    sel.disabled = true;
+    try {
+      await window.db.update('jobs', '?id=eq.' + encodeURIComponent(jobId), { invoice_payment_terms: newVal });
+      sel.style.borderColor = 'var(--green)';
+      setTimeout(function() { sel.style.borderColor = 'var(--navy-border)'; }, 1200);
+    } catch(e) {
+      window.toast && window.toast('Failed to save terms: ' + (e.message || 'unknown'), 'error');
+      sel.style.borderColor = 'var(--red)';
+    } finally {
+      sel.disabled = false;
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ── INVOICES (Xero AR list + chase emails) ─────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  window._finInvoices    = null;  // cached
+  window._finChaseLog    = null;  // cached chase history
+  var _finInvFilters = { status: 'all', search: '', from: '', to: '', sort: 'newest' };
+
+  window.loadFinInvoices = async function() {
+    var body = document.getElementById('fin-invoices-body');
+    if (!body) return;
+    if (window._finInvoices) {
+      _renderFinInvoices(body);
+      return;
+    }
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading invoices from Xero…</div>';
+    try {
+      var results = await Promise.all([
+        callXeroEF({ action: 'list_invoices' }, 60000),
+        callCreditEF({ action: 'list_chase_log' }, 10000).catch(function() { return { log: [] }; })
+      ]);
+      window._finInvoices = results[0].invoices || [];
+      window._finChaseLog = results[1].log || [];
+      _renderFinInvoices(body);
+    } catch(e) {
+      body.innerHTML = '<div class="card"><div style="color:var(--red);font-size:13px;">'
+        + 'Could not load invoices: ' + _esc(e.message)
+        + '</div><button class="btn btn-outline" style="margin-top:12px;" onclick="window._finReloadInvoices()">Retry</button></div>';
+    }
+  };
+
+  window._finReloadInvoices = function() {
+    window._finInvoices = null;
+    window._finChaseLog = null;
+    window.loadFinInvoices();
+  };
+
+  function _invoiceStatus(inv) {
+    if (inv.Status === 'PAID')   return 'PAID';
+    if (inv.Status === 'VOIDED') return 'VOIDED';
+    var due = inv.DueDate ? new Date(inv.DueDate) : null;
+    if (due && due < new Date() && Number(inv.AmountDue || 0) > 0) return 'OVERDUE';
+    return inv.Status || 'AUTHORISED';
+  }
+
+  function _statusBadge(status) {
+    var bg, fg;
+    if (status === 'PAID')         { bg = 'rgba(34,180,80,0.15)';  fg = 'var(--green)'; }
+    else if (status === 'OVERDUE') { bg = 'rgba(232,82,82,0.15)';  fg = 'var(--red)';   }
+    else if (status === 'VOIDED')  { bg = 'rgba(120,120,120,0.2)'; fg = 'var(--muted)'; }
+    else                            { bg = 'rgba(201,168,76,0.15)'; fg = 'var(--gold)';  }
+    return '<span style="background:' + bg + ';color:' + fg + ';padding:2px 8px;border-radius:3px;'
+         + 'font-size:11px;font-weight:600;letter-spacing:0.04em;">' + status + '</span>';
+  }
+
+  function _lastChaseFor(invoiceId) {
+    var log = window._finChaseLog || [];
+    for (var i = 0; i < log.length; i++) {
+      if (log[i].invoice_id === invoiceId) return log[i];
+    }
+    return null;
+  }
+
+  function _renderFinInvoices(container) {
+    var invoices = window._finInvoices || [];
+    var html = '';
+
+    // Filter bar
+    html += '<div class="card" style="margin-bottom:14px;">';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">';
+    html += '<select id="fin-inv-status" onchange="window._finApplyInvFilters()" '
+         + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+         + 'padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">'
+         + '<option value="all">All statuses</option>'
+         + '<option value="OVERDUE">Overdue</option>'
+         + '<option value="AUTHORISED">Outstanding</option>'
+         + '<option value="PAID">Paid</option>'
+         + '<option value="VOIDED">Voided</option>'
+         + '</select>';
+    html += '<input id="fin-inv-search" type="text" placeholder="Search client or invoice #" '
+         + 'oninput="window._finApplyInvFilters()" '
+         + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+         + 'padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;flex:1;min-width:180px;">';
+    html += '<input id="fin-inv-from" type="date" onchange="window._finApplyInvFilters()" '
+         + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+         + 'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">';
+    html += '<input id="fin-inv-to" type="date" onchange="window._finApplyInvFilters()" '
+         + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+         + 'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">';
+    html += '<select id="fin-inv-sort" onchange="window._finApplyInvFilters()" '
+         + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+         + 'padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">'
+         + '<option value="newest">Newest first</option>'
+         + '<option value="oldest">Oldest first</option>'
+         + '<option value="amount">Largest amount</option>'
+         + '<option value="due">Due date</option>'
+         + '</select>';
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:6px 12px;" onclick="window._finReloadInvoices()">Refresh</button>';
+    html += '</div>';
+    html += '<div style="margin-top:10px;font-size:12px;color:var(--muted);" id="fin-inv-summary">—</div>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<div id="fin-inv-table-wrap" style="overflow-x:auto;"></div>';
+    html += '</div>';
+
+    container.innerHTML = html;
+    _finApplyInvFiltersImpl();
+  }
+
+  window._finApplyInvFilters = function() {
+    _finInvFilters.status = (document.getElementById('fin-inv-status') || {}).value || 'all';
+    _finInvFilters.search = ((document.getElementById('fin-inv-search') || {}).value || '').toLowerCase().trim();
+    _finInvFilters.from   = (document.getElementById('fin-inv-from')  || {}).value || '';
+    _finInvFilters.to     = (document.getElementById('fin-inv-to')    || {}).value || '';
+    _finInvFilters.sort   = (document.getElementById('fin-inv-sort')  || {}).value || 'newest';
+    _finApplyInvFiltersImpl();
+  };
+
+  function _finApplyInvFiltersImpl() {
+    var all = window._finInvoices || [];
+    var filtered = all.filter(function(inv) {
+      var status = _invoiceStatus(inv);
+      if (_finInvFilters.status !== 'all') {
+        if (_finInvFilters.status === 'AUTHORISED' && status !== 'AUTHORISED' && status !== 'OVERDUE') return false;
+        if (_finInvFilters.status !== 'AUTHORISED' && status !== _finInvFilters.status) return false;
+      }
+      if (_finInvFilters.search) {
+        var hay = ((inv.Contact && inv.Contact.Name) || '') + ' ' + (inv.InvoiceNumber || '');
+        if (hay.toLowerCase().indexOf(_finInvFilters.search) < 0) return false;
+      }
+      if (_finInvFilters.from && inv.Date && inv.Date < _finInvFilters.from) return false;
+      if (_finInvFilters.to   && inv.Date && inv.Date > _finInvFilters.to)   return false;
+      return true;
+    });
+
+    filtered.sort(function(a, b) {
+      if (_finInvFilters.sort === 'oldest') return (a.Date || '').localeCompare(b.Date || '');
+      if (_finInvFilters.sort === 'amount') return Number(b.AmountDue || b.Total || 0) - Number(a.AmountDue || a.Total || 0);
+      if (_finInvFilters.sort === 'due')    return (a.DueDate || '').localeCompare(b.DueDate || '');
+      return (b.Date || '').localeCompare(a.Date || '');
+    });
+
+    var outstanding = 0;
+    filtered.forEach(function(i) { outstanding += Number(i.AmountDue || 0); });
+    var sumEl = document.getElementById('fin-inv-summary');
+    if (sumEl) {
+      sumEl.textContent = filtered.length + ' invoice' + (filtered.length === 1 ? '' : 's')
+        + ' · ' + _fmtCur(outstanding, 'EUR') + ' outstanding';
+    }
+
+    var wrap = document.getElementById('fin-inv-table-wrap');
+    if (!wrap) return;
+    if (filtered.length === 0) {
+      wrap.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">No invoices match your filters.</div>';
+      return;
+    }
+
+    var html = '<table class="data-table">';
+    html += '<thead><tr>'
+         + '<th>Invoice #</th><th>Client</th><th>Date</th><th>Due</th>'
+         + '<th style="text-align:right;">Amount Due</th><th>Status</th><th style="text-align:right;">Action</th>'
+         + '</tr></thead><tbody>';
+
+    var today = new Date();
+    filtered.forEach(function(inv) {
+      var status   = _invoiceStatus(inv);
+      var contact  = inv.Contact || {};
+      var xeroUrl  = 'https://go.xero.com/AccountsReceivable/Edit.aspx?invoiceID=' + encodeURIComponent(inv.InvoiceID || '');
+      var canChase = (status === 'OVERDUE') && !!contact.EmailAddress;
+      var chaseTip = !contact.EmailAddress ? 'No email on file — update contact in Xero' : '';
+      var lastChase = _lastChaseFor(inv.InvoiceID);
+
+      html += '<tr>';
+      html += '<td><span style="font-family:monospace;font-size:12px;">' + _esc(inv.InvoiceNumber || '—') + '</span></td>';
+      html += '<td>' + _esc(contact.Name || '—') + (contact.EmailAddress ? '<br><span style="font-size:11px;color:var(--muted);">' + _esc(contact.EmailAddress) + '</span>' : '') + '</td>';
+      html += '<td>' + _fmtDate(inv.Date) + '</td>';
+      html += '<td>' + _fmtDate(inv.DueDate);
+      if (status === 'OVERDUE' && inv.DueDate) {
+        html += '<br><span style="font-size:11px;color:var(--red);">' + _daysBetween(today, inv.DueDate) + ' days overdue</span>';
+      }
+      html += '</td>';
+      html += '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + _fmtCur(inv.AmountDue, inv.CurrencyCode) + '</td>';
+      html += '<td>' + _statusBadge(status);
+      if (lastChase) {
+        html += '<br><span style="font-size:10px;color:var(--amber);margin-top:2px;display:inline-block;" '
+              + 'title="' + _esc(lastChase.sent_at) + '">Chased ' + _fmtDate(lastChase.sent_at) + '</span>';
+      }
+      html += '</td>';
+      html += '<td style="text-align:right;white-space:nowrap;">';
+      if (status === 'OVERDUE') {
+        if (canChase) {
+          html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 10px;border-color:var(--amber);color:var(--amber);margin-right:4px;" '
+                + 'onclick="window._finOpenChaseModal(\'' + _esc(inv.InvoiceID) + '\')">Chase</button>';
+        } else {
+          html += '<button class="btn btn-outline" disabled title="' + _esc(chaseTip)
+                + '" style="font-size:11px;padding:5px 10px;opacity:0.4;cursor:not-allowed;margin-right:4px;">Chase</button>';
+        }
+      }
+      html += '<a href="' + xeroUrl + '" target="_blank" rel="noopener" class="btn btn-outline" '
+           + 'style="font-size:11px;padding:5px 10px;text-decoration:none;">Open in Xero ↗</a>';
+      html += '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }
+
+  // ── Chase modal ────────────────────────────────────────────────────────────
+  var _finChaseTemplates = null;
+
+  window._finOpenChaseModal = async function(invoiceId) {
+    var invoices = window._finInvoices || [];
+    var inv = null;
+    for (var i = 0; i < invoices.length; i++) {
+      if (invoices[i].InvoiceID === invoiceId) { inv = invoices[i]; break; }
+    }
+    if (!inv) { window.toast && window.toast('Invoice not found.', 'error'); return; }
+
+    if (!_finChaseTemplates) {
+      try {
+        _finChaseTemplates = await window.db.select(
+          'credit_control_templates',
+          '?is_active=eq.true&order=trigger_days.asc&select=id,name,subject,body_html,trigger_days'
+        );
+      } catch(e) {
+        window.toast && window.toast('Could not load chase templates.', 'error');
+        return;
+      }
+    }
+    if (!_finChaseTemplates || _finChaseTemplates.length === 0) {
+      window.lpAlert && window.lpAlert('No chase templates configured.');
+      return;
+    }
+
+    // Pick template that matches days overdue, defaulting to first
+    var days = inv.DueDate ? _daysBetween(new Date(), inv.DueDate) : 0;
+    var defaultTpl = _finChaseTemplates[0];
+    for (var t = 0; t < _finChaseTemplates.length; t++) {
+      if (days >= (_finChaseTemplates[t].trigger_days || 0)) defaultTpl = _finChaseTemplates[t];
+    }
+
+    // Check sender configured
+    try {
+      var settings = await window.db.select('app_settings', '?key=in.(credit_from_name,credit_from_email)&select=key,value');
+      var sMap = {};
+      (settings || []).forEach(function(r) { sMap[r.key] = (r.value || '').trim(); });
+      if (!sMap.credit_from_name || !sMap.credit_from_email) {
+        window.lpAlert && window.lpAlert(
+          'Chase email sender is not configured. Go to Finance > Settings and fill in Sender Name and Sender Email first.'
+        );
+        return;
+      }
+    } catch(e) { /* non-fatal — server will validate too */ }
+
+    _finRenderChaseModal(inv, defaultTpl, days);
+  };
+
+  function _finRenderChaseModal(inv, defaultTpl, days) {
+    var existing = document.getElementById('fin-chase-modal-bg');
+    if (existing) existing.remove();
+
+    var contact = inv.Contact || {};
+    var amount  = _fmtCur(inv.AmountDue, inv.CurrencyCode);
+
+    var bg = document.createElement('div');
+    bg.id = 'fin-chase-modal-bg';
+    bg.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.65);z-index:9999;'
+      + 'display:flex;align-items:center;justify-content:center;padding:20px;';
+
+    var modal = document.createElement('div');
+    modal.style.cssText = 'background:#0a1628;border:1px solid var(--navy-border);border-radius:6px;'
+      + 'width:100%;max-width:680px;max-height:90vh;overflow-y:auto;padding:24px;';
+
+    var radioOpts = _finChaseTemplates.map(function(t) {
+      var checked = t.id === defaultTpl.id ? ' checked' : '';
+      var label = t.name.charAt(0).toUpperCase() + t.name.slice(1);
+      return '<label style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;font-size:12px;cursor:pointer;">'
+        + '<input type="radio" name="fin-chase-tpl" value="' + _esc(t.id) + '"' + checked
+        + ' onchange="window._finRenderChasePreview(\'' + _esc(inv.InvoiceID) + '\')"> ' + _esc(label)
+        + ' <span style="color:var(--muted);">(' + (t.trigger_days || 0) + 'd)</span></label>';
+    }).join('');
+
+    modal.innerHTML =
+        '<div style="font-size:18px;font-weight:700;color:var(--white);margin-bottom:4px;">Send chase email</div>'
+      + '<div style="font-size:12px;color:var(--muted);margin-bottom:18px;">'
+      + 'Invoice ' + _esc(inv.InvoiceNumber || '—') + ' · ' + amount + ' · '
+      + (days > 0 ? days + ' days overdue' : 'Due today/recently') + '</div>'
+
+      + '<div style="background:var(--navy-mid);padding:12px;border-radius:4px;margin-bottom:16px;font-size:12px;">'
+      + '<div style="color:var(--muted);">To:</div>'
+      + '<div style="color:var(--white);font-weight:600;">' + _esc(contact.Name || '—') + ' &lt;' + _esc(contact.EmailAddress || '') + '&gt;</div>'
+      + '</div>'
+
+      + '<div style="margin-bottom:14px;">'
+      + '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;letter-spacing:0.06em;text-transform:uppercase;">Template</div>'
+      + radioOpts
+      + '</div>'
+
+      + '<div id="fin-chase-preview" style="background:var(--navy-mid);padding:16px;border-radius:4px;margin-bottom:18px;'
+      + 'border:1px solid var(--navy-border);max-height:300px;overflow-y:auto;"></div>'
+
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;">'
+      + '<button class="btn btn-outline" onclick="window._finCloseChaseModal()">Cancel</button>'
+      + '<button class="btn btn-gold" id="fin-chase-send-btn" onclick="window._finSendChase(\'' + _esc(inv.InvoiceID) + '\')">Send</button>'
+      + '</div>';
+
+    bg.appendChild(modal);
+    bg.addEventListener('click', function(e) { if (e.target === bg) window._finCloseChaseModal(); });
+    document.body.appendChild(bg);
+
+    window._finRenderChasePreview(inv.InvoiceID);
+  }
+
+  window._finCloseChaseModal = function() {
+    var el = document.getElementById('fin-chase-modal-bg');
+    if (el) el.remove();
+  };
+
+  function _finFillVars(text, inv) {
+    var contact = inv.Contact || {};
+    var days = inv.DueDate ? _daysBetween(new Date(), inv.DueDate) : 0;
+    var vars = {
+      contact_name:    contact.Name || 'there',
+      invoice_number:  inv.InvoiceNumber || '',
+      amount_due:      _fmtCur(inv.AmountDue, inv.CurrencyCode),
+      due_date:        _fmtDate(inv.DueDate),
+      days_overdue:    String(days),
+      invoice_url:     'https://go.xero.com/AccountsReceivable/Edit.aspx?invoiceID=' + encodeURIComponent(inv.InvoiceID || '')
+    };
+    return String(text || '').replace(/\{\{(\w+)\}\}/g, function(m, k) { return vars[k] != null ? vars[k] : m; });
+  }
+
+  window._finRenderChasePreview = function(invoiceId) {
+    var invoices = window._finInvoices || [];
+    var inv = null;
+    for (var i = 0; i < invoices.length; i++) {
+      if (invoices[i].InvoiceID === invoiceId) { inv = invoices[i]; break; }
+    }
+    if (!inv) return;
+    var sel = document.querySelector('input[name="fin-chase-tpl"]:checked');
+    if (!sel) return;
+    var tplId = sel.value;
+    var tpl = null;
+    for (var t = 0; t < _finChaseTemplates.length; t++) {
+      if (_finChaseTemplates[t].id === tplId) { tpl = _finChaseTemplates[t]; break; }
+    }
+    if (!tpl) return;
+
+    var subject = _finFillVars(tpl.subject, inv);
+    var body    = _finFillVars(tpl.body_html, inv);
+    var preview = document.getElementById('fin-chase-preview');
+    if (preview) {
+      preview.innerHTML =
+          '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:0.06em;text-transform:uppercase;">Subject</div>'
+        + '<div style="font-size:13px;color:var(--white);font-weight:600;margin-bottom:14px;">' + _esc(subject) + '</div>'
+        + '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:0.06em;text-transform:uppercase;">Body</div>'
+        + '<div style="font-size:13px;color:var(--white);line-height:1.6;">' + body + '</div>';
+    }
+  };
+
+  window._finSendChase = async function(invoiceId) {
+    var invoices = window._finInvoices || [];
+    var inv = null;
+    for (var i = 0; i < invoices.length; i++) {
+      if (invoices[i].InvoiceID === invoiceId) { inv = invoices[i]; break; }
+    }
+    if (!inv) return;
+    var sel = document.querySelector('input[name="fin-chase-tpl"]:checked');
+    if (!sel) return;
+    var contact = inv.Contact || {};
+    var days = inv.DueDate ? _daysBetween(new Date(), inv.DueDate) : 0;
+    var btn = document.getElementById('fin-chase-send-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+
+    try {
+      await callCreditEF({
+        action:         'send_chase_email',
+        template_id:    sel.value,
+        invoice_id:     inv.InvoiceID,
+        invoice_number: inv.InvoiceNumber,
+        contact_name:   contact.Name,
+        contact_email:  contact.EmailAddress,
+        amount_due:     _fmtCur(inv.AmountDue, inv.CurrencyCode),
+        due_date:       _fmtDate(inv.DueDate),
+        days_overdue:   days,
+        invoice_url:    'https://go.xero.com/AccountsReceivable/Edit.aspx?invoiceID=' + encodeURIComponent(inv.InvoiceID || '')
+      }, 20000);
+      window.toast && window.toast('Chase email sent to ' + (contact.Name || contact.EmailAddress), 'success');
+      window._finCloseChaseModal();
+      // Refresh chase log so the row badge appears
+      try {
+        var r = await callCreditEF({ action: 'list_chase_log' }, 10000);
+        window._finChaseLog = r.log || [];
+        _finApplyInvFiltersImpl();
+      } catch(e) { /* ignore */ }
+    } catch(e) {
+      window.toast && window.toast('Failed: ' + (e.message || 'unknown'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ── OVERVIEW (KPIs + monthly revenue chart) ────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  var _finOverviewRange = 'ytd';
+
+  window.loadFinOverview = async function() {
+    var body = document.getElementById('fin-overview-body');
+    if (!body) return;
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading overview…</div>';
+
+    // Need invoices loaded — fetch if cache is cold
+    if (!window._finInvoices) {
+      try {
+        var r = await callXeroEF({ action: 'list_invoices' }, 60000);
+        window._finInvoices = r.invoices || [];
+      } catch(e) {
+        body.innerHTML = '<div class="card"><div style="color:var(--red);font-size:13px;">'
+          + 'Could not load invoices: ' + _esc(e.message)
+          + '</div><button class="btn btn-outline" style="margin-top:12px;" onclick="window.loadFinOverview()">Retry</button></div>';
+        return;
+      }
+    }
+
+    // Stock value: re-use the existing app_settings.ecom_stock_value
+    var stockValue = 0;
+    try {
+      var rows = await window.db.select('app_settings', '?key=eq.ecom_stock_value&limit=1&select=value');
+      if (rows && rows.length) stockValue = parseFloat(rows[0].value) || 0;
+    } catch(e) { /* ignore */ }
+
+    _renderFinOverview(body, stockValue);
+  };
+
+  function _rangeBounds(range) {
+    var now   = new Date();
+    var y     = now.getFullYear();
+    var m     = now.getMonth();
+    if (range === 'this_month') return { from: new Date(y, m, 1), to: new Date(y, m + 1, 0, 23, 59, 59) };
+    if (range === 'last_month') return { from: new Date(y, m - 1, 1), to: new Date(y, m, 0, 23, 59, 59) };
+    if (range === 'quarter')    {
+      var qStart = m - (m % 3);
+      return { from: new Date(y, qStart, 1), to: new Date(y, qStart + 3, 0, 23, 59, 59) };
+    }
+    if (range === 'last_3_months') {
+      return { from: new Date(y, m - 2, 1), to: new Date(y, m + 1, 0, 23, 59, 59) };
+    }
+    // ytd
+    return { from: new Date(y, 0, 1), to: new Date(y, 11, 31, 23, 59, 59) };
+  }
+
+  function _renderFinOverview(container, stockValue) {
+    var invoices = window._finInvoices || [];
+    var today    = new Date();
+    var bounds   = _rangeBounds(_finOverviewRange);
+    var y        = today.getFullYear();
+    var thisMonthStart = new Date(y, today.getMonth(), 1);
+    var lastMonthStart = new Date(y, today.getMonth() - 1, 1);
+    var lastMonthEnd   = new Date(y, today.getMonth(), 0, 23, 59, 59);
+
+    var invoicedRange = 0, lastMonthRev = 0, outstanding = 0, overdueCount = 0;
+    var monthly = {}; // YYYY-MM → total
+
+    invoices.forEach(function(inv) {
+      if (inv.Status === 'VOIDED') return;
+      var d = inv.Date ? new Date(inv.Date) : null;
+      var total = Number(inv.Total || 0);
+
+      if (d && d >= bounds.from && d <= bounds.to) invoicedRange += total;
+      if (d && d >= lastMonthStart && d <= lastMonthEnd) lastMonthRev += total;
+
+      outstanding += Number(inv.AmountDue || 0);
+
+      var status = _invoiceStatus(inv);
+      if (status === 'OVERDUE') overdueCount++;
+
+      if (d && d.getFullYear() === y) {
+        var key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+        monthly[key] = (monthly[key] || 0) + total;
+      }
+    });
+
+    var html = '';
+
+    // Range selector
+    html += '<div class="card" style="margin-bottom:14px;">';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">';
+    html += '<span style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-right:8px;">Range</span>';
+    [
+      { v: 'this_month',    l: 'This Month' },
+      { v: 'last_month',    l: 'Last Month' },
+      { v: 'quarter',       l: 'This Quarter' },
+      { v: 'ytd',           l: 'YTD' },
+      { v: 'last_3_months', l: 'Last 3 Months' }
+    ].forEach(function(r) {
+      var active = r.v === _finOverviewRange;
+      html += '<button onclick="window._finSetOverviewRange(\'' + r.v + '\')" '
+           + 'style="background:' + (active ? 'rgba(201,168,76,0.18)' : 'transparent')
+           + ';border:1px solid ' + (active ? 'var(--gold)' : 'var(--navy-border)')
+           + ';color:' + (active ? 'var(--gold)' : 'var(--muted)')
+           + ';padding:5px 12px;font-size:11px;font-weight:600;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;text-transform:uppercase;">'
+           + r.l + '</button>';
+    });
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;margin-left:auto;" onclick="window._finReloadInvoices();window.loadFinOverview()">Refresh</button>';
+    html += '</div></div>';
+
+    // KPI cards
+    var kpis = [
+      { label: 'Invoiced (range)', value: _fmtCur(invoicedRange, 'EUR'), sub: 'Total invoiced in selected range (excl. voided)' },
+      { label: 'Last Month Revenue', value: _fmtCur(lastMonthRev, 'EUR'), sub: 'Invoiced ' + lastMonthStart.toLocaleDateString('en-IE', {month:'long', year:'numeric'}) },
+      { label: 'Outstanding AR', value: _fmtCur(outstanding, 'EUR'), sub: 'Total unpaid invoice amount' },
+      { label: 'Overdue Invoices', value: String(overdueCount), sub: 'Past due date with balance' },
+      { label: 'Stock Value', value: _fmtCur(stockValue, 'EUR'), sub: 'Total stock value on hand' }
+    ];
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin-bottom:18px;">';
+    kpis.forEach(function(k) {
+      html += '<div class="card" style="padding:14px 16px;">'
+           + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">' + _esc(k.label) + '</div>'
+           + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(k.value) + '</div>'
+           + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">' + _esc(k.sub) + '</div>'
+           + '</div>';
+    });
+    html += '</div>';
+
+    // Monthly chart
+    html += '<div class="card">';
+    html += '<div class="card-title" style="margin-bottom:12px;">Monthly Revenue · ' + y + '</div>';
+    html += _renderMonthlyChart(monthly, y);
+    html += '</div>';
+
+    container.innerHTML = html;
+  }
+
+  window._finSetOverviewRange = function(r) {
+    _finOverviewRange = r;
+    window.loadFinOverview();
+  };
+
+  function _renderMonthlyChart(monthly, y) {
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var values = months.map(function(_, i) {
+      var key = y + '-' + String(i + 1).padStart(2, '0');
+      return monthly[key] || 0;
+    });
+    var max = Math.max.apply(null, values.concat([1]));
+    var W   = 720, H = 220, padL = 48, padR = 12, padT = 12, padB = 26;
+    var bw  = (W - padL - padR) / 12;
+    var inner = H - padT - padB;
+
+    var bars = '';
+    for (var i = 0; i < 12; i++) {
+      var v = values[i];
+      var bh = (v / max) * inner;
+      var x  = padL + i * bw + 4;
+      var y0 = padT + (inner - bh);
+      var w  = bw - 8;
+      bars += '<rect x="' + x + '" y="' + y0 + '" width="' + w + '" height="' + bh
+           + '" fill="rgba(201,168,76,0.7)" stroke="rgba(201,168,76,1)" stroke-width="0.5">'
+           + '<title>' + months[i] + ' ' + y + ': ' + _fmtCur(v, 'EUR') + '</title></rect>';
+      bars += '<text x="' + (x + w / 2) + '" y="' + (H - padB + 14) + '" text-anchor="middle" '
+           + 'fill="rgba(255,255,255,0.6)" font-size="10" font-family="Lato">' + months[i] + '</text>';
+    }
+    // Y axis lines
+    for (var g = 0; g <= 4; g++) {
+      var gy  = padT + inner - (g * inner / 4);
+      var val = (max * g / 4);
+      bars += '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + gy + '" y2="' + gy
+           + '" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"></line>';
+      bars += '<text x="' + (padL - 6) + '" y="' + (gy + 3) + '" text-anchor="end" '
+           + 'fill="rgba(255,255,255,0.5)" font-size="9" font-family="Lato">'
+           + _fmtCur(val, 'EUR').replace('.00', '')
+           + '</text>';
+    }
+    return '<div style="overflow-x:auto;"><svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;max-width:' + W + 'px;display:block;">' + bars + '</svg></div>';
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ── STORES ─────────────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  window._finStores   = null;
+  window._finMappings = null;
+
+  window.loadFinStores = async function() {
+    var body = document.getElementById('fin-stores-body');
+    if (!body) return;
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading stores…</div>';
+    try {
+      var [stores, mappings] = await Promise.all([
+        window.db.select('ecommerce_stores_public', '?order=created_at.asc&select=*'),
+        window.db.select('xero_mappings', '?select=mapping_key,xero_account_code,xero_account_name,xero_tax_type,mapping_type,description')
+      ]);
+      window._finStores   = stores || [];
+      window._finMappings = mappings || [];
+      _renderFinStores(body);
+    } catch(e) {
+      body.innerHTML = '<div style="color:var(--red);font-size:13px;">Could not load stores: ' + _esc(e.message) + '</div>';
+    }
+  };
+
+  function _ecomMappingsOk() {
+    var maps = window._finMappings || [];
+    var required = ['ecommerce_sales','shipping_revenue','ecommerce_discounts','ecommerce_payment_clearing'];
+    var byKey = {};
+    maps.forEach(function(m) { byKey[m.mapping_key] = m; });
+    var missing = [];
+    required.forEach(function(k) {
+      if (!byKey[k] || !byKey[k].xero_account_code) missing.push(k);
+    });
+    return { ok: missing.length === 0, missing: missing };
+  }
+
+  function _renderFinStores(container) {
+    var stores = window._finStores || [];
+    var html = '';
+
+    var mapCheck = _ecomMappingsOk();
+    if (!mapCheck.ok) {
+      html += '<div class="card" style="margin-bottom:14px;background:rgba(232,156,58,0.08);border:1px solid rgba(232,156,58,0.4);">';
+      html += '<div style="font-size:13px;color:var(--amber);font-weight:600;">⚠ Ecommerce Xero account codes not fully configured</div>';
+      html += '<div style="font-size:12px;color:var(--muted);margin-top:4px;">'
+           + 'Set account codes for: ' + _esc(mapCheck.missing.join(', '))
+           + ' in <a href="#" onclick="window.showFinTab(\'mappings\',document.getElementById(\'fin-tab-mappings\'));return false;" '
+           + 'style="color:var(--gold);">Xero Mappings</a> before pushing orders to Xero.</div>';
+      html += '</div>';
+    }
+
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
+    html += '<div style="font-size:14px;color:var(--muted);">' + stores.length + ' store' + (stores.length === 1 ? '' : 's') + ' connected</div>';
+    html += '<button class="btn btn-gold" onclick="window._finOpenStoreModal()">+ Add Store</button>';
+    html += '</div>';
+
+    if (stores.length === 0) {
+      html += '<div class="card"><div style="color:var(--muted);font-size:13px;padding:18px 0;text-align:center;">'
+        + 'No stores yet — click <b>Add Store</b> to connect Shopify or WooCommerce.</div></div>';
+    } else {
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;">';
+      stores.forEach(function(s) {
+        html += _renderStoreCard(s, mapCheck.ok);
+      });
+      html += '</div>';
+    }
+    html += '<div id="fin-store-orders-drill" style="margin-top:18px;"></div>';
+    container.innerHTML = html;
+  }
+
+  function _renderStoreCard(store, mappingsOk) {
+    var statusCol = store.connection_status === 'connected' ? 'var(--green)'
+                  : store.connection_status === 'error'     ? 'var(--red)'
+                  : 'var(--muted)';
+    var statusTxt = store.connection_status === 'connected' ? 'Connected'
+                  : store.connection_status === 'error'     ? 'Error'
+                  : 'Not tested';
+    var platformBg = store.platform === 'shopify' ? 'rgba(34,180,80,0.18)' : 'rgba(150,100,220,0.18)';
+    var platformFg = store.platform === 'shopify' ? '#5be07b' : '#b791ff';
+    var platformLbl = store.platform === 'shopify' ? 'Shopify' : 'WooCommerce';
+    var id = _esc(store.id);
+
+    var html = '<div class="card" id="fin-store-card-' + id + '" style="padding:18px;">';
+    html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px;">';
+    html += '<div style="font-size:18px;font-weight:700;color:var(--white);line-height:1.2;">' + _esc(store.name) + '</div>';
+    html += '<span style="background:' + platformBg + ';color:' + platformFg + ';font-size:10px;font-weight:700;padding:3px 9px;border-radius:3px;letter-spacing:0.05em;">' + platformLbl + '</span>';
+    html += '</div>';
+
+    html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:14px;">'
+         + '<span style="width:8px;height:8px;border-radius:50%;background:' + statusCol + ';display:inline-block;"></span>'
+         + '<span style="font-size:12px;color:var(--muted);">' + statusTxt + '</span>'
+         + '</div>';
+
+    if (store.error_message) {
+      html += '<div style="background:rgba(232,82,82,0.1);border:1px solid rgba(232,82,82,0.4);padding:8px 10px;border-radius:3px;font-size:11px;color:var(--red);margin-bottom:12px;">'
+           + _esc(store.error_message) + '</div>';
+    }
+
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;">';
+    html += '<div><div style="font-size:10px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">Orders synced</div>'
+         + '<div style="font-size:16px;font-weight:700;color:var(--white);font-variant-numeric:tabular-nums;">' + Number(store.orders_synced_count || 0).toLocaleString() + '</div></div>';
+    html += '<div><div style="font-size:10px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">Revenue synced</div>'
+         + '<div style="font-size:16px;font-weight:700;color:var(--white);font-variant-numeric:tabular-nums;">' + _fmtCur(store.revenue_synced || 0, 'EUR') + '</div></div>';
+    html += '<div><div style="font-size:10px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">Last synced</div>'
+         + '<div style="font-size:12px;color:var(--white);">' + (store.last_synced_at ? _fmtDate(store.last_synced_at) : '—') + '</div></div>';
+    html += '<div><div style="font-size:10px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">Sync from</div>'
+         + '<div style="font-size:12px;color:var(--white);">' + (store.sync_from_date ? _fmtDate(store.sync_from_date) : '90 days') + '</div></div>';
+    html += '</div>';
+
+    html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:6px 10px;" onclick="window._finStoreSync(\'' + id + '\',this)">Sync Now</button>';
+
+    var pushDisabled = !mappingsOk;
+    var pushTitle = pushDisabled ? ' title="Configure ecommerce Xero account codes first"' : '';
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:6px 10px;'
+         + (pushDisabled ? 'opacity:0.4;cursor:not-allowed;' : '') + '" '
+         + (pushDisabled ? 'disabled' : 'onclick="window._finStorePushToXero(\'' + id + '\',this)"')
+         + pushTitle + '>Push to Xero</button>';
+
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:6px 10px;" onclick="window._finStoreViewOrders(\'' + id + '\')">View Orders</button>';
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:6px 10px;" onclick="window._finOpenStoreModal(\'' + id + '\')">Configure</button>';
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:6px 10px;border-color:var(--red);color:var(--red);" onclick="window._finStoreRemove(\'' + id + '\')">Remove</button>';
+    html += '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  // ── Store actions ──────────────────────────────────────────────────────────
+  window._finStoreSync = async function(id, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+      var r = await callEcomEF({ action: 'store_sync_orders', id: id }, 120000);
+      window.toast && window.toast('Synced — ' + (r.fetched || 0) + ' new orders, ' + (r.total_orders || 0) + ' total', 'success');
+      await window.loadFinStores();
+    } catch(e) {
+      window.toast && window.toast('Sync failed: ' + (e.message || 'unknown'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; }
+    }
+  };
+
+  window._finStorePushToXero = async function(id, btn) {
+    // Count unpushed
+    var unpushed = 0;
+    try {
+      var rows = await window.db.select('ecommerce_orders',
+        '?store_id=eq.' + encodeURIComponent(id) + '&xero_push_status=is.null&select=id');
+      unpushed = (rows || []).length;
+    } catch(e) { /* best-effort count */ }
+
+    var msg = 'This will create up to ' + Math.min(unpushed, 50) + ' invoice(s) + matching payments in Xero. '
+            + 'They will be marked as paid against the Ecommerce Payment Clearing account.\n\nContinue?';
+    var ok = window.lpConfirm
+      ? await window.lpConfirm(msg, { title: 'Push to Xero', confirmLabel: 'Push' })
+      : window.confirm(msg);
+    if (!ok) return;
+
+    if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
+    try {
+      var r = await callEcomEF({ action: 'store_push_to_xero', id: id }, 180000);
+      window.toast && window.toast('Pushed ' + (r.pushed || 0) + ', failed ' + (r.failed || 0) + ', skipped ' + (r.skipped || 0), 'success');
+      await window.loadFinStores();
+    } catch(e) {
+      window.toast && window.toast('Push failed: ' + (e.message || 'unknown'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Push to Xero'; }
+    }
+  };
+
+  window._finStoreRemove = async function(id) {
+    var stores = window._finStores || [];
+    var s = stores.find(function(x) { return x.id === id; });
+    var name = s ? s.name : 'this store';
+    var msg = 'Remove "' + name + '"? Orders already synced to Pulse will be kept. '
+            + 'The store will be deactivated and no further syncing will occur.';
+    var ok = window.lpConfirm
+      ? await window.lpConfirm(msg, { title: 'Remove store', confirmLabel: 'Remove', destructive: true })
+      : window.confirm(msg);
+    if (!ok) return;
+    try {
+      await callEcomEF({ action: 'deactivate_store', id: id }, 15000);
+      window.toast && window.toast('Store removed.', 'success');
+      await window.loadFinStores();
+    } catch(e) {
+      window.toast && window.toast('Failed: ' + (e.message || 'unknown'), 'error');
+    }
+  };
+
+  window._finStoreViewOrders = async function(id) {
+    var drill = document.getElementById('fin-store-orders-drill');
+    if (!drill) return;
+    drill.innerHTML = '<div class="card"><div style="color:var(--muted);font-size:13px;">Loading orders…</div></div>';
+    try {
+      var orders = await window.db.select('ecommerce_orders',
+        '?store_id=eq.' + encodeURIComponent(id)
+        + '&order=ordered_at.desc&limit=200'
+        + '&select=id,order_number,customer_name,customer_email,total_amount,currency,ordered_at,xero_push_status,xero_invoice_id,xero_error');
+      var store = (window._finStores || []).find(function(x) { return x.id === id; });
+      var html = '<div class="card">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">';
+      html += '<div class="card-title" style="margin:0;">' + _esc((store && store.name) || 'Store') + ' — Orders</div>';
+      html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 10px;" onclick="document.getElementById(\'fin-store-orders-drill\').innerHTML=\'\'">Close</button>';
+      html += '</div>';
+      if (!orders || orders.length === 0) {
+        html += '<div style="color:var(--muted);font-size:13px;">No orders synced yet.</div>';
+      } else {
+        html += '<div style="overflow-x:auto;"><table class="data-table"><thead><tr>'
+             + '<th>Order #</th><th>Customer</th><th>Date</th>'
+             + '<th style="text-align:right;">Total</th><th>Xero Push</th>'
+             + '</tr></thead><tbody>';
+        orders.forEach(function(o) {
+          var st = o.xero_push_status || 'pending';
+          var col = st === 'pushed' ? 'var(--green)'
+                  : st === 'invoiced' ? 'var(--gold)'
+                  : st === 'failed' || st === 'payment_failed' ? 'var(--red)'
+                  : st === 'skipped' ? 'var(--muted)'
+                  : 'var(--muted)';
+          html += '<tr>'
+               + '<td>' + _esc(o.order_number || '—') + '</td>'
+               + '<td>' + _esc(o.customer_name || '—')
+               + (o.customer_email ? '<br><span style="font-size:11px;color:var(--muted);">' + _esc(o.customer_email) + '</span>' : '')
+               + '</td>'
+               + '<td>' + _fmtDate(o.ordered_at) + '</td>'
+               + '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + _fmtCur(o.total_amount, o.currency) + '</td>'
+               + '<td><span style="color:' + col + ';font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;" '
+               + (o.xero_error ? 'title="' + _esc(o.xero_error) + '"' : '') + '>' + _esc(st) + '</span></td>'
+               + '</tr>';
+        });
+        html += '</tbody></table></div>';
+      }
+      html += '</div>';
+      drill.innerHTML = html;
+      drill.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch(e) {
+      drill.innerHTML = '<div class="card"><div style="color:var(--red);font-size:13px;">Error: ' + _esc(e.message) + '</div></div>';
+    }
+  };
+
+  // ── Add/Configure store modal ──────────────────────────────────────────────
+  window._finOpenStoreModal = function(editId) {
+    var existing = (window._finStores || []).find(function(s) { return s.id === editId; });
+    var maps = (window._finMappings || []).filter(function(m) { return m.mapping_type === 'revenue'; });
+
+    var bg = document.createElement('div');
+    bg.id = 'fin-store-modal-bg';
+    bg.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.65);z-index:9999;'
+      + 'display:flex;align-items:center;justify-content:center;padding:20px;';
+
+    var modal = document.createElement('div');
+    modal.style.cssText = 'background:#0a1628;border:1px solid var(--navy-border);border-radius:6px;'
+      + 'width:100%;max-width:560px;max-height:90vh;overflow-y:auto;padding:24px;';
+
+    var platform = existing ? existing.platform : 'shopify';
+    var salesOpts = '<option value="">(unset — use Mapping default)</option>'
+      + maps.map(function(m) {
+          return '<option value="' + _esc(m.mapping_key) + '"'
+            + (existing && existing.xero_sales_account === m.mapping_key ? ' selected' : '')
+            + '>' + _esc(m.description || m.mapping_key) + '</option>';
+        }).join('');
+    var shipOpts  = '<option value="">(unset — use Mapping default)</option>'
+      + maps.map(function(m) {
+          return '<option value="' + _esc(m.mapping_key) + '"'
+            + (existing && existing.xero_shipping_account === m.mapping_key ? ' selected' : '')
+            + '>' + _esc(m.description || m.mapping_key) + '</option>';
+        }).join('');
+
+    var inputStyle = 'width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+      + 'padding:8px 10px;font-size:13px;border-radius:3px;box-sizing:border-box;font-family:Lato,sans-serif;';
+
+    modal.innerHTML =
+        '<div style="font-size:18px;font-weight:700;color:var(--white);margin-bottom:18px;">'
+      + (existing ? 'Configure store' : 'Add store') + '</div>'
+
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">'
+      + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Platform</label>'
+      + '<select id="fin-store-platform" onchange="window._finStorePlatformChanged()" style="' + inputStyle + '"'
+      + (existing ? ' disabled' : '') + '>'
+      + '<option value="shopify"'      + (platform === 'shopify'      ? ' selected' : '') + '>Shopify</option>'
+      + '<option value="woocommerce"' + (platform === 'woocommerce' ? ' selected' : '') + '>WooCommerce</option>'
+      + '</select></div>'
+
+      + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Store name</label>'
+      + '<input id="fin-store-name" type="text" value="' + _esc(existing ? existing.name : '') + '" style="' + inputStyle + '"></div>'
+      + '</div>'
+
+      + '<div style="margin-bottom:12px;">'
+      + '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Store URL</label>'
+      + '<input id="fin-store-url" type="text" placeholder="e.g. mystore.myshopify.com" value="'
+      + _esc(existing ? (existing.store_url || '') : '') + '" style="' + inputStyle + '"></div>'
+
+      + '<div id="fin-store-creds-shopify" style="display:' + (platform === 'shopify' ? 'block' : 'none') + ';margin-bottom:12px;">'
+      + '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Admin API Access Token'
+      + (existing ? ' <span style="color:var(--muted);">(leave blank to keep existing)</span>' : '') + '</label>'
+      + '<input id="fin-store-shop-token" type="password" placeholder="shpat_..." style="' + inputStyle + '"></div>'
+
+      + '<div id="fin-store-creds-woo" style="display:' + (platform === 'woocommerce' ? 'block' : 'none') + ';margin-bottom:12px;">'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
+      + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Consumer Key'
+      + (existing ? ' <span style="color:var(--muted);">(leave blank)</span>' : '') + '</label>'
+      + '<input id="fin-store-woo-key" type="password" placeholder="ck_..." style="' + inputStyle + '"></div>'
+      + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Consumer Secret'
+      + (existing ? ' <span style="color:var(--muted);">(leave blank)</span>' : '') + '</label>'
+      + '<input id="fin-store-woo-secret" type="password" placeholder="cs_..." style="' + inputStyle + '"></div>'
+      + '</div></div>'
+
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">'
+      + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Sync from date</label>'
+      + '<input id="fin-store-from-date" type="date" value="' + _esc(existing && existing.sync_from_date ? existing.sync_from_date : '') + '" style="' + inputStyle + '"></div>'
+      + '<div></div></div>'
+
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">'
+      + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Xero sales account</label>'
+      + '<select id="fin-store-sales" style="' + inputStyle + '">' + salesOpts + '</select></div>'
+      + '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Xero shipping account</label>'
+      + '<select id="fin-store-ship" style="' + inputStyle + '">' + shipOpts + '</select></div>'
+      + '</div>'
+
+      + '<div id="fin-store-test-result" style="font-size:12px;margin-bottom:14px;"></div>'
+
+      + '<div style="display:flex;justify-content:space-between;gap:8px;">'
+      + '<button class="btn btn-outline" onclick="window._finCloseStoreModal()">Cancel</button>'
+      + '<div style="display:flex;gap:8px;">'
+      + '<button class="btn btn-outline" id="fin-store-test-btn" onclick="window._finTestStore(' + (existing ? '\'' + _esc(existing.id) + '\'' : 'null') + ')">Test Connection</button>'
+      + '<button class="btn btn-gold" id="fin-store-save-btn" onclick="window._finSaveStore(' + (existing ? '\'' + _esc(existing.id) + '\'' : 'null') + ')">' + (existing ? 'Save' : 'Add Store') + '</button>'
+      + '</div></div>';
+
+    bg.appendChild(modal);
+    bg.addEventListener('click', function(e) { if (e.target === bg) window._finCloseStoreModal(); });
+    document.body.appendChild(bg);
+  };
+
+  window._finCloseStoreModal = function() {
+    var el = document.getElementById('fin-store-modal-bg');
+    if (el) el.remove();
+  };
+
+  window._finStorePlatformChanged = function() {
+    var p = (document.getElementById('fin-store-platform') || {}).value;
+    var s = document.getElementById('fin-store-creds-shopify');
+    var w = document.getElementById('fin-store-creds-woo');
+    if (s) s.style.display = p === 'shopify' ? 'block' : 'none';
+    if (w) w.style.display = p === 'woocommerce' ? 'block' : 'none';
+  };
+
+  function _finCollectStorePayload(existingId) {
+    var p = (document.getElementById('fin-store-platform') || {}).value;
+    var payload = {
+      name:                  (document.getElementById('fin-store-name')      || {}).value || '',
+      platform:              p,
+      store_url:             (document.getElementById('fin-store-url')       || {}).value || '',
+      sync_from_date:        (document.getElementById('fin-store-from-date') || {}).value || null,
+      xero_sales_account:    (document.getElementById('fin-store-sales')     || {}).value || null,
+      xero_shipping_account: (document.getElementById('fin-store-ship')      || {}).value || null
+    };
+    if (p === 'shopify') {
+      payload.api_key    = (document.getElementById('fin-store-shop-token') || {}).value || '';
+      payload.api_secret = '';
+    } else {
+      payload.api_key    = (document.getElementById('fin-store-woo-key')    || {}).value || '';
+      payload.api_secret = (document.getElementById('fin-store-woo-secret') || {}).value || '';
+    }
+    if (existingId) payload.id = existingId;
+    return payload;
+  }
+
+  window._finTestStore = async function(existingId) {
+    var resEl = document.getElementById('fin-store-test-result');
+    var btn   = document.getElementById('fin-store-test-btn');
+    if (resEl) resEl.innerHTML = '<span style="color:var(--muted);">Testing…</span>';
+    if (btn) btn.disabled = true;
+
+    // To test, we need a saved store. If editing, test the existing record;
+    // if new, save a temp record first, test, then keep or roll back.
+    try {
+      var payload = _finCollectStorePayload(existingId);
+      var id = existingId;
+      if (!id) {
+        // Need to add first to test (the EF reads creds from DB)
+        if (!payload.name || !payload.platform || !payload.store_url || !payload.api_key) {
+          if (resEl) resEl.innerHTML = '<span style="color:var(--amber);">Fill in name, URL and credentials first.</span>';
+          if (btn) btn.disabled = false;
+          return;
+        }
+        var r = await callEcomEF(Object.assign({ action: 'add_store' }, payload), 15000);
+        id = r.id;
+        // Mark this id so save can be a no-op confirmation
+        document.getElementById('fin-store-save-btn').setAttribute('data-new-id', id);
+      } else if (payload.api_key || payload.api_secret) {
+        // Update creds before testing
+        await callEcomEF(Object.assign({ action: 'update_store' }, payload), 15000);
+      }
+      var t = await callEcomEF({ action: 'store_test_connection', id: id }, 20000);
+      if (resEl) resEl.innerHTML = '<span style="color:var(--green);">✓ Connected — ' + _esc(t.shop_name || 'OK') + '</span>';
+    } catch(e) {
+      if (resEl) resEl.innerHTML = '<span style="color:var(--red);">✗ ' + _esc(e.message || 'failed') + '</span>';
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  };
+
+  window._finSaveStore = async function(existingId) {
+    var btn = document.getElementById('fin-store-save-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      var payload = _finCollectStorePayload(existingId);
+      var newId   = btn ? btn.getAttribute('data-new-id') : null;
+      if (existingId) {
+        await callEcomEF(Object.assign({ action: 'update_store' }, payload), 15000);
+      } else if (newId) {
+        // Already created during test — just update remaining fields
+        payload.id = newId;
+        await callEcomEF(Object.assign({ action: 'update_store' }, payload), 15000);
+      } else {
+        await callEcomEF(Object.assign({ action: 'add_store' }, payload), 15000);
+      }
+      window.toast && window.toast('Store saved.', 'success');
+      window._finCloseStoreModal();
+      await window.loadFinStores();
+    } catch(e) {
+      window.toast && window.toast('Failed: ' + (e.message || 'unknown'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = existingId ? 'Save' : 'Add Store'; }
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ── FINANCE SETTINGS: sender identity for chase emails ─────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Hook a tiny enhancement onto the existing loadFinSettings: after it
+  // renders, append a sender-identity card if missing.
+  var _origLoadFinSettings = window.loadFinSettings;
+  if (typeof _origLoadFinSettings === 'function') {
+    window.loadFinSettings = async function() {
+      await _origLoadFinSettings.apply(this, arguments);
+      try {
+        var body = document.getElementById('fin-settings-body');
+        if (!body || body.querySelector('#fin-sender-card')) return;
+        var rows = await window.db.select('app_settings',
+          '?key=in.(credit_from_name,credit_from_email)&select=key,value');
+        var s = {};
+        (rows || []).forEach(function(r) { s[r.key] = (r.value || '').trim(); });
+        var hasName  = !!s.credit_from_name;
+        var hasEmail = !!s.credit_from_email;
+
+        var html = '';
+        html += '<div class="card" id="fin-sender-card" style="margin-top:20px;">';
+        html += '<div class="card-title" style="margin-bottom:12px;">Chase Email Sender</div>';
+        if (!hasName || !hasEmail) {
+          html += '<div style="background:rgba(232,156,58,0.08);border:1px solid rgba(232,156,58,0.4);'
+               + 'padding:10px 12px;border-radius:3px;margin-bottom:14px;font-size:12px;color:var(--amber);">'
+               + '⚠ Sender not configured — fill in both fields below before sending chase emails.</div>';
+        }
+        html += '<div style="font-size:12px;color:var(--muted);margin-bottom:14px;">'
+             + 'Chase emails are sent <strong>from this name and email address</strong> to make them look personal. '
+             + 'The sending domain must be verified in Resend before delivery works.</div>';
+        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">';
+        html += '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Sender name</label>'
+             + '<input id="fin-sender-name" type="text" value="' + _esc(s.credit_from_name || '') + '" '
+             + 'placeholder="e.g. John Smith" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);'
+             + 'color:var(--white);padding:8px 10px;font-size:13px;border-radius:3px;box-sizing:border-box;font-family:Lato,sans-serif;"></div>';
+        html += '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Sender email</label>'
+             + '<input id="fin-sender-email" type="email" value="' + _esc(s.credit_from_email || '') + '" '
+             + 'placeholder="accounts@lighthousedrinks.com" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);'
+             + 'color:var(--white);padding:8px 10px;font-size:13px;border-radius:3px;box-sizing:border-box;font-family:Lato,sans-serif;"></div>';
+        html += '</div>';
+        html += '<button class="btn btn-gold" onclick="window._finSaveSender()">Save Sender</button>';
+        html += '</div>';
+        body.insertAdjacentHTML('beforeend', html);
+      } catch(e) { /* non-fatal */ }
+    };
+  }
+
+  window._finSaveSender = async function() {
+    var name  = ((document.getElementById('fin-sender-name')  || {}).value || '').trim();
+    var email = ((document.getElementById('fin-sender-email') || {}).value || '').trim();
+    if (!name || !email) {
+      window.toast && window.toast('Both fields are required.', 'warn');
+      return;
+    }
+    async function saveKey(key, value) {
+      var rows = await window.db.select('app_settings', '?key=eq.' + key + '&limit=1&select=id');
+      if (rows && rows.length) {
+        await window.db.update('app_settings', '?key=eq.' + key, { value: value });
+      } else {
+        await window.db.insert('app_settings', { key: key, value: value });
+      }
+    }
+    try {
+      await saveKey('credit_from_name',  name);
+      await saveKey('credit_from_email', email);
+      window.toast && window.toast('Sender saved.', 'success');
+      window.loadFinSettings();
+    } catch(e) {
+      window.toast && window.toast('Failed: ' + (e.message || 'unknown'), 'error');
+    }
+  };
+
   // ── Post-auth hook: Xero OAuth callback handler ────────────────────────────
   function _xeroCallbackHandler(user) {
     var pendingRaw = sessionStorage.getItem('xero_pending_callback');
@@ -47690,7 +48916,6 @@ if (typeof _origOpenDD === 'function') {
     <div id="fin-tabs" style="display:flex;gap:0;margin-bottom:24px;border-bottom:2px solid var(--navy-border);">
       <button class="inv-tab active" id="fin-tab-overview"  onclick="window.showFinTab('overview',this)">Overview</button>
       <button class="inv-tab"        id="fin-tab-invoices"  onclick="window.showFinTab('invoices',this)">Invoices</button>
-      <button class="inv-tab"        id="fin-tab-aged"      onclick="window.showFinTab('aged',this)">Aged Debtors</button>
       <button class="inv-tab"        id="fin-tab-jobs"      onclick="window.showFinTab('jobs',this)">Jobs to Invoice</button>
       <button class="inv-tab"        id="fin-tab-stores"    onclick="window.showFinTab('stores',this)">Stores</button>
       <button class="inv-tab"        id="fin-tab-mappings"  onclick="window.showFinTab('mappings',this)">Xero Mappings</button>
@@ -47699,19 +48924,16 @@ if (typeof _origOpenDD === 'function') {
 
     <!-- Panels -->
     <div class="fin-panel" id="fin-panel-overview">
-      <div class="card"><div class="card-title">Overview</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+      <div id="fin-overview-body"><div style="color:var(--muted);font-size:13px;">Loading…</div></div>
     </div>
     <div class="fin-panel" id="fin-panel-invoices" style="display:none;">
-      <div class="card"><div class="card-title">Invoices</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
-    </div>
-    <div class="fin-panel" id="fin-panel-aged" style="display:none;">
-      <div class="card"><div class="card-title">Aged Debtors</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+      <div id="fin-invoices-body"><div style="color:var(--muted);font-size:13px;">Loading…</div></div>
     </div>
     <div class="fin-panel" id="fin-panel-jobs" style="display:none;">
-      <div class="card"><div class="card-title">Jobs to Invoice</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+      <div id="fin-jobs-body"><div style="color:var(--muted);font-size:13px;">Loading…</div></div>
     </div>
     <div class="fin-panel" id="fin-panel-stores" style="display:none;">
-      <div class="card"><div class="card-title">Stores</div><div style="color:var(--muted);font-size:13px;margin-top:8px;">Coming soon.</div></div>
+      <div id="fin-stores-body"><div style="color:var(--muted);font-size:13px;">Loading…</div></div>
     </div>
     <div class="fin-panel" id="fin-panel-mappings" style="display:none;">
       <div id="fin-mappings-body"><div style="color:var(--muted);font-size:13px;">Loading mappings…</div></div>
