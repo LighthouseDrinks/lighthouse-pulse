@@ -370,7 +370,7 @@ Deno.serve(async (req: Request) => {
       while (true) {
         const params = `where=ContactStatus%3D%3D%22ACTIVE%22&pageSize=100&page=${page}`;
         const { status, data } = await xeroGet('/api.xro/2.0/Contacts', refreshResult.accessToken!, refreshResult.tenantId!, params);
-        if (status !== 200) return err('Xero API error', 400);
+        if (status !== 200) return err(`Xero Contacts API error ${status}: ${JSON.stringify(data).slice(0,300)}`, 400);
         const contacts = data?.Contacts ?? [];
         allContacts.push(...contacts);
         if (contacts.length < 100) break;
