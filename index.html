@@ -47104,7 +47104,10 @@ if (typeof _origOpenDD === 'function') {
   };
 
   // ── Client Mapping card ────────────────────────────────────────────────────
-  async function _loadClientMappingCard(isConnected) {
+  var _finContactsError = null;  // last error message from list_contacts
+  var _fin429Until      = 0;     // epoch ms when the 429 backoff expires
+
+  async function _loadClientMappingCard(isConnected, forceRefresh) {
     var mapBody = document.getElementById('fin-mapping-body');
     if (!mapBody) return;
 
@@ -47117,17 +47120,33 @@ if (typeof _origOpenDD === 'function') {
       var userMap = {};
       (appUsers || []).forEach(function(u) { userMap[u.id] = u.display_name || u.email || u.id; });
 
-      // Fetch contacts if connected
-      var contacts = [];
-      if (isConnected) {
+      // Fetch contacts only if connected and not yet cached (or forceRefresh)
+      var contacts = _finContacts || [];
+      if (isConnected && (forceRefresh || !_finContacts)) {
+        // Check 429 cooldown
+        var now = Date.now();
+        if (_fin429Until > now) {
+          var secsLeft = Math.ceil((_fin429Until - now) / 1000);
+          _finContactsError = 'Rate limited — retry in ' + secsLeft + 's';
+          _startCountdown(mapBody, clients, userMap, isConnected);
+          return;
+        }
         mapBody.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading Xero contacts…</div>';
+        _finContactsError = null;
         try {
           var cResult = await callXeroEF({ action: 'list_contacts' });
           contacts = cResult.contacts || [];
           _finContacts = contacts;
+          _fin429Until = 0;
         } catch(e) {
           console.warn('list_contacts failed:', e);
-          window.toast && window.toast('Could not load Xero contacts: ' + (e.message || e), 'error');
+          _finContactsError = e.message || String(e);
+          if ((e.message || '').indexOf('rate limit') !== -1 || (e.message || '').indexOf('429') !== -1) {
+            _fin429Until = Date.now() + 62000; // 62s cooldown
+            _startCountdown(mapBody, clients, userMap, isConnected);
+            return;
+          }
+          window.toast && window.toast('Could not load Xero contacts: ' + _finContactsError, 'error');
         }
       }
 
@@ -47135,6 +47154,25 @@ if (typeof _origOpenDD === 'function') {
     } catch(e) {
       if (mapBody) mapBody.innerHTML = '<div style="color:var(--red);font-size:13px;">Error: ' + _esc(e.message) + '</div>';
     }
+  }
+
+  function _startCountdown(mapBody, clients, userMap, isConnected) {
+    function _tick() {
+      var secsLeft = Math.ceil((_fin429Until - Date.now()) / 1000);
+      var el = document.getElementById('fin-429-countdown');
+      if (!el) return; // container was replaced
+      if (secsLeft <= 0) {
+        _loadClientMappingCard(isConnected, true);
+        return;
+      }
+      el.textContent = 'Xero rate limit — retrying in ' + secsLeft + 's…';
+      setTimeout(_tick, 1000);
+    }
+    mapBody.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">'
+      + '<span id="fin-429-countdown" style="color:var(--amber);font-size:13px;"></span>'
+      + '<button class="btn btn-outline" style="font-size:11px;padding:4px 10px;" '
+      +   'onclick="window._finRefreshContacts()">Retry now</button></div>';
+    _tick();
   }
 
   function _normName(s) {
@@ -47159,6 +47197,7 @@ if (typeof _origOpenDD === 'function') {
     html += '</select>';
     if (isConnected) {
       html += '<button class="btn btn-outline" onclick="window._finSuggestMatches()" style="font-size:11px;padding:5px 12px;">Suggest matches</button>';
+      html += '<button class="btn btn-outline" onclick="window._finRefreshContacts()" style="font-size:11px;padding:5px 12px;" title="Re-fetch contacts from Xero">↻ Refresh contacts</button>';
     }
     html += '</div>';
 
@@ -47291,6 +47330,12 @@ if (typeof _origOpenDD === 'function') {
     }
 
     tbody.innerHTML = _renderMappingRows(filtered, contacts, userMap, conn, false);
+  };
+
+  window._finRefreshContacts = function() {
+    _finContacts = null; // clear cache
+    _fin429Until = 0;    // clear any cooldown so force-refresh works immediately
+    _loadClientMappingCard(true, true);
   };
 
   window._finSuggestMatches = function() {
