@@ -48244,123 +48244,57 @@ if (typeof _origOpenDD === 'function') {
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // ── OVERVIEW (KPIs + monthly revenue chart) ────────────────────────────────
+  // ── OVERVIEW (KPIs from Xero reports + monthly chart) ──────────────────────
   // ═══════════════════════════════════════════════════════════════════════════
-  var _finOverviewRange = 'ytd';
+  // Uses Xero's report endpoints (Profit & Loss, Aged Receivables) instead of
+  // pulling individual invoices — 2 small report calls vs. one big invoice list.
+  window._finOverviewMetrics = null; // session cache
 
   window.loadFinOverview = async function() {
     var body = document.getElementById('fin-overview-body');
     if (!body) return;
-    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading overview…</div>';
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading overview from Xero reports…</div>';
 
-    // Overview always needs YTD data. Reuse the YTD cache from the Invoices tab
-    // if it's already loaded, otherwise fetch it now.
-    var ytdCache = window._finInvoicesByPreset && window._finInvoicesByPreset.ytd;
-    if (!ytdCache) {
+    var metrics = window._finOverviewMetrics;
+    if (!metrics) {
       try {
-        var r = await callXeroEF({ action: 'list_invoices', preset: 'ytd' }, 60000);
-        if (!window._finInvoicesByPreset) window._finInvoicesByPreset = {};
-        window._finInvoicesByPreset.ytd = r.invoices || [];
-        ytdCache = window._finInvoicesByPreset.ytd;
+        metrics = await callXeroEF({ action: 'overview_metrics' }, 60000);
+        window._finOverviewMetrics = metrics;
       } catch(e) {
         body.innerHTML = '<div class="card"><div style="color:var(--red);font-size:13px;">'
-          + 'Could not load invoices: ' + _esc(e.message)
-          + '</div><button class="btn btn-outline" style="margin-top:12px;" onclick="window.loadFinOverview()">Retry</button></div>';
+          + 'Could not load overview: ' + _esc(e.message)
+          + '</div><button class="btn btn-outline" style="margin-top:12px;" onclick="window._finRefreshOverview()">Retry</button></div>';
         return;
       }
     }
-    // For Overview rendering, expose YTD invoices as _finInvoices
-    window._finInvoices = ytdCache;
 
-    // Stock value: re-use the existing app_settings.ecom_stock_value
     var stockValue = 0;
     try {
       var rows = await window.db.select('app_settings', '?key=eq.ecom_stock_value&limit=1&select=value');
       if (rows && rows.length) stockValue = parseFloat(rows[0].value) || 0;
     } catch(e) { /* ignore */ }
 
-    _renderFinOverview(body, stockValue);
+    _renderFinOverview(body, metrics, stockValue);
   };
 
-  function _rangeBounds(range) {
-    var now   = new Date();
-    var y     = now.getFullYear();
-    var m     = now.getMonth();
-    if (range === 'this_month') return { from: new Date(y, m, 1), to: new Date(y, m + 1, 0, 23, 59, 59) };
-    if (range === 'last_month') return { from: new Date(y, m - 1, 1), to: new Date(y, m, 0, 23, 59, 59) };
-    if (range === 'quarter')    {
-      var qStart = m - (m % 3);
-      return { from: new Date(y, qStart, 1), to: new Date(y, qStart + 3, 0, 23, 59, 59) };
-    }
-    if (range === 'last_3_months') {
-      return { from: new Date(y, m - 2, 1), to: new Date(y, m + 1, 0, 23, 59, 59) };
-    }
-    // ytd
-    return { from: new Date(y, 0, 1), to: new Date(y, 11, 31, 23, 59, 59) };
-  }
-
-  function _renderFinOverview(container, stockValue) {
-    var invoices = window._finInvoices || [];
-    var today    = new Date();
-    var bounds   = _rangeBounds(_finOverviewRange);
-    var y        = today.getFullYear();
-    var thisMonthStart = new Date(y, today.getMonth(), 1);
-    var lastMonthStart = new Date(y, today.getMonth() - 1, 1);
-    var lastMonthEnd   = new Date(y, today.getMonth(), 0, 23, 59, 59);
-
-    var invoicedRange = 0, lastMonthRev = 0, outstanding = 0, overdueCount = 0;
-    var monthly = {}; // YYYY-MM → total
-
-    invoices.forEach(function(inv) {
-      if (inv.Status === 'VOIDED') return;
-      var d = inv.Date ? new Date(inv.Date) : null;
-      var total = Number(inv.Total || 0);
-
-      if (d && d >= bounds.from && d <= bounds.to) invoicedRange += total;
-      if (d && d >= lastMonthStart && d <= lastMonthEnd) lastMonthRev += total;
-
-      outstanding += Number(inv.AmountDue || 0);
-
-      var status = _invoiceStatus(inv);
-      if (status === 'OVERDUE') overdueCount++;
-
-      if (d && d.getFullYear() === y) {
-        var key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
-        monthly[key] = (monthly[key] || 0) + total;
-      }
-    });
-
+  function _renderFinOverview(container, m, stockValue) {
+    var y = new Date().getFullYear();
     var html = '';
 
-    // Range selector
-    html += '<div class="card" style="margin-bottom:14px;">';
-    html += '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">';
-    html += '<span style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-right:8px;">Range</span>';
-    [
-      { v: 'this_month',    l: 'This Month' },
-      { v: 'last_month',    l: 'Last Month' },
-      { v: 'quarter',       l: 'This Quarter' },
-      { v: 'ytd',           l: 'YTD' },
-      { v: 'last_3_months', l: 'Last 3 Months' }
-    ].forEach(function(r) {
-      var active = r.v === _finOverviewRange;
-      html += '<button onclick="window._finSetOverviewRange(\'' + r.v + '\')" '
-           + 'style="background:' + (active ? 'rgba(201,168,76,0.18)' : 'transparent')
-           + ';border:1px solid ' + (active ? 'var(--gold)' : 'var(--navy-border)')
-           + ';color:' + (active ? 'var(--gold)' : 'var(--muted)')
-           + ';padding:5px 12px;font-size:11px;font-weight:600;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;letter-spacing:0.04em;text-transform:uppercase;">'
-           + r.l + '</button>';
-    });
-    html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;margin-left:auto;" onclick="window._finRefreshOverview()">Refresh</button>';
-    html += '</div></div>';
+    // Header row with refresh
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">';
+    html += '<div style="font-size:12px;color:var(--muted);">'
+         + 'Pulled from Xero reports · ' + _fmtDate(m.generated_at) + '</div>';
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;" onclick="window._finRefreshOverview()">Refresh</button>';
+    html += '</div>';
 
     // KPI cards
     var kpis = [
-      { label: 'Invoiced (range)', value: _fmtCur(invoicedRange, 'EUR'), sub: 'Total invoiced in selected range (excl. voided)' },
-      { label: 'Last Month Revenue', value: _fmtCur(lastMonthRev, 'EUR'), sub: 'Invoiced ' + lastMonthStart.toLocaleDateString('en-IE', {month:'long', year:'numeric'}) },
-      { label: 'Outstanding AR', value: _fmtCur(outstanding, 'EUR'), sub: 'Total unpaid invoice amount' },
-      { label: 'Overdue Invoices', value: String(overdueCount), sub: 'Past due date with balance' },
-      { label: 'Stock Value', value: _fmtCur(stockValue, 'EUR'), sub: 'Total stock value on hand' }
+      { label: 'Sales YTD',            value: _fmtCur(m.ytd_revenue, 'EUR'),        sub: 'Income from Xero P&L · ' + y },
+      { label: 'Last Month Revenue',   value: _fmtCur(m.last_month_revenue, 'EUR'), sub: m.last_month_label ? 'Invoiced ' + m.last_month_label : 'Previous month' },
+      { label: 'Outstanding AR',       value: _fmtCur(m.outstanding_total, 'EUR'),  sub: 'Total unpaid from Aged Receivables' },
+      { label: 'Overdue',              value: _fmtCur(m.overdue_total, 'EUR'),      sub: (m.overdue_count || 0) + ' contact' + (m.overdue_count === 1 ? '' : 's') + ' past due' },
+      { label: 'Stock Value',          value: _fmtCur(stockValue, 'EUR'),           sub: 'Total stock value on hand' }
     ];
     html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin-bottom:18px;">';
     kpis.forEach(function(k) {
@@ -48375,19 +48309,14 @@ if (typeof _origOpenDD === 'function') {
     // Monthly chart
     html += '<div class="card">';
     html += '<div class="card-title" style="margin-bottom:12px;">Monthly Revenue · ' + y + '</div>';
-    html += _renderMonthlyChart(monthly, y);
+    html += _renderMonthlyChart(m.monthly || {}, y);
     html += '</div>';
 
     container.innerHTML = html;
   }
 
-  window._finSetOverviewRange = function(r) {
-    _finOverviewRange = r;
-    window.loadFinOverview();
-  };
-
   window._finRefreshOverview = function() {
-    if (window._finInvoicesByPreset) delete window._finInvoicesByPreset.ytd;
+    window._finOverviewMetrics = null;
     window.loadFinOverview();
   };
 
