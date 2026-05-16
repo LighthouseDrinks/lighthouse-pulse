@@ -47115,17 +47115,11 @@ if (typeof _origOpenDD === 'function') {
   };
 
   // ── Client Mapping card ────────────────────────────────────────────────────
-  var _finContactsError = null;  // last error message from list_contacts
-  var _fin429Until      = 0;     // epoch ms when the 429 backoff expires
+  var _finContactNameMap = null; // contactId → name, populated from already-mapped clients only
 
   async function _loadClientMappingCard(isConnected, forceRefresh) {
     var mapBody = document.getElementById('fin-mapping-body');
     if (!mapBody) return;
-
-    // #region agent log
-    var _dbg = function(msg, data, hyp) { fetch('http://127.0.0.1:7747/ingest/f2b8cfd5-4d0d-490f-b66e-c19fe7e036d9',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'9e4922'},body:JSON.stringify({sessionId:'9e4922',location:'index.html:_loadClientMappingCard',message:msg,data:data,hypothesisId:hyp,timestamp:Date.now()})}).catch(function(){}); };
-    _dbg('ENTRY', {isConnected:isConnected, forceRefresh:forceRefresh, hasCachedContacts:!!_finContacts, cachedCount:(_finContacts||[]).length, fin429Until:_fin429Until, now:Date.now()}, 'A,B,C,D,E');
-    // #endregion
 
     try {
       var [clients, appUsers] = await Promise.all([
@@ -47136,90 +47130,32 @@ if (typeof _origOpenDD === 'function') {
       var userMap = {};
       (appUsers || []).forEach(function(u) { userMap[u.id] = u.display_name || u.email || u.id; });
 
-      // Fetch contacts only if connected and not yet cached (or forceRefresh)
-      var contacts = _finContacts || [];
-      if (isConnected && (forceRefresh || !_finContacts)) {
-        // Check 429 cooldown
-        var now = Date.now();
-        if (_fin429Until > now) {
-          var secsLeft = Math.ceil((_fin429Until - now) / 1000);
-          _finContactsError = 'Rate limited — retry in ' + secsLeft + 's';
-          // #region agent log
-          _dbg('429_COOLDOWN_ACTIVE', {secsLeft:secsLeft}, 'A');
-          // #endregion
-          _startCountdown(mapBody, clients, userMap, isConnected);
-          return;
-        }
-        mapBody.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading Xero contacts…</div>';
-        _finContactsError = null;
-        // #region agent log
-        var _fetchStart = Date.now();
-        _dbg('FETCH_START', {timeoutMs:60000}, 'A,B,C,D');
-        // #endregion
-        try {
-          var cResult = await callXeroEF({ action: 'list_contacts' }, 60000); // 60s timeout
-          // #region agent log
-          _dbg('FETCH_SUCCESS', {elapsedMs:Date.now()-_fetchStart, contactCount:(cResult.contacts||[]).length}, 'A,B,C,D');
-          // #endregion
-          contacts = cResult.contacts || [];
-          _finContacts = contacts;
-          _fin429Until = 0;
-        } catch(e) {
-          // #region agent log
-          _dbg('FETCH_ERROR', {elapsedMs:Date.now()-_fetchStart, errorName:e.name, errorMsg:e.message, isAbort:e.name==='AbortError'}, 'A,B,C,D,E');
-          // #endregion
-          console.warn('list_contacts failed:', e);
-          _finContactsError = e.message || String(e);
-          var isRateLimit = (e.message || '').toLowerCase().indexOf('rate limit') !== -1
-                         || (e.message || '').indexOf('429') !== -1;
-          // #region agent log
-          _dbg('ERROR_PATH', {isRateLimit:isRateLimit, errorMsg:_finContactsError}, 'A,E');
-          // #endregion
-          if (isRateLimit) {
-            _fin429Until = Date.now() + 62000; // 62s cooldown
-            _startCountdown(mapBody, clients, userMap, isConnected);
-            return;
+      // Only fetch names for already-mapped clients — never fetch all contacts
+      var contactNameMap = _finContactNameMap || {};
+      if (isConnected && (forceRefresh || !_finContactNameMap)) {
+        var mappedIds = (clients || []).map(function(c) { return c.xero_contact_id; }).filter(Boolean);
+        if (mappedIds.length > 0) {
+          mapBody.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading…</div>';
+          try {
+            var r = await callXeroEF({ action: 'get_contacts_by_ids', ids: mappedIds }, 15000);
+            contactNameMap = {};
+            (r.contacts || []).forEach(function(ct) { contactNameMap[ct.ContactID] = ct.Name; });
+            _finContactNameMap = contactNameMap;
+          } catch(e) {
+            console.warn('get_contacts_by_ids failed (non-fatal):', e);
+            _finContactNameMap = {};
+            contactNameMap = {};
           }
-          // Show error in card body so it's never silent
-          mapBody.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">'
-            + '<div style="color:var(--red);font-size:13px;">Could not load Xero contacts: ' + _esc(_finContactsError) + '</div>'
-            + '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;width:fit-content;" '
-            +   'onclick="window._finRefreshContacts()">Retry</button></div>';
-          return;
+        } else {
+          _finContactNameMap = {};
+          contactNameMap = {};
         }
-      } else {
-        // #region agent log
-        _dbg('SKIPPED_FETCH', {reason: !isConnected ? 'not_connected' : 'already_cached', contactCount:contacts.length}, 'D,E');
-        // #endregion
       }
 
-      _renderClientMapping(clients || [], contacts, userMap, isConnected, mapBody);
+      _renderClientMapping(clients || [], contactNameMap, userMap, isConnected, mapBody);
     } catch(e) {
-      // #region agent log
-      _dbg('OUTER_CATCH', {errorMsg:e.message}, 'E');
-      // #endregion
       if (mapBody) mapBody.innerHTML = '<div style="color:var(--red);font-size:13px;">Error: ' + _esc(e.message) + '</div>';
     }
-  }
-
-  function _startCountdown(mapBody, clients, userMap, isConnected) {
-    function _tick() {
-      var secsLeft = Math.ceil((_fin429Until - Date.now()) / 1000);
-      var el = document.getElementById('fin-429-countdown');
-      if (!el) return; // container was replaced
-      if (secsLeft <= 0) {
-        el.textContent = 'Rate limit cleared — press Retry to load contacts.';
-        el.style.color = 'var(--muted)';
-        return;
-      }
-      el.textContent = 'Xero rate limit hit — you can retry in ' + secsLeft + 's.';
-      setTimeout(_tick, 1000);
-    }
-    mapBody.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">'
-      + '<span id="fin-429-countdown" style="color:var(--amber);font-size:13px;"></span>'
-      + '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;width:fit-content;" '
-      +   'onclick="window._finRefreshContacts()">Retry</button></div>';
-    _tick();
   }
 
   function _normName(s) {
@@ -47229,7 +47165,7 @@ if (typeof _origOpenDD === 'function') {
       .replace(/\s+/g, ' ').trim();
   }
 
-  function _renderClientMapping(clients, contacts, userMap, isConnected, container) {
+  function _renderClientMapping(clients, contactNameMap, userMap, isConnected, container) {
     var HIDDEN_STAGES = ['opportunity','lead','prospect'];
     var activeClients = clients.filter(function(c) { return HIDDEN_STAGES.indexOf(c.lifecycle_stage) < 0; });
     var mappedTotal   = activeClients.filter(function(c) { return !!c.xero_contact_id; }).length;
@@ -47242,10 +47178,6 @@ if (typeof _origOpenDD === 'function') {
     html += '<option value="active">Active only</option>';
     html += '<option value="all">All</option>';
     html += '</select>';
-    if (isConnected) {
-      html += '<button class="btn btn-outline" onclick="window._finSuggestMatches()" style="font-size:11px;padding:5px 12px;">Suggest matches</button>';
-      html += '<button class="btn btn-outline" onclick="window._finRefreshContacts()" style="font-size:11px;padding:5px 12px;" title="Re-fetch contacts from Xero">↻ Refresh contacts</button>';
-    }
     html += '</div>';
 
     html += '<div id="fin-map-hidden-note" style="font-size:12px;color:var(--muted);margin-bottom:8px;display:none;"></div>';
@@ -47254,21 +47186,20 @@ if (typeof _origOpenDD === 'function') {
     html += '<table class="data-table" id="fin-map-table">';
     html += '<thead><tr><th>Client</th><th>Xero Contact</th><th>Mapped on</th><th>Mapped by</th></tr></thead>';
     html += '<tbody id="fin-map-tbody">';
-    html += _renderMappingRows(activeClients, contacts, userMap, isConnected, true);
+    html += _renderMappingRows(activeClients, contactNameMap, userMap, isConnected, true);
     html += '</tbody></table></div>';
 
     container.innerHTML = html;
-    container.dataset.clients  = JSON.stringify(activeClients);
-    container.dataset.contacts = JSON.stringify(contacts);
-    container.dataset.usermap  = JSON.stringify(userMap);
+    container.dataset.clients = JSON.stringify(activeClients);
+    container.dataset.usermap = JSON.stringify(userMap);
 
-    window._finMapClients  = activeClients;
-    window._finMapContacts = contacts;
-    window._finMapUserMap  = userMap;
-    window._finIsConnected = isConnected;
+    window._finMapClients     = activeClients;
+    window._finContactNameMap = contactNameMap;
+    window._finMapUserMap     = userMap;
+    window._finIsConnected    = isConnected;
   }
 
-  function _renderMappingRows(clientList, contacts, userMap, isConnected, activeOnly) {
+  function _renderMappingRows(clientList, contactNameMap, userMap, isConnected, activeOnly) {
     var HIDDEN_STAGES = ['opportunity','lead','prospect'];
     var rows = '';
     clientList.forEach(function(c) {
@@ -47277,7 +47208,7 @@ if (typeof _origOpenDD === 'function') {
       var rowStyle = isMapped ? '' : 'style="background:rgba(232,156,58,0.06);"';
       rows += '<tr ' + rowStyle + ' data-cid="' + _esc(c.id) + '" id="fin-map-row-' + _esc(c.id) + '">';
       rows += '<td>' + _esc(c.name) + '</td>';
-      rows += '<td>' + _buildContactSelect(c, contacts, isConnected) + '</td>';
+      rows += '<td>' + _buildContactSearch(c, contactNameMap, isConnected) + '</td>';
       rows += '<td id="fin-map-date-' + _esc(c.id) + '">' + _fmtDate(c.xero_contact_mapped_at) + '</td>';
       rows += '<td id="fin-map-by-' + _esc(c.id) + '">' + _esc(userMap[c.xero_contact_mapped_by] || (c.xero_contact_mapped_by ? c.xero_contact_mapped_by : '—')) + '</td>';
       rows += '</tr>';
@@ -47285,19 +47216,87 @@ if (typeof _origOpenDD === 'function') {
     return rows;
   }
 
-  function _buildContactSelect(client, contacts, isConnected) {
-    if (!isConnected) {
-      return '<span style="color:var(--muted);font-size:12px;">Connect Xero to map</span>';
+  function _buildContactSearch(client, contactNameMap, isConnected) {
+    if (!isConnected) return '<span style="color:var(--muted);font-size:12px;">Connect Xero to map</span>';
+    var cid = _esc(client.id);
+    var currentName = client.xero_contact_id ? (contactNameMap[client.xero_contact_id] || client.xero_contact_id) : null;
+    var html = '<div style="position:relative;" class="xsw" data-cid="' + cid + '">';
+    if (currentName) {
+      html += '<div id="xsm-' + cid + '" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
+            + '<span style="font-size:12px;color:var(--white);">&#10003; ' + _esc(currentName) + '</span>'
+            + '<button class="btn btn-outline" style="font-size:10px;padding:3px 8px;" onclick="window._finOpenXeroSearch(\'' + cid + '\')">Change</button>'
+            + '</div>';
+      html += '<div id="xss-' + cid + '" style="display:none;">' + _buildXeroSearchInput(cid) + '</div>';
+    } else {
+      html += '<div id="xsm-' + cid + '" style="display:none;"></div>';
+      html += '<div id="xss-' + cid + '">' + _buildXeroSearchInput(cid) + '</div>';
     }
-    var sel = '<select onchange="window._finMapContact(\'' + _esc(client.id) + '\',this.value)" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;max-width:240px;">';
-    sel += '<option value="">— Select contact —</option>';
-    contacts.forEach(function(ct) {
-      var sel_ = ct.ContactID === client.xero_contact_id ? ' selected' : '';
-      sel += '<option value="' + _esc(ct.ContactID) + '"' + sel_ + '>' + _esc(ct.Name) + (ct.EmailAddress ? ' (' + _esc(ct.EmailAddress) + ')' : '') + '</option>';
-    });
-    sel += '</select>';
-    return sel;
+    html += '</div>';
+    return html;
   }
+
+  function _buildXeroSearchInput(cid) {
+    return '<div style="position:relative;">'
+      + '<input type="text" placeholder="Type to search Xero contacts…" '
+      + 'oninput="window._finContactSearch(this,\'' + cid + '\')" '
+      + 'onblur="setTimeout(function(){var d=document.getElementById(\'xsd-' + cid + '\');if(d)d.style.display=\'none\';},200)" '
+      + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;width:220px;">'
+      + '<div id="xsd-' + cid + '" style="display:none;position:absolute;top:100%;left:0;z-index:999;'
+      + 'background:#1a2540;border:1px solid var(--navy-border);border-radius:3px;'
+      + 'min-width:240px;max-height:200px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,0.5);"></div>'
+      + '</div>';
+  }
+
+  window._finOpenXeroSearch = function(cid) {
+    var mEl = document.getElementById('xsm-' + cid);
+    var sEl = document.getElementById('xss-' + cid);
+    if (mEl) mEl.style.display = 'none';
+    if (sEl) { sEl.style.display = ''; var inp = sEl.querySelector('input'); if (inp) { inp.value = ''; inp.focus(); } }
+  };
+
+  window._finContactSearch = function(input, cid) {
+    var q = input.value.trim();
+    var dropEl = document.getElementById('xsd-' + cid);
+    if (!dropEl) return;
+    if (q.length < 2) { dropEl.style.display = 'none'; return; }
+    clearTimeout(input._t);
+    dropEl.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted);">Searching…</div>';
+    dropEl.style.display = 'block';
+    input._t = setTimeout(async function() {
+      try {
+        var r = await callXeroEF({ action: 'search_contacts', query: q }, 10000);
+        var cts = r.contacts || [];
+        if (!cts.length) {
+          dropEl.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted);">No contacts found.</div>';
+          return;
+        }
+        dropEl.innerHTML = cts.map(function(ct) {
+          var safeName = (ct.Name || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+          return '<div style="padding:8px 10px;font-size:12px;cursor:pointer;color:var(--white);border-bottom:1px solid rgba(255,255,255,0.05);" '
+            + 'onmousedown="window._finPickXeroContact(\'' + _esc(cid) + '\',\'' + _esc(ct.ContactID) + '\',\'' + safeName + '\')">'
+            + _esc(ct.Name) + (ct.EmailAddress ? '<br><span style="color:var(--muted);font-size:11px;">' + _esc(ct.EmailAddress) + '</span>' : '')
+            + '</div>';
+        }).join('');
+      } catch(e) {
+        dropEl.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--red);">Search failed: ' + _esc(e.message) + '</div>';
+      }
+    }, 300);
+  };
+
+  window._finPickXeroContact = async function(cid, contactId, contactName) {
+    var mEl = document.getElementById('xsm-' + cid);
+    var sEl = document.getElementById('xss-' + cid);
+    if (mEl) {
+      mEl.innerHTML = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
+        + '<span style="font-size:12px;color:var(--white);">&#10003; ' + _esc(contactName) + '</span>'
+        + '<button class="btn btn-outline" style="font-size:10px;padding:3px 8px;" onclick="window._finOpenXeroSearch(\'' + _esc(cid) + '\')">Change</button>'
+        + '</div>';
+      mEl.style.display = '';
+    }
+    if (sEl) sEl.style.display = 'none';
+    if (window._finContactNameMap) window._finContactNameMap[contactId] = contactName;
+    await window._finMapContact(cid, contactId);
+  };
 
   window._finMapContact = async function(clientId, contactId) {
     var cu = window.CURRENT_USER;
@@ -47333,13 +47332,6 @@ if (typeof _origOpenDD === 'function') {
       var counter = document.getElementById('fin-map-counter');
       if (counter) counter.textContent = mapped + ' of ' + (window._finMapClients || []).length + ' clients mapped to Xero.';
 
-      // Show tick
-      var sel = document.querySelector('#fin-map-row-' + clientId + ' select');
-      if (sel) {
-        var origColor = sel.style.borderColor;
-        sel.style.borderColor = 'var(--green)';
-        setTimeout(function() { sel.style.borderColor = origColor; }, 1500);
-      }
       window.toast && window.toast('Saved.', 'success');
     } catch(e) {
       window.lpAlert && window.lpAlert('Error saving: ' + e.message);
@@ -47351,11 +47343,11 @@ if (typeof _origOpenDD === 'function') {
     var stage  = (document.getElementById('fin-map-stage')  || {}).value || 'active';
     var tbody  = document.getElementById('fin-map-tbody');
     if (!tbody) return;
-    var HIDDEN_STAGES = ['opportunity','lead','prospect'];
-    var clients  = window._finMapClients  || [];
-    var contacts = window._finMapContacts || [];
-    var userMap  = window._finMapUserMap  || {};
-    var conn     = window._finIsConnected;
+    var HIDDEN_STAGES   = ['opportunity','lead','prospect'];
+    var clients         = window._finMapClients     || [];
+    var contactNameMap  = window._finContactNameMap || {};
+    var userMap         = window._finMapUserMap     || {};
+    var conn            = window._finIsConnected;
 
     var filtered = clients.filter(function(c) {
       if (stage === 'active' && HIDDEN_STAGES.indexOf(c.lifecycle_stage) >= 0) return false;
@@ -47363,59 +47355,21 @@ if (typeof _origOpenDD === 'function') {
       return true;
     });
 
-    var totalShown = filtered.length;
+    var totalShown  = filtered.length;
     var totalActive = stage === 'active' ? clients.filter(function(c) { return HIDDEN_STAGES.indexOf(c.lifecycle_stage) < 0; }).length : clients.length;
     var hidden = totalActive - totalShown;
     var noteEl = document.getElementById('fin-map-hidden-note');
     if (noteEl) {
-      if (hidden > 0) {
-        noteEl.style.display = '';
-        noteEl.textContent = '(' + hidden + ' hidden by current filter)';
-      } else {
-        noteEl.style.display = 'none';
-      }
+      if (hidden > 0) { noteEl.style.display = ''; noteEl.textContent = '(' + hidden + ' hidden by current filter)'; }
+      else { noteEl.style.display = 'none'; }
     }
 
-    tbody.innerHTML = _renderMappingRows(filtered, contacts, userMap, conn, false);
+    tbody.innerHTML = _renderMappingRows(filtered, contactNameMap, userMap, conn, false);
   };
 
   window._finRefreshContacts = function() {
-    _finContacts = null; // clear cache
-    _fin429Until = 0;    // clear any cooldown so force-refresh works immediately
+    _finContactNameMap = null;
     _loadClientMappingCard(true, true);
-  };
-
-  window._finSuggestMatches = function() {
-    var clients  = window._finMapClients  || [];
-    var contacts = window._finMapContacts || [];
-    if (!contacts.length) { window.toast && window.toast('No Xero contacts loaded.', 'error'); return; }
-
-    var suggestions = 0;
-    clients.forEach(function(c) {
-      if (c.xero_contact_id) return;
-      var normClient = _normName(c.name);
-      var bestMatch  = null;
-      var bestConf   = null;
-      contacts.forEach(function(ct) {
-        var normXero = _normName(ct.Name);
-        if (normClient === normXero) { bestMatch = ct; bestConf = 'high'; }
-        else if (!bestMatch && (normClient.indexOf(normXero) >= 0 || normXero.indexOf(normClient) >= 0)) {
-          bestMatch = ct; bestConf = 'medium';
-        }
-      });
-      if (bestMatch) {
-        var row = document.getElementById('fin-map-row-' + c.id);
-        if (!row) return;
-        var sel = row.querySelector('select');
-        if (!sel) return;
-        sel.value = bestMatch.ContactID;
-        var confColor = bestConf === 'high' ? 'var(--green)' : 'var(--amber)';
-        sel.style.borderColor = confColor;
-        sel.title = bestConf.charAt(0).toUpperCase() + bestConf.slice(1) + ' confidence match — review before saving';
-        suggestions++;
-      }
-    });
-    window.toast && window.toast('Suggested ' + suggestions + ' match' + (suggestions === 1 ? '' : 'es') + '. Review and save each row.', 'success');
   };
 
   // ── Credentials helpers ────────────────────────────────────────────────────
