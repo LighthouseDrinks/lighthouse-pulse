@@ -154,9 +154,18 @@ async function xeroGet(
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'Xero-tenant-id': tenantId,
+      'Accept': 'application/json',
     },
   });
-  const data = await res.json();
+  let data: unknown;
+  const ct = res.headers.get('content-type') ?? '';
+  if (ct.includes('application/json')) {
+    data = await res.json();
+  } else {
+    const text = await res.text().catch(() => '(unreadable)');
+    console.warn('[xero-oauth] non-JSON response body:', text.slice(0, 300));
+    data = { error: `Non-JSON response (${res.status}): ${text.slice(0, 200)}` };
+  }
   console.log('[xero-oauth] response:', res.status, JSON.stringify(data).slice(0, 500));
   return { status: res.status, data };
 }
