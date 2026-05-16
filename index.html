@@ -46878,14 +46878,25 @@ if (typeof _origOpenDD === 'function') {
   var _finReconnectRequired = false;  // set when auto-refresh finds token permanently invalid
 
   // ── Edge function wrapper ──────────────────────────────────────────────────
-  async function callXeroEF(body) {
+  async function callXeroEF(body, timeoutMs) {
     var sess  = await window._sb.auth.getSession();
     var token = sess.data && sess.data.session ? sess.data.session.access_token : null;
-    var res = await fetch(XERO_EF, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-      body: JSON.stringify(body)
-    });
+    var controller = new AbortController();
+    var timer = timeoutMs ? setTimeout(function() { controller.abort(); }, timeoutMs) : null;
+    var res;
+    try {
+      res = await fetch(XERO_EF, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+    } catch(fetchErr) {
+      if (fetchErr.name === 'AbortError') throw new Error('Request timed out — Xero API took too long to respond');
+      throw fetchErr;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     var rawText = await res.text();
     var data;
     try { data = JSON.parse(rawText); } catch(e) {
@@ -47134,19 +47145,26 @@ if (typeof _origOpenDD === 'function') {
         mapBody.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading Xero contacts…</div>';
         _finContactsError = null;
         try {
-          var cResult = await callXeroEF({ action: 'list_contacts' });
+          var cResult = await callXeroEF({ action: 'list_contacts' }, 30000); // 30s timeout
           contacts = cResult.contacts || [];
           _finContacts = contacts;
           _fin429Until = 0;
         } catch(e) {
           console.warn('list_contacts failed:', e);
           _finContactsError = e.message || String(e);
-          if ((e.message || '').indexOf('rate limit') !== -1 || (e.message || '').indexOf('429') !== -1) {
+          var isRateLimit = (e.message || '').toLowerCase().indexOf('rate limit') !== -1
+                         || (e.message || '').indexOf('429') !== -1;
+          if (isRateLimit) {
             _fin429Until = Date.now() + 62000; // 62s cooldown
             _startCountdown(mapBody, clients, userMap, isConnected);
             return;
           }
-          window.toast && window.toast('Could not load Xero contacts: ' + _finContactsError, 'error');
+          // Show error in card body so it's never silent
+          mapBody.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">'
+            + '<div style="color:var(--red);font-size:13px;">Could not load Xero contacts: ' + _esc(_finContactsError) + '</div>'
+            + '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;width:fit-content;" '
+            +   'onclick="window._finRefreshContacts()">Retry</button></div>';
+          return;
         }
       }
 
@@ -47162,16 +47180,17 @@ if (typeof _origOpenDD === 'function') {
       var el = document.getElementById('fin-429-countdown');
       if (!el) return; // container was replaced
       if (secsLeft <= 0) {
-        _loadClientMappingCard(isConnected, true);
+        el.textContent = 'Rate limit cleared — press Retry to load contacts.';
+        el.style.color = 'var(--muted)';
         return;
       }
-      el.textContent = 'Xero rate limit — retrying in ' + secsLeft + 's…';
+      el.textContent = 'Xero rate limit hit — you can retry in ' + secsLeft + 's.';
       setTimeout(_tick, 1000);
     }
-    mapBody.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">'
+    mapBody.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">'
       + '<span id="fin-429-countdown" style="color:var(--amber);font-size:13px;"></span>'
-      + '<button class="btn btn-outline" style="font-size:11px;padding:4px 10px;" '
-      +   'onclick="window._finRefreshContacts()">Retry now</button></div>';
+      + '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;width:fit-content;" '
+      +   'onclick="window._finRefreshContacts()">Retry</button></div>';
     _tick();
   }
 
