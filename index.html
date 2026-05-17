@@ -48179,19 +48179,20 @@ if (typeof _origOpenDD === 'function') {
       }
     }
 
-    // Check sender configured
+    // Seed sender identity with defaults BEFORE the fetch so a network/RLS
+    // hiccup leaves us with usable values (modal still opens, From line still
+    // renders, EF still has a default fallback to actually send from).
+    _finSenderIdentity = {
+      name:  'Lighthouse Drinks',
+      email: 'creditcontrol@lighthousedrinks.com'
+    };
     try {
       var settings = await window.db.select('app_settings', '?key=in.(credit_from_name,credit_from_email)&select=key,value');
       var sMap = {};
       (settings || []).forEach(function(r) { sMap[r.key] = (r.value || '').trim(); });
-      if (!sMap.credit_from_name || !sMap.credit_from_email) {
-        window.lpAlert && window.lpAlert(
-          'Chase email sender is not configured. Go to Finance > Settings and fill in Sender Name and Sender Email first.'
-        );
-        return;
-      }
-      _finSenderIdentity = { name: sMap.credit_from_name, email: sMap.credit_from_email };
-    } catch(e) { /* non-fatal — server will validate too */ }
+      if (sMap.credit_from_name)  _finSenderIdentity.name  = sMap.credit_from_name;
+      if (sMap.credit_from_email) _finSenderIdentity.email = sMap.credit_from_email;
+    } catch(e) { /* keep defaults */ }
 
     _finRenderChaseModal(inv, defaultTpl, days);
   };
@@ -48243,7 +48244,7 @@ if (typeof _origOpenDD === 'function') {
       + '<div style="color:var(--white);font-weight:600;margin-bottom:6px;">' + _esc(contact.Name || '—') + '</div>'
       + '<input id="fin-chase-to" type="email" placeholder="recipient@example.com" '
       +   'value="' + prefilled + '" '
-      +   'oninput="window._finValidateChaseTo()" '
+      +   'oninput="window._finValidateChaseTo();window._finRenderChasePreview(\'' + _esc(inv.InvoiceID) + '\')" '
       +   'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
       +   'padding:7px 10px;font-size:13px;border-radius:3px;font-family:Lato,sans-serif;box-sizing:border-box;">'
       + noEmailHint
@@ -48256,8 +48257,7 @@ if (typeof _origOpenDD === 'function') {
       + radioOpts
       + '</div>'
 
-      + '<div id="fin-chase-preview" style="background:var(--navy-mid);padding:16px;border-radius:4px;margin-bottom:18px;'
-      + 'border:1px solid var(--navy-border);max-height:300px;overflow-y:auto;"></div>'
+      + '<div id="fin-chase-preview" style="margin-bottom:18px;border-radius:4px;max-height:420px;overflow-y:auto;"></div>'
 
       + '<div style="display:flex;justify-content:flex-end;gap:8px;">'
       + '<button class="btn btn-outline" onclick="window._finCloseChaseModal()">Cancel</button>'
@@ -48326,13 +48326,35 @@ if (typeof _origOpenDD === 'function') {
     var subject = _finFillVars(tpl.subject, inv);
     var body    = _finFillVars(tpl.body_html, inv);
     var preview = document.getElementById('fin-chase-preview');
-    if (preview) {
-      preview.innerHTML =
-          '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:0.06em;text-transform:uppercase;">Subject</div>'
-        + '<div style="font-size:13px;color:var(--white);font-weight:600;margin-bottom:14px;">' + _esc(subject) + '</div>'
-        + '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:0.06em;text-transform:uppercase;">Body</div>'
-        + '<div style="font-size:13px;color:var(--white);line-height:1.6;">' + body + '</div>';
-    }
+    if (!preview) return;
+
+    // Live From/To so the preview reflects whatever's on screen right now
+    var fromDisplay = _finSenderIdentity
+      ? _finSenderIdentity.name + ' <' + _finSenderIdentity.email + '>'
+      : 'Lighthouse Drinks <creditcontrol@lighthousedrinks.com>';
+    var toInput  = document.getElementById('fin-chase-to');
+    var toEmail  = ((toInput && toInput.value) || '').trim();
+    var toName   = (inv.Contact && inv.Contact.Name) || '';
+    var toDisplay = toEmail
+      ? (toName ? toName + ' <' + toEmail + '>' : toEmail)
+      : '(no recipient yet)';
+
+    // Render as a white inbox card so it's obvious this IS what will be sent.
+    // body is template HTML with {{vars}} already substituted — render unescaped
+    // so the <p> tags survive. Templates come from an admin-controlled table.
+    preview.innerHTML =
+        '<div style="background:#ffffff;color:#1a1a2e;border-radius:4px;overflow:hidden;">'
+      +   '<div style="padding:18px 22px 14px;border-bottom:1px solid #e1e4ea;">'
+      +     '<div style="font-size:17px;font-weight:700;color:#1a1a2e;line-height:1.35;margin-bottom:12px;">' + _esc(subject) + '</div>'
+      +     '<div style="font-size:12px;color:#5f6b7a;line-height:1.7;">'
+      +       '<div><span style="display:inline-block;width:48px;color:#8896a8;">From</span>' + _esc(fromDisplay) + '</div>'
+      +       '<div><span style="display:inline-block;width:48px;color:#8896a8;">To</span>'   + _esc(toDisplay)   + '</div>'
+      +     '</div>'
+      +   '</div>'
+      +   '<div style="padding:20px 22px 22px;font-family:Lato,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.65;color:#2c3340;">'
+      +     body
+      +   '</div>'
+      + '</div>';
   };
 
   window._finSendChase = async function(invoiceId) {

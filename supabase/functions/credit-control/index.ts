@@ -25,6 +25,11 @@ const FINANCE_ROLES = [
 
 const RESEND_URL = 'https://api.resend.com/emails';
 
+// Defaults so the EF never refuses to send purely because app_settings is
+// blank. Persisted overrides from Finance > Settings still win.
+const DEFAULT_FROM_NAME  = 'Lighthouse Drinks';
+const DEFAULT_FROM_EMAIL = 'creditcontrol@lighthousedrinks.com';
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -97,18 +102,17 @@ Deno.serve(async (req: Request) => {
         .single();
       if (tplErr || !tpl) return err('Template not found', 404);
 
-      // Load sender identity
+      // Load sender identity — fall back to module defaults when blank so a
+      // missing app_settings row never blocks a chase. Resend still rejects
+      // unverified sending domains; that error path is handled below.
       const { data: settings } = await adminClient
         .from('app_settings')
         .select('key, value')
         .in('key', ['credit_from_name', 'credit_from_email']);
       const sMap: Record<string, string> = {};
       for (const r of (settings ?? [])) sMap[r.key] = (r.value || '').trim();
-      const fromName  = sMap['credit_from_name']  || '';
-      const fromEmail = sMap['credit_from_email'] || '';
-      if (!fromName || !fromEmail) {
-        return err('Chase email sender not configured. Set credit_from_name and credit_from_email in Finance > Settings.', 400);
-      }
+      const fromName  = sMap['credit_from_name']  || DEFAULT_FROM_NAME;
+      const fromEmail = sMap['credit_from_email'] || DEFAULT_FROM_EMAIL;
 
       const apiKey = Deno.env.get('RESEND_API_KEY');
       if (!apiKey) return err('RESEND_API_KEY not configured on the server', 500);
@@ -142,9 +146,15 @@ Deno.serve(async (req: Request) => {
       const messageId  = (resendData?.id as string) || null;
 
       const sendStatus = resendRes.status >= 200 && resendRes.status < 300 ? 'sent' : 'failed';
-      const errorMsg   = sendStatus === 'failed'
+      let errorMsg: string | null = sendStatus === 'failed'
         ? (resendData?.message || resendData?.name || `Resend ${resendRes.status}`)
         : null;
+      // Rewrite the opaque Resend "domain not verified" message into something
+      // actionable. The first chase after a fresh install usually hits this.
+      if (errorMsg && /domain.*(verif|not verified)|is not verified/i.test(errorMsg)) {
+        const domain = fromEmail.includes('@') ? fromEmail.split('@')[1] : fromEmail;
+        errorMsg = `Sending domain "${domain}" is not verified in Resend. Add it (SPF + DKIM) at https://resend.com/domains, then retry.`;
+      }
 
       // Log the attempt regardless of outcome — useful audit trail
       await adminClient.from('credit_control_log').insert({
