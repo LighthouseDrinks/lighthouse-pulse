@@ -81,20 +81,25 @@ Deno.serve(async (req: Request) => {
 
     // ── send_chase_email ────────────────────────────────────────────────────
     if (action === 'send_chase_email') {
-      const templateId   = (body.template_id    as string) || '';
-      const invoiceId    = (body.invoice_id     as string) || '';
-      const invoiceNo    = (body.invoice_number as string) || '';
-      const contactName  = ((body.contact_name  as string) || '').trim();
-      const contactEmail = ((body.contact_email as string) || '').trim();
-      const amountDue    = (body.amount_due     as string) || '';
-      const dueDate      = (body.due_date       as string) || '';
-      const daysOverdue  = Number(body.days_overdue ?? 0);
-      const invoiceUrl   = (body.invoice_url    as string) || '';
+      const templateId       = (body.template_id        as string) || '';
+      const invoiceId        = (body.invoice_id         as string) || '';
+      const invoiceNo        = (body.invoice_number     as string) || '';
+      const contactName      = ((body.contact_name      as string) || '').trim();
+      const contactEmail     = ((body.contact_email     as string) || '').trim();
+      const amountDue        = (body.amount_due         as string) || '';
+      const dueDate          = (body.due_date           as string) || '';
+      const daysOverdue      = Number(body.days_overdue ?? 0);
+      const invoiceUrl       = (body.invoice_url        as string) || '';
+      // Per-send overrides from the editable modal. When supplied they win
+      // over the stored template — template_id is still required so the log
+      // captures which tone was sent.
+      const subjectOverride  = ((body.subject_override   as string) || '').trim();
+      const bodyHtmlOverride = ((body.body_html_override as string) || '').trim();
 
       if (!templateId)   return err('template_id is required', 400);
       if (!contactEmail) return err('contact_email is required', 400);
 
-      // Load template
+      // Load template (always — used for fallback + for the tone name in logs).
       const { data: tpl, error: tplErr } = await adminClient
         .from('credit_control_templates')
         .select('id, name, subject, body_html')
@@ -125,8 +130,14 @@ Deno.serve(async (req: Request) => {
         days_overdue:    String(daysOverdue),
         invoice_url:     invoiceUrl,
       };
-      const subject = fillTemplate(tpl.subject as string, vars);
-      const html    = fillTemplate(tpl.body_html as string, vars);
+      // Overrides come from the editable modal with vars already substituted
+      // on the client (so what the user previewed is what gets sent). We still
+      // run fillTemplate over them as a no-op safety net so any leftover
+      // {{vars}} the user kept also resolve.
+      const rawSubject = subjectOverride  || (tpl.subject   as string);
+      const rawHtml    = bodyHtmlOverride || (tpl.body_html as string);
+      const subject    = fillTemplate(rawSubject, vars);
+      const html       = fillTemplate(rawHtml,    vars);
 
       console.log('[credit-control] sending chase to', contactEmail, 'template:', tpl.name);
       const resendRes = await fetch(RESEND_URL, {
