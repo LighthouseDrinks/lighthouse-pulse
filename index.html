@@ -48278,6 +48278,33 @@ if (typeof _origOpenDD === 'function') {
     _renderFinOverview(body, metrics, stockValue);
   };
 
+  // Compact currency formatter for chart axis labels: €1.4M / €125K / €850 / €0
+  function _compactCur(v) {
+    if (!isFinite(v) || v === 0) return '€0';
+    var abs = Math.abs(v);
+    var sign = v < 0 ? '-' : '';
+    if (abs >= 1000000) return sign + '€' + (Math.round(abs / 100000) / 10) + 'M';
+    if (abs >= 1000)    return sign + '€' + (Math.round(abs / 100) / 10) + 'K';
+    return sign + '€' + Math.round(abs);
+  }
+
+  // YoY pill: green if positive, red if negative, muted dash if null
+  function _yoyPill(pct) {
+    if (pct == null) {
+      return '<span style="display:inline-block;background:rgba(255,255,255,0.06);color:var(--muted);'
+           + 'font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-left:6px;'
+           + 'vertical-align:middle;font-family:Lato,sans-serif;" title="No prior-year data to compare">—</span>';
+    }
+    var positive = pct >= 0;
+    var bg = positive ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)';
+    var fg = positive ? 'var(--green)' : 'var(--red)';
+    var sign = positive ? '+' : '';
+    return '<span style="display:inline-block;background:' + bg + ';color:' + fg + ';'
+         + 'font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-left:6px;'
+         + 'vertical-align:middle;font-family:Lato,sans-serif;letter-spacing:0.02em;">'
+         + sign + pct.toFixed(1) + '%</span>';
+  }
+
   function _renderFinOverview(container, m, stockValue) {
     var y = new Date().getFullYear();
     var html = '';
@@ -48285,16 +48312,14 @@ if (typeof _origOpenDD === 'function') {
     var diag = m._diagnostic || {};
     var efVer = diag.ef_version || 'unknown';
 
-    // Header row with refresh + diagnostics toggle
+    // Header row with timestamp + small diagnostic link + refresh
     html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">';
     html += '<div style="font-size:12px;color:var(--muted);">'
          + 'Pulled from Xero reports · ' + _fmtDate(m.generated_at)
-         + ' <span style="opacity:0.6;">· EF ' + _esc(efVer) + '</span>'
+         + ' · <a onclick="window._finToggleDiag()" style="color:var(--muted);text-decoration:underline;cursor:pointer;font-size:11px;" title="Show technical details for debugging">diagnostics</a>'
+         + ' <span style="opacity:0.5;font-size:10px;">v' + _esc(efVer) + '</span>'
          + '</div>';
-    html += '<div style="display:flex;gap:8px;">';
-    html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;" onclick="window._finToggleDiag()">Show diagnostics</button>';
     html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;" onclick="window._finRefreshOverview()">Refresh</button>';
-    html += '</div>';
     html += '</div>';
 
     // Hidden diagnostic panel (toggle via _finToggleDiag)
@@ -48308,32 +48333,101 @@ if (typeof _origOpenDD === 'function') {
          + '</pre>';
     html += '</div>';
 
-    // KPI cards
-    var kpis = [
-      { label: 'Sales YTD',            value: _fmtCur(m.ytd_revenue, 'EUR'),        sub: 'Income from Xero P&L · ' + y },
-      { label: 'Last Month Revenue',   value: _fmtCur(m.last_month_revenue, 'EUR'), sub: m.last_month_label ? 'Invoiced ' + m.last_month_label : 'Previous month' },
-      { label: 'Outstanding AR',       value: _fmtCur(m.outstanding_total, 'EUR'),  sub: 'Total unpaid from Aged Receivables' },
-      { label: 'Overdue',              value: _fmtCur(m.overdue_total, 'EUR'),      sub: (m.overdue_count || 0) + ' contact' + (m.overdue_count === 1 ? '' : 's') + ' past due' },
-      { label: 'Stock Value',          value: _fmtCur(stockValue, 'EUR'),           sub: 'Total stock value on hand' }
-    ];
-    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin-bottom:18px;">';
-    kpis.forEach(function(k) {
-      html += '<div class="card" style="padding:14px 16px;">'
-           + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">' + _esc(k.label) + '</div>'
-           + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(k.value) + '</div>'
-           + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">' + _esc(k.sub) + '</div>'
-           + '</div>';
-    });
+    // ── KPI cards ─────────────────────────────────────────────────────────
+    var overdueCount = m.overdue_count || 0;
+
+    // Sales This Year (with YoY)
+    var ytdCardHtml =
+        '<div class="card" style="padding:14px 16px;">'
+      + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Sales This Year</div>'
+      + '<div style="display:flex;align-items:baseline;flex-wrap:wrap;">'
+      +   '<span style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.ytd_revenue, 'EUR')) + '</span>'
+      +   _yoyPill(m.ytd_yoy_pct)
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">'
+      +   (m.ytd_revenue_prior > 0
+            ? 'vs ' + _compactCur(m.ytd_revenue_prior) + ' (' + (y - 1) + ')'
+            : 'No ' + (y - 1) + ' data')
+      + '</div>'
+      + '</div>';
+
+    // Last Month Sales (with YoY)
+    var lmCardHtml =
+        '<div class="card" style="padding:14px 16px;">'
+      + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Last Month Sales</div>'
+      + '<div style="display:flex;align-items:baseline;flex-wrap:wrap;">'
+      +   '<span style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.last_month_revenue, 'EUR')) + '</span>'
+      +   _yoyPill(m.last_month_yoy_pct)
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">'
+      +   (m.last_month_label ? _esc(m.last_month_label) : 'Previous month')
+      +   (m.last_month_revenue_prior > 0
+            ? ' · vs ' + _compactCur(m.last_month_revenue_prior) + ' (' + _esc(m.last_month_label_prior || (y - 1).toString()) + ')'
+            : '')
+      + '</div>'
+      + '</div>';
+
+    // Owed to You (Outstanding AR)
+    var owedCardHtml =
+        '<div class="card" style="padding:14px 16px;">'
+      + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Owed to You</div>'
+      + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.outstanding_total, 'EUR')) + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Total of all unpaid invoices (includes not-yet-due)</div>'
+      + '</div>';
+
+    // Overdue — Chase These (clickable to Invoices > overdue preset)
+    var overdueAccent = overdueCount > 0 ? 'var(--red)' : 'var(--gold)';
+    var overdueSub = overdueCount === 0
+      ? 'Nothing past due — nice work'
+      : overdueCount + ' invoice' + (overdueCount === 1 ? '' : 's') + ' past due date — click to chase';
+    var overdueCardHtml =
+        '<div class="card" onclick="window._finOpenOverdueChase()" '
+      + 'style="padding:14px 16px;cursor:' + (overdueCount > 0 ? 'pointer' : 'default') + ';" '
+      + 'title="' + (overdueCount > 0 ? 'Open Invoices tab with Overdue filter' : '') + '">'
+      + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Overdue — Chase These</div>'
+      + '<div style="font-size:22px;font-weight:800;color:' + overdueAccent + ';font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.overdue_total, 'EUR')) + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">' + _esc(overdueSub) + '</div>'
+      + '</div>';
+
+    // Stock Value
+    var stockCardHtml =
+        '<div class="card" style="padding:14px 16px;">'
+      + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Stock Value</div>'
+      + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(stockValue, 'EUR')) + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Total stock value on hand</div>'
+      + '</div>';
+
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-bottom:18px;">';
+    html += ytdCardHtml + lmCardHtml + owedCardHtml + overdueCardHtml + stockCardHtml;
     html += '</div>';
 
-    // Monthly chart
+    // Monthly chart — with low-confidence banner if cells didn't reconcile
     html += '<div class="card">';
     html += '<div class="card-title" style="margin-bottom:12px;">Monthly Revenue · ' + y + '</div>';
+    if (m.monthly_chart_confidence === 'low') {
+      html += '<div style="background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.30);'
+           + 'color:var(--amber);padding:8px 12px;border-radius:4px;font-size:11px;margin-bottom:12px;">'
+           + 'Monthly breakdown does not reconcile with the KPIs above. The KPI cards are the source of truth — '
+           + 'open <a onclick="window._finToggleDiag()" style="color:var(--amber);text-decoration:underline;cursor:pointer;">diagnostics</a> to see the raw Xero data.'
+           + '</div>';
+    }
     html += _renderMonthlyChart(m.monthly || {}, y);
     html += '</div>';
 
     container.innerHTML = html;
   }
+
+  // Jump to Invoices tab with the overdue preset pre-loaded
+  window._finOpenOverdueChase = function() {
+    var btn = document.getElementById('fin-tab-invoices');
+    window.showFinTab && window.showFinTab('invoices', btn);
+    // Auto-load the overdue preset once the panel is shown
+    setTimeout(function() {
+      if (typeof window._finPickInvoicePreset === 'function') {
+        window._finPickInvoicePreset('overdue');
+      }
+    }, 50);
+  };
 
   window._finRefreshOverview = function() {
     window._finOverviewMetrics = null;
@@ -48353,7 +48447,7 @@ if (typeof _origOpenDD === 'function') {
       return monthly[key] || 0;
     });
     var max = Math.max.apply(null, values.concat([1]));
-    var W   = 720, H = 220, padL = 48, padR = 12, padT = 12, padB = 26;
+    var W   = 720, H = 220, padL = 64, padR = 12, padT = 12, padB = 26;
     var bw  = (W - padL - padR) / 12;
     var inner = H - padT - padB;
 
@@ -48370,7 +48464,7 @@ if (typeof _origOpenDD === 'function') {
       bars += '<text x="' + (x + w / 2) + '" y="' + (H - padB + 14) + '" text-anchor="middle" '
            + 'fill="rgba(255,255,255,0.6)" font-size="10" font-family="Lato">' + months[i] + '</text>';
     }
-    // Y axis lines
+    // Y axis lines — labels use _compactCur to avoid clipping (€1.4M not €1,400,000)
     for (var g = 0; g <= 4; g++) {
       var gy  = padT + inner - (g * inner / 4);
       var val = (max * g / 4);
@@ -48378,7 +48472,7 @@ if (typeof _origOpenDD === 'function') {
            + '" stroke="rgba(255,255,255,0.08)" stroke-width="0.5"></line>';
       bars += '<text x="' + (padL - 6) + '" y="' + (gy + 3) + '" text-anchor="end" '
            + 'fill="rgba(255,255,255,0.5)" font-size="9" font-family="Lato">'
-           + _fmtCur(val, 'EUR').replace('.00', '')
+           + _compactCur(val)
            + '</text>';
     }
     return '<div style="overflow-x:auto;"><svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;max-width:' + W + 'px;display:block;">' + bars + '</svg></div>';
