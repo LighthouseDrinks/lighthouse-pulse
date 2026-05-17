@@ -606,7 +606,7 @@ Deno.serve(async (req: Request) => {
     //     generated_at:      iso string
     //   }
     if (action === 'overview_metrics') {
-      const EF_VERSION = '2026-05-17-yoy-v2';
+      const EF_VERSION = '2026-05-17-overview-fixes-v3';
       const { clientId, clientSecret } = await getXeroCreds(adminClient);
       if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
       const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
@@ -625,6 +625,17 @@ Deno.serve(async (req: Request) => {
         if (!Number.isFinite(n)) return 0;
         return neg ? -n : n;
       };
+      // Xero uses legacy WCF date format /Date(1234567890000+0000)/ for many endpoints.
+      // Newer endpoints sometimes return ISO. Parse both gracefully.
+      const parseXeroDate = (raw: unknown): Date | null => {
+        if (raw == null) return null;
+        const s = String(raw);
+        if (!s) return null;
+        const m = /\/Date\((-?\d+)([+-]\d{4})?\)\//.exec(s);
+        if (m) return new Date(parseInt(m[1], 10));
+        const d = new Date(s);
+        return isNaN(d.getTime()) ? null : d;
+      };
       const pad2 = (n: number) => String(n).padStart(2, '0');
       const fmtDate = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
       const firstOfMonth = (y: number, m: number) => new Date(y, m, 1);
@@ -636,6 +647,24 @@ Deno.serve(async (req: Request) => {
       const yoyPct = (cur: number, prior: number): number | null => {
         if (!prior || prior === 0) return null;
         return Math.round((cur - prior) / prior * 1000) / 10;
+      };
+      // Shared semaphore so all Xero calls (P&L + per-page invoices) respect
+      // Xero's per-tenant 5-concurrent ceiling. withSlot wraps any async fn.
+      const XERO_CONCURRENCY = 5;
+      let _slotsInUse = 0;
+      const _slotWaiters: Array<() => void> = [];
+      const _acquire = (): Promise<void> => new Promise((resolve) => {
+        if (_slotsInUse < XERO_CONCURRENCY) { _slotsInUse++; resolve(); return; }
+        _slotWaiters.push(() => { _slotsInUse++; resolve(); });
+      });
+      const _release = () => {
+        _slotsInUse--;
+        const next = _slotWaiters.shift();
+        if (next) next();
+      };
+      const withSlot = async <T>(fn: () => Promise<T>): Promise<T> => {
+        await _acquire();
+        try { return await fn(); } finally { _release(); }
       };
 
       // Section/Summary matcher reused for all 4 single-period P&L parses
@@ -750,17 +779,27 @@ Deno.serve(async (req: Request) => {
 
       const acc = refreshResult.accessToken!;
       const ten = refreshResult.tenantId!;
+      const callPL = (params: string) => withSlot(() => xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, params));
 
-      // ── Paginated invoices fetcher (replaces broken AR report call) ───
-      type InvoiceSummary = { AmountDue?: number; DueDate?: string; InvoiceID?: string; Status?: string; InvoiceNumber?: string };
+      // ── Paginated invoices fetcher (Type=ACCREC only, shared pool) ───
+      type InvoiceSummary = {
+        AmountDue?: number;
+        DueDate?: string;
+        InvoiceID?: string;
+        Status?: string;
+        InvoiceNumber?: string;
+        Type?: string;
+      };
       type InvoicesFetchResult = { invoices: InvoiceSummary[]; pages_fetched: number; capped: boolean; error: string | null };
       const fetchAllOutstandingInvoices = async (): Promise<InvoicesFetchResult> => {
         const all: InvoiceSummary[] = [];
         const MAX_PAGES = 50;
         let page = 1;
+        // ACCREC == sales invoices (money owed TO us). Exclude ACCPAY (supplier bills).
+        const where = encodeURIComponent('Type=="ACCREC"');
         while (page <= MAX_PAGES) {
-          const params = `Statuses=AUTHORISED,SUBMITTED&summaryOnly=true&page=${page}`;
-          const { status, data } = await xeroGet('/api.xro/2.0/Invoices', acc, ten, params);
+          const params = `where=${where}&Statuses=AUTHORISED,SUBMITTED&summaryOnly=true&page=${page}`;
+          const { status, data } = await withSlot(() => xeroGet('/api.xro/2.0/Invoices', acc, ten, params));
           if (status !== 200) {
             return { invoices: all, pages_fetched: page - 1, capped: false, error: `Invoices page ${page} returned ${status}: ${JSON.stringify(data).slice(0, 200)}` };
           }
@@ -775,28 +814,41 @@ Deno.serve(async (req: Request) => {
         return { invoices: all, pages_fetched: MAX_PAGES, capped: true, error: 'Reached MAX_PAGES cap (50 pages = 5000 invoices)' };
       };
 
-      // ── Run all 6 calls in parallel ──────────────────────────────────
+      // ── Build job list: 4 fixed P&L + per-month P&L (past + current only) ──
+      // For May (monthIdx=4): 4 fixed + 5 per-month (Jan, Feb, Mar, Apr, May) = 9 P&L jobs.
+      // Future months are skipped entirely (no point asking Xero for zeros).
+      type MonthlyJob = { key: string; from: string; to: string };
+      const monthlyJobs: MonthlyJob[] = [];
+      for (let i = 0; i <= monthIdx; i++) {
+        const start = firstOfMonth(year, i);
+        const end   = lastOfMonth(year, i);
+        monthlyJobs.push({ key: `${year}-${pad2(i + 1)}`, from: fmtDate(start), to: fmtDate(end) });
+      }
+
+      // Kick off everything in parallel — shared withSlot semaphore caps to 5 concurrent.
+      const ytdP             = callPL(`fromDate=${yearStart}&toDate=${today}`);
+      const ytdPriorP        = callPL(`fromDate=${year - 1}-01-01&toDate=${fmtDate(ytdPriorEnd)}`);
+      const lastMonthCurP    = callPL(`fromDate=${fmtDate(lastMonthStart)}&toDate=${fmtDate(lastMonthEnd)}`);
+      const lastMonthPriorP  = callPL(`fromDate=${fmtDate(lastMonthStartPrior)}&toDate=${fmtDate(lastMonthEndPrior)}`);
+      const monthlyPs        = monthlyJobs.map((j) => callPL(`fromDate=${j.from}&toDate=${j.to}`));
+      const invoicesP        = fetchAllOutstandingInvoices();
+
       const [
         ytdRes,
         ytdPriorRes,
         lastMonthCurRes,
         lastMonthPriorRes,
-        monthlyRes,
         invoicesResSettled,
+        ...monthlyResults
       ] = await Promise.allSettled([
-        xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, `fromDate=${yearStart}&toDate=${today}`),
-        xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, `fromDate=${year - 1}-01-01&toDate=${fmtDate(ytdPriorEnd)}`),
-        xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, `fromDate=${fmtDate(lastMonthStart)}&toDate=${fmtDate(lastMonthEnd)}`),
-        xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, `fromDate=${fmtDate(lastMonthStartPrior)}&toDate=${fmtDate(lastMonthEndPrior)}`),
-        xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, `toDate=${yearEnd}&periods=11&timeframe=MONTH`),
-        fetchAllOutstandingInvoices(),
+        ytdP, ytdPriorP, lastMonthCurP, lastMonthPriorP, invoicesP, ...monthlyPs,
       ]);
 
-      // ── Parse the 4 single-period P&L results ───────────────────────
-      const ytdParse           = parseSinglePL(ytdRes,           'YTD');
-      const ytdPriorParse      = parseSinglePL(ytdPriorRes,      'YTD prior');
-      const lastMonthParse     = parseSinglePL(lastMonthCurRes,  'Last month current');
-      const lastMonthPriorParse= parseSinglePL(lastMonthPriorRes,'Last month prior');
+      // ── Parse the 4 fixed single-period P&L results ─────────────────
+      const ytdParse           = parseSinglePL(ytdRes as PromiseSettledResult<{status:number;data:Record<string,unknown>}>,           'YTD');
+      const ytdPriorParse      = parseSinglePL(ytdPriorRes as PromiseSettledResult<{status:number;data:Record<string,unknown>}>,      'YTD prior');
+      const lastMonthParse     = parseSinglePL(lastMonthCurRes as PromiseSettledResult<{status:number;data:Record<string,unknown>}>,  'Last month current');
+      const lastMonthPriorParse= parseSinglePL(lastMonthPriorRes as PromiseSettledResult<{status:number;data:Record<string,unknown>}>,'Last month prior');
 
       const ytdRevenue            = ytdParse.value;
       const ytdRevenuePrior       = ytdPriorParse.value;
@@ -808,99 +860,28 @@ Deno.serve(async (req: Request) => {
       const lastMonthLabel      = new Date(lastMonthY,     lastMonthMi, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' });
       const lastMonthLabelPrior = new Date(lastMonthY - 1, lastMonthMi, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' });
 
-      // ── Parse the monthly chart call + cumulative-cell inference ─────
+      // ── Parse per-month P&L results — same matcher as YTD, so guaranteed to reconcile ──
       const monthly: Record<string, number> = {};
       for (let i = 0; i < 12; i++) monthly[`${year}-${pad2(i + 1)}`] = 0;
+      const perMonthDiag: Array<{ key: string; value: number }> = [];
+      const monthlyErrors: Array<{ key: string; error: string }> = [];
 
-      let monthlyHeaders: string[]              = [];
-      let monthlyColumnMap: Array<string | null> = [];
-      let monthlyRawCells: Array<number | null> = [];
-      let monthlyError: string | null           = null;
-      let cumulativeDetected = false;
+      monthlyResults.forEach((res, i) => {
+        const job = monthlyJobs[i];
+        const parsed = parseSinglePL(res as PromiseSettledResult<{status:number;data:Record<string,unknown>}>, `Monthly ${job.key}`);
+        monthly[job.key] = parsed.value;
+        perMonthDiag.push({ key: job.key, value: parsed.value });
+        if (parsed.error) monthlyErrors.push({ key: job.key, error: parsed.error });
+      });
+
+      // Sanity: sum(monthly past+current) should ≈ ytd_revenue. High confidence within 2%.
+      const monthlySum = Object.values(monthly).reduce((s, v) => s + v, 0);
       let monthlyChartConfidence: 'high' | 'low' = 'high';
-
-      if (monthlyRes.status === 'fulfilled') {
-        const { status: s, data: d } = monthlyRes.value;
-        if (s === 200) {
-          const rpt    = ((d?.Reports ?? []) as Array<Record<string, unknown>>)[0];
-          const mRows  = ((rpt?.Rows ?? []) as Array<Record<string, unknown>>);
-          const hdrRow = mRows.find((r) => r.RowType === 'Header');
-          const hdrCells = ((hdrRow?.Cells ?? []) as Array<Record<string, unknown>>);
-          monthlyHeaders = hdrCells.map((c) => String(c.Value ?? ''));
-
-          const MONTH_MAP: Record<string, string> = {
-            jan: '01', january: '01', feb: '02', february: '02',
-            mar: '03', march:   '03', apr: '04', april:    '04',
-            may: '05',                jun: '06', june:     '06',
-            jul: '07', july:    '07', aug: '08', august:   '08',
-            sep: '09', sept:    '09', september: '09',
-            oct: '10', october: '10', nov: '11', november: '11',
-            dec: '12', december:'12',
-          };
-          monthlyColumnMap = hdrCells.map((c, i) => {
-            if (i === 0) return null;
-            const raw = String(c.Value ?? '').trim();
-            if (!raw || /total/i.test(raw)) return null;
-            const m = raw.match(/(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*[-\s]\s*(\d{2}|\d{4})/i);
-            if (!m) return null;
-            const mm = MONTH_MAP[m[1].toLowerCase()];
-            if (!mm) return null;
-            const yy = m[2].length === 2 ? `20${m[2]}` : m[2];
-            return `${yy}-${mm}`;
-          });
-
-          // Find Income SummaryRow via shared matcher
-          const match = findIncomeSummary(mRows);
-          if (match.summary) {
-            const cells = ((match.summary.Cells ?? []) as Array<Record<string, unknown>>);
-            monthlyRawCells = cells.map((c) => c.Value == null ? null : parseNum(c.Value));
-
-            // Populate raw monthly values via column map
-            const rawByKey: Record<string, number> = {};
-            cells.forEach((c, i) => {
-              const key = monthlyColumnMap[i];
-              if (!key) return;
-              rawByKey[key] = parseNum(c.Value);
-            });
-
-            // Detect cumulative-cell pattern: sum of past-month raws vs ytd_revenue.
-            // If sum >> ytd, then each cell is YTD-cumulative-to-that-period, not per-month.
-            const pastKeys: string[] = [];
-            for (let i = 0; i <= monthIdx; i++) {
-              const k = `${year}-${pad2(i + 1)}`;
-              if (k in rawByKey) pastKeys.push(k);
-            }
-            const pastRaw = pastKeys.map((k) => rawByKey[k]);
-            const sumPast = pastRaw.reduce((s, v) => s + v, 0);
-            if (ytdRevenue > 0 && sumPast > ytdRevenue * 1.5) {
-              cumulativeDetected = true;
-              // Convert: per-month[i] = raw[i] - raw[i-1]
-              pastKeys.forEach((k, i) => {
-                rawByKey[k] = i === 0 ? pastRaw[i] : pastRaw[i] - pastRaw[i - 1];
-              });
-            }
-
-            // Write to output monthly object
-            Object.keys(rawByKey).forEach((k) => {
-              if (k in monthly) monthly[k] = rawByKey[k];
-            });
-
-            // Confidence check: sum of monthly should be ≈ ytd_revenue (within 5%)
-            const monthlySum = Object.values(monthly).reduce((s, v) => s + v, 0);
-            if (ytdRevenue > 0) {
-              const drift = Math.abs(monthlySum - ytdRevenue) / ytdRevenue;
-              monthlyChartConfidence = drift < 0.05 ? 'high' : 'low';
-            }
-          } else {
-            monthlyError = 'Monthly P&L: no Income SummaryRow found';
-            monthlyChartConfidence = 'low';
-          }
-        } else {
-          monthlyError = `Xero P&L (monthly) returned ${s}: ${JSON.stringify(d).slice(0, 200)}`;
-          monthlyChartConfidence = 'low';
-        }
-      } else {
-        monthlyError = `Xero P&L (monthly) call failed: ${String(monthlyRes.reason).slice(0, 200)}`;
+      if (ytdRevenue > 0) {
+        const drift = Math.abs(monthlySum - ytdRevenue) / ytdRevenue;
+        if (drift > 0.02) monthlyChartConfidence = 'low';
+      } else if (monthlySum > 0) {
+        // monthly has data but YTD doesn't — suspicious
         monthlyChartConfidence = 'low';
       }
 
@@ -912,6 +893,7 @@ Deno.serve(async (req: Request) => {
       let invoicesFetched = 0;
       let invoicesPagesFetched = 0;
       let invoicesCapped = false;
+      const overdueSample: Array<{ id?: string; number?: string; due_iso?: string; amount: number }> = [];
 
       if (invoicesResSettled.status === 'fulfilled') {
         const r = invoicesResSettled.value as InvoicesFetchResult;
@@ -924,12 +906,17 @@ Deno.serve(async (req: Request) => {
           const due = parseNum(inv.AmountDue);
           if (due <= 0) continue;
           outstandingTotal += due;
-          if (inv.DueDate) {
-            // Xero summaryOnly returns DueDate as ISO date string
-            const dueDate = new Date(String(inv.DueDate));
-            if (!isNaN(dueDate.getTime()) && dueDate < todayDate) {
-              overdueTotal += due;
-              overdueCount++;
+          const dueDate = parseXeroDate(inv.DueDate);
+          if (dueDate && dueDate < todayDate) {
+            overdueTotal += due;
+            overdueCount++;
+            if (overdueSample.length < 3) {
+              overdueSample.push({
+                id: inv.InvoiceID,
+                number: inv.InvoiceNumber,
+                due_iso: dueDate.toISOString().split('T')[0],
+                amount: due,
+              });
             }
           }
         }
@@ -941,7 +928,7 @@ Deno.serve(async (req: Request) => {
         ef_version: EF_VERSION,
         ytdRevenue, ytdRevenuePrior, ytdYoyPct,
         lastMonthRevenue, lastMonthRevenuePrior, lastMonthYoyPct,
-        cumulativeDetected, monthlyChartConfidence,
+        monthlySum, monthlyChartConfidence, monthlyJobsRun: monthlyJobs.length,
         outstandingTotal, overdueTotal, overdueCount, invoicesFetched, invoicesPagesFetched, invoicesCapped, invoicesError,
       }).slice(0, 2000));
 
@@ -967,23 +954,114 @@ Deno.serve(async (req: Request) => {
           pl_last_month:       lastMonthParse,
           pl_last_month_prior: lastMonthPriorParse,
           pl_monthly: {
-            headers:               monthlyHeaders,
-            column_map:            monthlyColumnMap,
-            raw_summary_cells:     monthlyRawCells,
-            cumulative_detected:   cumulativeDetected,
-            chart_confidence:      monthlyChartConfidence,
-            error:                 monthlyError,
+            per_month:         perMonthDiag,
+            sum:               monthlySum,
+            chart_confidence:  monthlyChartConfidence,
+            errors:            monthlyErrors.length ? monthlyErrors : null,
           },
           invoices_summary: {
-            count_fetched:    invoicesFetched,
-            pages_fetched:    invoicesPagesFetched,
-            capped:           invoicesCapped,
+            type_filter:       'ACCREC',
+            count_fetched:     invoicesFetched,
+            pages_fetched:     invoicesPagesFetched,
+            capped:            invoicesCapped,
             outstanding_total: outstandingTotal,
-            overdue_total:    overdueTotal,
-            overdue_count:    overdueCount,
-            error:            invoicesError,
+            overdue_total:     overdueTotal,
+            overdue_count:     overdueCount,
+            overdue_sample:    overdueSample,
+            error:             invoicesError,
           },
         },
+      });
+    }
+
+    // ── overview_top_customer ─────────────────────────────────────────────────
+    // Slow, paginated fetch of all customer invoices issued YTD, aggregated by
+    // contact to find the customer who's billed the most this year. Runs as a
+    // SEPARATE action so the main overview_metrics call returns instantly and
+    // the UI can render with last-known cached value while this catches up.
+    // Hard-capped at 200 pages (20,000 invoices) to prevent runaway.
+    if (action === 'overview_top_customer') {
+      const { clientId, clientSecret } = await getXeroCreds(adminClient);
+      if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
+      const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
+      if (!refreshResult.ok) return json({ error: refreshResult.error });
+
+      const tStart = Date.now();
+      const now = new Date();
+      const year = now.getFullYear();
+      const acc  = refreshResult.accessToken!;
+      const ten  = refreshResult.tenantId!;
+
+      type ContactRef = { ContactID?: string; Name?: string };
+      type InvoiceSummary = { Type?: string; Status?: string; Contact?: ContactRef; Total?: number; Date?: string };
+
+      const MAX_PAGES = 200;
+      const where = encodeURIComponent(`Type=="ACCREC" AND Date >= DateTime(${year},01,01)`);
+      const totalsByContact = new Map<string, { name: string; total: number; invoice_count: number }>();
+      let pagesFetched = 0;
+      let invoicesSeen = 0;
+      let capped = false;
+      let error: string | null = null;
+      let grossTotal = 0;
+
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const params = `where=${where}&summaryOnly=true&page=${page}`;
+        const { status, data } = await xeroGet('/api.xro/2.0/Invoices', acc, ten, params);
+        pagesFetched = page;
+        if (status !== 200) {
+          error = `Page ${page} returned ${status}: ${JSON.stringify(data).slice(0, 200)}`;
+          break;
+        }
+        const list = ((data?.Invoices ?? []) as InvoiceSummary[]);
+        invoicesSeen += list.length;
+        for (const inv of list) {
+          if (inv.Status === 'VOIDED' || inv.Status === 'DELETED') continue;
+          const total = typeof inv.Total === 'number' ? inv.Total : Number(inv.Total) || 0;
+          if (!isFinite(total) || total <= 0) continue;
+          const cid  = inv.Contact?.ContactID;
+          const name = (inv.Contact?.Name ?? '').trim();
+          if (!cid) continue;
+          grossTotal += total;
+          const existing = totalsByContact.get(cid);
+          if (existing) {
+            existing.total += total;
+            existing.invoice_count += 1;
+            if (!existing.name && name) existing.name = name;
+          } else {
+            totalsByContact.set(cid, { name: name || '(unnamed contact)', total, invoice_count: 1 });
+          }
+        }
+        if (list.length < 100) break;
+        if (page === MAX_PAGES) capped = true;
+      }
+
+      const ranked = Array.from(totalsByContact.entries())
+        .map(([contact_id, v]) => ({ contact_id, name: v.name, total: Math.round(v.total * 100) / 100, invoice_count: v.invoice_count }))
+        .sort((a, b) => b.total - a.total);
+
+      const fetch_ms = Date.now() - tStart;
+
+      console.log('[xero-oauth] overview_top_customer:', JSON.stringify({
+        pages_fetched: pagesFetched,
+        invoices_seen: invoicesSeen,
+        contacts:      totalsByContact.size,
+        capped, fetch_ms, error,
+        top:           ranked[0] ?? null,
+      }).slice(0, 1000));
+
+      return json({
+        top_customer:         ranked[0] ?? null,
+        ytd_revenue_estimate: Math.round(grossTotal * 100) / 100,
+        top_5_for_diag:       ranked.slice(0, 5),
+        meta: {
+          pages_fetched: pagesFetched,
+          invoices_seen: invoicesSeen,
+          contacts:      totalsByContact.size,
+          capped,
+          fetch_ms,
+          error,
+        },
+        generated_at: now.toISOString(),
       });
     }
 

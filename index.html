@@ -48249,12 +48249,50 @@ if (typeof _origOpenDD === 'function') {
   // ═══════════════════════════════════════════════════════════════════════════
   // Uses Xero's report endpoints (Profit & Loss, Aged Receivables) instead of
   // pulling individual invoices — 2 small report calls vs. one big invoice list.
-  window._finOverviewMetrics = null; // session cache
+  window._finOverviewMetrics = null; // session cache for overview_metrics
+
+  // ── Top Customer YTD: separate, non-blocking, localStorage-cached ─────
+  var TOP_CUSTOMER_LS_KEY = 'lp.fin.topCustomerYtd.v1';
+  window._finTopCustomerCache    = null; // { top_customer, ytd_revenue_estimate, generated_at }
+  window._finTopCustomerInFlight = false;
+  window._finTopCustomerError    = null;
+
+  function _safeLSGet(key) { try { return localStorage.getItem(key); } catch (_) { return null; } }
+  function _safeLSSet(key, val) { try { localStorage.setItem(key, val); } catch (_) { /* ignore quota / private-mode */ } }
+
+  // Relative time with 7-day cap: <7d => "5m ago", "3h ago", "2d ago"; >7d => formatted date
+  function _relativeOrDate(iso) {
+    if (!iso) return '';
+    var t = Date.parse(iso);
+    if (isNaN(t)) return '';
+    var diff = Date.now() - t;
+    if (diff < 0) diff = 0;
+    var SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+    if (diff > SEVEN_DAYS) {
+      return new Date(t).toLocaleDateString('en-IE', { day: 'numeric', month: 'short', year: 'numeric' });
+    }
+    var mins = Math.floor(diff / 60000);
+    if (mins < 1)  return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hrs  = Math.floor(mins / 60);
+    if (hrs < 24)  return hrs + 'h ago';
+    var days = Math.floor(hrs / 24);
+    return days + 'd ago';
+  }
 
   window.loadFinOverview = async function() {
     var body = document.getElementById('fin-overview-body');
     if (!body) return;
     body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading overview from Xero reports…</div>';
+
+    // Hydrate top-customer cache from localStorage so the card can render instantly.
+    if (!window._finTopCustomerCache) {
+      var cached = _safeLSGet(TOP_CUSTOMER_LS_KEY);
+      if (cached) {
+        try { window._finTopCustomerCache = JSON.parse(cached); }
+        catch (_) { /* corrupted cache, ignore */ }
+      }
+    }
 
     var metrics = window._finOverviewMetrics;
     if (!metrics) {
@@ -48276,6 +48314,10 @@ if (typeof _origOpenDD === 'function') {
     } catch(e) { /* ignore */ }
 
     _renderFinOverview(body, metrics, stockValue);
+
+    // Kick off the slow Top Customer fetch in the background; the card was
+    // already rendered with cached/skeleton state above.
+    window._finLoadTopCustomerBg();
   };
 
   // Compact currency formatter for chart axis labels: €1.4M / €125K / €850 / €0
@@ -48335,10 +48377,14 @@ if (typeof _origOpenDD === 'function') {
 
     // ── KPI cards ─────────────────────────────────────────────────────────
     var overdueCount = m.overdue_count || 0;
+    // Shared card style: min-width:0 lets the grid actually shrink narrow cards
+    // (otherwise wide content forces overflow). min-height keeps the row height
+    // stable when Top Customer transitions skeleton → data → error.
+    var CARD_STYLE = 'padding:14px 16px;min-width:0;min-height:110px;';
 
     // Sales This Year (with YoY)
     var ytdCardHtml =
-        '<div class="card" style="padding:14px 16px;">'
+        '<div class="card" style="' + CARD_STYLE + '">'
       + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Sales This Year</div>'
       + '<div style="display:flex;align-items:baseline;flex-wrap:wrap;">'
       +   '<span style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.ytd_revenue, 'EUR')) + '</span>'
@@ -48353,7 +48399,7 @@ if (typeof _origOpenDD === 'function') {
 
     // Last Month Sales (with YoY)
     var lmCardHtml =
-        '<div class="card" style="padding:14px 16px;">'
+        '<div class="card" style="' + CARD_STYLE + '">'
       + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Last Month Sales</div>'
       + '<div style="display:flex;align-items:baseline;flex-wrap:wrap;">'
       +   '<span style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.last_month_revenue, 'EUR')) + '</span>'
@@ -48367,9 +48413,17 @@ if (typeof _origOpenDD === 'function') {
       + '</div>'
       + '</div>';
 
+    // Stock Value
+    var stockCardHtml =
+        '<div class="card" style="' + CARD_STYLE + '">'
+      + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Stock Value</div>'
+      + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(stockValue, 'EUR')) + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Total stock value on hand</div>'
+      + '</div>';
+
     // Owed to You (Outstanding AR)
     var owedCardHtml =
-        '<div class="card" style="padding:14px 16px;">'
+        '<div class="card" style="' + CARD_STYLE + '">'
       + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Owed to You</div>'
       + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.outstanding_total, 'EUR')) + '</div>'
       + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Total of all unpaid invoices (includes not-yet-due)</div>'
@@ -48382,23 +48436,22 @@ if (typeof _origOpenDD === 'function') {
       : overdueCount + ' invoice' + (overdueCount === 1 ? '' : 's') + ' past due date — click to chase';
     var overdueCardHtml =
         '<div class="card" onclick="window._finOpenOverdueChase()" '
-      + 'style="padding:14px 16px;cursor:' + (overdueCount > 0 ? 'pointer' : 'default') + ';" '
+      + 'style="' + CARD_STYLE + 'cursor:' + (overdueCount > 0 ? 'pointer' : 'default') + ';" '
       + 'title="' + (overdueCount > 0 ? 'Open Invoices tab with Overdue filter' : '') + '">'
       + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Overdue — Chase These</div>'
       + '<div style="font-size:22px;font-weight:800;color:' + overdueAccent + ';font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.overdue_total, 'EUR')) + '</div>'
       + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">' + _esc(overdueSub) + '</div>'
       + '</div>';
 
-    // Stock Value
-    var stockCardHtml =
-        '<div class="card" style="padding:14px 16px;">'
-      + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Stock Value</div>'
-      + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(stockValue, 'EUR')) + '</div>'
-      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Total stock value on hand</div>'
-      + '</div>';
+    // Top Customer YTD — initial render from cache or skeleton.
+    // The wrapping div has id=fin-top-customer-card so background fetch can swap it in place.
+    var topCustomerCardHtml = _renderTopCustomerCardHtml(_computeTopCustomerState());
 
-    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-bottom:18px;">';
-    html += ytdCardHtml + lmCardHtml + owedCardHtml + overdueCardHtml + stockCardHtml;
+    // Responsive 3-up grid: 3 cols >=900px, 2 cols 600-900px, 1 col below (from one rule).
+    // Order: row 1 = Sales This Year / Last Month Sales / Stock Value
+    //        row 2 = Owed to You / Overdue / Top Customer YTD
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:14px;margin-bottom:18px;">';
+    html += ytdCardHtml + lmCardHtml + stockCardHtml + owedCardHtml + overdueCardHtml + topCustomerCardHtml;
     html += '</div>';
 
     // Monthly chart — with low-confidence banner if cells didn't reconcile
@@ -48431,7 +48484,136 @@ if (typeof _origOpenDD === 'function') {
 
   window._finRefreshOverview = function() {
     window._finOverviewMetrics = null;
+    // Also clear the top-customer error so a manual retry re-attempts the fetch.
+    window._finTopCustomerError = null;
     window.loadFinOverview();
+  };
+
+  // ── Top Customer card: state machine + renderer + background fetcher ──
+
+  // Derive the current card state from cache + in-flight + error globals.
+  // States: cached, fresh, cached-refreshing, no-cache-loading, empty,
+  //         error-with-cache, error-no-cache
+  function _computeTopCustomerState() {
+    var cache    = window._finTopCustomerCache;     // { top_customer, ytd_revenue_estimate, generated_at } | null
+    var inFlight = !!window._finTopCustomerInFlight;
+    var error    = window._finTopCustomerError;
+    var metrics  = window._finOverviewMetrics || {};
+    var ytdRev   = metrics.ytd_revenue || 0;
+
+    if (!cache && inFlight) return { kind: 'no-cache-loading' };
+    if (!cache && error)    return { kind: 'error-no-cache', error: error };
+    if (!cache)             return { kind: 'no-cache-loading' }; // first paint before bg fetch fires
+
+    var data       = cache.top_customer;
+    var generated  = cache.generated_at;
+    var ytdEst     = cache.ytd_revenue_estimate || 0;
+    var ytdForPct  = ytdEst > 0 ? ytdEst : ytdRev;
+
+    if (!data) return { kind: 'empty', generated_at: generated, refreshing: inFlight };
+    if (error) return { kind: 'error-with-cache', data: data, generated_at: generated, error: error, ytdForPct: ytdForPct };
+    if (inFlight) return { kind: 'cached-refreshing', data: data, generated_at: generated, ytdForPct: ytdForPct };
+    return { kind: 'fresh', data: data, generated_at: generated, ytdForPct: ytdForPct };
+  }
+
+  function _renderTopCustomerCardHtml(state) {
+    var CARD_STYLE = 'padding:14px 16px;min-width:0;min-height:110px;';
+    var WRAP = function(inner) {
+      return '<div id="fin-top-customer-card" class="card" style="' + CARD_STYLE + 'position:relative;">'
+           + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Top Customer YTD</div>'
+           + inner
+           + '</div>';
+    };
+
+    if (state.kind === 'no-cache-loading') {
+      return WRAP(
+          '<div style="font-size:14px;color:var(--muted);font-weight:600;margin-top:6px;">Loading…</div>'
+        + '<div style="font-size:11px;color:var(--muted);margin-top:6px;">First refresh can take 30s+ for large Xero accounts.</div>'
+      );
+    }
+
+    if (state.kind === 'error-no-cache') {
+      return WRAP(
+          '<div style="font-size:14px;color:var(--red);font-weight:600;margin-top:6px;">Couldn\'t load</div>'
+        + '<div style="font-size:11px;color:var(--muted);margin-top:6px;">'
+        +   _esc((state.error || '').slice(0, 80))
+        +   ' · <a onclick="window._finLoadTopCustomerBg(true)" style="color:var(--gold);text-decoration:underline;cursor:pointer;">retry</a>'
+        + '</div>'
+      );
+    }
+
+    if (state.kind === 'empty') {
+      return WRAP(
+          '<div style="font-size:14px;color:var(--muted);font-weight:600;margin-top:6px;">No customer invoices this year</div>'
+        + '<div style="font-size:11px;color:var(--muted);margin-top:6px;">Updated ' + _esc(_relativeOrDate(state.generated_at)) + '</div>'
+      );
+    }
+
+    // States with data: fresh / cached-refreshing / error-with-cache
+    var d = state.data;
+    var ytdForPct = state.ytdForPct || 0;
+    var pct = ytdForPct > 0 ? Math.round((d.total / ytdForPct) * 100 * 10) / 10 : null;
+    var subParts = [d.invoice_count + ' invoice' + (d.invoice_count === 1 ? '' : 's')];
+    if (pct != null && isFinite(pct)) subParts.push(pct.toFixed(1) + '% of YTD');
+    var sub = subParts.join(' · ');
+
+    var refreshingBadge = state.kind === 'cached-refreshing'
+      ? '<span style="position:absolute;top:10px;right:12px;font-size:10px;color:var(--muted);background:rgba(255,255,255,0.06);padding:2px 7px;border-radius:10px;">Refreshing…</span>'
+      : '';
+
+    var errorTail = state.kind === 'error-with-cache'
+      ? ' · <span style="color:var(--amber);">couldn\'t refresh</span>'
+      : '';
+
+    var fullName = _esc(d.name || '(unnamed contact)');
+
+    return '<div id="fin-top-customer-card" class="card" style="' + CARD_STYLE + 'position:relative;">'
+         + refreshingBadge
+         + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Top Customer YTD</div>'
+         + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(d.total, 'EUR')) + '</div>'
+         + '<div title="' + fullName + '" style="font-size:12px;color:var(--white);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + fullName + '</div>'
+         + '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + _esc(sub)
+         +   ' <span style="opacity:0.6;">· updated ' + _esc(_relativeOrDate(state.generated_at)) + '</span>'
+         +   errorTail
+         + '</div>'
+         + '</div>';
+  }
+
+  // Replace just the Top Customer card in-place. No-op if the user has navigated
+  // away from the overview tab (card no longer in DOM).
+  function _maybeUpdateTopCustomerCard() {
+    var card = document.getElementById('fin-top-customer-card');
+    if (!card) return;
+    var html = _renderTopCustomerCardHtml(_computeTopCustomerState());
+    // outerHTML replacement preserves the surrounding grid layout.
+    card.outerHTML = html;
+  }
+
+  // Background fetch — caches result in localStorage and re-renders just the card.
+  // Dedupes via _finTopCustomerInFlight flag so repeated Refresh clicks don't pile up.
+  window._finLoadTopCustomerBg = async function(forceRetry) {
+    if (window._finTopCustomerInFlight) return;
+    // If we previously failed and the user wants to retry, clear the error first.
+    if (forceRetry) window._finTopCustomerError = null;
+    window._finTopCustomerInFlight = true;
+    _maybeUpdateTopCustomerCard(); // show "Refreshing…" overlay
+    try {
+      var resp = await callXeroEF({ action: 'overview_top_customer' }, 120000);
+      var payload = {
+        top_customer:         resp.top_customer || null,
+        ytd_revenue_estimate: resp.ytd_revenue_estimate || 0,
+        generated_at:         resp.generated_at || new Date().toISOString()
+      };
+      window._finTopCustomerCache = payload;
+      window._finTopCustomerError = null;
+      _safeLSSet(TOP_CUSTOMER_LS_KEY, JSON.stringify(payload));
+    } catch (e) {
+      window._finTopCustomerError = (e && e.message) ? e.message : String(e);
+      console.error('[finance] overview_top_customer failed:', e);
+    } finally {
+      window._finTopCustomerInFlight = false;
+      _maybeUpdateTopCustomerCard();
+    }
   };
 
   window._finToggleDiag = function() {
