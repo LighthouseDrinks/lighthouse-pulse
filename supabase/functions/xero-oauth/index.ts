@@ -618,41 +618,104 @@ Deno.serve(async (req: Request) => {
       const yearEnd  = `${year}-12-31`;
 
       // ── 1) P&L — monthly columns Jan..Dec of current year ───────────────
-      // toDate=YYYY-12-31, periods=11, timeframe=MONTH → 12 monthly columns
-      // The header row gives the period labels; the Income section's SummaryRow
-      // gives the totals.
+      // toDate=YYYY-12-31, periods=11, timeframe=MONTH → 12 monthly columns.
+      // NOTE: Xero often appends a final "Total" column to monthly P&L reports.
+      // We use the Header row to identify which columns are actual months vs
+      // the grand-total column, so we never double-count.
       const plParams = `toDate=${yearEnd}&periods=11&timeframe=MONTH`;
       const { status: plStatus, data: plData } = await xeroGet(
         '/api.xro/2.0/Reports/ProfitAndLoss', refreshResult.accessToken!, refreshResult.tenantId!, plParams,
       );
       if (plStatus !== 200) return err(`Xero P&L API error ${plStatus}: ${JSON.stringify(plData).slice(0,200)}`, 400);
 
-      // Parse the report
       const plReport = ((plData?.Reports ?? []) as Array<Record<string, unknown>>)[0];
       const plRows   = ((plReport?.Rows ?? []) as Array<Record<string, unknown>>);
 
-      // Headers row — first cell is label, rest are period labels e.g. "Jan 2026"
-      const headerRow = plRows.find((r) => r.RowType === 'Header');
+      // Headers row — first cell is label, remaining are period labels.
+      // Examples seen: "Apr 2026", "Apr-26", "1 Apr 2026 - 30 Apr 2026", "Total"
+      const headerRow   = plRows.find((r) => r.RowType === 'Header');
       const headerCells = ((headerRow?.Cells ?? []) as Array<Record<string, unknown>>);
-      const monthLabels = headerCells.slice(1).map((c) => String(c.Value ?? ''));
 
-      // Find Income section and its SummaryRow ("Total Income")
-      const incomeSection = plRows.find((r) => r.RowType === 'Section' && (r.Title === 'Income' || r.Title === 'Revenue'));
+      const MONTH_MAP: Record<string, string> = {
+        jan: '01', january:  '01',
+        feb: '02', february: '02',
+        mar: '03', march:    '03',
+        apr: '04', april:    '04',
+        may: '05',
+        jun: '06', june:     '06',
+        jul: '07', july:     '07',
+        aug: '08', august:   '08',
+        sep: '09', sept: '09', september: '09',
+        oct: '10', october:  '10',
+        nov: '11', november: '11',
+        dec: '12', december: '12',
+      };
+      // For each header cell, decide whether it maps to a YYYY-MM key or should
+      // be skipped (label column / grand-total column / unrecognised).
+      const columnMonths: (string | null)[] = headerCells.map((c, i) => {
+        if (i === 0) return null;                                 // row-label column
+        const raw = String(c.Value ?? '').trim();
+        if (!raw || /total/i.test(raw)) return null;              // grand total
+        // Match "Apr 2026", "Apr-26", "April 2026", "1 Apr 2026 - 30 Apr 2026"
+        const m = raw.match(/(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*[-\s]\s*(\d{2}|\d{4})/i);
+        if (!m) return null;
+        const mm = MONTH_MAP[m[1].toLowerCase()];
+        if (!mm) return null;
+        const yy = m[2].length === 2 ? `20${m[2]}` : m[2];
+        return `${yy}-${mm}`;
+      });
+
+      // Find Income section and its SummaryRow ("Total Income"). Defensive: we
+      // also fall back to "Trading Income" and "Revenue" which some chart-of-
+      // accounts variants use.
+      const incomeSection = plRows.find((r) =>
+        r.RowType === 'Section' &&
+        (r.Title === 'Income' || r.Title === 'Revenue' || r.Title === 'Trading Income')
+      );
       const incomeRows    = ((incomeSection?.Rows ?? []) as Array<Record<string, unknown>>);
       const totalRow      = incomeRows.find((r) => r.RowType === 'SummaryRow');
       const totalCells    = ((totalRow?.Cells ?? []) as Array<Record<string, unknown>>);
-      const monthlyValues = totalCells.slice(1).map((c) => Number(c.Value ?? 0));
 
-      // Build monthly object keyed by YYYY-MM for the chart
+      // Build monthly object keyed by YYYY-MM using ONLY the columns that the
+      // Header identified as real months (skips the grand-total column).
       const monthly: Record<string, number> = {};
+      // Pre-fill all 12 months of the current year with 0 so the chart has a
+      // consistent shape even if Xero only returns past months.
       for (let i = 0; i < 12; i++) {
-        const key = `${year}-${String(i + 1).padStart(2, '0')}`;
-        monthly[key] = monthlyValues[i] ?? 0;
+        monthly[`${year}-${String(i + 1).padStart(2, '0')}`] = 0;
       }
+      totalCells.forEach((c, i) => {
+        const key = columnMonths[i];
+        if (!key) return;
+        const val = Number(c.Value ?? 0);
+        if (Number.isFinite(val)) monthly[key] = val;
+      });
 
-      const ytdRevenue       = monthlyValues.reduce((s, n) => s + (Number.isFinite(n) ? n : 0), 0);
-      const lastMonthIdx     = month - 1; // 0-based; if January, this is -1 → use Dec last year? No — show 0 to keep current-year semantics
-      const lastMonthRevenue = lastMonthIdx >= 0 ? (monthlyValues[lastMonthIdx] ?? 0) : 0;
+      // YTD = sum of monthly values for the current year (no double-count).
+      const ytdRevenue = Object.entries(monthly)
+        .filter(([k]) => k.startsWith(`${year}-`))
+        .reduce((s, [, v]) => s + v, 0);
+
+      // Last month: previous calendar month. getMonth() is 0-indexed for the
+      // current month, which conveniently equals the 1-indexed previous month.
+      const lastMonthIdx     = month; // e.g. May (month=4) → "04" = April
+      const lastMonthKey     = lastMonthIdx >= 1
+        ? `${year}-${String(lastMonthIdx).padStart(2, '0')}`
+        : null;
+      const lastMonthRevenue = lastMonthKey ? (monthly[lastMonthKey] ?? 0) : 0;
+      const lastMonthLabel   = lastMonthKey
+        ? new Date(year, lastMonthIdx - 1, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' })
+        : null;
+
+      console.log('[xero-oauth] overview_metrics P&L parsed:', JSON.stringify({
+        headers:        headerCells.map((c) => c.Value),
+        columnMonths,
+        totalCellsLen:  totalCells.length,
+        monthly,
+        ytdRevenue,
+        lastMonthKey,
+        lastMonthRevenue,
+      }).slice(0, 1500));
 
       // ── 2) Aged Receivables — outstanding + overdue ─────────────────────
       // Some Xero accounts return this endpoint slowly or not at all (depending
@@ -712,7 +775,7 @@ Deno.serve(async (req: Request) => {
       return json({
         ytd_revenue:        ytdRevenue,
         last_month_revenue: lastMonthRevenue,
-        last_month_label:   lastMonthIdx >= 0 ? monthLabels[lastMonthIdx] : null,
+        last_month_label:   lastMonthLabel,
         monthly,
         outstanding_total: outstandingTotal,
         overdue_total:     overdueTotal,
