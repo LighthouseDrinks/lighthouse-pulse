@@ -606,6 +606,7 @@ Deno.serve(async (req: Request) => {
     //     generated_at:      iso string
     //   }
     if (action === 'overview_metrics') {
+      const EF_VERSION = '2026-05-17-ytd-fix';
       const { clientId, clientSecret } = await getXeroCreds(adminClient);
       if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
       const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
@@ -615,89 +616,212 @@ Deno.serve(async (req: Request) => {
       const year     = now.getFullYear();
       const month    = now.getMonth(); // 0-11
       const today    = now.toISOString().split('T')[0];
-      const yearEnd  = `${year}-12-31`;
+      const yearStart = `${year}-01-01`;
+      const yearEnd   = `${year}-12-31`;
 
-      // ── 1) P&L — monthly columns Jan..Dec of current year ───────────────
-      // toDate=YYYY-12-31, periods=11, timeframe=MONTH → 12 monthly columns.
-      // NOTE: Xero often appends a final "Total" column to monthly P&L reports.
-      // We use the Header row to identify which columns are actual months vs
-      // the grand-total column, so we never double-count.
-      const plParams = `toDate=${yearEnd}&periods=11&timeframe=MONTH`;
-      const { status: plStatus, data: plData } = await xeroGet(
-        '/api.xro/2.0/Reports/ProfitAndLoss', refreshResult.accessToken!, refreshResult.tenantId!, plParams,
-      );
-      if (plStatus !== 200) return err(`Xero P&L API error ${plStatus}: ${JSON.stringify(plData).slice(0,200)}`, 400);
-
-      const plReport = ((plData?.Reports ?? []) as Array<Record<string, unknown>>)[0];
-      const plRows   = ((plReport?.Rows ?? []) as Array<Record<string, unknown>>);
-
-      // Headers row — first cell is label, remaining are period labels.
-      // Examples seen: "Apr 2026", "Apr-26", "1 Apr 2026 - 30 Apr 2026", "Total"
-      const headerRow   = plRows.find((r) => r.RowType === 'Header');
-      const headerCells = ((headerRow?.Cells ?? []) as Array<Record<string, unknown>>);
-
-      const MONTH_MAP: Record<string, string> = {
-        jan: '01', january:  '01',
-        feb: '02', february: '02',
-        mar: '03', march:    '03',
-        apr: '04', april:    '04',
-        may: '05',
-        jun: '06', june:     '06',
-        jul: '07', july:     '07',
-        aug: '08', august:   '08',
-        sep: '09', sept: '09', september: '09',
-        oct: '10', october:  '10',
-        nov: '11', november: '11',
-        dec: '12', december: '12',
+      // Robust string→number parser. Xero sometimes returns "1,234.56" or
+      // "(1234.56)" (parens = negative). Returns 0 on parse failure.
+      const parseNum = (raw: unknown): number => {
+        if (raw == null) return 0;
+        let s = String(raw).trim();
+        if (!s) return 0;
+        const neg = s.startsWith('(') && s.endsWith(')');
+        if (neg) s = s.slice(1, -1);
+        s = s.replace(/,/g, '').replace(/\s/g, '');
+        const n = Number(s);
+        if (!Number.isFinite(n)) return 0;
+        return neg ? -n : n;
       };
-      // For each header cell, decide whether it maps to a YYYY-MM key or should
-      // be skipped (label column / grand-total column / unrecognised).
-      const columnMonths: (string | null)[] = headerCells.map((c, i) => {
-        if (i === 0) return null;                                 // row-label column
-        const raw = String(c.Value ?? '').trim();
-        if (!raw || /total/i.test(raw)) return null;              // grand total
-        // Match "Apr 2026", "Apr-26", "April 2026", "1 Apr 2026 - 30 Apr 2026"
-        const m = raw.match(/(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*[-\s]\s*(\d{2}|\d{4})/i);
-        if (!m) return null;
-        const mm = MONTH_MAP[m[1].toLowerCase()];
-        if (!mm) return null;
-        const yy = m[2].length === 2 ? `20${m[2]}` : m[2];
-        return `${yy}-${mm}`;
-      });
 
-      // Find Income section and its SummaryRow ("Total Income"). Defensive: we
-      // also fall back to "Trading Income" and "Revenue" which some chart-of-
-      // accounts variants use.
-      const incomeSection = plRows.find((r) =>
-        r.RowType === 'Section' &&
-        (r.Title === 'Income' || r.Title === 'Revenue' || r.Title === 'Trading Income')
-      );
-      const incomeRows    = ((incomeSection?.Rows ?? []) as Array<Record<string, unknown>>);
-      const totalRow      = incomeRows.find((r) => r.RowType === 'SummaryRow');
-      const totalCells    = ((totalRow?.Cells ?? []) as Array<Record<string, unknown>>);
+      // ── Run all 3 Xero calls in parallel ──────────────────────────────
+      // Token is shared (already refreshed above); each call is independent.
+      const acc = refreshResult.accessToken!;
+      const ten = refreshResult.tenantId!;
+      const [ytdRes, monthlyRes, arRes] = await Promise.allSettled([
+        xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, `fromDate=${yearStart}&toDate=${today}`),
+        xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, `toDate=${yearEnd}&periods=11&timeframe=MONTH`),
+        xeroGet('/api.xro/2.0/Reports/AgedReceivablesByContact', acc, ten, `date=${today}`),
+      ]);
 
-      // Build monthly object keyed by YYYY-MM using ONLY the columns that the
-      // Header identified as real months (skips the grand-total column).
-      const monthly: Record<string, number> = {};
-      // Pre-fill all 12 months of the current year with 0 so the chart has a
-      // consistent shape even if Xero only returns past months.
-      for (let i = 0; i < 12; i++) {
-        monthly[`${year}-${String(i + 1).padStart(2, '0')}`] = 0;
+      // ── 1) YTD figure — dedicated single-period P&L call ─────────────
+      // Single-period P&L returns exactly 2 cell columns per row: [label, value].
+      // We let Xero do the maths — no client-side summing of monthly cells.
+      let ytdRevenue = 0;
+      let plYtdSectionTitleMatched: string | null = null;
+      let plYtdMatchedVia: 'A_section' | 'B_summary_label' | 'C_fuzzy' | 'none' = 'none';
+      let plYtdSummaryLabel: string | null = null;
+      let plYtdValueRaw: string | null = null;
+      let plYtdSectionAccountLines: Array<{ label: string; value: number }> = [];
+      let plSectionTitles: string[] = [];
+      let plYtdError: string | null = null;
+
+      if (ytdRes.status === 'fulfilled') {
+        const { status: s, data: d } = ytdRes.value;
+        if (s === 200) {
+          const rpt  = ((d?.Reports ?? []) as Array<Record<string, unknown>>)[0];
+          const rows = ((rpt?.Rows ?? []) as Array<Record<string, unknown>>);
+
+          // Collect top-level section titles for diagnostic visibility
+          plSectionTitles = rows
+            .filter((r) => r.RowType === 'Section')
+            .map((r) => String(r.Title ?? ''))
+            .filter(Boolean);
+
+          // Section title matcher (case-insensitive)
+          const SECTION_RE = /^(income|trading income|sales|revenue|turnover|operating income)$/i;
+          // SummaryRow label matcher
+          const SUMMARY_RE = /^total\s+(income|sales|revenue|turnover|trading income|operating income)$/i;
+
+          // Helper to extract row's account label + value (value = Cells[1])
+          const rowLabelValue = (r: Record<string, unknown>): { label: string; value: number } => {
+            const cells = ((r.Cells ?? []) as Array<Record<string, unknown>>);
+            return {
+              label: String(cells[0]?.Value ?? '').trim(),
+              value: parseNum(cells[1]?.Value),
+            };
+          };
+
+          // Priority A: top-level Section with matching Title → direct-child SummaryRow
+          let pickedSummary: Record<string, unknown> | null = null;
+          for (const r of rows) {
+            if (r.RowType !== 'Section') continue;
+            const title = String(r.Title ?? '');
+            if (!SECTION_RE.test(title)) continue;
+            const childRows = ((r.Rows ?? []) as Array<Record<string, unknown>>);
+            const summary = childRows.find((cr) => cr.RowType === 'SummaryRow');
+            if (summary) {
+              plYtdSectionTitleMatched = title;
+              plYtdMatchedVia = 'A_section';
+              pickedSummary = summary;
+              // Capture every leaf Row (account line) inside this section for diagnostic
+              plYtdSectionAccountLines = childRows
+                .filter((cr) => cr.RowType === 'Row')
+                .map(rowLabelValue);
+              break;
+            }
+          }
+
+          // Priority B: scan ALL SummaryRows in the report (top-level + nested) for matching label
+          if (!pickedSummary) {
+            const allSummaries: Array<{ row: Record<string, unknown>; sectionTitle: string | null }> = [];
+            const collect = (rs: Array<Record<string, unknown>>, parentTitle: string | null) => {
+              for (const r of rs) {
+                if (r.RowType === 'SummaryRow') allSummaries.push({ row: r, sectionTitle: parentTitle });
+                if (Array.isArray(r.Rows)) collect(r.Rows as Array<Record<string, unknown>>, String(r.Title ?? parentTitle ?? ''));
+              }
+            };
+            collect(rows, null);
+            const hit = allSummaries.find(({ row }) => {
+              const label = String(((row.Cells ?? []) as Array<Record<string, unknown>>)[0]?.Value ?? '').trim();
+              return SUMMARY_RE.test(label);
+            });
+            if (hit) {
+              pickedSummary = hit.row;
+              plYtdMatchedVia = 'B_summary_label';
+              plYtdSectionTitleMatched = hit.sectionTitle;
+            }
+          }
+
+          // Priority C: fuzzy — any SummaryRow whose label starts with "Total Income"
+          if (!pickedSummary) {
+            const collectAll = (rs: Array<Record<string, unknown>>): Array<Record<string, unknown>> => {
+              const out: Array<Record<string, unknown>> = [];
+              for (const r of rs) {
+                if (r.RowType === 'SummaryRow') out.push(r);
+                if (Array.isArray(r.Rows)) out.push(...collectAll(r.Rows as Array<Record<string, unknown>>));
+              }
+              return out;
+            };
+            const all = collectAll(rows);
+            const hit = all.find((r) => {
+              const label = String(((r.Cells ?? []) as Array<Record<string, unknown>>)[0]?.Value ?? '').trim();
+              return /^total\s+income/i.test(label);
+            });
+            if (hit) {
+              pickedSummary = hit;
+              plYtdMatchedVia = 'C_fuzzy';
+            }
+          }
+
+          if (pickedSummary) {
+            const cells = ((pickedSummary.Cells ?? []) as Array<Record<string, unknown>>);
+            plYtdSummaryLabel = String(cells[0]?.Value ?? '').trim();
+            plYtdValueRaw     = cells[1]?.Value == null ? null : String(cells[1].Value);
+            ytdRevenue        = parseNum(cells[1]?.Value);
+          } else {
+            plYtdError = 'No matching Income SummaryRow found';
+          }
+        } else {
+          plYtdError = `Xero P&L (YTD) returned ${s}: ${JSON.stringify(d).slice(0, 200)}`;
+        }
+      } else {
+        plYtdError = `Xero P&L (YTD) call failed: ${String(ytdRes.reason).slice(0, 200)}`;
       }
-      totalCells.forEach((c, i) => {
-        const key = columnMonths[i];
-        if (!key) return;
-        const val = Number(c.Value ?? 0);
-        if (Number.isFinite(val)) monthly[key] = val;
-      });
 
-      // YTD = sum of monthly values for the current year (no double-count).
-      const ytdRevenue = Object.entries(monthly)
-        .filter(([k]) => k.startsWith(`${year}-`))
-        .reduce((s, [, v]) => s + v, 0);
+      // ── 2) Monthly chart + last-month KPI ─────────────────────────────
+      // Uses the periods=11&timeframe=MONTH call. We DO NOT compute YTD from
+      // this — it's used purely for the monthly chart and last-month KPI.
+      const monthly: Record<string, number> = {};
+      for (let i = 0; i < 12; i++) monthly[`${year}-${String(i + 1).padStart(2, '0')}`] = 0;
 
-      // Last month: previous calendar month. getMonth() is 0-indexed for the
-      // current month, which conveniently equals the 1-indexed previous month.
+      let monthlyHeaders: string[] = [];
+      let monthlyColumnMap: Array<string | null> = [];
+      let monthlySummaryCells: Array<string | null> = [];
+      let monthlyError: string | null = null;
+
+      if (monthlyRes.status === 'fulfilled') {
+        const { status: s, data: d } = monthlyRes.value;
+        if (s === 200) {
+          const rpt    = ((d?.Reports ?? []) as Array<Record<string, unknown>>)[0];
+          const mRows  = ((rpt?.Rows ?? []) as Array<Record<string, unknown>>);
+          const hdrRow = mRows.find((r) => r.RowType === 'Header');
+          const hdrCells = ((hdrRow?.Cells ?? []) as Array<Record<string, unknown>>);
+          monthlyHeaders = hdrCells.map((c) => String(c.Value ?? ''));
+
+          const MONTH_MAP: Record<string, string> = {
+            jan: '01', january: '01', feb: '02', february: '02',
+            mar: '03', march:   '03', apr: '04', april:    '04',
+            may: '05',                jun: '06', june:     '06',
+            jul: '07', july:    '07', aug: '08', august:   '08',
+            sep: '09', sept:    '09', september: '09',
+            oct: '10', october: '10', nov: '11', november: '11',
+            dec: '12', december:'12',
+          };
+          monthlyColumnMap = hdrCells.map((c, i) => {
+            if (i === 0) return null;
+            const raw = String(c.Value ?? '').trim();
+            if (!raw || /total/i.test(raw)) return null;
+            const m = raw.match(/(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*[-\s]\s*(\d{2}|\d{4})/i);
+            if (!m) return null;
+            const mm = MONTH_MAP[m[1].toLowerCase()];
+            if (!mm) return null;
+            const yy = m[2].length === 2 ? `20${m[2]}` : m[2];
+            return `${yy}-${mm}`;
+          });
+
+          // Find Income section's direct-child SummaryRow (mirror the Priority A logic)
+          const SECTION_RE = /^(income|trading income|sales|revenue|turnover|operating income)$/i;
+          const incomeSec = mRows.find((r) =>
+            r.RowType === 'Section' && SECTION_RE.test(String(r.Title ?? ''))
+          );
+          const incomeChildren = ((incomeSec?.Rows ?? []) as Array<Record<string, unknown>>);
+          const summaryRow = incomeChildren.find((r) => r.RowType === 'SummaryRow');
+          const summaryCells = ((summaryRow?.Cells ?? []) as Array<Record<string, unknown>>);
+          monthlySummaryCells = summaryCells.map((c) => c.Value == null ? null : String(c.Value));
+
+          summaryCells.forEach((c, i) => {
+            const key = monthlyColumnMap[i];
+            if (!key) return;
+            monthly[key] = parseNum(c.Value);
+          });
+        } else {
+          monthlyError = `Xero P&L (monthly) returned ${s}: ${JSON.stringify(d).slice(0, 200)}`;
+        }
+      } else {
+        monthlyError = `Xero P&L (monthly) call failed: ${String(monthlyRes.reason).slice(0, 200)}`;
+      }
+
+      // Last month: previous calendar month
       const lastMonthIdx     = month; // e.g. May (month=4) → "04" = April
       const lastMonthKey     = lastMonthIdx >= 1
         ? `${year}-${String(lastMonthIdx).padStart(2, '0')}`
@@ -707,70 +831,60 @@ Deno.serve(async (req: Request) => {
         ? new Date(year, lastMonthIdx - 1, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' })
         : null;
 
-      console.log('[xero-oauth] overview_metrics P&L parsed:', JSON.stringify({
-        headers:        headerCells.map((c) => c.Value),
-        columnMonths,
-        totalCellsLen:  totalCells.length,
-        monthly,
-        ytdRevenue,
-        lastMonthKey,
-        lastMonthRevenue,
-      }).slice(0, 1500));
-
-      // ── 2) Aged Receivables — outstanding + overdue ─────────────────────
-      // Some Xero accounts return this endpoint slowly or not at all (depending
-      // on chart of accounts setup). We make it best-effort so the Overview
-      // still renders if it fails.
+      // ── 3) Aged Receivables — outstanding + overdue ─────────────────────
       let outstandingTotal = 0;
       let overdueTotal     = 0;
       let overdueCount     = 0;
-      try {
-        const arParams = `date=${today}`;
-        const { status: arStatus, data: arData } = await xeroGet(
-          '/api.xro/2.0/Reports/AgedReceivablesByContact', refreshResult.accessToken!, refreshResult.tenantId!, arParams,
-        );
-        if (arStatus === 200) {
-          const arReport = ((arData?.Reports ?? []) as Array<Record<string, unknown>>)[0];
-          const arRows   = ((arReport?.Rows ?? []) as Array<Record<string, unknown>>);
+      let arError: string | null = null;
 
-          // Total row is a Section with a SummaryRow. Cells (in order):
-          //   [Label, Current, 1-30, 31-60, 61-90, Older, Total]
-          // We walk all rows looking for a SummaryRow with 7 cells.
-          function walk(rows: Array<Record<string, unknown>>) {
-            for (const r of rows) {
+      if (arRes.status === 'fulfilled') {
+        const { status: s, data: d } = arRes.value;
+        if (s === 200) {
+          const arReport = ((d?.Reports ?? []) as Array<Record<string, unknown>>)[0];
+          const arRows   = ((arReport?.Rows ?? []) as Array<Record<string, unknown>>);
+          // Total row: SummaryRow with cells [Label, Current, 1-30, 31-60, 61-90, Older, Total]
+          const walk = (rs: Array<Record<string, unknown>>) => {
+            for (const r of rs) {
               if (r.RowType === 'SummaryRow') {
                 const cells = ((r.Cells ?? []) as Array<Record<string, unknown>>);
                 if (cells.length >= 7) {
-                  // Last cell is total. Buckets 2..5 are overdue (1-30, 31-60, 61-90, 90+).
-                  outstandingTotal = Number(cells[6]?.Value ?? 0);
+                  outstandingTotal = parseNum(cells[6]?.Value);
                   overdueTotal =
-                      Number(cells[2]?.Value ?? 0)
-                    + Number(cells[3]?.Value ?? 0)
-                    + Number(cells[4]?.Value ?? 0)
-                    + Number(cells[5]?.Value ?? 0);
+                      parseNum(cells[2]?.Value)
+                    + parseNum(cells[3]?.Value)
+                    + parseNum(cells[4]?.Value)
+                    + parseNum(cells[5]?.Value);
                 }
               }
               if (r.RowType === 'Row') {
                 const cells = ((r.Cells ?? []) as Array<Record<string, unknown>>);
                 if (cells.length >= 7) {
                   const buckets =
-                      Number(cells[2]?.Value ?? 0)
-                    + Number(cells[3]?.Value ?? 0)
-                    + Number(cells[4]?.Value ?? 0)
-                    + Number(cells[5]?.Value ?? 0);
+                      parseNum(cells[2]?.Value)
+                    + parseNum(cells[3]?.Value)
+                    + parseNum(cells[4]?.Value)
+                    + parseNum(cells[5]?.Value);
                   if (buckets > 0) overdueCount++;
                 }
               }
               if (Array.isArray(r.Rows)) walk(r.Rows as Array<Record<string, unknown>>);
             }
-          }
+          };
           walk(arRows);
         } else {
-          console.warn('[xero-oauth] AgedReceivablesByContact non-200:', arStatus);
+          arError = `Xero AR returned ${s}`;
         }
-      } catch (e) {
-        console.warn('[xero-oauth] AgedReceivablesByContact error (non-fatal):', e);
+      } else {
+        arError = `Xero AR call failed: ${String(arRes.reason).slice(0, 200)}`;
       }
+
+      console.log('[xero-oauth] overview_metrics:', JSON.stringify({
+        ef_version: EF_VERSION,
+        ytdRevenue, plYtdMatchedVia, plYtdSummaryLabel, plYtdValueRaw,
+        plYtdSectionTitleMatched, plSectionTitles, plYtdError,
+        monthlyHeaders, monthlyColumnMap, monthlySummaryCells, monthlyError,
+        outstandingTotal, overdueTotal, overdueCount, arError,
+      }).slice(0, 2000));
 
       return json({
         ytd_revenue:        ytdRevenue,
@@ -781,6 +895,26 @@ Deno.serve(async (req: Request) => {
         overdue_total:     overdueTotal,
         overdue_count:     overdueCount,
         generated_at:      now.toISOString(),
+        _diagnostic: {
+          ef_version: EF_VERSION,
+          pl_ytd: {
+            matched_via:          plYtdMatchedVia,
+            section_title:        plYtdSectionTitleMatched,
+            summary_label:        plYtdSummaryLabel,
+            value_raw:            plYtdValueRaw,
+            value_parsed:         ytdRevenue,
+            section_titles_found: plSectionTitles,
+            section_account_lines: plYtdSectionAccountLines,
+            error:                plYtdError,
+          },
+          pl_monthly: {
+            headers:       monthlyHeaders,
+            column_map:    monthlyColumnMap,
+            summary_cells: monthlySummaryCells,
+            error:         monthlyError,
+          },
+          ar: { error: arError },
+        },
       });
     }
 
