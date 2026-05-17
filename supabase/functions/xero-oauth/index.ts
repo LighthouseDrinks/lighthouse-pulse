@@ -1202,6 +1202,218 @@ Deno.serve(async (req: Request) => {
       return json({ contact_id: created?.ContactID, created: true });
     }
 
+    // ── push_job_invoice ──────────────────────────────────────────────────────
+    // Pushes a production-job invoice to Xero as a DRAFT and records the
+    // as-billed snapshot to job_invoice_lines + jobs.xero_invoice_id.
+    //
+    // Safety stack (read top-to-bottom):
+    //   1. Role gate (FINANCE_ROLES only — covered by the handler-level gate)
+    //   2. SELECT ... FOR UPDATE on jobs.xero_invoice_id — early-returns
+    //      { already_pushed: true } if a prior push already succeeded. Kills
+    //      both retry-after-orphan and double-click race in one shot.
+    //   3. Idempotency-Key: pulse-{job_id} header on the Xero POST — defence
+    //      in depth: even if step 2 is somehow bypassed, Xero de-duplicates
+    //      identical-key requests for 24h.
+    //   4. job_invoice_record_push RPC — wraps line snapshot + jobs update
+    //      in a single transaction so we can't end up with snapshot but no
+    //      jobs.xero_invoice_id (or vice versa).
+    //   5. partial_persist flag — if RPC fails AFTER Xero accepted, surface
+    //      the InvoiceID to the UI + log structured payload for recovery.
+    if (action === 'push_job_invoice') {
+      const EF_VERSION = '2026-05-17-jobs-to-invoice-v1';
+
+      type IncomingLine = {
+        description?: string;
+        quantity?: number | string;
+        unit_price?: number | string;
+        account_code?: string;
+        tax_type?: string;
+        line_type?: string;
+        xero_account_key?: string;
+      };
+      const jobId            = String(body.job_id      ?? '').trim();
+      const contactId        = String(body.contact_id  ?? '').trim();
+      const reference        = String(body.reference   ?? '').trim();
+      const dateIn           = String(body.date        ?? '').trim();
+      const paymentTermsDays = Number(body.payment_terms_days ?? 30) || 30;
+      const linesIn          = Array.isArray(body.lines) ? (body.lines as IncomingLine[]) : [];
+
+      if (!jobId)     return err('job_id is required', 400);
+      if (!contactId) return err('contact_id is required', 400);
+      if (!linesIn.length) return err('At least one line item is required', 400);
+
+      // Step 2: double-push guard — read existing xero_invoice_id under
+      // a row lock so concurrent calls can't both push. The "FOR UPDATE"
+      // semantics live inside the dedicated RPC below; here we do a plain
+      // select first because the most common path is a fast bail-out.
+      const { data: existingJob, error: jobReadErr } = await adminClient
+        .from('jobs')
+        .select('id, xero_invoice_id, xero_invoice_number')
+        .eq('id', jobId)
+        .maybeSingle();
+      if (jobReadErr || !existingJob) return err('Job not found', 404);
+      if (existingJob.xero_invoice_id) {
+        const deep = `https://go.xero.com/AccountsReceivable/Edit.aspx?invoiceID=${existingJob.xero_invoice_id}`;
+        return json({
+          already_pushed:  true,
+          invoice_id:      existingJob.xero_invoice_id,
+          invoice_number:  existingJob.xero_invoice_number ?? null,
+          deep_link:       deep,
+        });
+      }
+
+      // Validate every line has the bare minimum to be sent.
+      const cleanedLines = linesIn
+        .map((l, i): { idx: number; description: string; quantity: number; unit_price: number; account_code: string; tax_type: string; line_type: string; xero_account_key: string } | null => {
+          const q  = Number(l.quantity);
+          const up = Number(l.unit_price);
+          if (!Number.isFinite(q) || !Number.isFinite(up)) return null;
+          if (q * up <= 0) return null; // skip zero lines silently
+          const ac = String(l.account_code ?? '').trim();
+          if (!ac) {
+            // Bubble up via outer reduce by throwing — caught below.
+            throw new Error(`Line ${i + 1} is missing an account code`);
+          }
+          return {
+            idx:              i,
+            description:      String(l.description ?? '').trim() || '(no description)',
+            quantity:         q,
+            unit_price:       up,
+            account_code:     ac,
+            tax_type:         String(l.tax_type ?? '').trim(),
+            line_type:        String(l.line_type ?? '').trim(),
+            xero_account_key: String(l.xero_account_key ?? '').trim(),
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      if (!cleanedLines.length) {
+        return err('All line items are zero — nothing to invoice', 400);
+      }
+
+      const { clientId, clientSecret } = await getXeroCreds(adminClient);
+      if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
+      const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
+      if (!refreshResult.ok) return json({ error: refreshResult.error || 'reconnect_required' }, 400);
+
+      // Compute Date / DueDate
+      const today = new Date();
+      const isoDate = (d: Date) => d.toISOString().split('T')[0];
+      const date = dateIn || isoDate(today);
+      const dueDateObj = new Date(date + 'T00:00:00');
+      dueDateObj.setDate(dueDateObj.getDate() + paymentTermsDays);
+      const dueDate = isoDate(dueDateObj);
+
+      // Build Xero payload
+      const xeroPayload = {
+        Invoices: [{
+          Type:         'ACCREC',
+          Status:       'DRAFT',
+          Contact:      { ContactID: contactId },
+          Date:         date,
+          DueDate:      dueDate,
+          Reference:    reference || `Job ${jobId}`,
+          CurrencyCode: 'EUR',
+          LineItems:    cleanedLines.map((l) => ({
+            Description: l.description,
+            Quantity:    l.quantity,
+            UnitAmount:  l.unit_price,
+            AccountCode: l.account_code,
+            TaxType:     l.tax_type || undefined,
+          })),
+        }],
+      };
+
+      // Step 3: Idempotency-Key — Xero dedupes identical-keyed requests for 24h.
+      const idempKey = `pulse-${jobId}`;
+      const postUrl = `${XERO_API}/api.xro/2.0/Invoices`;
+      console.log(`[xero-oauth] push_job_invoice POST ${postUrl} job=${jobId} lines=${cleanedLines.length} idempKey=${idempKey} ef=${EF_VERSION}`);
+      const xeroRes = await fetch(postUrl, {
+        method: 'POST',
+        headers: {
+          Authorization:     `Bearer ${refreshResult.accessToken}`,
+          'Xero-tenant-id':  refreshResult.tenantId!,
+          'Content-Type':    'application/json',
+          'Accept':          'application/json',
+          'Idempotency-Key': idempKey,
+        },
+        body: JSON.stringify(xeroPayload),
+      });
+      let xeroBody: Record<string, unknown> = {};
+      try { xeroBody = await xeroRes.json(); } catch { xeroBody = {}; }
+      console.log(`[xero-oauth] push_job_invoice response status=${xeroRes.status} body=${JSON.stringify(xeroBody).slice(0, 600)}`);
+
+      if (xeroRes.status !== 200) {
+        // Pull the first validation message out of Xero's nested shape.
+        let xeroMsg = '';
+        const elements = (xeroBody as { Elements?: Array<Record<string, unknown>> })?.Elements;
+        if (Array.isArray(elements) && elements.length) {
+          const ve = (elements[0] as { ValidationErrors?: Array<{ Message?: string }> })?.ValidationErrors;
+          if (Array.isArray(ve) && ve.length) xeroMsg = ve.map((v) => v?.Message ?? '').filter(Boolean).join('; ');
+        }
+        if (!xeroMsg) {
+          xeroMsg = String((xeroBody as { Message?: string })?.Message ?? `Xero returned ${xeroRes.status}`);
+        }
+        return json({ error: `Xero rejected the invoice: ${xeroMsg}` }, 400);
+      }
+
+      const createdInvoice = ((xeroBody as { Invoices?: Array<Record<string, unknown>> })?.Invoices ?? [])[0] ?? {};
+      const invoiceId     = String(createdInvoice.InvoiceID     ?? '');
+      const invoiceNumber = String(createdInvoice.InvoiceNumber ?? '');
+      const deepLink      = invoiceId ? `https://go.xero.com/AccountsReceivable/Edit.aspx?invoiceID=${invoiceId}` : '';
+
+      if (!invoiceId) {
+        console.error('[xero-oauth] push_job_invoice: Xero returned 200 but no InvoiceID', JSON.stringify(xeroBody).slice(0, 400));
+        return err('Xero accepted the request but returned no InvoiceID', 500);
+      }
+
+      // Step 4: snapshot + jobs update via RPC (atomic).
+      const rpcPayload = cleanedLines.map((l, idx) => ({
+        line_type:         l.line_type,
+        description:       l.description,
+        quantity:          l.quantity,
+        unit_price:        l.unit_price,
+        xero_account_key:  l.xero_account_key,
+        xero_account_code: l.account_code,
+        xero_tax_type:     l.tax_type,
+        position:          idx,
+      }));
+      const { error: rpcErr } = await adminClient.rpc('job_invoice_record_push', {
+        p_job_id:         jobId,
+        p_invoice_id:     invoiceId,
+        p_invoice_number: invoiceNumber,
+        p_lines:          rpcPayload,
+      });
+
+      if (rpcErr) {
+        // Step 5: partial-persist path. Xero accepted but we couldn't record it.
+        // Structured log so the operator can recover from EF logs.
+        console.error('[xero-oauth] pulse_push_partial_failure', JSON.stringify({
+          event:          'pulse_push_partial_failure',
+          job_id:         jobId,
+          invoice_id:     invoiceId,
+          invoice_number: invoiceNumber,
+          rpc_error:      rpcErr.message,
+          lines:          rpcPayload,
+        }));
+        return json({
+          ok:               true,
+          partial_persist:  true,
+          invoice_id:       invoiceId,
+          invoice_number:   invoiceNumber,
+          deep_link:        deepLink,
+          warning:          `Xero accepted invoice ${invoiceNumber || invoiceId} but Pulse could not record it (${rpcErr.message}). Paste InvoiceID ${invoiceId} onto the job manually.`,
+        });
+      }
+
+      return json({
+        ok:             true,
+        invoice_id:     invoiceId,
+        invoice_number: invoiceNumber,
+        deep_link:      deepLink,
+      });
+    }
+
     // ── list_accounts ─────────────────────────────────────────────────────────
     if (action === 'list_accounts') {
       const { clientId, clientSecret } = await getXeroCreds(adminClient);

@@ -46840,7 +46840,7 @@ if (typeof _origOpenDD === 'function') {
 
   var MAPPING_ORDER = [
     'bottling_sales','ecommerce_sales','freight_courier','stock_on_hand',
-    'gift_cards','colouring_charges','chill_filtration','pallet_supply',
+    'gift_cards','colouring_charges','dilution_charges','chill_filtration','pallet_supply',
     'outbound_revenue','label_application'
   ];
   var MAPPING_LABELS = {
@@ -46850,6 +46850,7 @@ if (typeof _origOpenDD === 'function') {
     stock_on_hand:     'Stock on Hand (Asset)',
     gift_cards:        'Gift Cards',
     colouring_charges: 'Colouring Charges',
+    dilution_charges:  'Dilution Charges',
     chill_filtration:  'Chill Filtration',
     pallet_supply:     'Pallet Supply',
     outbound_revenue:  'Outbound Revenue',
@@ -47194,7 +47195,7 @@ if (typeof _origOpenDD === 'function') {
 
     html += '<div style="overflow-x:auto;">';
     html += '<table class="data-table" id="fin-map-table">';
-    html += '<thead><tr><th>Client</th><th>Xero Contact</th><th>Mapped on</th><th>Mapped by</th></tr></thead>';
+    html += '<thead><tr><th>Client</th><th>Xero Contact</th><th>Mapped on</th><th>Mapped by</th><th></th></tr></thead>';
     html += '<tbody id="fin-map-tbody">';
     html += _renderMappingRows(activeClients, contactNameMap, userMap, isConnected, true);
     html += '</tbody></table></div>';
@@ -47221,10 +47222,193 @@ if (typeof _origOpenDD === 'function') {
       rows += '<td>' + _buildContactSearch(c, contactNameMap, isConnected) + '</td>';
       rows += '<td id="fin-map-date-' + _esc(c.id) + '">' + _fmtDate(c.xero_contact_mapped_at) + '</td>';
       rows += '<td id="fin-map-by-' + _esc(c.id) + '">' + _esc(userMap[c.xero_contact_mapped_by] || (c.xero_contact_mapped_by ? c.xero_contact_mapped_by : '—')) + '</td>';
+      // Rates disclosure button — only meaningful for mapped clients
+      rows += '<td style="text-align:right;white-space:nowrap;">';
+      if (isMapped) {
+        rows += '<button class="btn btn-outline" style="font-size:10px;padding:3px 8px;" '
+              + 'onclick="window._finToggleRatesPanel(\'' + _esc(c.id) + '\')" '
+              + 'id="fin-rates-toggle-' + _esc(c.id) + '">Rates ▾</button>';
+      }
+      rows += '</td>';
       rows += '</tr>';
+      // Hidden rate panel row (one per client, collapsed by default).
+      rows += '<tr id="fin-rates-row-' + _esc(c.id) + '" style="display:none;">'
+            + '<td colspan="5" style="background:var(--navy-mid);padding:14px 18px;" id="fin-rates-cell-' + _esc(c.id) + '">'
+            + '<div style="color:var(--muted);font-size:12px;">Click Rates to load…</div>'
+            + '</td></tr>';
     });
     return rows;
   }
+
+  // ── Per-client rate card editor ────────────────────────────────────────────
+  // Lazy-loads the rate rows + global defaults the first time it's opened.
+  // Cache is keyed by clientId so re-opening is instant.
+  window._finRatesCache = {};
+
+  window._finToggleRatesPanel = async function(clientId) {
+    var row    = document.getElementById('fin-rates-row-' + clientId);
+    var toggle = document.getElementById('fin-rates-toggle-' + clientId);
+    if (!row) return;
+    if (row.style.display !== 'none') {
+      row.style.display = 'none';
+      if (toggle) toggle.textContent = 'Rates ▾';
+      return;
+    }
+    row.style.display = '';
+    if (toggle) toggle.textContent = 'Rates ▴';
+
+    var cell = document.getElementById('fin-rates-cell-' + clientId);
+    if (!cell) return;
+    cell.innerHTML = '<div style="color:var(--muted);font-size:12px;">Loading rates…</div>';
+
+    try {
+      var cached = window._finRatesCache[clientId];
+      if (!cached) {
+        var queries = await Promise.all([
+          window.db.select('client_invoice_rates',
+            '?client_id=eq.' + encodeURIComponent(clientId)
+            + '&select=line_type,unit_price'),
+          window.db.select('xero_mappings',
+            '?select=mapping_key,default_unit_price'
+            + '&mapping_key=in.(bottling_sales,pallet_supply,dilution_charges,colouring_charges,freight_courier)')
+        ]);
+        var rates = queries[0] || [];
+        var defaults = queries[1] || [];
+        var defaultsByKey = {};
+        defaults.forEach(function(d) { defaultsByKey[d.mapping_key] = d.default_unit_price; });
+        var ratesByType = {};
+        rates.forEach(function(r) { ratesByType[r.line_type] = r.unit_price; });
+        cached = { ratesByType: ratesByType, defaultsByKey: defaultsByKey };
+        window._finRatesCache[clientId] = cached;
+      }
+      cell.innerHTML = _finRenderRatesEditor(clientId, cached);
+    } catch (e) {
+      cell.innerHTML = '<div style="color:var(--red);font-size:12px;">Error loading rates: ' + _esc(e.message) + '</div>';
+    }
+  };
+
+  function _finRenderRatesEditor(clientId, cached) {
+    var html = '';
+    html += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">'
+         + 'Per-client unit prices used by Build Invoice. Empty = falls back to the global default shown as placeholder.'
+         + '</div>';
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 14px;align-items:end;">';
+    FIN_LINE_DEFS.forEach(function(def) {
+      var current = cached.ratesByType[def.type];
+      var defaultVal = cached.defaultsByKey[def.key];
+      var defaultStr = defaultVal != null && isFinite(Number(defaultVal))
+        ? 'Default: €' + Number(defaultVal).toFixed(2)
+        : 'No global default set';
+      html += '<div>'
+            + '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;">' + _esc(def.label) + '</div>'
+            + '<div style="display:flex;align-items:center;gap:6px;">'
+            +   '<span style="font-size:12px;color:var(--muted);">€</span>'
+            +   '<input type="number" step="0.01" min="0" id="fin-rate-' + _esc(clientId) + '-' + _esc(def.type) + '" '
+            +     'data-cid="' + _esc(clientId) + '" data-type="' + _esc(def.type) + '" '
+            +     'value="' + (current != null ? _esc(String(current)) : '') + '" '
+            +     'placeholder="' + _esc(defaultStr) + '" '
+            +     'style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+            +     'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;text-align:right;">'
+            +   (current != null
+                  ? '<button onclick="window._finResetRate(\'' + _esc(clientId) + '\',\'' + _esc(def.type) + '\')" '
+                    + 'style="background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:10px;text-decoration:underline;padding:0;" '
+                    + 'title="Use global default">Reset</button>'
+                  : '')
+            + '</div>'
+            + '</div>';
+    });
+    html += '</div>';
+    html += '<div style="margin-top:14px;display:flex;justify-content:flex-end;align-items:center;gap:10px;">';
+    html += '<span id="fin-rates-status-' + _esc(clientId) + '" style="font-size:11px;color:var(--muted);"></span>';
+    html += '<button class="btn btn-gold" style="font-size:11px;padding:5px 12px;" onclick="window._finSaveRates(\'' + _esc(clientId) + '\')">Save rates</button>';
+    html += '</div>';
+    return html;
+  }
+
+  window._finResetRate = async function(clientId, lineType) {
+    var statusEl = document.getElementById('fin-rates-status-' + clientId);
+    try {
+      if (statusEl) { statusEl.style.color = 'var(--muted)'; statusEl.textContent = 'Resetting…'; }
+      await window.db.delete('client_invoice_rates',
+        '?client_id=eq.' + encodeURIComponent(clientId)
+        + '&line_type=eq.' + encodeURIComponent(lineType));
+      // Bust cache so next open shows the global default again.
+      if (window._finRatesCache[clientId]) {
+        delete window._finRatesCache[clientId].ratesByType[lineType];
+      }
+      var inp = document.getElementById('fin-rate-' + clientId + '-' + lineType);
+      if (inp) inp.value = '';
+      // Re-render the editor so the Reset button disappears.
+      var cell = document.getElementById('fin-rates-cell-' + clientId);
+      if (cell && window._finRatesCache[clientId]) {
+        cell.innerHTML = _finRenderRatesEditor(clientId, window._finRatesCache[clientId]);
+      }
+      if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = 'Override removed.'; }
+    } catch (e) {
+      if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Reset failed: ' + (e.message || 'error'); }
+    }
+  };
+
+  window._finSaveRates = async function(clientId) {
+    var statusEl = document.getElementById('fin-rates-status-' + clientId);
+    if (statusEl) { statusEl.style.color = 'var(--muted)'; statusEl.textContent = 'Saving…'; }
+
+    var upserts = [];
+    var deletes = [];
+    var cached = window._finRatesCache[clientId];
+    if (!cached) return;
+    var cu = window.CURRENT_USER;
+
+    FIN_LINE_DEFS.forEach(function(def) {
+      var inp = document.getElementById('fin-rate-' + clientId + '-' + def.type);
+      if (!inp) return;
+      var raw = inp.value.trim();
+      var existing = cached.ratesByType[def.type];
+      if (raw === '') {
+        // Cleared input — drop the override (if there was one).
+        if (existing != null) deletes.push(def.type);
+        return;
+      }
+      var n = Number(raw);
+      if (!isFinite(n) || n < 0) {
+        // Invalid — surface inline error and skip.
+        inp.style.borderColor = 'var(--red)';
+        return;
+      }
+      inp.style.borderColor = 'var(--navy-border)';
+      upserts.push({
+        client_id:  clientId,
+        line_type:  def.type,
+        unit_price: n,
+        updated_at: new Date().toISOString(),
+        updated_by: (cu && cu.auth_user_id) || null
+      });
+    });
+
+    try {
+      if (upserts.length) {
+        // db.upsert sets Prefer: resolution=merge-duplicates so the
+        // (client_id, line_type) PK conflict resolves to UPDATE.
+        await window.db.upsert('client_invoice_rates', upserts);
+      }
+      for (var i = 0; i < deletes.length; i++) {
+        await window.db.delete('client_invoice_rates',
+          '?client_id=eq.' + encodeURIComponent(clientId)
+          + '&line_type=eq.' + encodeURIComponent(deletes[i]));
+      }
+      // Update cache so next open is consistent.
+      upserts.forEach(function(u) { cached.ratesByType[u.line_type] = u.unit_price; });
+      deletes.forEach(function(t) { delete cached.ratesByType[t]; });
+      // Re-render so Reset buttons appear/disappear.
+      var cell = document.getElementById('fin-rates-cell-' + clientId);
+      if (cell) cell.innerHTML = _finRenderRatesEditor(clientId, cached);
+      var s2 = document.getElementById('fin-rates-status-' + clientId);
+      if (s2) { s2.style.color = 'var(--green)'; s2.textContent = 'Saved.'; }
+    } catch (e) {
+      var s3 = document.getElementById('fin-rates-status-' + clientId);
+      if (s3) { s3.style.color = 'var(--red)'; s3.textContent = 'Save failed: ' + (e.message || 'error'); }
+    }
+  };
 
   function _buildContactSearch(client, contactNameMap, isConnected) {
     if (!isConnected) return '<span style="color:var(--muted);font-size:12px;">Connect Xero to map</span>';
@@ -47689,6 +47873,10 @@ if (typeof _origOpenDD === 'function') {
   // ═══════════════════════════════════════════════════════════════════════════
   // ── JOBS TO INVOICE ────────────────────────────────────────────────────────
   // ═══════════════════════════════════════════════════════════════════════════
+  // Cache for rendered job rows so the Build Invoice modal can look up the
+  // full row without a refetch. Keyed by job.id.
+  window._finJobsById = {};
+
   window.loadFinJobs = async function() {
     var body = document.getElementById('fin-jobs-body');
     if (!body) return;
@@ -47696,14 +47884,18 @@ if (typeof _origOpenDD === 'function') {
     try {
       // Completed jobs that haven't been pushed to Xero yet.
       // Stage is stored as either 'complete' or 'Complete' historically.
+      // Pulls dilution/colouring flags + client xero_contact_id + bom_id so the
+      // Build Invoice modal can derive lines without further round-trips.
       var jobs = await window.db.select(
         'jobs',
-        '?select=id,product_name,po_number,bottle_target,actual_bottles_produced,date_completed,stage,invoice_payment_terms,clients(name)'
+        '?select=id,product_name,po_number,bottle_target,actual_bottles_produced,date_completed,stage,invoice_payment_terms,client_id,bom_id,dilution,colouring,clients(id,name,xero_contact_id)'
         + '&stage=in.(complete,Complete)'
         + '&xero_invoice_id=is.null'
         + '&order=date_completed.desc'
         + '&limit=500'
       );
+      window._finJobsById = {};
+      (jobs || []).forEach(function(j) { window._finJobsById[j.id] = j; });
       _renderFinJobs(jobs || [], body);
     } catch(e) {
       body.innerHTML = '<div style="color:var(--red);font-size:13px;">Error loading jobs: ' + _esc(e.message) + '</div>';
@@ -47712,11 +47904,6 @@ if (typeof _origOpenDD === 'function') {
 
   function _renderFinJobs(jobs, container) {
     var html = '';
-    html += '<div class="card" style="margin-bottom:14px;padding:14px 18px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.25);">';
-    html += '<div style="font-size:13px;color:var(--gold);font-weight:600;">Xero invoice push launching soon</div>';
-    html += '<div style="font-size:12px;color:var(--muted);margin-top:4px;">Set payment terms now so each job is ready when push goes live.</div>';
-    html += '</div>';
-
     html += '<div class="card">';
     html += '<div class="card-title" style="margin-bottom:16px;">Jobs to Invoice ('
          + jobs.length + ')</div>';
@@ -47728,12 +47915,26 @@ if (typeof _origOpenDD === 'function') {
       html += '<thead><tr>'
            + '<th>Client</th><th>Job ID</th><th>Product</th><th>PO #</th>'
            + '<th>Completed</th><th style="text-align:right;">Bottles</th><th>Payment Terms</th>'
+           + '<th></th>'
            + '</tr></thead><tbody>';
 
       jobs.forEach(function(j) {
         var clientName = (j.clients && j.clients.name) || '—';
         var bottles    = j.actual_bottles_produced || j.bottle_target || '—';
         var terms      = j.invoice_payment_terms || '30_days';
+        var hasContact = !!(j.clients && j.clients.xero_contact_id);
+
+        // Build Invoice button — amber when ready, greyed + tooltip otherwise.
+        var btn;
+        if (hasContact) {
+          btn = '<button class="btn btn-gold" style="font-size:11px;padding:5px 12px;" '
+              + 'onclick="window._finOpenBuildInvoice(\'' + _esc(j.id) + '\')">Build Invoice</button>';
+        } else {
+          btn = '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;opacity:0.55;cursor:not-allowed;" '
+              + 'title="Map this client to a Xero contact in the Mapping tab before invoicing" '
+              + 'onclick="window.showFinTab(\'mapping\', document.getElementById(\'fin-tab-mapping\'))">No Xero contact</button>';
+        }
+
         html += '<tr>'
              + '<td>' + _esc(clientName) + '</td>'
              + '<td><span style="font-family:monospace;font-size:11px;color:var(--muted);">' + _esc(j.id) + '</span></td>'
@@ -47743,6 +47944,7 @@ if (typeof _origOpenDD === 'function') {
              + '<td style="text-align:right;font-variant-numeric:tabular-nums;">'
              + (bottles === '—' ? '—' : Number(bottles).toLocaleString()) + '</td>'
              + '<td>' + _buildPaymentTermsSelect(j.id, terms) + '</td>'
+             + '<td style="text-align:right;">' + btn + '</td>'
              + '</tr>';
       });
       html += '</tbody></table></div>';
@@ -47772,6 +47974,641 @@ if (typeof _origOpenDD === 'function') {
       sel.style.borderColor = 'var(--red)';
     } finally {
       sel.disabled = false;
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ── BUILD INVOICE MODAL ────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Opens a modal that auto-derives invoice lines from a completed job:
+  //   - Bottling line     : qty = actual_bottles_produced
+  //   - Pallet supply     : qty = ceil(bottles / (casesLayer * layersPallet * bottles_per_shipper))
+  //   - Dilution charge   : qty = 1, only if jobs.dilution is true
+  //   - Colouring charge  : qty = 1, only if jobs.colouring is true
+  //   - Transport         : qty = 1, always (operator removes/zeros if not billable)
+  // Unit prices resolve from client_invoice_rates → xero_mappings.default_unit_price → 0.
+  // All cells editable. Push sends to xero-oauth push_job_invoice action which
+  // creates a DRAFT invoice in Xero.
+
+  // line_type → mapping_key + human label. Order is render order in the modal.
+  var FIN_LINE_DEFS = [
+    { type: 'bottling',  key: 'bottling_sales',    label: 'Bottling' },
+    { type: 'pallet',    key: 'pallet_supply',     label: 'Pallet supply' },
+    { type: 'dilution',  key: 'dilution_charges',  label: 'Dilution' },
+    { type: 'colouring', key: 'colouring_charges', label: 'Colouring' },
+    { type: 'transport', key: 'freight_courier',   label: 'Transport' }
+  ];
+
+  // Defensive BOM stacking parser. additional_info is JSONB but PostgREST
+  // sometimes returns it as a string. Null / missing keys / non-numeric values
+  // all degrade gracefully to 0 so the pallet line short-circuits to a blank-qty
+  // warning instead of dividing by zero.
+  function _finParseBomStacking(additional_info) {
+    var info = additional_info;
+    if (info == null) return { casesLayer: 0, layersPallet: 0 };
+    if (typeof info === 'string') {
+      try { info = JSON.parse(info); } catch (e) { info = {}; }
+    }
+    var cl = Number(info && info.casesLayer);
+    var lp = Number(info && info.layersPallet);
+    return {
+      casesLayer:   isFinite(cl) ? cl : 0,
+      layersPallet: isFinite(lp) ? lp : 0
+    };
+  }
+
+  // Map PAYMENT_TERMS_OPTIONS value → days (used for DueDate computation).
+  function _finTermsToDays(t) {
+    switch (t) {
+      case 'on_receipt': return 0;
+      case '7_days':     return 7;
+      case '14_days':    return 14;
+      case '30_days':    return 30;
+      case '45_days':    return 45;
+      case '60_days':    return 60;
+      case 'eom':
+        // End of month — days remaining in current month (today inclusive).
+        var d = new Date();
+        var last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+        return Math.max(0, last - d.getDate());
+      default:           return 30;
+    }
+  }
+
+  // Pre-fetch mappings + bom + rates in parallel and stash state on window._finBuildInvoice.
+  window._finOpenBuildInvoice = async function(jobId) {
+    var job = window._finJobsById && window._finJobsById[jobId];
+    if (!job) {
+      window.toast && window.toast('Job not loaded — refresh the list.', 'error');
+      return;
+    }
+    if (!(job.clients && job.clients.xero_contact_id)) {
+      window.toast && window.toast('Map this client to a Xero contact first.', 'error');
+      return;
+    }
+
+    var bg = _finRenderBuildInvoiceShell(job);
+    document.body.appendChild(bg);
+
+    try {
+      var queries = [
+        // Mappings: account codes + tax types + global default prices.
+        window.db.select('xero_mappings',
+          '?select=mapping_key,xero_account_code,xero_account_name,xero_tax_type,default_unit_price'
+          + '&mapping_key=in.(bottling_sales,pallet_supply,dilution_charges,colouring_charges,freight_courier)'),
+        // Per-client rate overrides for this job's client.
+        window.db.select('client_invoice_rates',
+          '?client_id=eq.' + encodeURIComponent(job.client_id)
+          + '&select=line_type,unit_price'),
+        // BOM stacking for pallet derivation. May not exist (older jobs).
+        job.bom_id
+          ? window.db.select('boms',
+              '?id=eq.' + encodeURIComponent(job.bom_id)
+              + '&select=id,bottles_per_shipper,additional_info&limit=1')
+          : Promise.resolve([])
+      ];
+      var results = await Promise.all(queries);
+      var mappings = results[0] || [];
+      var rates    = results[1] || [];
+      var bom      = (results[2] || [])[0] || null;
+
+      var mappingByKey = {};
+      mappings.forEach(function(m) { mappingByKey[m.mapping_key] = m; });
+      var rateByKey = {};
+      rates.forEach(function(r) { rateByKey[r.line_type] = Number(r.unit_price); });
+
+      // Derive initial lines.
+      var lines = _finDeriveInvoiceLines(job, bom, mappingByKey, rateByKey);
+
+      window._finBuildInvoice = {
+        job:          job,
+        bom:          bom,
+        mappingByKey: mappingByKey,
+        rateByKey:    rateByKey,
+        lines:        lines,
+        pushing:      false
+      };
+
+      _finRenderBuildInvoiceBody();
+    } catch (e) {
+      var inner = document.getElementById('fin-bi-body');
+      if (inner) inner.innerHTML = '<div style="color:var(--red);font-size:13px;padding:20px 0;">'
+        + 'Error loading invoice data: ' + _esc(e.message) + '</div>';
+    }
+  };
+
+  function _finDeriveInvoiceLines(job, bom, mappingByKey, rateByKey) {
+    var bottles = Number(job.actual_bottles_produced) || 0;
+
+    function unitPrice(lineType, key) {
+      if (rateByKey[lineType] != null && isFinite(rateByKey[lineType])) return rateByKey[lineType];
+      var m = mappingByKey[key];
+      if (m && m.default_unit_price != null) {
+        var n = Number(m.default_unit_price);
+        if (isFinite(n)) return n;
+      }
+      return 0;
+    }
+
+    function baseLine(lineType, key) {
+      var m = mappingByKey[key] || {};
+      return {
+        type:             lineType,
+        xero_account_key: key,
+        account_code:     m.xero_account_code || '',
+        account_name:     m.xero_account_name || '',
+        tax_type:         m.xero_tax_type || '',
+        unit_price:       unitPrice(lineType, key)
+      };
+    }
+
+    var lines = [];
+
+    // 1. Bottling — always present
+    var bl = baseLine('bottling', 'bottling_sales');
+    bl.description = 'Bottling ' + bottles.toLocaleString() + ' bottles of ' + (job.product_name || '—')
+      + (job.po_number ? ' (PO ' + job.po_number + ')' : '');
+    bl.quantity = bottles;
+    lines.push(bl);
+
+    // 2. Pallet supply — always present, qty short-circuits to 0 with warning
+    //    when stacking data is missing.
+    var stacking = _finParseBomStacking(bom && bom.additional_info);
+    var bps      = Number(bom && bom.bottles_per_shipper) || 0;
+    var palletCapacity = stacking.casesLayer * stacking.layersPallet * bps;
+    var pl = baseLine('pallet', 'pallet_supply');
+    if (palletCapacity > 0 && bottles > 0) {
+      var pallets = Math.ceil(bottles / palletCapacity);
+      var casesPerPallet = stacking.casesLayer * stacking.layersPallet;
+      pl.description = 'Pallet supply (' + pallets + ' pallets at ' + casesPerPallet + ' cases/pallet)';
+      pl.quantity = pallets;
+    } else {
+      pl.description = 'Pallet supply';
+      pl.quantity = 0;
+      pl.warn = !palletCapacity
+        ? 'Set pallet stacking on this BOM to auto-fill (cases per layer × layers per pallet × bottles per shipper).'
+        : 'No bottles recorded on job — enter pallet count manually.';
+    }
+    lines.push(pl);
+
+    // 3. Dilution — only if job flagged
+    if (job.dilution) {
+      var dl = baseLine('dilution', 'dilution_charges');
+      dl.description = 'Dilution charge for ' + (job.product_name || 'this job');
+      dl.quantity = 1;
+      lines.push(dl);
+    }
+
+    // 4. Colouring — only if job flagged
+    if (job.colouring) {
+      var cl = baseLine('colouring', 'colouring_charges');
+      cl.description = 'Colouring charge for ' + (job.product_name || 'this job');
+      cl.quantity = 1;
+      lines.push(cl);
+    }
+
+    // 5. Transport — always (operator removes/zeros if not billable)
+    var tl = baseLine('transport', 'freight_courier');
+    tl.description = 'Transport / delivery';
+    tl.quantity = 1;
+    lines.push(tl);
+
+    return lines;
+  }
+
+  function _finRenderBuildInvoiceShell(job) {
+    var existing = document.getElementById('fin-bi-modal-bg');
+    if (existing) existing.remove();
+
+    var bg = document.createElement('div');
+    bg.id = 'fin-bi-modal-bg';
+    bg.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.65);'
+      + 'z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:30px 20px;overflow-y:auto;';
+
+    var modal = document.createElement('div');
+    modal.style.cssText = 'background:#0a1628;border:1px solid var(--navy-border);border-radius:6px;'
+      + 'width:100%;max-width:980px;padding:24px;color:var(--white);';
+
+    modal.innerHTML =
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;">'
+      +   '<div>'
+      +     '<div style="font-size:18px;font-weight:700;color:var(--white);">Build Invoice</div>'
+      +     '<div style="font-size:12px;color:var(--muted);margin-top:3px;">'
+      +       _esc((job.clients && job.clients.name) || '—') + ' &middot; '
+      +       'Job <span style="font-family:monospace;">' + _esc(job.id) + '</span>'
+      +       (job.product_name ? ' &middot; ' + _esc(job.product_name) : '')
+      +     '</div>'
+      +   '</div>'
+      +   '<button class="btn btn-outline" style="font-size:11px;padding:5px 10px;" '
+      +     'onclick="window._finCloseBuildInvoice()">Close</button>'
+      + '</div>'
+      + '<div id="fin-bi-body"><div style="color:var(--muted);font-size:13px;padding:30px 0;text-align:center;">Loading invoice lines…</div></div>';
+
+    bg.appendChild(modal);
+    bg.addEventListener('click', function(e) { if (e.target === bg) window._finCloseBuildInvoice(); });
+    return bg;
+  }
+
+  window._finCloseBuildInvoice = function() {
+    var el = document.getElementById('fin-bi-modal-bg');
+    if (el) el.remove();
+    window._finBuildInvoice = null;
+  };
+
+  function _finRenderBuildInvoiceBody() {
+    var state = window._finBuildInvoice;
+    if (!state) return;
+    var body = document.getElementById('fin-bi-body');
+    if (!body) return;
+
+    var job = state.job;
+    var bom = state.bom;
+    var lines = state.lines;
+
+    // Guardrails — surface missing data BEFORE the table.
+    var warnings = [];
+    var missingAccountForRequired = [];
+    lines.forEach(function(l) {
+      // bottling, pallet, transport are "required" lines (always present).
+      // dilution/colouring are present only when the job flagged them.
+      var isRequired = (l.quantity > 0) || ['bottling','pallet','transport'].indexOf(l.type) >= 0;
+      if (isRequired && !l.account_code) {
+        var def = FIN_LINE_DEFS.find(function(d) { return d.type === l.type; });
+        missingAccountForRequired.push((def && def.label) || l.type);
+      }
+    });
+    if (missingAccountForRequired.length) {
+      warnings.push({
+        level: 'error',
+        text:  'Set account codes for: ' + missingAccountForRequired.join(', ')
+             + ' in Finance &gt; Settings &gt; Xero Mappings before pushing.'
+      });
+    }
+    if (!Number(job.actual_bottles_produced)) {
+      warnings.push({
+        level: 'warn',
+        text:  'No bottles recorded on this job — bottling line is empty. Enter quantity manually or update the job first.'
+      });
+    }
+    if (!bom) {
+      warnings.push({
+        level: 'warn',
+        text:  'No BOM linked to this job — pallet quantity must be entered manually.'
+      });
+    }
+
+    var warningHtml = warnings.map(function(w) {
+      var bg = w.level === 'error'
+        ? 'background:rgba(231,76,60,0.10);border:1px solid rgba(231,76,60,0.45);color:#ff9c8e;'
+        : 'background:rgba(232,156,58,0.10);border:1px solid rgba(232,156,58,0.45);color:var(--amber);';
+      return '<div style="' + bg + 'padding:9px 12px;border-radius:3px;margin-bottom:8px;font-size:12px;">' + w.text + '</div>';
+    }).join('');
+
+    // Default payment terms.
+    var defaultTermsDays = _finTermsToDays(job.invoice_payment_terms || '30_days');
+
+    var html = '';
+    if (warningHtml) html += '<div style="margin-bottom:14px;">' + warningHtml + '</div>';
+
+    // Header summary card
+    var stacking = _finParseBomStacking(bom && bom.additional_info);
+    var stackText = (stacking.casesLayer && stacking.layersPallet && bom && bom.bottles_per_shipper)
+      ? stacking.casesLayer + ' cases/layer × ' + stacking.layersPallet + ' layers × ' + bom.bottles_per_shipper + ' bottles/case'
+      : '—';
+    html += '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;'
+         + 'padding:12px 14px;margin-bottom:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px 18px;font-size:12px;">';
+    html += '<div><div style="color:var(--muted);">Bottles produced</div><div style="color:var(--white);font-weight:600;">'
+         + (Number(job.actual_bottles_produced) || 0).toLocaleString() + '</div></div>';
+    html += '<div><div style="color:var(--muted);">BOM stacking</div><div style="color:var(--white);font-weight:600;">'
+         + _esc(stackText) + '</div></div>';
+    html += '<div><div style="color:var(--muted);">Dilution</div><div style="color:var(--white);font-weight:600;">'
+         + (job.dilution ? 'Yes' : 'No') + '</div></div>';
+    html += '<div><div style="color:var(--muted);">Colouring</div><div style="color:var(--white);font-weight:600;">'
+         + (job.colouring ? 'Yes' : 'No') + '</div></div>';
+    html += '<div><div style="color:var(--muted);">PO #</div><div style="color:var(--white);font-weight:600;">'
+         + _esc(job.po_number || '—') + '</div></div>';
+    html += '</div>';
+
+    // Lines table
+    html += '<div style="overflow-x:auto;"><table class="data-table" style="font-size:12px;">';
+    html += '<thead><tr>'
+         + '<th style="width:34%;">Description</th>'
+         + '<th style="width:90px;text-align:right;">Qty</th>'
+         + '<th style="width:120px;text-align:right;">Unit Price (€)</th>'
+         + '<th style="width:110px;text-align:right;">Subtotal</th>'
+         + '<th style="width:160px;">Account Code</th>'
+         + '<th style="width:40px;"></th>'
+         + '</tr></thead><tbody id="fin-bi-lines-body">';
+    lines.forEach(function(l, idx) {
+      html += _finRenderInvoiceLineRow(l, idx);
+    });
+    html += '</tbody>';
+
+    // Totals + Add line in footer
+    html += '<tfoot>';
+    html += '<tr><td colspan="6" style="padding-top:10px;">'
+         + '<button class="btn btn-outline" style="font-size:11px;padding:5px 12px;" onclick="window._finBiAddLine()">+ Add line</button>'
+         + '</td></tr>';
+    html += '<tr><td colspan="3" style="text-align:right;font-size:13px;font-weight:600;color:var(--muted);padding-top:12px;border-top:1px solid var(--navy-border);">Total (excl. VAT)</td>'
+         + '<td id="fin-bi-total" style="text-align:right;font-size:14px;font-weight:700;color:var(--gold);padding-top:12px;border-top:1px solid var(--navy-border);font-variant-numeric:tabular-nums;">€0.00</td>'
+         + '<td colspan="2" style="border-top:1px solid var(--navy-border);"></td></tr>';
+    html += '</tfoot></table></div>';
+
+    // Footer controls
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:18px;flex-wrap:wrap;">';
+    html += '<div style="font-size:12px;color:var(--muted);">'
+         + 'Will create as <strong style="color:var(--white);">DRAFT</strong> in Xero. Approve &amp; send from Xero.'
+         + '</div>';
+    html += '<div style="display:flex;align-items:center;gap:10px;">';
+    html += '<label style="font-size:12px;color:var(--muted);">Payment terms</label>';
+    html += '<input id="fin-bi-terms" type="number" min="0" max="180" value="' + defaultTermsDays + '" '
+         + 'style="width:64px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+         + 'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;text-align:right;"> '
+         + '<span style="font-size:11px;color:var(--muted);">days</span>';
+    html += '<button class="btn btn-outline" onclick="window._finCloseBuildInvoice()">Cancel</button>';
+    html += '<button class="btn btn-gold" id="fin-bi-push-btn" onclick="window._finBiPush()">Push to Xero (Draft)</button>';
+    html += '</div></div>';
+
+    body.innerHTML = html;
+    _finBiRecalcTotal();
+    _finBiUpdatePushButtonState();
+  }
+
+  function _finRenderInvoiceLineRow(line, idx) {
+    var subtotal = (Number(line.quantity) || 0) * (Number(line.unit_price) || 0);
+    var isZero   = subtotal === 0;
+    var rowStyle = isZero ? 'opacity:0.55;' : '';
+    var descStyle = isZero ? 'text-decoration:line-through;' : '';
+
+    var accountOptions = _finBiAccountOptions(line.account_code);
+
+    var warnHtml = line.warn
+      ? '<div style="font-size:10px;color:var(--amber);margin-top:3px;">' + _esc(line.warn) + '</div>'
+      : '';
+    var zeroHtml = isZero
+      ? '<div style="font-size:10px;color:var(--muted);margin-top:3px;">Will not be pushed (zero)</div>'
+      : '';
+
+    return '<tr id="fin-bi-row-' + idx + '" data-idx="' + idx + '" style="' + rowStyle + '">'
+      + '<td><input type="text" data-idx="' + idx + '" data-field="description" value="' + _esc(line.description || '') + '" '
+      +   'oninput="window._finBiEditLine(this)" '
+      +   'style="' + descStyle + 'width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+      +   'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;box-sizing:border-box;">'
+      +   warnHtml + zeroHtml
+      + '</td>'
+      + '<td style="text-align:right;"><input type="number" min="0" step="any" data-idx="' + idx + '" data-field="quantity" value="' + _esc(String(line.quantity != null ? line.quantity : '')) + '" '
+      +   'oninput="window._finBiEditLine(this)" '
+      +   'style="width:80px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+      +   'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;text-align:right;"></td>'
+      + '<td style="text-align:right;"><input type="number" min="0" step="0.01" data-idx="' + idx + '" data-field="unit_price" value="' + _esc(String(line.unit_price != null ? line.unit_price : '')) + '" '
+      +   'oninput="window._finBiEditLine(this)" '
+      +   'style="width:110px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+      +   'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;text-align:right;"></td>'
+      + '<td id="fin-bi-sub-' + idx + '" style="text-align:right;font-variant-numeric:tabular-nums;color:var(--white);">'
+      +   _fmtCur(subtotal, 'EUR') + '</td>'
+      + '<td><select data-idx="' + idx + '" data-field="account_code" onchange="window._finBiEditLine(this)" '
+      +   'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+      +   'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">' + accountOptions + '</select></td>'
+      + '<td style="text-align:center;"><button onclick="window._finBiRemoveLine(' + idx + ')" '
+      +   'style="background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:4px 8px;" '
+      +   'title="Remove line">×</button></td>'
+      + '</tr>';
+  }
+
+  // Build the <option> list for account code dropdown. Revenue mappings only,
+  // filters out mappings with no Xero account code yet (those would fail at push).
+  function _finBiAccountOptions(currentCode) {
+    var state = window._finBuildInvoice;
+    if (!state) return '<option value=""></option>';
+    var opts = '<option value="">— Select account —</option>';
+    Object.keys(state.mappingByKey).forEach(function(key) {
+      var m = state.mappingByKey[key];
+      if (!m || !m.xero_account_code) return;
+      var sel = m.xero_account_code === currentCode ? ' selected' : '';
+      opts += '<option value="' + _esc(m.xero_account_code) + '"' + sel + '>'
+            + _esc(m.xero_account_code) + ' — ' + _esc(m.xero_account_name || (MAPPING_LABELS[key] || key))
+            + '</option>';
+    });
+    // Also include the current code even if it doesn't match any mapping,
+    // so we never silently drop a value the user typed elsewhere.
+    if (currentCode && opts.indexOf('value="' + currentCode + '"') < 0) {
+      opts += '<option value="' + _esc(currentCode) + '" selected>' + _esc(currentCode) + ' — (custom)</option>';
+    }
+    return opts;
+  }
+
+  window._finBiEditLine = function(el) {
+    var state = window._finBuildInvoice;
+    if (!state) return;
+    var idx   = Number(el.dataset.idx);
+    var field = el.dataset.field;
+    var val   = el.value;
+    var line  = state.lines[idx];
+    if (!line) return;
+    if (field === 'quantity' || field === 'unit_price') {
+      line[field] = val === '' ? 0 : Number(val);
+    } else if (field === 'account_code') {
+      line.account_code = val;
+      // Keep the matching mapping's tax_type in sync for the line.
+      var matched = null;
+      Object.keys(state.mappingByKey).forEach(function(k) {
+        var m = state.mappingByKey[k];
+        if (m && m.xero_account_code === val) matched = m;
+      });
+      if (matched) {
+        line.tax_type = matched.xero_tax_type || line.tax_type;
+        // If the operator changed the account, also update xero_account_key so
+        // the snapshot reflects the user's intent.
+        Object.keys(state.mappingByKey).forEach(function(k) {
+          if (state.mappingByKey[k] === matched) line.xero_account_key = k;
+        });
+      }
+    } else {
+      line[field] = val;
+    }
+
+    // Re-render just the subtotal cell. For quantity/unit_price/account changes,
+    // re-render the whole row so opacity/strikethrough update with the zero state.
+    if (field === 'quantity' || field === 'unit_price' || field === 'account_code') {
+      var rowEl = document.getElementById('fin-bi-row-' + idx);
+      if (rowEl) {
+        rowEl.outerHTML = _finRenderInvoiceLineRow(line, idx);
+        // Restore focus to the edited input.
+        var newRow = document.getElementById('fin-bi-row-' + idx);
+        var focusEl = newRow && newRow.querySelector('[data-field="' + field + '"]');
+        if (focusEl) {
+          focusEl.focus();
+          // Don't reposition cursor for select fields.
+          if (focusEl.tagName === 'INPUT' && typeof focusEl.setSelectionRange === 'function') {
+            try { focusEl.setSelectionRange(focusEl.value.length, focusEl.value.length); } catch (e) {}
+          }
+        }
+      }
+    }
+    _finBiRecalcTotal();
+    _finBiUpdatePushButtonState();
+  };
+
+  window._finBiRemoveLine = function(idx) {
+    var state = window._finBuildInvoice;
+    if (!state) return;
+    state.lines.splice(idx, 1);
+    _finRenderBuildInvoiceBody();
+  };
+
+  window._finBiAddLine = function() {
+    var state = window._finBuildInvoice;
+    if (!state) return;
+    state.lines.push({
+      type:             'custom',
+      xero_account_key: '',
+      description:      '',
+      quantity:         1,
+      unit_price:       0,
+      account_code:     '',
+      account_name:     '',
+      tax_type:         ''
+    });
+    _finRenderBuildInvoiceBody();
+  };
+
+  function _finBiRecalcTotal() {
+    var state = window._finBuildInvoice;
+    if (!state) return;
+    var total = 0;
+    state.lines.forEach(function(l) {
+      var sub = (Number(l.quantity) || 0) * (Number(l.unit_price) || 0);
+      total += sub;
+    });
+    var el = document.getElementById('fin-bi-total');
+    if (el) el.textContent = _fmtCur(total, 'EUR');
+  }
+
+  // Disable Push if any non-zero line is missing an account code, or if every
+  // line is zero (nothing to send).
+  function _finBiUpdatePushButtonState() {
+    var state = window._finBuildInvoice;
+    if (!state) return;
+    var btn = document.getElementById('fin-bi-push-btn');
+    if (!btn) return;
+    var anyValid     = false;
+    var missingAcct  = false;
+    state.lines.forEach(function(l) {
+      var sub = (Number(l.quantity) || 0) * (Number(l.unit_price) || 0);
+      if (sub > 0) {
+        anyValid = true;
+        if (!l.account_code) missingAcct = true;
+      }
+    });
+    var ok = anyValid && !missingAcct;
+    btn.disabled = !ok;
+    btn.style.opacity = ok ? '' : '0.5';
+    btn.style.cursor  = ok ? '' : 'not-allowed';
+    btn.title = !anyValid
+      ? 'Every line is zero — nothing to invoice'
+      : (missingAcct ? 'One or more lines is missing an account code' : '');
+  }
+
+  // Build the payload and call the EF. Disables button + shows "Pushing…" during
+  // the round-trip so a slow Xero response can't be turned into a double-click.
+  window._finBiPush = async function() {
+    var state = window._finBuildInvoice;
+    if (!state) return;
+    if (state.pushing) return;
+
+    var btn = document.getElementById('fin-bi-push-btn');
+    var termsInput = document.getElementById('fin-bi-terms');
+    var paymentTermsDays = Math.max(0, Math.min(365, Number(termsInput && termsInput.value) || 30));
+
+    var payloadLines = state.lines
+      .filter(function(l) {
+        var sub = (Number(l.quantity) || 0) * (Number(l.unit_price) || 0);
+        return sub > 0;
+      })
+      .map(function(l) {
+        return {
+          line_type:        l.type,
+          xero_account_key: l.xero_account_key || '',
+          description:      l.description || '',
+          quantity:         Number(l.quantity) || 0,
+          unit_price:       Number(l.unit_price) || 0,
+          account_code:     l.account_code || '',
+          tax_type:         l.tax_type || ''
+        };
+      });
+
+    if (!payloadLines.length) {
+      window.toast && window.toast('Every line is zero — nothing to push.', 'error');
+      return;
+    }
+
+    state.pushing = true;
+    if (btn) {
+      btn.disabled = true;
+      btn.dataset._origText = btn.dataset._origText || btn.textContent;
+      btn.textContent = 'Pushing…';
+    }
+
+    try {
+      var resp = await callXeroEF({
+        action:             'push_job_invoice',
+        job_id:             state.job.id,
+        contact_id:         state.job.clients.xero_contact_id,
+        reference:          state.job.po_number ? ('Job ' + state.job.id + ' — PO ' + state.job.po_number) : ('Job ' + state.job.id),
+        date:               new Date().toISOString().split('T')[0],
+        payment_terms_days: paymentTermsDays,
+        lines:              payloadLines
+      }, 45000);
+
+      if (resp && resp.already_pushed) {
+        var hereLink = resp.deep_link
+          ? ' · <a href="' + _esc(resp.deep_link) + '" target="_blank" rel="noopener" style="color:var(--gold);">Open in Xero ↗</a>'
+          : '';
+        window.toast && window.toast('Job already invoiced (' + (resp.invoice_number || resp.invoice_id) + ').', 'success');
+        // Re-render Jobs list so the row falls off.
+        window._finCloseBuildInvoice();
+        window.loadFinJobs && window.loadFinJobs();
+        return;
+      }
+
+      if (resp && resp.partial_persist) {
+        // Xero accepted but Pulse couldn't record. Show amber-style message
+        // with a copyable InvoiceID, keep the modal open so the user can act.
+        var body = document.getElementById('fin-bi-body');
+        if (body) {
+          body.insertAdjacentHTML('afterbegin',
+            '<div style="background:rgba(232,156,58,0.10);border:1px solid rgba(232,156,58,0.45);'
+            + 'color:var(--amber);padding:12px 14px;border-radius:4px;margin-bottom:14px;font-size:13px;">'
+            + '<strong>Xero accepted invoice ' + _esc(resp.invoice_number || '') + '</strong> but Pulse could not record it.<br>'
+            + 'Paste this InvoiceID onto the job manually: '
+            + '<code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:2px;">' + _esc(resp.invoice_id) + '</code> '
+            + '<button onclick="navigator.clipboard&amp;&amp;navigator.clipboard.writeText(\'' + _esc(resp.invoice_id) + '\')" '
+            +   'class="btn btn-outline" style="font-size:10px;padding:3px 8px;margin-left:8px;">Copy</button>'
+            + (resp.deep_link ? ' <a href="' + _esc(resp.deep_link) + '" target="_blank" rel="noopener" style="color:var(--gold);margin-left:8px;">Open in Xero ↗</a>' : '')
+            + '</div>');
+        }
+        state.pushing = false;
+        if (btn) {
+          btn.disabled = false;
+          if (btn.dataset._origText) btn.textContent = btn.dataset._origText;
+        }
+        return;
+      }
+
+      // Happy path.
+      var msg = 'Draft invoice ' + (resp.invoice_number || resp.invoice_id) + ' created in Xero.';
+      window.toast && window.toast(msg, 'success');
+      // Briefly delay close so the toast is readable before the list re-renders.
+      window._finCloseBuildInvoice();
+      window.loadFinJobs && window.loadFinJobs();
+    } catch (e) {
+      window.toast && window.toast('Push failed: ' + (e.message || 'unknown'), 'error');
+      state.pushing = false;
+      if (btn) {
+        btn.disabled = false;
+        if (btn.dataset._origText) btn.textContent = btn.dataset._origText;
+      }
+      _finBiUpdatePushButtonState();
     }
   };
 
@@ -49501,6 +50338,96 @@ if (typeof _origOpenDD === 'function') {
       window.loadFinSettings();
     } catch(e) {
       window.toast && window.toast('Failed: ' + (e.message || 'unknown'), 'error');
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ── FINANCE SETTINGS: global default invoice line prices ───────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Defaults are stored on xero_mappings.default_unit_price, used by the Build
+  // Invoice modal as a fallback when a client has no rate-card override.
+  var _origLoadFinSettings_defaults = window.loadFinSettings;
+  if (typeof _origLoadFinSettings_defaults === 'function') {
+    window.loadFinSettings = async function() {
+      await _origLoadFinSettings_defaults.apply(this, arguments);
+      try {
+        var body = document.getElementById('fin-settings-body');
+        if (!body || body.querySelector('#fin-defaults-card')) return;
+        var mRows = await window.db.select('xero_mappings',
+          '?select=id,mapping_key,default_unit_price'
+          + '&mapping_key=in.(bottling_sales,pallet_supply,dilution_charges,colouring_charges,freight_courier)');
+        var byKey = {};
+        (mRows || []).forEach(function(m) { byKey[m.mapping_key] = m; });
+
+        var html = '';
+        html += '<div class="card" id="fin-defaults-card" style="margin-top:20px;">';
+        html += '<div class="card-title" style="margin-bottom:10px;">Default Invoice Line Prices</div>';
+        html += '<div style="font-size:12px;color:var(--muted);margin-bottom:14px;">'
+             + 'Used by Build Invoice when a client has no per-client rate override. '
+             + 'Override individual clients from Finance &gt; Mapping &gt; Rates.'
+             + '</div>';
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;">';
+        FIN_LINE_DEFS.forEach(function(def) {
+          var m = byKey[def.key];
+          var val = m && m.default_unit_price != null ? m.default_unit_price : '';
+          var noMap = !m;
+          html += '<div>'
+                + '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">' + _esc(def.label) + '</label>'
+                + '<div style="display:flex;align-items:center;gap:6px;">'
+                + '<span style="font-size:12px;color:var(--muted);">€</span>'
+                + '<input id="fin-default-' + _esc(def.key) + '" type="number" step="0.01" min="0" '
+                +   'value="' + _esc(String(val)) + '" '
+                +   (noMap ? 'disabled placeholder="(mapping not seeded — run jobs_to_invoice.sql)" ' : '')
+                +   'data-mapping-id="' + _esc(m ? m.id : '') + '" '
+                +   'style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+                +   'padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;text-align:right;"></div>'
+                + '</div>';
+        });
+        html += '</div>';
+        html += '<div style="margin-top:14px;display:flex;justify-content:flex-end;align-items:center;gap:10px;">';
+        html += '<span id="fin-defaults-status" style="font-size:11px;color:var(--muted);"></span>';
+        html += '<button class="btn btn-gold" onclick="window._finSaveDefaults()">Save defaults</button>';
+        html += '</div>';
+        html += '</div>';
+        body.insertAdjacentHTML('beforeend', html);
+      } catch (e) { /* non-fatal */ }
+    };
+  }
+
+  window._finSaveDefaults = async function() {
+    var statusEl = document.getElementById('fin-defaults-status');
+    if (statusEl) { statusEl.style.color = 'var(--muted)'; statusEl.textContent = 'Saving…'; }
+    var any = false;
+    var failedAny = false;
+    for (var i = 0; i < FIN_LINE_DEFS.length; i++) {
+      var def = FIN_LINE_DEFS[i];
+      var inp = document.getElementById('fin-default-' + def.key);
+      if (!inp || inp.disabled) continue;
+      var mid = inp.dataset.mappingId;
+      if (!mid) continue;
+      var raw = inp.value.trim();
+      var n   = raw === '' ? null : Number(raw);
+      if (raw !== '' && (!isFinite(n) || n < 0)) {
+        inp.style.borderColor = 'var(--red)';
+        failedAny = true;
+        continue;
+      }
+      inp.style.borderColor = 'var(--navy-border)';
+      try {
+        await window.db.update('xero_mappings', '?id=eq.' + encodeURIComponent(mid), { default_unit_price: n });
+        any = true;
+      } catch (e) {
+        failedAny = true;
+      }
+    }
+    if (statusEl) {
+      if (failedAny) {
+        statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Some rows failed to save.';
+      } else if (any) {
+        statusEl.style.color = 'var(--green)'; statusEl.textContent = 'Defaults saved.';
+      } else {
+        statusEl.style.color = 'var(--muted)'; statusEl.textContent = 'No changes.';
+      }
     }
   };
 
