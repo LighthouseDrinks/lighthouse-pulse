@@ -47653,8 +47653,25 @@ if (typeof _origOpenDD === 'function') {
     return symbol + n.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  // Xero returns dates in legacy WCF format /Date(1234567890000+0000)/ on most
+  // endpoints. Newer endpoints sometimes return ISO. Accept both defensively.
+  // Returns null for missing/unparseable values so callers can branch safely.
+  function parseXeroDate(raw) {
+    if (raw == null) return null;
+    if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+    var s = String(raw);
+    if (!s) return null;
+    var m = /\/Date\((-?\d+)([+-]\d{4})?\)\//.exec(s);
+    if (m) return new Date(parseInt(m[1], 10));
+    var d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
   function _daysBetween(later, earlier) {
-    var ms = new Date(later).getTime() - new Date(earlier).getTime();
+    var la = later   instanceof Date ? later   : parseXeroDate(later);
+    var ea = earlier instanceof Date ? earlier : parseXeroDate(earlier);
+    if (!la || !ea) return 0;
+    var ms = la.getTime() - ea.getTime();
     return Math.floor(ms / (1000 * 60 * 60 * 24));
   }
 
@@ -47760,11 +47777,12 @@ if (typeof _origOpenDD === 'function') {
   var _finInvFilters = { status: 'all', search: '', from: '', to: '', sort: 'newest' };
 
   var FIN_INV_PRESETS = [
-    { id: 'overdue',  label: 'Overdue',       desc: 'All unpaid invoices past their due date' },
-    { id: 'last_30',  label: 'Last 30 Days',  desc: 'Invoices issued in the last 30 days' },
-    { id: 'last_90',  label: 'Last 90 Days',  desc: 'Invoices issued in the last 90 days' },
-    { id: 'ytd',      label: 'Year to Date',  desc: 'Invoices since Jan 1 — also used by Overview' },
-    { id: 'custom',   label: 'Custom Range',  desc: 'Pick your own from/to dates' }
+    { id: 'outstanding', label: 'Outstanding (Owed to You)', desc: 'Every authorised invoice with money still due — matches the Owed to You card on Overview' },
+    { id: 'overdue',     label: 'Overdue',                   desc: 'All unpaid invoices past their due date' },
+    { id: 'last_30',     label: 'Last 30 Days',              desc: 'Invoices issued in the last 30 days' },
+    { id: 'last_90',     label: 'Last 90 Days',              desc: 'Invoices issued in the last 90 days' },
+    { id: 'ytd',         label: 'Year to Date',              desc: 'Invoices since Jan 1 — also used by Overview' },
+    { id: 'custom',      label: 'Custom Range',              desc: 'Pick your own from/to dates' }
   ];
 
   window.loadFinInvoices = function() {
@@ -47867,7 +47885,7 @@ if (typeof _origOpenDD === 'function') {
   function _invoiceStatus(inv) {
     if (inv.Status === 'PAID')   return 'PAID';
     if (inv.Status === 'VOIDED') return 'VOIDED';
-    var due = inv.DueDate ? new Date(inv.DueDate) : null;
+    var due = parseXeroDate(inv.DueDate);
     if (due && due < new Date() && Number(inv.AmountDue || 0) > 0) return 'OVERDUE';
     return inv.Status || 'AUTHORISED';
   }
@@ -47981,7 +47999,11 @@ if (typeof _origOpenDD === 'function') {
     filtered.sort(function(a, b) {
       if (_finInvFilters.sort === 'oldest') return (a.Date || '').localeCompare(b.Date || '');
       if (_finInvFilters.sort === 'amount') return Number(b.AmountDue || b.Total || 0) - Number(a.AmountDue || a.Total || 0);
-      if (_finInvFilters.sort === 'due')    return (a.DueDate || '').localeCompare(b.DueDate || '');
+      if (_finInvFilters.sort === 'due')    {
+        // Defensive: DueDate may be WCF /Date(...)/ or ISO. Sort by parsed timestamp.
+        var da = parseXeroDate(a.DueDate); var db = parseXeroDate(b.DueDate);
+        return (da ? da.getTime() : 0) - (db ? db.getTime() : 0);
+      }
       return (b.Date || '').localeCompare(a.Date || '');
     });
 
@@ -47996,7 +48018,17 @@ if (typeof _origOpenDD === 'function') {
     var wrap = document.getElementById('fin-inv-table-wrap');
     if (!wrap) return;
     if (filtered.length === 0) {
-      wrap.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">No invoices match your filters.</div>';
+      // Friendlier copy when the underlying preset is empty (vs filtered to nothing).
+      var loadedCount = (window._finInvoices || []).length;
+      var msg;
+      if (loadedCount === 0) {
+        if (window._finCurrentPreset === 'outstanding') msg = 'Nothing outstanding — fully paid up.';
+        else if (window._finCurrentPreset === 'overdue') msg = 'Nothing overdue — nice work.';
+        else msg = 'No invoices in this view.';
+      } else {
+        msg = 'No invoices match your filters.';
+      }
+      wrap.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">' + _esc(msg) + '</div>';
       return;
     }
 
@@ -48376,11 +48408,25 @@ if (typeof _origOpenDD === 'function') {
     html += '</div>';
 
     // ── KPI cards ─────────────────────────────────────────────────────────
-    var overdueCount = m.overdue_count || 0;
+    var overdueCount   = m.overdue_count || 0;
+    var overdueTotal   = Number(m.overdue_total || 0);
+    var outstanding    = Number(m.outstanding_total || 0);
+    var currentTotal   = Math.max(0, outstanding - overdueTotal);
+    var aging          = m.aging || null;
+    var submittedTotal = Number(m.submitted_total || 0);
+    var submittedCount = m.submitted_count || 0;
+    var invoicesCapped = !!m.invoices_capped;
+    // Counts per status — overdue count is on m; current count = total outstanding count - overdue count
+    var outstandingCount = aging ? (
+      (aging.current && aging.current.count ? aging.current.count : 0)
+      + overdueCount
+    ) : null;
+    var currentCount = outstandingCount != null ? Math.max(0, outstandingCount - overdueCount) : null;
     // Shared card style: min-width:0 lets the grid actually shrink narrow cards
     // (otherwise wide content forces overflow). min-height keeps the row height
-    // stable when Top Customer transitions skeleton → data → error.
-    var CARD_STYLE = 'padding:14px 16px;min-width:0;min-height:110px;';
+    // stable when Top Customer transitions skeleton → data → error, and now
+    // accommodates the aging strip + sub-lines inside the Owed card.
+    var CARD_STYLE = 'padding:14px 16px;min-width:0;min-height:130px;';
 
     // Sales This Year (with YoY)
     var ytdCardHtml =
@@ -48421,12 +48467,37 @@ if (typeof _origOpenDD === 'function') {
       + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Total stock value on hand</div>'
       + '</div>';
 
-    // Owed to You (Outstanding AR)
+    // Owed to You (Outstanding AR) — clickable, with breakdown and aging strip.
+    // Mirrors Xero's "Awaiting Payment" definition: AUTHORISED, type ACCREC only.
+    // SUBMITTED drafts surfaced as amber side-note (not silently hidden).
+    var agingStripHtml = _renderAgingStrip(aging, overdueTotal, currentTotal);
+    var currentLineCount  = (currentCount != null)  ? ' (' + currentCount  + ')' : '';
+    var overdueLineCount  = ' (' + overdueCount + ')';
+    var draftWarning = submittedTotal > 0
+      ? '<div style="font-size:11px;color:var(--amber);margin-top:6px;" title="Draft invoices Xero hasn\'t authorised yet — they\'re money but not officially Awaiting Payment.">'
+        +   '⚠ ' + _esc(_fmtCur(submittedTotal, 'EUR')) + ' in ' + submittedCount + ' draft invoice' + (submittedCount === 1 ? '' : 's')
+        +   ' awaiting approval — not included above'
+        + '</div>'
+      : '';
+    var cappedWarning = invoicesCapped
+      ? '<div style="font-size:11px;color:var(--amber);margin-top:6px;">⚠ Hit page cap — totals may be understated</div>'
+      : '';
+    var owedSubLines =
+        '<div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.55;">'
+      +   '<span style="color:var(--white);">' + _esc(_fmtCur(currentTotal, 'EUR')) + '</span> current' + _esc(currentLineCount)
+      +   ' · <span style="color:' + (overdueTotal > 0 ? 'var(--red)' : 'var(--white)') + ';">' + _esc(_fmtCur(overdueTotal, 'EUR')) + '</span> overdue' + _esc(overdueLineCount)
+      + '</div>'
+      + '<div style="font-size:10px;color:var(--muted);opacity:0.7;margin-top:3px;" title="AUTHORISED ACCREC invoices with AmountDue > 0 — matches Xero\'s Awaiting Payment total.">Approximates Xero Awaiting Payment · click for detail</div>';
     var owedCardHtml =
-        '<div class="card" style="' + CARD_STYLE + '">'
+        '<div class="card" onclick="window._finOpenOutstandingDrill()" '
+      + 'style="' + CARD_STYLE + 'cursor:' + (outstanding > 0 ? 'pointer' : 'default') + ';" '
+      + 'title="' + (outstanding > 0 ? 'Open Invoices tab with Outstanding (all owed) filter' : '') + '">'
       + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Owed to You</div>'
-      + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(m.outstanding_total, 'EUR')) + '</div>'
-      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Total of all unpaid invoices (includes not-yet-due)</div>'
+      + '<div style="font-size:22px;font-weight:800;color:var(--gold);font-variant-numeric:tabular-nums;">' + _esc(_fmtCur(outstanding, 'EUR')) + '</div>'
+      + owedSubLines
+      + agingStripHtml
+      + draftWarning
+      + cappedWarning
       + '</div>';
 
     // Overdue — Chase These (clickable to Invoices > overdue preset)
@@ -48482,6 +48553,58 @@ if (typeof _origOpenDD === 'function') {
     }, 50);
   };
 
+  // Open the Invoices tab with the new Outstanding preset (everything owed,
+  // overdue or not). Triggered by clicking the Owed-to-You card on Overview.
+  window._finOpenOutstandingDrill = function() {
+    var btn = document.getElementById('fin-tab-invoices');
+    window.showFinTab && window.showFinTab('invoices', btn);
+    setTimeout(function() {
+      if (typeof window._finPickInvoicePreset === 'function') {
+        window._finPickInvoicePreset('outstanding');
+      }
+    }, 50);
+  };
+
+  // Compact colour-coded aging strip — renders inline inside the Owed card.
+  // Segments are proportional to bucket totals; hover tooltips show €amount +
+  // invoice count. Buckets: current (green), 1-30 (gold), 31-60 (amber),
+  // 61-90 (orange), 90+ (red). Gracefully returns '' if no aging data.
+  function _renderAgingStrip(aging, overdueTotal, currentTotal) {
+    if (!aging) return '';
+    var segs = [
+      { key: 'current',        label: 'Current',     color: '#22c55e', total: aging.current        ? aging.current.total        : currentTotal, count: aging.current        ? aging.current.count        : 0 },
+      { key: 'bucket_1_30',    label: '1–30 days',   color: '#facc15', total: aging.bucket_1_30    ? aging.bucket_1_30.total    : 0,            count: aging.bucket_1_30    ? aging.bucket_1_30.count    : 0 },
+      { key: 'bucket_31_60',   label: '31–60 days',  color: '#fb923c', total: aging.bucket_31_60   ? aging.bucket_31_60.total   : 0,            count: aging.bucket_31_60   ? aging.bucket_31_60.count   : 0 },
+      { key: 'bucket_61_90',   label: '61–90 days',  color: '#f97316', total: aging.bucket_61_90   ? aging.bucket_61_90.total   : 0,            count: aging.bucket_61_90   ? aging.bucket_61_90.count   : 0 },
+      { key: 'bucket_90_plus', label: '90+ days',    color: '#ef4444', total: aging.bucket_90_plus ? aging.bucket_90_plus.total : 0,            count: aging.bucket_90_plus ? aging.bucket_90_plus.count : 0 }
+    ];
+    var grand = 0;
+    segs.forEach(function(s) { grand += Math.max(0, s.total || 0); });
+    if (grand <= 0) return '';
+
+    var bar = '<div style="display:flex;height:6px;border-radius:3px;overflow:hidden;margin-top:10px;background:rgba(255,255,255,0.06);">';
+    segs.forEach(function(s) {
+      var pct = (Math.max(0, s.total) / grand) * 100;
+      if (pct <= 0) return;
+      var tip = s.label + ' · ' + _fmtCur(s.total, 'EUR') + ' (' + s.count + ' invoice' + (s.count === 1 ? '' : 's') + ')';
+      bar += '<div title="' + _esc(tip) + '" style="width:' + pct.toFixed(2) + '%;background:' + s.color + ';"></div>';
+    });
+    bar += '</div>';
+
+    // Tiny legend underneath — only show buckets with >0 to keep it scannable.
+    var legendItems = segs.filter(function(s) { return s.total > 0; }).map(function(s) {
+      return '<span style="display:inline-flex;align-items:center;gap:4px;">'
+           +   '<span style="width:8px;height:8px;border-radius:2px;background:' + s.color + ';display:inline-block;"></span>'
+           +   _esc(s.label)
+           + '</span>';
+    });
+    var legend = '<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:10px;color:var(--muted);margin-top:6px;">'
+               + legendItems.join('')
+               + '</div>';
+
+    return bar + legend;
+  }
+
   window._finRefreshOverview = function() {
     window._finOverviewMetrics = null;
     // Also clear the top-customer error so a manual retry re-attempts the fetch.
@@ -48517,7 +48640,7 @@ if (typeof _origOpenDD === 'function') {
   }
 
   function _renderTopCustomerCardHtml(state) {
-    var CARD_STYLE = 'padding:14px 16px;min-width:0;min-height:110px;';
+    var CARD_STYLE = 'padding:14px 16px;min-width:0;min-height:130px;';
     var WRAP = function(inner) {
       return '<div id="fin-top-customer-card" class="card" style="' + CARD_STYLE + 'position:relative;">'
            + '<div style="font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">Top Customer YTD</div>'

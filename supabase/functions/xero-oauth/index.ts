@@ -170,6 +170,19 @@ async function xeroGet(
   return { status: res.status, data };
 }
 
+// Xero returns DueDate/Date in legacy WCF format /Date(1234567890000+0000)/ on most
+// endpoints. Newer endpoints sometimes return ISO. Parse both defensively so callers
+// never have to think about it. Returns null for missing/unparseable values.
+function parseXeroDate(raw: unknown): Date | null {
+  if (raw == null) return null;
+  const s = String(raw);
+  if (!s) return null;
+  const m = /\/Date\((-?\d+)([+-]\d{4})?\)\//.exec(s);
+  if (m) return new Date(parseInt(m[1], 10));
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 // ── main handler ──────────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
@@ -508,7 +521,8 @@ Deno.serve(async (req: Request) => {
       let dateFrom = '';
       let dateTo   = '';
       let statuses = 'AUTHORISED,PAID';
-      let postFilterOverdue = false;
+      let postFilterOverdue     = false;
+      let postFilterOutstanding = false;
 
       if (preset === 'overdue') {
         // Wide net so we catch invoices issued long ago that are still due.
@@ -516,6 +530,12 @@ Deno.serve(async (req: Request) => {
         dateFrom = '2020-01-01';
         statuses = 'AUTHORISED';
         postFilterOverdue = true;
+      } else if (preset === 'outstanding') {
+        // Every still-owed AUTHORISED invoice, regardless of due date.
+        // Mirrors the Owed-to-You headline on the Overview tab.
+        dateFrom = '2020-01-01';
+        statuses = 'AUTHORISED';
+        postFilterOutstanding = true;
       } else if (preset === 'last_30') {
         dateFrom = isoDate(daysAgo(30));
       } else if (preset === 'last_90') {
@@ -561,11 +581,20 @@ Deno.serve(async (req: Request) => {
       console.log(`[xero-oauth] list_invoices done total=${allInvoices.length} elapsed=${Date.now() - t0}ms`);
 
       const today = isoDate(now);
+      const todayDate = new Date(today + 'T00:00:00');
       const simplified = allInvoices
         .filter((i) => {
-          if (!postFilterOverdue) return true;
-          // Overdue = past DueDate AND still has balance
-          return (i.DueDate as string) < today && Number(i.AmountDue ?? 0) > 0;
+          if (postFilterOutstanding) return Number(i.AmountDue ?? 0) > 0;
+          if (postFilterOverdue) {
+            // Overdue = past DueDate AND still has balance.
+            // parseXeroDate handles both WCF (/Date(...)/) and ISO; the previous
+            // string-compare against a WCF-formatted DueDate was always false in a
+            // misleading way (saved only by the AmountDue>0 guard).
+            const due = parseXeroDate(i.DueDate);
+            if (!due) return false;
+            return due < todayDate && Number(i.AmountDue ?? 0) > 0;
+          }
+          return true;
         })
         .map((i) => {
           const contact = (i.Contact ?? {}) as Record<string, unknown>;
@@ -606,7 +635,7 @@ Deno.serve(async (req: Request) => {
     //     generated_at:      iso string
     //   }
     if (action === 'overview_metrics') {
-      const EF_VERSION = '2026-05-17-overview-fixes-v3';
+      const EF_VERSION = '2026-05-17-aging-buckets-v4';
       const { clientId, clientSecret } = await getXeroCreds(adminClient);
       if (!clientId || !clientSecret) return err('Xero credentials not configured', 400);
       const refreshResult = await refreshConnectionIfNeeded(adminClient, clientId, clientSecret);
@@ -625,17 +654,8 @@ Deno.serve(async (req: Request) => {
         if (!Number.isFinite(n)) return 0;
         return neg ? -n : n;
       };
-      // Xero uses legacy WCF date format /Date(1234567890000+0000)/ for many endpoints.
-      // Newer endpoints sometimes return ISO. Parse both gracefully.
-      const parseXeroDate = (raw: unknown): Date | null => {
-        if (raw == null) return null;
-        const s = String(raw);
-        if (!s) return null;
-        const m = /\/Date\((-?\d+)([+-]\d{4})?\)\//.exec(s);
-        if (m) return new Date(parseInt(m[1], 10));
-        const d = new Date(s);
-        return isNaN(d.getTime()) ? null : d;
-      };
+      // parseXeroDate is now a module-level helper (defined above) so list_invoices
+      // and any future action can share it.
       const pad2 = (n: number) => String(n).padStart(2, '0');
       const fmtDate = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
       const firstOfMonth = (y: number, m: number) => new Date(y, m, 1);
@@ -781,7 +801,10 @@ Deno.serve(async (req: Request) => {
       const ten = refreshResult.tenantId!;
       const callPL = (params: string) => withSlot(() => xeroGet('/api.xro/2.0/Reports/ProfitAndLoss', acc, ten, params));
 
-      // ── Paginated invoices fetcher (Type=ACCREC only, shared pool) ───
+      // ── Paginated invoices fetcher (Type=ACCREC, AUTHORISED only, shared pool) ─
+      // Matches Xero's "Awaiting Payment" definition exactly. SUBMITTED drafts are
+      // pulled separately so we can show them as an amber side-note (instead of
+      // silently hiding money that someone forgot to send).
       type InvoiceSummary = {
         AmountDue?: number;
         DueDate?: string;
@@ -793,25 +816,42 @@ Deno.serve(async (req: Request) => {
       type InvoicesFetchResult = { invoices: InvoiceSummary[]; pages_fetched: number; capped: boolean; error: string | null };
       const fetchAllOutstandingInvoices = async (): Promise<InvoicesFetchResult> => {
         const all: InvoiceSummary[] = [];
-        const MAX_PAGES = 50;
+        const MAX_PAGES = 200;
         let page = 1;
         // ACCREC == sales invoices (money owed TO us). Exclude ACCPAY (supplier bills).
         const where = encodeURIComponent('Type=="ACCREC"');
         while (page <= MAX_PAGES) {
-          const params = `where=${where}&Statuses=AUTHORISED,SUBMITTED&summaryOnly=true&page=${page}`;
+          const params = `where=${where}&Statuses=AUTHORISED&summaryOnly=true&page=${page}`;
           const { status, data } = await withSlot(() => xeroGet('/api.xro/2.0/Invoices', acc, ten, params));
           if (status !== 200) {
             return { invoices: all, pages_fetched: page - 1, capped: false, error: `Invoices page ${page} returned ${status}: ${JSON.stringify(data).slice(0, 200)}` };
           }
           const list = ((data?.Invoices ?? []) as InvoiceSummary[]);
           all.push(...list);
-          // Xero summaryOnly invoices return up to 100 per page
           if (list.length < 100) {
             return { invoices: all, pages_fetched: page, capped: false, error: null };
           }
           page++;
         }
-        return { invoices: all, pages_fetched: MAX_PAGES, capped: true, error: 'Reached MAX_PAGES cap (50 pages = 5000 invoices)' };
+        return { invoices: all, pages_fetched: MAX_PAGES, capped: true, error: `Reached MAX_PAGES cap (${MAX_PAGES} pages = ${MAX_PAGES * 100} invoices) — totals may be understated` };
+      };
+
+      // Separate SUBMITTED (awaiting-approval) summary. Cheap because SUBMITTED
+      // volume is always small for any healthy Xero. Surfaced as an amber side-note,
+      // never included in headline Owed-to-You.
+      type SubmittedSummary = { count: number; total: number; error: string | null };
+      const fetchSubmittedSummary = async (): Promise<SubmittedSummary> => {
+        const where = encodeURIComponent('Type=="ACCREC"');
+        const params = `where=${where}&Statuses=SUBMITTED&summaryOnly=true&page=1`;
+        const { status, data } = await withSlot(() => xeroGet('/api.xro/2.0/Invoices', acc, ten, params));
+        if (status !== 200) return { count: 0, total: 0, error: `SUBMITTED summary returned ${status}` };
+        const list = ((data?.Invoices ?? []) as InvoiceSummary[]);
+        let count = 0, total = 0;
+        for (const inv of list) {
+          const due = parseNum(inv.AmountDue);
+          if (due > 0) { count++; total += due; }
+        }
+        return { count, total, error: null };
       };
 
       // ── Build job list: 4 fixed P&L + per-month P&L (past + current only) ──
@@ -832,6 +872,7 @@ Deno.serve(async (req: Request) => {
       const lastMonthPriorP  = callPL(`fromDate=${fmtDate(lastMonthStartPrior)}&toDate=${fmtDate(lastMonthEndPrior)}`);
       const monthlyPs        = monthlyJobs.map((j) => callPL(`fromDate=${j.from}&toDate=${j.to}`));
       const invoicesP        = fetchAllOutstandingInvoices();
+      const submittedP       = fetchSubmittedSummary();
 
       const [
         ytdRes,
@@ -839,9 +880,10 @@ Deno.serve(async (req: Request) => {
         lastMonthCurRes,
         lastMonthPriorRes,
         invoicesResSettled,
+        submittedResSettled,
         ...monthlyResults
       ] = await Promise.allSettled([
-        ytdP, ytdPriorP, lastMonthCurP, lastMonthPriorP, invoicesP, ...monthlyPs,
+        ytdP, ytdPriorP, lastMonthCurP, lastMonthPriorP, invoicesP, submittedP, ...monthlyPs,
       ]);
 
       // ── Parse the 4 fixed single-period P&L results ─────────────────
@@ -885,15 +927,23 @@ Deno.serve(async (req: Request) => {
         monthlyChartConfidence = 'low';
       }
 
-      // ── Outstanding / Overdue from paginated invoices summary ────────
+      // ── Outstanding / Overdue / Aging buckets — single pass ──────────
+      // All in one loop so overdue_total / overdue_count are DERIVED from buckets
+      // (single source of truth — they can never disagree with the aging strip).
+      type Bucket = { total: number; count: number };
+      const aging: Record<'current'|'bucket_1_30'|'bucket_31_60'|'bucket_61_90'|'bucket_90_plus', Bucket> = {
+        current:        { total: 0, count: 0 },
+        bucket_1_30:    { total: 0, count: 0 },
+        bucket_31_60:   { total: 0, count: 0 },
+        bucket_61_90:   { total: 0, count: 0 },
+        bucket_90_plus: { total: 0, count: 0 },
+      };
       let outstandingTotal = 0;
-      let overdueTotal     = 0;
-      let overdueCount     = 0;
       let invoicesError: string | null = null;
       let invoicesFetched = 0;
       let invoicesPagesFetched = 0;
       let invoicesCapped = false;
-      const overdueSample: Array<{ id?: string; number?: string; due_iso?: string; amount: number }> = [];
+      const overdueSample: Array<{ id?: string; number?: string; due_iso?: string; amount: number; bucket: string }> = [];
 
       if (invoicesResSettled.status === 'fulfilled') {
         const r = invoicesResSettled.value as InvoicesFetchResult;
@@ -902,26 +952,56 @@ Deno.serve(async (req: Request) => {
         invoicesPagesFetched = r.pages_fetched;
         invoicesCapped = r.capped;
         const todayDate = new Date(today + 'T00:00:00');
+        const DAY_MS = 86_400_000;
         for (const inv of r.invoices) {
           const due = parseNum(inv.AmountDue);
           if (due <= 0) continue;
           outstandingTotal += due;
           const dueDate = parseXeroDate(inv.DueDate);
-          if (dueDate && dueDate < todayDate) {
-            overdueTotal += due;
-            overdueCount++;
-            if (overdueSample.length < 3) {
-              overdueSample.push({
-                id: inv.InvoiceID,
-                number: inv.InvoiceNumber,
-                due_iso: dueDate.toISOString().split('T')[0],
-                amount: due,
-              });
-            }
+          if (!dueDate) {
+            // No due date → treat as current (Xero allows null DueDate on early invoices).
+            aging.current.total += due;
+            aging.current.count += 1;
+            continue;
+          }
+          const days = Math.floor((todayDate.getTime() - dueDate.getTime()) / DAY_MS);
+          let key: keyof typeof aging;
+          if      (days <= 0)  key = 'current';
+          else if (days <= 30) key = 'bucket_1_30';
+          else if (days <= 60) key = 'bucket_31_60';
+          else if (days <= 90) key = 'bucket_61_90';
+          else                 key = 'bucket_90_plus';
+          aging[key].total += due;
+          aging[key].count += 1;
+          if (key !== 'current' && overdueSample.length < 3) {
+            overdueSample.push({
+              id: inv.InvoiceID,
+              number: inv.InvoiceNumber,
+              due_iso: dueDate.toISOString().split('T')[0],
+              amount: due,
+              bucket: key,
+            });
           }
         }
       } else {
         invoicesError = `Invoices fetch failed: ${String(invoicesResSettled.reason).slice(0, 200)}`;
+      }
+
+      // Derive overdue from buckets — guarantees aging strip + KPI cards agree.
+      const overdueTotal = aging.bucket_1_30.total + aging.bucket_31_60.total + aging.bucket_61_90.total + aging.bucket_90_plus.total;
+      const overdueCount = aging.bucket_1_30.count + aging.bucket_31_60.count + aging.bucket_61_90.count + aging.bucket_90_plus.count;
+
+      // SUBMITTED summary (drafts awaiting approval — not part of headline Owed)
+      let submittedCount = 0;
+      let submittedTotal = 0;
+      let submittedError: string | null = null;
+      if (submittedResSettled.status === 'fulfilled') {
+        const s = submittedResSettled.value as SubmittedSummary;
+        submittedCount = s.count;
+        submittedTotal = s.total;
+        submittedError = s.error;
+      } else {
+        submittedError = `SUBMITTED fetch failed: ${String(submittedResSettled.reason).slice(0, 200)}`;
       }
 
       console.log('[xero-oauth] overview_metrics:', JSON.stringify({
@@ -946,6 +1026,10 @@ Deno.serve(async (req: Request) => {
         outstanding_total:        outstandingTotal,
         overdue_total:            overdueTotal,
         overdue_count:            overdueCount,
+        aging,                    // NEW: 5 aging buckets, each { total, count }
+        submitted_count:          submittedCount,
+        submitted_total:          submittedTotal,
+        invoices_capped:          invoicesCapped,
         generated_at:             now.toISOString(),
         _diagnostic: {
           ef_version: EF_VERSION,
@@ -961,12 +1045,17 @@ Deno.serve(async (req: Request) => {
           },
           invoices_summary: {
             type_filter:       'ACCREC',
+            statuses_included: 'AUTHORISED',
             count_fetched:     invoicesFetched,
             pages_fetched:     invoicesPagesFetched,
             capped:            invoicesCapped,
             outstanding_total: outstandingTotal,
             overdue_total:     overdueTotal,
             overdue_count:     overdueCount,
+            submitted_count:   submittedCount,
+            submitted_total:   submittedTotal,
+            submitted_error:   submittedError,
+            aging,
             overdue_sample:    overdueSample,
             error:             invoicesError,
           },
