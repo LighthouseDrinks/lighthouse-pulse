@@ -46984,8 +46984,19 @@ if (typeof _origOpenDD === 'function') {
   // ── Helpers ────────────────────────────────────────────────────────────────
   function _fmtDate(iso) {
     if (!iso) return '—';
+    var d = parseXeroDate(iso);
+    if (d) {
+      try { return d.toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' }); } catch(e) {}
+    }
     try { return new Date(iso).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' }); }
-    catch(e) { return iso.slice(0,10); }
+    catch(e) { return String(iso).slice(0,10); }
+  }
+
+  function _xeroDateToIso(d) {
+    if (!d) return null;
+    return d.getUTCFullYear() + '-'
+      + String(d.getUTCMonth() + 1).padStart(2, '0') + '-'
+      + String(d.getUTCDate()).padStart(2, '0');
   }
 
   function _esc(s) {
@@ -47927,35 +47938,46 @@ if (typeof _origOpenDD === 'function') {
     html += '<button class="btn btn-outline" style="font-size:10px;padding:4px 9px;margin-left:auto;" onclick="window._finChangeInvoiceView()">Change view</button>';
     html += '</div>';
 
-    // Filter bar
+    // Filter bar — re-hydrates from _finInvFilters on every render so Refresh
+    // doesn't blank the user's chosen filters. Text/date inputs use value=""
+    // attributes; selects need <option selected> on the matching option.
+    var _opt = function(val, label, current) {
+      return '<option value="' + _esc(val) + '"' + (current === val ? ' selected' : '') + '>' + _esc(label) + '</option>';
+    };
+    var curStatus = _finInvFilters.status || 'all';
+    var curSort   = _finInvFilters.sort   || 'newest';
+
     html += '<div class="card" style="margin-bottom:14px;">';
     html += '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">';
     html += '<select id="fin-inv-status" onchange="window._finApplyInvFilters()" '
          + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
          + 'padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">'
-         + '<option value="all">All statuses</option>'
-         + '<option value="OVERDUE">Overdue</option>'
-         + '<option value="AUTHORISED">Outstanding</option>'
-         + '<option value="PAID">Paid</option>'
-         + '<option value="VOIDED">Voided</option>'
+         + _opt('all',        'All statuses', curStatus)
+         + _opt('OVERDUE',    'Overdue',      curStatus)
+         + _opt('AUTHORISED', 'Outstanding',  curStatus)
+         + _opt('PAID',       'Paid',         curStatus)
+         + _opt('VOIDED',     'Voided',       curStatus)
          + '</select>';
     html += '<input id="fin-inv-search" type="text" placeholder="Search client or invoice #" '
+         + 'value="' + _esc(_finInvFilters.search || '') + '" '
          + 'oninput="window._finApplyInvFilters()" '
          + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
          + 'padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;flex:1;min-width:180px;">';
     html += '<input id="fin-inv-from" type="date" onchange="window._finApplyInvFilters()" '
+         + 'value="' + _esc(_finInvFilters.from || '') + '" '
          + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
          + 'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">';
     html += '<input id="fin-inv-to" type="date" onchange="window._finApplyInvFilters()" '
+         + 'value="' + _esc(_finInvFilters.to || '') + '" '
          + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
          + 'padding:6px 8px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">';
     html += '<select id="fin-inv-sort" onchange="window._finApplyInvFilters()" '
          + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
          + 'padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">'
-         + '<option value="newest">Newest first</option>'
-         + '<option value="oldest">Oldest first</option>'
-         + '<option value="amount">Largest amount</option>'
-         + '<option value="due">Due date</option>'
+         + _opt('newest', 'Newest first',   curSort)
+         + _opt('oldest', 'Oldest first',   curSort)
+         + _opt('amount', 'Largest amount', curSort)
+         + _opt('due',    'Due date',       curSort)
          + '</select>';
     html += '<button class="btn btn-outline" style="font-size:11px;padding:6px 12px;" onclick="window._finReloadInvoices()">Refresh</button>';
     html += '</div>';
@@ -47991,20 +48013,28 @@ if (typeof _origOpenDD === 'function') {
         var hay = ((inv.Contact && inv.Contact.Name) || '') + ' ' + (inv.InvoiceNumber || '');
         if (hay.toLowerCase().indexOf(_finInvFilters.search) < 0) return false;
       }
-      if (_finInvFilters.from && inv.Date && inv.Date < _finInvFilters.from) return false;
-      if (_finInvFilters.to   && inv.Date && inv.Date > _finInvFilters.to)   return false;
+      if (_finInvFilters.from || _finInvFilters.to) {
+        var invIso = _xeroDateToIso(parseXeroDate(inv.Date));
+        if (_finInvFilters.from && (!invIso || invIso < _finInvFilters.from)) return false;
+        if (_finInvFilters.to   && (!invIso || invIso > _finInvFilters.to))   return false;
+      }
       return true;
     });
 
     filtered.sort(function(a, b) {
-      if (_finInvFilters.sort === 'oldest') return (a.Date || '').localeCompare(b.Date || '');
+      if (_finInvFilters.sort === 'oldest') {
+        var ao = parseXeroDate(a.Date); var bo = parseXeroDate(b.Date);
+        return (ao ? ao.getTime() : 0) - (bo ? bo.getTime() : 0);
+      }
       if (_finInvFilters.sort === 'amount') return Number(b.AmountDue || b.Total || 0) - Number(a.AmountDue || a.Total || 0);
       if (_finInvFilters.sort === 'due')    {
         // Defensive: DueDate may be WCF /Date(...)/ or ISO. Sort by parsed timestamp.
         var da = parseXeroDate(a.DueDate); var db = parseXeroDate(b.DueDate);
         return (da ? da.getTime() : 0) - (db ? db.getTime() : 0);
       }
-      return (b.Date || '').localeCompare(a.Date || '');
+      // Newest first (default) — same defensive parse so WCF dates sort correctly.
+      var an = parseXeroDate(a.Date); var bn = parseXeroDate(b.Date);
+      return (bn ? bn.getTime() : 0) - (an ? an.getTime() : 0);
     });
 
     var outstanding = 0;
@@ -48066,15 +48096,35 @@ if (typeof _origOpenDD === 'function') {
       html += '<td style="text-align:right;white-space:nowrap;">';
       if (status === 'OVERDUE') {
         if (canChase) {
-          html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 10px;border-color:var(--amber);color:var(--amber);margin-right:4px;" '
-                + 'onclick="window._finOpenChaseModal(\'' + _esc(inv.InvoiceID) + '\')">Chase</button>';
+          // Cool-down: dim all three segments uniformly when last chase < 24h
+          // ago. Tooltip warns but does NOT block — escalation may still be
+          // intentional and the modal preview is the real confirm step.
+          var dimmed = lastChase && (Date.now() - new Date(lastChase.sent_at).getTime() < 86400000);
+          var dimStyle = dimmed ? 'opacity:0.55;' : '';
+          var dimTip   = dimmed ? ' — Chased ' + _relativeOrDate(lastChase.sent_at) + ', click to send another' : '';
+          html += '<span style="display:inline-flex;border:1px solid var(--amber);border-radius:3px;overflow:hidden;margin-right:4px;vertical-align:middle;' + dimStyle + '">';
+          ['soft', 'medium', 'heavy'].forEach(function(tone, i) {
+            var letter = tone.charAt(0).toUpperCase();
+            var label  = letter + tone.slice(1);
+            var sep    = i > 0 ? 'border-left:1px solid var(--amber);' : '';
+            html += '<button type="button" '
+                  + 'style="background:transparent;color:var(--amber);font-size:11px;padding:5px 9px;min-width:26px;border:0;' + sep + 'cursor:pointer;font-family:Lato,sans-serif;line-height:1;" '
+                  + 'title="' + _esc(label + ' reminder' + dimTip) + '" '
+                  + 'onclick="window._finOpenChaseModal(\'' + _esc(inv.InvoiceID) + '\',\'' + tone + '\')">' + letter + '</button>';
+          });
+          html += '</span>';
         } else {
           html += '<button class="btn btn-outline" disabled title="' + _esc(chaseTip)
                 + '" style="font-size:11px;padding:5px 10px;opacity:0.4;cursor:not-allowed;margin-right:4px;">Chase</button>';
         }
+        // Compact icon-only Xero link on overdue rows to make room for the segmented control.
+        html += '<a href="' + xeroUrl + '" target="_blank" rel="noopener" class="btn btn-outline" '
+             + 'title="Open in Xero" '
+             + 'style="font-size:11px;padding:5px 10px;text-decoration:none;">↗</a>';
+      } else {
+        html += '<a href="' + xeroUrl + '" target="_blank" rel="noopener" class="btn btn-outline" '
+             + 'style="font-size:11px;padding:5px 10px;text-decoration:none;">Open in Xero ↗</a>';
       }
-      html += '<a href="' + xeroUrl + '" target="_blank" rel="noopener" class="btn btn-outline" '
-           + 'style="font-size:11px;padding:5px 10px;text-decoration:none;">Open in Xero ↗</a>';
       html += '</td>';
       html += '</tr>';
     });
@@ -48085,7 +48135,10 @@ if (typeof _origOpenDD === 'function') {
   // ── Chase modal ────────────────────────────────────────────────────────────
   var _finChaseTemplates = null;
 
-  window._finOpenChaseModal = async function(invoiceId) {
+  // Stashed so _finRenderChaseModal can show the "From:" line without re-querying.
+  var _finSenderIdentity = null;
+
+  window._finOpenChaseModal = async function(invoiceId, presetTone) {
     var invoices = window._finInvoices || [];
     var inv = null;
     for (var i = 0; i < invoices.length; i++) {
@@ -48109,11 +48162,19 @@ if (typeof _origOpenDD === 'function') {
       return;
     }
 
-    // Pick template that matches days overdue, defaulting to first
+    // Pick template: presetTone (from row segmented control) wins; otherwise
+    // fall back to "highest trigger_days <= days-overdue" auto-pick.
     var days = inv.DueDate ? _daysBetween(new Date(), inv.DueDate) : 0;
     var defaultTpl = _finChaseTemplates[0];
-    for (var t = 0; t < _finChaseTemplates.length; t++) {
-      if (days >= (_finChaseTemplates[t].trigger_days || 0)) defaultTpl = _finChaseTemplates[t];
+    if (presetTone) {
+      var tone = String(presetTone).toLowerCase();
+      for (var t = 0; t < _finChaseTemplates.length; t++) {
+        if ((_finChaseTemplates[t].name || '').toLowerCase() === tone) { defaultTpl = _finChaseTemplates[t]; break; }
+      }
+    } else {
+      for (var t = 0; t < _finChaseTemplates.length; t++) {
+        if (days >= (_finChaseTemplates[t].trigger_days || 0)) defaultTpl = _finChaseTemplates[t];
+      }
     }
 
     // Check sender configured
@@ -48127,6 +48188,7 @@ if (typeof _origOpenDD === 'function') {
         );
         return;
       }
+      _finSenderIdentity = { name: sMap.credit_from_name, email: sMap.credit_from_email };
     } catch(e) { /* non-fatal — server will validate too */ }
 
     _finRenderChaseModal(inv, defaultTpl, days);
@@ -48157,6 +48219,11 @@ if (typeof _origOpenDD === 'function') {
         + ' <span style="color:var(--muted);">(' + (t.trigger_days || 0) + 'd)</span></label>';
     }).join('');
 
+    var fromLine = _finSenderIdentity
+      ? '<div style="color:var(--muted);margin-top:8px;">From:</div>'
+        + '<div style="color:var(--white);font-weight:600;">' + _esc(_finSenderIdentity.name) + ' &lt;' + _esc(_finSenderIdentity.email) + '&gt;</div>'
+      : '';
+
     modal.innerHTML =
         '<div style="font-size:18px;font-weight:700;color:var(--white);margin-bottom:4px;">Send chase email</div>'
       + '<div style="font-size:12px;color:var(--muted);margin-bottom:18px;">'
@@ -48166,10 +48233,12 @@ if (typeof _origOpenDD === 'function') {
       + '<div style="background:var(--navy-mid);padding:12px;border-radius:4px;margin-bottom:16px;font-size:12px;">'
       + '<div style="color:var(--muted);">To:</div>'
       + '<div style="color:var(--white);font-weight:600;">' + _esc(contact.Name || '—') + ' &lt;' + _esc(contact.EmailAddress || '') + '&gt;</div>'
+      + fromLine
       + '</div>'
 
       + '<div style="margin-bottom:14px;">'
-      + '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;letter-spacing:0.06em;text-transform:uppercase;">Template</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-bottom:4px;letter-spacing:0.06em;text-transform:uppercase;">Template</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;opacity:0.8;">Soft = polite nudge · Medium = follow-up · Heavy = final notice before hold</div>'
       + radioOpts
       + '</div>'
 
@@ -48249,6 +48318,14 @@ if (typeof _origOpenDD === 'function') {
     var btn = document.getElementById('fin-chase-send-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
 
+    // Look up tone for the success toast (purely for nicer copy — server is the
+    // source of truth on which template was actually rendered).
+    var sentTone = '';
+    for (var ti = 0; ti < (_finChaseTemplates || []).length; ti++) {
+      if (_finChaseTemplates[ti].id === sel.value) { sentTone = (_finChaseTemplates[ti].name || ''); break; }
+    }
+    var toneLabel = sentTone ? sentTone.charAt(0).toUpperCase() + sentTone.slice(1) : 'Chase';
+
     try {
       await callCreditEF({
         action:         'send_chase_email',
@@ -48262,7 +48339,7 @@ if (typeof _origOpenDD === 'function') {
         days_overdue:   days,
         invoice_url:    'https://go.xero.com/AccountsReceivable/Edit.aspx?invoiceID=' + encodeURIComponent(inv.InvoiceID || '')
       }, 20000);
-      window.toast && window.toast('Chase email sent to ' + (contact.Name || contact.EmailAddress), 'success');
+      window.toast && window.toast(toneLabel + ' reminder sent to ' + (contact.Name || contact.EmailAddress), 'success');
       window._finCloseChaseModal();
       // Refresh chase log so the row badge appears
       try {
