@@ -48073,8 +48073,10 @@ if (typeof _origOpenDD === 'function') {
       var status   = _invoiceStatus(inv);
       var contact  = inv.Contact || {};
       var xeroUrl  = 'https://go.xero.com/AccountsReceivable/Edit.aspx?invoiceID=' + encodeURIComponent(inv.InvoiceID || '');
-      var canChase = (status === 'OVERDUE') && !!contact.EmailAddress;
-      var chaseTip = !contact.EmailAddress ? 'No email on file — update contact in Xero' : '';
+      // Always allow chase on overdue rows — modal lets the user enter a
+      // recipient email when the Xero contact has none on file.
+      var canChase = (status === 'OVERDUE');
+      var chaseTip = !contact.EmailAddress ? 'No email on Xero contact — enter one in the modal' : '';
       var lastChase = _lastChaseFor(inv.InvoiceID);
 
       html += '<tr>';
@@ -48220,9 +48222,15 @@ if (typeof _origOpenDD === 'function') {
     }).join('');
 
     var fromLine = _finSenderIdentity
-      ? '<div style="color:var(--muted);margin-top:8px;">From:</div>'
+      ? '<div style="color:var(--muted);margin-top:10px;">From</div>'
         + '<div style="color:var(--white);font-weight:600;">' + _esc(_finSenderIdentity.name) + ' &lt;' + _esc(_finSenderIdentity.email) + '&gt;</div>'
       : '';
+
+    var hadEmail   = !!contact.EmailAddress;
+    var prefilled  = _esc(contact.EmailAddress || '');
+    var noEmailHint = hadEmail
+      ? ''
+      : '<div style="font-size:11px;color:var(--amber);margin-top:6px;">No email on this Xero contact \u2014 enter one to send this once. Update the contact in Xero to skip this step next time.</div>';
 
     modal.innerHTML =
         '<div style="font-size:18px;font-weight:700;color:var(--white);margin-bottom:4px;">Send chase email</div>'
@@ -48231,8 +48239,14 @@ if (typeof _origOpenDD === 'function') {
       + (days > 0 ? days + ' days overdue' : 'Due today/recently') + '</div>'
 
       + '<div style="background:var(--navy-mid);padding:12px;border-radius:4px;margin-bottom:16px;font-size:12px;">'
-      + '<div style="color:var(--muted);">To:</div>'
-      + '<div style="color:var(--white);font-weight:600;">' + _esc(contact.Name || '—') + ' &lt;' + _esc(contact.EmailAddress || '') + '&gt;</div>'
+      + '<div style="color:var(--muted);">To</div>'
+      + '<div style="color:var(--white);font-weight:600;margin-bottom:6px;">' + _esc(contact.Name || '—') + '</div>'
+      + '<input id="fin-chase-to" type="email" placeholder="recipient@example.com" '
+      +   'value="' + prefilled + '" '
+      +   'oninput="window._finValidateChaseTo()" '
+      +   'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+      +   'padding:7px 10px;font-size:13px;border-radius:3px;font-family:Lato,sans-serif;box-sizing:border-box;">'
+      + noEmailHint
       + fromLine
       + '</div>'
 
@@ -48255,7 +48269,24 @@ if (typeof _origOpenDD === 'function') {
     document.body.appendChild(bg);
 
     window._finRenderChasePreview(inv.InvoiceID);
+    window._finValidateChaseTo();
   }
+
+  // Loose email check — good enough for client-side gating; Resend will do
+  // the real validation server-side. Disables the Send button when invalid
+  // so users get instant feedback instead of an opaque API error.
+  window._finValidateChaseTo = function() {
+    var inp = document.getElementById('fin-chase-to');
+    var btn = document.getElementById('fin-chase-send-btn');
+    if (!inp || !btn) return;
+    var v = (inp.value || '').trim();
+    var ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+    btn.disabled = !ok;
+    btn.style.opacity   = ok ? '' : '0.5';
+    btn.style.cursor    = ok ? '' : 'not-allowed';
+    btn.title           = ok ? '' : 'Enter a valid recipient email';
+    inp.style.borderColor = (v && !ok) ? 'var(--red)' : 'var(--navy-border)';
+  };
 
   window._finCloseChaseModal = function() {
     var el = document.getElementById('fin-chase-modal-bg');
@@ -48316,6 +48347,17 @@ if (typeof _origOpenDD === 'function') {
     var contact = inv.Contact || {};
     var days = inv.DueDate ? _daysBetween(new Date(), inv.DueDate) : 0;
     var btn = document.getElementById('fin-chase-send-btn');
+
+    // Use the editable To: value (may be the prefilled Xero email or one the
+    // user typed in for contacts without an email on file).
+    var toInput = document.getElementById('fin-chase-to');
+    var toEmail = ((toInput && toInput.value) || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
+      window.toast && window.toast('Enter a valid recipient email first.', 'warn');
+      if (toInput) toInput.focus();
+      return;
+    }
+
     if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
 
     // Look up tone for the success toast (purely for nicer copy — server is the
@@ -48333,13 +48375,13 @@ if (typeof _origOpenDD === 'function') {
         invoice_id:     inv.InvoiceID,
         invoice_number: inv.InvoiceNumber,
         contact_name:   contact.Name,
-        contact_email:  contact.EmailAddress,
+        contact_email:  toEmail,
         amount_due:     _fmtCur(inv.AmountDue, inv.CurrencyCode),
         due_date:       _fmtDate(inv.DueDate),
         days_overdue:   days,
         invoice_url:    'https://go.xero.com/AccountsReceivable/Edit.aspx?invoiceID=' + encodeURIComponent(inv.InvoiceID || '')
       }, 20000);
-      window.toast && window.toast(toneLabel + ' reminder sent to ' + (contact.Name || contact.EmailAddress), 'success');
+      window.toast && window.toast(toneLabel + ' reminder sent to ' + (contact.Name || toEmail), 'success');
       window._finCloseChaseModal();
       // Refresh chase log so the row badge appears
       try {
