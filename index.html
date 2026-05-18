@@ -17,11 +17,8 @@
 (function(){
   try {
     var raw = localStorage.getItem('lhd-auth');
-    var cached = raw ? JSON.parse(raw) : null;
-    var expiresAt = cached && Number(cached.expires_at || (cached.currentSession && cached.currentSession.expires_at) || 0);
-    // Only suppress the login screen for a clearly live cached session. Stale
-    // refresh tokens can make getSession() hang before the login form appears.
-    if (raw && raw.indexOf('"access_token"') > -1 && expiresAt && expiresAt > Math.floor(Date.now() / 1000) + 30) {
+    // Check for token presence without parsing — works across all Supabase v2 storage formats
+    if (raw && (raw.indexOf('"access_token"') > -1 || raw.indexOf('"refresh_token"') > -1)) {
       document.documentElement.classList.add('resuming-session');
     }
   } catch(e) {}
@@ -1749,7 +1746,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   // Check for existing session on load.
-  // Race against a short watchdog so a hanging token-refresh (paused
+  // Race against a 8-second watchdog so a hanging token-refresh (paused
   // Supabase project, network outage) never leaves the navy-blank screen.
   var _sessionResolved = false;
   var _sessionWatchdog = setTimeout(function() {
@@ -1758,7 +1755,7 @@ document.addEventListener('DOMContentLoaded', function() {
       console.warn('getSession() timed out - falling back to login screen');
       showLogin();
     }
-  }, 1500);
+  }, 8000);
 
   _sb.auth.getSession().then(function(res) {
     if (_sessionResolved) return;
@@ -2080,15 +2077,6 @@ function setAuthError(msg) {
 }
 
 // ── Sign in ──────────────────────────────────────────────────────────────────
-function withAuthTimeout(promise, label) {
-  return Promise.race([
-    promise,
-    new Promise(function(_, reject) {
-      setTimeout(function() { reject(new Error(label + ' timed out. Please try again.')); }, 45000);
-    })
-  ]);
-}
-
 window.doLogin = async function() {
   var email = (document.getElementById('auth-email') || {}).value.trim();
   var pw    = (document.getElementById('auth-password') || {}).value;
@@ -2100,10 +2088,10 @@ window.doLogin = async function() {
   if (!email || !pw) { setAuthError('Please enter your email and password.'); return; }
   if (btn) { btn.disabled=true; btn.textContent='Signing in…'; }
   try {
-    var res = await withAuthTimeout(window._sb.auth.signInWithPassword({ email: email, password: pw }), 'Sign in');
+    var res = await window._sb.auth.signInWithPassword({ email: email, password: pw });
     if (res.error) throw res.error;
     if (!res.data || !res.data.session) throw new Error('No session returned. Check Supabase config.');
-    await withAuthTimeout(handleSession(res.data.session), 'Account verification');
+    await handleSession(res.data.session);
   } catch(e) {
     var msg = e.message || 'Unknown error';
     setAuthError('Error: ' + msg);
