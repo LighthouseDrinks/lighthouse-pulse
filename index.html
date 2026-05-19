@@ -21614,6 +21614,9 @@ window._approvalsBadgePoll = async function() {
   </div>
 
   <!-- ══ LINE STATUS — idle / changeover / running / paused ═══════════════ -->
+  <!-- Now also hosts the active-job action buttons (Pause/Finish/Stop/Times, -->
+  <!-- Start Production, Resume) — a single banner replaces the old           -->
+  <!-- "Active Job(s)" card so the operator has one authoritative widget.      -->
   <div id="sched-line-status" class="card" style="padding:14px 18px;margin-top:6px;display:flex;align-items:center;gap:14px;border-left:3px solid var(--navy-border);">
     <div id="sched-line-dot" style="width:12px;height:12px;border-radius:50%;background:var(--navy-border);flex-shrink:0;"></div>
     <div style="flex:1;min-width:0;">
@@ -21621,6 +21624,7 @@ window._approvalsBadgePoll = async function() {
       <div id="sched-line-sub" style="font-size:11px;color:var(--muted);margin-top:2px;">&nbsp;</div>
     </div>
     <div id="sched-line-timer" style="font-family:monospace;font-size:22px;font-weight:700;color:var(--muted);letter-spacing:0.05em;display:none;">00:00:00</div>
+    <div id="sched-line-actions" style="display:flex;gap:6px;flex-shrink:0;align-items:center;"></div>
   </div>
 
   <!-- ══ BAY BOARD — 5 scarce dry-goods staging slots + waitlist ═══════════ -->
@@ -21633,17 +21637,6 @@ window._approvalsBadgePoll = async function() {
       <button onclick="window._renderBayBoard&&window._renderBayBoard()" class="btn btn-outline" style="font-size:11px;padding:5px 12px;">Refresh</button>
     </div>
     <div id="bay-board-content"><div style="color:var(--muted);font-size:12px;padding:10px 0;">Loading bay status…</div></div>
-  </div>
-
-  <!-- Active Job(s) -->
-  <div class="card" style="padding:0;overflow:hidden;margin-top:16px;">
-    <div style="padding:13px 18px 10px;border-bottom:1px solid var(--navy-border);">
-      <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;">Active Job(s)</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px;">Jobs currently running, paused, or in changeover</div>
-    </div>
-    <div id="sched-active-jobs" style="padding:12px 18px;min-height:48px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start;">
-      <div style="color:var(--muted);font-size:11px;">Loading...</div>
-    </div>
   </div>
 
   <!-- Next Jobs -->
@@ -37780,7 +37773,8 @@ window.saveAdjModal = async function() {
         var sixtyDaysAgo = new Date(Date.now() - 60 * 86400000).toISOString();
         _schedDowntime = await sbGet('downtime_logs?start_time=gte.' + sixtyDaysAgo + '&order=start_time.asc');
       } catch(e2) { _schedDowntime = []; }
-      renderActiveJobs();
+      _schedBannerLoaded = true;
+      _renderLineStatusBanner();
       renderNextJobs();
       renderScheduleEvents();
       renderRecentCorrections();
@@ -37898,7 +37892,9 @@ window.saveAdjModal = async function() {
   };
 
   // ── Line-status banner (idle / changeover / running / paused / loading) ─────
-  // First-load: 'loading'. After first renderActiveJobs() call: real state.
+  // First-load: 'loading'. After loadSchedule() has populated _schedJobs: real state.
+  // The banner is the single active-job widget on the Schedule page — it owns the
+  // timer AND the Pause/Finish/Stop/Times/Resume/Start-Production action buttons.
   var _schedBannerLoaded = false;
   function _renderLineStatusBanner() {
     var card = document.getElementById('sched-line-status');
@@ -37907,12 +37903,16 @@ window.saveAdjModal = async function() {
     var hd   = document.getElementById('sched-line-headline');
     var sub  = document.getElementById('sched-line-sub');
     var tmr  = document.getElementById('sched-line-timer');
+    var acts = document.getElementById('sched-line-actions');
     if (!_schedBannerLoaded) {
       card.style.borderLeftColor = 'var(--navy-border)';
+      card.style.cursor = 'default';
+      card.onclick = null;
       if (dot) dot.style.background = 'var(--navy-border)';
       if (hd)  { hd.textContent = 'Loading line status…'; hd.style.color = 'var(--muted)'; }
       if (sub) sub.textContent = '\u00a0';
       if (tmr) tmr.style.display = 'none';
+      if (acts) acts.innerHTML = '';
       return;
     }
     var active = (_schedJobs || []).find(function(j) {
@@ -37926,6 +37926,7 @@ window.saveAdjModal = async function() {
       if (hd)  { hd.textContent = 'LINE IDLE'; hd.style.color = 'var(--green)'; }
       if (sub) sub.textContent = 'No changeover or production active — pick a job from Next Jobs to start.';
       if (tmr) tmr.style.display = 'none';
+      if (acts) acts.innerHTML = '';
       return;
     }
     var isCo     = !!(active.changeover_start && !active.actual_start);
@@ -37934,11 +37935,8 @@ window.saveAdjModal = async function() {
     var state = isCo ? 'CHANGEOVER' : isPaused ? 'PAUSED' : 'RUNNING';
     var label = window.jobDisplayName ? window.jobDisplayName(active, _schedBomMap) : (active.product_name || active.id);
     card.style.borderLeftColor = col;
-    card.style.cursor = 'pointer';
-    card.onclick = function() {
-      var aj = document.getElementById('sched-active-jobs');
-      if (aj && aj.scrollIntoView) aj.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    };
+    card.style.cursor = 'default';
+    card.onclick = null;
     if (dot) { dot.style.background = col; dot.style.boxShadow = '0 0 6px ' + col; }
     if (hd)  { hd.innerHTML = 'LINE ' + state + ' <span style="color:var(--gold);font-weight:600;font-size:12px;margin-left:6px;letter-spacing:0.02em;">' + esc(active.id) + '</span>'; hd.style.color = col; }
     if (sub) sub.textContent = label + (active.clientName ? ' · ' + active.clientName : '');
@@ -37951,6 +37949,28 @@ window.saveAdjModal = async function() {
         ? _safeProdSecs(active.changeover_start, null, 0)
         : _safeProdSecs(active.actual_start, active.paused_at, active.total_paused_secs);
       tmr.textContent = fmtSecs(secs);
+    }
+    if (acts) {
+      var canControl = window.canDo && window.canDo('production_control');
+      if (!canControl) { acts.innerHTML = ''; return; }
+      var inShift = _isWithinShift();
+      var jid = esc(active.id);
+      var btnBase = 'font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;padding:7px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;';
+      var html = '';
+      if (isCo) {
+        html += '<button onclick="window.schedStartProduction(\'' + jid + '\')" title="Changeover finished — start running product" style="' + btnBase + 'background:var(--green);border:none;color:#0d1b2a;">&#9654; Start Production</button>';
+        html += '<button onclick="window.schedStop(\'' + jid + '\')" title="Stop and return to queue (logs downtime + reason)" style="' + btnBase + 'background:transparent;border:1px solid var(--red);color:var(--red);">&#9632; Stop</button>';
+      } else if (isPaused) {
+        html += '<button onclick="window.schedResumeJob(\'' + jid + '\')" style="' + btnBase + 'background:var(--green);border:none;color:#0d1b2a;">&#9654; Resume</button>';
+        html += '<button onclick="window.schedFinishJob(\'' + jid + '\')" style="' + btnBase + 'background:transparent;border:1px solid var(--amber);color:var(--amber);">&#9632; Finish</button>';
+        html += '<button onclick="window.schedStop(\'' + jid + '\')" title="Stop and return to queue (logs downtime + reason)" style="' + btnBase + 'background:transparent;border:1px solid var(--red);color:var(--red);">&#9632; Stop</button>';
+      } else {
+        html += '<button class="sched-pause-btn" onclick="window.schedPauseJob(\'' + jid + '\')" ' + (!inShift ? 'disabled ' : '') + 'style="' + btnBase + 'background:transparent;border:1px solid var(--navy-border);color:var(--muted);opacity:' + (!inShift ? '0.4' : '1') + ';" title="' + (!inShift ? 'Cannot pause outside production hours' : '') + '">&#9646;&#9646; Pause</button>';
+        html += '<button onclick="window.schedFinishJob(\'' + jid + '\')" style="' + btnBase + 'background:var(--amber);border:none;color:#0d1b2a;">&#9632; Finish</button>';
+        html += '<button onclick="window.schedStop(\'' + jid + '\')" title="Stop and return to queue (logs downtime + reason)" style="' + btnBase + 'background:transparent;border:1px solid var(--red);color:var(--red);">&#9632; Stop</button>';
+      }
+      html += '<button onclick="window.schedEditActualTimes(\'' + jid + '\')" title="Edit recorded times" style="' + btnBase + 'background:transparent;border:1px solid rgba(201,168,76,0.35);color:var(--gold);">&#9998; Times</button>';
+      acts.innerHTML = html;
     }
   }
 
@@ -37968,105 +37988,15 @@ window.saveAdjModal = async function() {
     }
   }
 
-  // ── Tick: update timer spans without full re-render ──────────────────────────
+  // ── Tick: update banner timer + refresh Pause button shift-time gating ──────
   function _tickActiveTimers() {
     _tickBannerTimer();
-    document.querySelectorAll('[data-timer-job]').forEach(function(el) {
-      var jid  = el.getAttribute('data-timer-job');
-      var type = el.getAttribute('data-timer-type');
-      var j    = _schedJobs.find(function(x) { return x.id === jid; });
-      if (!j) return;
-      if (type === 'run') {
-        el.textContent = fmtSecs(_safeProdSecs(j.actual_start, j.paused_at, j.total_paused_secs));
-      } else if (type === 'co') {
-        var coSecs = _safeProdSecs(j.changeover_start, null, 0);
-        el.textContent = fmtSecs(coSecs);
-        var h = coSecs / 3600;
-        el.style.color = h < 2 ? 'var(--green)' : h < 3 ? 'var(--amber)' : 'var(--red)';
-      }
-    });
     var inShift = _isWithinShift();
     document.querySelectorAll('.sched-pause-btn').forEach(function(btn) {
       btn.disabled    = !inShift;
       btn.style.opacity = inShift ? '1' : '0.4';
       btn.title       = inShift ? '' : 'Cannot pause outside production hours';
     });
-  }
-
-  // ── Render: Active Jobs ──────────────────────────────────────────────────────
-  function renderActiveJobs() {
-    var el = document.getElementById('sched-active-jobs');
-    if (!el) return;
-    _schedBannerLoaded = true;
-    _renderLineStatusBanner();
-    var canControl  = window.canDo && window.canDo('production_control');
-    var canOverride = window.canDo && window.canDo('changeover_override');
-    var active = _schedJobs.filter(function(j) {
-      return (j.actual_start && !j.actual_end) || (j.changeover_start && !j.actual_start);
-    });
-    if (!active.length) {
-      el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0;">No active jobs — press Start on a queued job to begin.</div>';
-      return;
-    }
-    var inShift = _isWithinShift();
-    el.style.display    = 'block';
-    el.style.padding    = '0';
-    el.innerHTML = active.map(function(j) {
-      var isChangeover = !j.actual_start && !!j.changeover_start;
-      var isPaused     = !!(j.actual_start && j.paused_at && !j.actual_end);
-      var borderCol    = isChangeover ? 'var(--amber)' : isPaused ? 'rgba(255,255,255,0.25)' : 'var(--green)';
-      var stateLabel   = isChangeover ? 'CHANGEOVER' : isPaused ? 'PAUSED' : 'RUNNING';
-      var stateCol     = isChangeover ? 'var(--amber)' : isPaused ? 'var(--muted)' : 'var(--green)';
-      var timerSecs    = isChangeover
-        ? _safeProdSecs(j.changeover_start, null, 0)
-        : _safeProdSecs(j.actual_start, j.paused_at, j.total_paused_secs);
-      var timerH    = timerSecs / 3600;
-      var timerCol  = isChangeover
-        ? (timerH < 2 ? 'var(--green)' : timerH < 3 ? 'var(--amber)' : 'var(--red)')
-        : 'var(--white)';
-      var timerType = isChangeover ? 'co' : 'run';
-
-      // Full-width horizontal card: info | timer | buttons
-      var h = '<div style="border-bottom:1px solid rgba(36,61,87,0.5);border-left:4px solid ' + borderCol + ';padding:14px 18px;width:100%;box-sizing:border-box;background:var(--navy-card);display:grid;grid-template-columns:1fr 180px auto;gap:20px;align-items:center;">';
-
-      // Col 1: identity + meta
-      h += '<div style="min-width:0;">';
-      h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">';
-      h += '<span style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:' + stateCol + ';">&#9679; ' + stateLabel + '</span>';
-      h += '<a href="javascript:void(0)" onclick="window.openJobDetail&&window.openJobDetail(\'' + esc(j.id) + '\')" style="font-size:10px;font-weight:700;color:var(--gold);text-decoration:none;">' + esc(j.id) + '</a>';
-      h += '</div>';
-      var _aJobLabel = window.jobDisplayName(j, _schedBomMap);
-      h += '<div style="font-size:15px;font-weight:700;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px;" title="' + esc(_aJobLabel) + '">' + esc(_aJobLabel) + '</div>';
-      h += '<div style="font-size:11px;color:var(--muted);">' + (j.clientName ? esc(j.clientName) + ' &nbsp;&middot;&nbsp; ' : '') + (j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '') + '</div>';
-      h += '</div>';
-
-      // Col 2: timer
-      h += '<div style="text-align:center;">';
-      h += '<div style="font-size:28px;font-weight:700;font-family:monospace;color:' + timerCol + ';letter-spacing:0.05em;" data-timer-job="' + esc(j.id) + '" data-timer-type="' + timerType + '">' + fmtSecs(timerSecs) + '</div>';
-      h += '<div style="font-size:9px;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-top:2px;">' + (isChangeover ? 'Changeover time' : isPaused ? 'Paused at' : 'Productive time') + '</div>';
-      h += '</div>';
-
-      // Col 3: action buttons
-      h += '<div style="display:flex;flex-direction:column;gap:6px;min-width:110px;">';
-      if (canControl) {
-        if (isChangeover) {
-          h += '<button onclick="window.schedStartProduction(\'' + esc(j.id) + '\')" title="Changeover finished \u2014 start running product" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green);border:none;color:#0d1b2a;padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9654; Start Production</button>';
-          h += '<button onclick="window.schedStop(\'' + esc(j.id) + '\')" title="Stop and return to queue (logs downtime + reason)" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9632; Stop</button>';
-        } else if (isPaused) {
-          h += '<button onclick="window.schedResumeJob(\'' + esc(j.id) + '\')" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green);border:none;color:#0d1b2a;padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9654; Resume</button>';
-          h += '<button onclick="window.schedFinishJob(\'' + esc(j.id) + '\')" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--amber);color:var(--amber);padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9632; Finish</button>';
-          h += '<button onclick="window.schedStop(\'' + esc(j.id) + '\')" title="Stop and return to queue (logs downtime + reason)" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9632; Stop</button>';
-        } else {
-          h += '<button class="sched-pause-btn" onclick="window.schedPauseJob(\'' + esc(j.id) + '\')" ' + (!inShift ? 'disabled ' : '') + 'style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;opacity:' + (!inShift ? '0.4' : '1') + ';" title="' + (!inShift ? 'Cannot pause outside production hours' : '') + '">&#9646;&#9646; Pause</button>';
-          h += '<button onclick="window.schedFinishJob(\'' + esc(j.id) + '\')" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--amber);border:none;color:#0d1b2a;padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9632; Finish</button>';
-          h += '<button onclick="window.schedStop(\'' + esc(j.id) + '\')" title="Stop and return to queue (logs downtime + reason)" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--red);color:var(--red);padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9632; Stop</button>';
-        }
-      }
-      if (canControl) h += '<button onclick="window.schedEditActualTimes(\'' + esc(j.id) + '\')" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid rgba(201,168,76,0.35);color:var(--gold);padding:8px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">&#9998; Times</button>';
-      h += '</div>';
-      h += '</div>';
-      return h;
-    }).join('');
   }
 
   // ── Render: Next Jobs ────────────────────────────────────────────────────────
