@@ -19541,8 +19541,8 @@ window.loadBoms = async function initBoms() {
   // Live clock in header — ticks every second with HH:MM:SS
   function updateClock() {
     var now = new Date();
-    var timeStr = now.toLocaleTimeString('en-IE', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
-    var dateStr = now.toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' });
+    var timeStr = now.toLocaleTimeString('en-IE', { hour:'2-digit', minute:'2-digit', second:'2-digit', timeZone:'Europe/Dublin' });
+    var dateStr = now.toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric', timeZone:'Europe/Dublin' });
     var el = document.getElementById('header-live-clock');
     if (el) {
       el.innerHTML = '<strong style="color:var(--white);">' + dateStr + '</strong> &nbsp;<span style="color:var(--gold);font-weight:700;font-family:\'Lato\',monospace;">' + timeStr + '</span>';
@@ -27503,7 +27503,6 @@ window.printBatchQR = function() {
     +   '<div class="info">'
     +     '<div class="title">' + (d.desc || 'Dry Goods Delivery') + '</div>'
     +     '<div class="meta"><strong>Batch:</strong> ' + (d.ref || '—') + '</div>'
-    +     '<div class="meta"><strong>Qty:</strong> ' + (d.qty ? parseInt(d.qty).toLocaleString() : '—') + '</div>'
     +     (deliveryDate ? '<div class="meta"><strong>Delivered:</strong> ' + deliveryDate + '</div>' : '')
     +     (skuId ? '<div class="meta"><strong>SKU:</strong> ' + skuId + '</div>' : '')
     +   '</div>'
@@ -27547,7 +27546,6 @@ window.showBatchQR = function(batchId) {
       +     '<div class="title">' + displayName + '</div>'
       +     (client ? '<div class="meta"><strong>Client:</strong> ' + client + '</div>' : '')
       +     '<div class="meta"><strong>Batch:</strong> ' + batchRef + '</div>'
-      +     '<div class="meta"><strong>Remaining:</strong> ' + parseInt(b.quantity_remaining).toLocaleString() + '</div>'
       +     (b.delivery_date ? '<div class="meta"><strong>Delivered:</strong> ' + fmtDate(b.delivery_date) + '</div>' : '')
       +     (b.sku_id ? '<div class="meta"><strong>SKU:</strong> ' + b.sku_id + '</div>' : '')
       +   '</div>'
@@ -31078,6 +31076,27 @@ window.saveAdjModal = async function() {
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
 
+  // Effective bottle count for a job:
+  //   • Bottles-target jobs: returns the stored bottle_target (derived:false).
+  //   • Liquid-target jobs:  derives bottles from liquid_litres + BOM volume_cl,
+  //     adjusting for dilution when abv_in and bottling_abv are both present.
+  // Mirrors the formula used in initComponentsFromBOM / resyncComponentQtys.
+  window._calcEffectiveBottles = function(job, bomVolCl) {
+    if (!job) return { bottles: null, derived: false };
+    if (job.bottle_target) return { bottles: parseInt(job.bottle_target, 10), derived: false };
+    var volCl = parseFloat(bomVolCl || 0);
+    if (job.job_target_type !== 'liquid' || !job.liquid_litres || !volCl) {
+      return { bottles: null, derived: false };
+    }
+    var capL = volCl / 100;
+    var workingLitres = parseFloat(job.liquid_litres);
+    if (job.abv_in && job.bottling_abv) {
+      workingLitres = (parseFloat(job.liquid_litres) * parseFloat(job.abv_in)) / parseFloat(job.bottling_abv);
+    }
+    var n = Math.round(workingLitres / capL) || null;
+    return { bottles: n, derived: !!n };
+  };
+
   window.initComponentsFromBOM = async function(jobId, silent) {
     var j = _jobs.find(function(x){ return x.id === jobId; });
     if (!j || !j.bom_id) {
@@ -31517,7 +31536,7 @@ window.saveAdjModal = async function() {
     // Pull BOM for case/pallet info
     var bom = null;
     try {
-      var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=bottles_per_shipper,additional_info');
+      var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=bottles_per_shipper,additional_info,volume_cl');
       bom = bomRows[0] || null;
     } catch(e) { window.logError('load BOM for weights/measures', e); }
     var ai = (bom && bom.additional_info) || {};
@@ -31601,7 +31620,10 @@ window.saveAdjModal = async function() {
     html += '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">Final Yield</div>';
 
     html += frow('Batch / Lot No', inp('lot-no', j.lot_number, 'e.g. B-0042'), true);
-    html += frow('Total Bottles Produced', inp('bottles', j.actual_bottles_produced, 'e.g. 6820', 'number') + sub('Planned: ' + (j.bottle_target ? j.bottle_target.toLocaleString() : '—') + ' bottles'), true);
+    var _resEff = window._calcEffectiveBottles(j, bom && bom.volume_cl);
+    var _resPlannedLabel = 'Planned: ' + (_resEff.bottles ? _resEff.bottles.toLocaleString() : '—') + ' bottles'
+      + (_resEff.derived ? ' (calc.)' : '');
+    html += frow('Total Bottles Produced', inp('bottles', j.actual_bottles_produced, 'e.g. 6820', 'number') + sub(_resPlannedLabel), true);
     html += frow('Total Cases', inp('cases', actualCases, 'Auto-calculated', 'number') + sub('Auto-calculated from bottles ÷ case size'), true);
     html += frow('Cases per Layer', inp('cases-layer', casesPerLayer, 'From BOM', 'text', !!casesPerLayer));
     html += frow('Cases per Pallet', inp('cases-pallet', casesPerPallet, 'Auto-calculated', 'text', !!(casesPerLayer && layersPerPallet)));
@@ -31985,6 +32007,7 @@ window.saveAdjModal = async function() {
         : 'Bottled at ' + (bottlingAbv ? bottlingAbv.toFixed(1) + '% ABV' : 'specified strength');
 
       var totalPallets = (casesPerPallet && j.actual_cases) ? Math.ceil(j.actual_cases / casesPerPallet) : null;
+      var _emEff = window._calcEffectiveBottles(j, volumeCl);
 
       var subject = 'Bottling Confirmation — ' + (j.product_name || j.id) + ' · Lot ' + (j.lot_number || '—');
       var html = '<div style="' + _emailWrap + '">'
@@ -32002,7 +32025,8 @@ window.saveAdjModal = async function() {
           ])
         + _emailSection('Production Results', [
             ['Bottles Produced',  j.actual_bottles_produced ? j.actual_bottles_produced.toLocaleString() + ' btls' : '—'],
-            ['Planned Target',    j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—'],
+            ['Planned Target',    (_emEff.bottles ? _emEff.bottles.toLocaleString() + ' btls' : '—')
+                                    + (_emEff.derived ? ' (calculated from litres)' : '')],
             ['Total Cases',       j.actual_cases ? j.actual_cases.toLocaleString() : '—'],
             ['Bottles per Case',  bottlesPerCase ? String(bottlesPerCase) : '—'],
             ['Cases per Pallet',  casesPerPallet ? String(casesPerPallet) : '—'],
@@ -32752,7 +32776,12 @@ window.saveAdjModal = async function() {
           + '</span>'
           + '<span style="font-size:10px;color:var(--muted);margin-left:8px;">(from BOM)</span>');
       }
-      html += frow('Target bottles', '<span style="font-size:13px;color:var(--white);font-weight:600;">' + (j && j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—') + '</span>');
+      var _lsoEff = window._calcEffectiveBottles(j, _bomVolCl);
+      html += frow('Target bottles',
+        '<span style="font-size:13px;color:var(--white);font-weight:600;">'
+        + (_lsoEff.bottles ? _lsoEff.bottles.toLocaleString() + ' btls' : '—')
+        + '</span>'
+        + (_lsoEff.derived ? '<span style="font-size:10px;color:var(--muted);margin-left:8px;">(calculated from litres)</span>' : ''));
       // Liquid preparation status: reflects whether bottling-strength containers are linked.
       var _prepStatus, _prepColour;
       if (!_linkedConts.length) {
@@ -33329,7 +33358,10 @@ window.saveAdjModal = async function() {
     h += frow('PO Number', esc(j.po_number || '—'));
     h += '</div><div>';
     h += frow('Scheduled Date', esc(schedDate));
-    h += frow('Bottle Target', j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '—');
+    var _woEff = window._calcEffectiveBottles(j, bom && bom.volume_cl);
+    h += frow('Bottle Target',
+      (_woEff.bottles ? _woEff.bottles.toLocaleString() + ' btls' : '—')
+      + (_woEff.derived ? ' <span style="font-size:10px;color:#888;font-weight:600;">(calculated from litres)</span>' : ''));
     h += frow('BOM Liquid Spec', esc(liquidSkuDesc));
     h += '</div></div>';
 
@@ -36640,8 +36672,16 @@ window.saveAdjModal = async function() {
       return;
     }
     try {
-      var todayStr = new Date().toISOString().split('T')[0];
-      var rows = await supaGet('clock_events?user_id=eq.' + uid + '&timestamp=gte.' + todayStr + 'T00:00:00Z&order=timestamp.asc');
+      var _dubP = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Dublin',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+      var _dub = {};_dubP.forEach(function(x){if(x.type!=='literal')_dub[x.type]=x.value;});
+      var todayStr = _dub.year + '-' + _dub.month + '-' + _dub.day;
+      var _dubFromMs = Date.UTC(+_dub.year, +_dub.month-1, +_dub.day, 0, 0, 0);
+      var _dubFmt = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Dublin',hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(_dubFromMs));
+      var _o={};_dubFmt.forEach(function(x){if(x.type!=='literal')_o[x.type]=parseInt(x.value,10);});
+      if(_o.hour===24)_o.hour=0;
+      var _dubOff = Math.round((Date.UTC(_o.year,_o.month-1,_o.day,_o.hour,_o.minute,_o.second) - _dubFromMs)/60000);
+      var _dubFromIso = new Date(_dubFromMs - _dubOff*60000).toISOString();
+      var rows = await supaGet('clock_events?user_id=eq.' + uid + '&timestamp=gte.' + _dubFromIso + '&order=timestamp.asc');
       if (!rows || !rows.length) {
         el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px 0;">You haven\'t clocked in today.</div>';
         return;
@@ -36650,7 +36690,7 @@ window.saveAdjModal = async function() {
       var TYPE_LABEL = { clock_in: 'Clocked in', clock_out: 'Clocked out', break_start: 'Break started', break_end: 'Break ended' };
       var TYPE_COLOUR = { clock_in: 'var(--green)', clock_out: 'var(--muted)', break_start: 'var(--amber)', break_end: 'var(--blue)' };
 
-      function fmt(ts) { return new Date(ts).toLocaleTimeString('en-IE', { hour: '2-digit', minute: '2-digit' }); }
+      function fmt(ts) { return new Date(ts).toLocaleTimeString('en-IE', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Dublin' }); }
       function dur(from, to) {
         var ms = new Date(to).getTime() - new Date(from).getTime();
         var h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
@@ -42199,7 +42239,7 @@ window.saveAdjModal = async function() {
     var btn = document.getElementById('header-clock-btn');
     if (btn) {
       if (_hClockState === 'clocked_in') {
-        var since = _hClockSince ? new Date(_hClockSince).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'}) : '';
+        var since = _hClockSince ? new Date(_hClockSince).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Dublin'}) : '';
         btn.style.borderColor = 'var(--green)';
         btn.style.color = 'var(--green)';
         btn.innerHTML = '&#9654; In ' + (since||'') + (_hClockSince ? ' &middot; ' + fmtDur(_hClockSince) : '') + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
@@ -42223,7 +42263,7 @@ window.saveAdjModal = async function() {
     var icon  = document.getElementById('ql-clock-in-icon');
     if (!tile) return;
     if (_hClockState === 'clocked_in') {
-      var since = _hClockSince ? new Date(_hClockSince).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'}) : '';
+      var since = _hClockSince ? new Date(_hClockSince).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Dublin'}) : '';
       tile.style.borderTopColor = 'var(--green)';
       tile.onmouseover = function(){ this.style.borderColor='var(--green)'; };
       if (icon)  icon.textContent  = '✅';
@@ -43734,10 +43774,32 @@ function isAdm(){
   return !!(window.CURRENT_PERMISSIONS&&window.CURRENT_PERMISSIONS[role]&&window.CURRENT_PERMISSIONS[role].hr_view_all);
 }
 function canEditTs(){var role=window.CURRENT_USER&&window.CURRENT_USER.role;if(!role)return false;var p=window.CURRENT_PERMISSIONS&&window.CURRENT_PERMISSIONS[role];return !!(p&&p.timesheet_edit);}
-function ds(d){var y=d.getFullYear(),mo=String(d.getMonth()+1).padStart(2,'0'),dy=String(d.getDate()).padStart(2,'0');return y+'-'+mo+'-'+dy;}
-function ft(ts){if(!ts)return'';var d=new Date(ts);return d.toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'});}
+var TZ='Europe/Dublin';
+function dubOffsetMin(utcMs){
+  var p=new Intl.DateTimeFormat('en-GB',{timeZone:TZ,hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(utcMs));
+  var o={};p.forEach(function(x){if(x.type!=='literal')o[x.type]=parseInt(x.value,10);});
+  if(o.hour===24)o.hour=0;
+  var asUtc=Date.UTC(o.year,o.month-1,o.day,o.hour,o.minute,o.second);
+  return Math.round((asUtc-utcMs)/60000);
+}
+function dubWallToIso(dateStr,timeStr){
+  var p=dateStr.split('-'),t=(timeStr||'00:00').split(':');
+  var asIfUtc=Date.UTC(+p[0],+p[1]-1,+p[2],(+t[0])||0,(+t[1])||0,(+t[2])||0);
+  var off=dubOffsetMin(asIfUtc);
+  return new Date(asIfUtc-off*60000).toISOString();
+}
+function dubParts(ts){
+  var d=ts instanceof Date?ts:new Date(ts);
+  var p=new Intl.DateTimeFormat('en-GB',{timeZone:TZ,hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).formatToParts(d);
+  var o={};p.forEach(function(x){if(x.type!=='literal')o[x.type]=x.value;});
+  if(o.hour==='24')o.hour='00';
+  return o;
+}
+function addDaysYmd(ymd,n){var p=ymd.split('-'),d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));d.setUTCDate(d.getUTCDate()+n);return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0');}
+function ds(d){var o=dubParts(d);return o.year+'-'+o.month+'-'+o.day;}
+function ft(ts){if(!ts)return'';return new Date(ts).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit',timeZone:TZ});}
 function fm(ms){if(!ms||ms<=0)return'0h 0m';var h=Math.floor(ms/3600000),m=Math.floor((ms%3600000)/60000);return h+'h '+m+'m';}
-function tv(evObj){if(!evObj||!evObj.timestamp)return'';var d=new Date(evObj.timestamp);return d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');}
+function tv(evObj){if(!evObj||!evObj.timestamp)return'';var o=dubParts(evObj.timestamp);return o.hour+':'+o.minute;}
 function roleText(role){return(role||'').replace(/_/g,' ');}
 function empLabel(emp){
   emp=emp||{};
@@ -43754,10 +43816,11 @@ function empInitials(label){
 }
 
 function wdays(off){
-  var n=new Date(),dw=n.getDay(),m=new Date(n);
-  m.setDate(n.getDate()-(dw===0?6:dw-1)+(off*7));
-  m.setHours(0,0,0,0);
-  var r=[];for(var i=0;i<7;i++){var d=new Date(m);d.setDate(m.getDate()+i);r.push(d);}
+  var nowP=dubParts(new Date());
+  var todayYmd=nowP.year+'-'+nowP.month+'-'+nowP.day;
+  var dw=new Date(Date.UTC(+nowP.year,+nowP.month-1,+nowP.day)).getUTCDay();
+  var monStr=addDaysYmd(todayYmd,-(dw===0?6:dw-1)+(off*7));
+  var r=[];for(var i=0;i<7;i++){r.push(new Date(dubWallToIso(addDaysYmd(monStr,i),'00:00')));}
   return r;
 }
 
@@ -43766,7 +43829,7 @@ function buildRecs(evts,uid){
   evts.filter(function(e){return !uid||e.user_id===uid;})
     .sort(function(a,b){return new Date(a.timestamp)-new Date(b.timestamp);})
     .forEach(function(e){
-      var _td=new Date(e.timestamp),d=[_td.getFullYear(),String(_td.getMonth()+1).padStart(2,'0'),String(_td.getDate()).padStart(2,'0')].join('-');
+      var o=dubParts(e.timestamp),d=o.year+'-'+o.month+'-'+o.day;
       if(!days[d])days[d]={ci:null,co:null,br:[]};
       var r=days[d];
       if(e.event_type==='clock_in'&&!r.ci)r.ci=e;
@@ -43930,12 +43993,12 @@ window.tsLoad=async function(){
   det.innerHTML='<div style="padding:20px;color:var(--muted);font-size:12px;">Loading\u2026</div>';
   var queryUid=_selAuth||_sel;
   var days=wdays(_wo);
-  var _wsUtc=days[0].toISOString().slice(0,19),_weEnd=new Date(days[6]);_weEnd.setHours(23,59,59,999);var _weUtc=_weEnd.toISOString().slice(0,19);
-  var evts=await get('clock_events?user_id=eq.'+queryUid+'&timestamp=gte.'+_wsUtc+'&timestamp=lte.'+_weUtc+'&order=timestamp.asc&limit=500');
+  var _ws=dubWallToIso(ds(days[0]),'00:00'),_we=dubWallToIso(ds(days[6]),'23:59:59');
+  var evts=await get('clock_events?user_id=eq.'+queryUid+'&timestamp=gte.'+_ws+'&timestamp=lte.'+_we+'&order=timestamp.asc&limit=500');
   _evts=evts;
   var recs=buildRecs(evts,queryUid);
   var DN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  var weekLabel=days[0].toLocaleDateString('en-IE',{day:'numeric',month:'short'})+' \u2013 '+days[6].toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'});
+  var weekLabel=days[0].toLocaleDateString('en-IE',{day:'numeric',month:'short',timeZone:TZ})+' \u2013 '+days[6].toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric',timeZone:TZ});
   var totMs=0,totDays=0;
   days.forEach(function(day){var r=recs[ds(day)];if(r&&r.ci){totMs+=wkMs(r);totDays++;}});
   var canEd=canEditTs();
@@ -43985,7 +44048,7 @@ window.tsLoad=async function(){
     var tdDay=document.createElement('td');
     tdDay.style.cssText='padding:10px 16px;white-space:nowrap;';
     tdDay.innerHTML='<span style="font-size:12px;font-weight:700;color:'+(isToday?'var(--gold)':isWknd?'rgba(255,255,255,0.25)':'var(--white)')+';">'+DN[di]+'</span>'
-      +' <span style="font-size:11px;color:var(--muted);">'+day.getDate()+'</span>';
+      +' <span style="font-size:11px;color:var(--muted);">'+parseInt(dubParts(day).day,10)+'</span>';
     if(canEd&&rec&&rec.ci){
       var editBtn=document.createElement('button');
       editBtn.textContent='\u270e';
@@ -44146,18 +44209,18 @@ function dayModal(d2){
       if(!rec){
         // fresh insert - clock-in optional (e.g. adding forgotten clock-out to existing day)
         var rows=[];
-        if(ci)rows.push({user_id:uid,event_type:'clock_in',timestamp:date+'T'+ci+':00'});
-        if(co)rows.push({user_id:uid,event_type:'clock_out',timestamp:date+'T'+co+':00'});
-        if(b1s)rows.push({user_id:uid,event_type:'break_start',timestamp:date+'T'+b1s+':00'});
-        if(b1s&&b1e)rows.push({user_id:uid,event_type:'break_end',timestamp:date+'T'+b1e+':00'});
-        if(b2s)rows.push({user_id:uid,event_type:'break_start',timestamp:date+'T'+b2s+':00'});
-        if(b2s&&b2e)rows.push({user_id:uid,event_type:'break_end',timestamp:date+'T'+b2e+':00'});
+        if(ci)rows.push({user_id:uid,event_type:'clock_in',timestamp:dubWallToIso(date,ci)});
+        if(co)rows.push({user_id:uid,event_type:'clock_out',timestamp:dubWallToIso(date,co)});
+        if(b1s)rows.push({user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,b1s)});
+        if(b1s&&b1e)rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b1e)});
+        if(b2s)rows.push({user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,b2s)});
+        if(b2s&&b2e)rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b2e)});
         await post('clock_events',rows);
       } else {
         // update existing
-        if(rec.ci)await patch('clock_events?id=eq.'+rec.ci.id,{timestamp:date+'T'+ci+':00'});
-        if(rec.co&&co)await patch('clock_events?id=eq.'+rec.co.id,{timestamp:date+'T'+co+':00'});
-        else if(!rec.co&&co)await post('clock_events',[{user_id:uid,event_type:'clock_out',timestamp:date+'T'+co+':00'}]);
+        if(rec.ci)await patch('clock_events?id=eq.'+rec.ci.id,{timestamp:dubWallToIso(date,ci)});
+        if(rec.co&&co)await patch('clock_events?id=eq.'+rec.co.id,{timestamp:dubWallToIso(date,co)});
+        else if(!rec.co&&co)await post('clock_events',[{user_id:uid,event_type:'clock_out',timestamp:dubWallToIso(date,co)}]);
         else if(rec.co&&!co)await del('clock_events?id=eq.'+rec.co.id);
         await doBreak(uid,date,rec.br[0]||null,b1s,b1e);
         await doBreak(uid,date,rec.br[1]||null,b2s,b2e);
@@ -44176,13 +44239,13 @@ async function doBreak(uid,date,br,ns,ne){
   }
   if(!ns)return;
   if(br){
-    if(br.s)await patch('clock_events?id=eq.'+br.s.id,{timestamp:date+'T'+ns+':00'});
-    if(br.e&&ne)await patch('clock_events?id=eq.'+br.e.id,{timestamp:date+'T'+ne+':00'});
-    else if(!br.e&&ne)await post('clock_events',[{user_id:uid,event_type:'break_end',timestamp:date+'T'+ne+':00'}]);
+    if(br.s)await patch('clock_events?id=eq.'+br.s.id,{timestamp:dubWallToIso(date,ns)});
+    if(br.e&&ne)await patch('clock_events?id=eq.'+br.e.id,{timestamp:dubWallToIso(date,ne)});
+    else if(!br.e&&ne)await post('clock_events',[{user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,ne)}]);
     else if(br.e&&!ne)await del('clock_events?id=eq.'+br.e.id);
   } else {
-    var rows=[{user_id:uid,event_type:'break_start',timestamp:date+'T'+ns+':00'}];
-    if(ne)rows.push({user_id:uid,event_type:'break_end',timestamp:date+'T'+ne+':00'});
+    var rows=[{user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,ns)}];
+    if(ne)rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,ne)});
     await post('clock_events',rows);
   }
 }
@@ -44201,7 +44264,7 @@ window.tsQuickAdd=function(dateStr,evType){
       var v=document.getElementById('ts-qt').value;
       if(!v){window.toast&&window.toast('Please enter a time','error');return;}
       var uid=_selAuth||_sel;
-      await post('clock_events',[{user_id:uid,event_type:evType,timestamp:dateStr+'T'+v+':00'}]);
+      await post('clock_events',[{user_id:uid,event_type:evType,timestamp:dubWallToIso(dateStr,v)}]);
       window.toast&&window.toast('Saved \u2713','success');window.tsLoad();
     }
   });
@@ -44219,7 +44282,7 @@ window.tsEditEvt=function(id,dateStr){
     ok:'Save',
     cb:async function(){
       var v=document.getElementById('ts-t').value;if(!v)return;
-      await patch('clock_events?id=eq.'+id,{timestamp:dateStr+'T'+v+':00'});
+      await patch('clock_events?id=eq.'+id,{timestamp:dubWallToIso(dateStr,v)});
       window.toast&&window.toast('Saved','success');window.tsLoad();
     }
   });
@@ -44236,7 +44299,7 @@ window.tsDelEvt=function(id,evType,dateStr,brIdx){
         var uid=_selAuth||_sel;
         if(evType==='clock_in'||evType==='clock_out'){
           // Delete ALL events of this type on this day for this user (handles duplicates)
-          await del('clock_events?user_id=eq.'+uid+'&event_type=eq.'+evType+'&timestamp=gte.'+dateStr+'T00:00:00&timestamp=lte.'+dateStr+'T23:59:59');
+          await del('clock_events?user_id=eq.'+uid+'&event_type=eq.'+evType+'&timestamp=gte.'+dubWallToIso(dateStr,'00:00')+'&timestamp=lte.'+dubWallToIso(dateStr,'23:59:59'));
         } else if(evType==='break_start'&&typeof brIdx!=='undefined'){
           // Delete this break_start and its paired break_end if present
           var recs=buildRecs(_evts,uid);var rec=recs[dateStr];
@@ -44282,7 +44345,7 @@ function tsModal(opts){
 async function loadLive(){
   try{
     var today=ds(new Date());
-    var rows=await get('clock_events?timestamp=gte.'+today+'T00:00:00&order=timestamp.asc&limit=2000');
+    var rows=await get('clock_events?timestamp=gte.'+dubWallToIso(today,'00:00')+'&order=timestamp.asc&limit=2000');
     var byU={};
     rows.forEach(function(e){if(!byU[e.user_id])byU[e.user_id]=[];byU[e.user_id].push(e);});
     Object.keys(byU).forEach(function(uid){
