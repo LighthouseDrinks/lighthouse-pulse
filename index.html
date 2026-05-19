@@ -971,6 +971,62 @@ const SUPA_KEY = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
 // Lighthouse staff roles that receive new-submission alerts:
 const LH_NOTIFY_ROLES = ['client_coordinator', 'quality_compliance', 'managing_director'];
 
+// ── Canonical role registry ──────────────────────────────────────────────────
+// Single source of truth for staff role keys and their display labels.
+// All other label/registry references in the app should use window.roleLabel(key).
+// Defined at module load (before auth) so invite/registration flows can read it.
+window.STAFF_ROLES = [
+  'managing_director','operations_director','business_analyst','quality_compliance',
+  'financial_controller','commercial_manager','ecommerce_manager','production_manager',
+  'warehouse_liquid','client_coordinator','production_operator','order_fulfillment'
+];
+window.ROLE_LABELS = {
+  'managing_director':    'Managing Director',
+  'operations_director':  'Operations Director',
+  'business_analyst':     'Business Analyst',
+  'quality_compliance':   'Quality & Compliance Manager',
+  'financial_controller': 'Financial Controller',
+  'commercial_manager':   'Commercial Manager',
+  'ecommerce_manager':    'E-Commerce Manager',
+  'production_manager':   'Production Manager',
+  'warehouse_liquid':     'Warehouse & Liquid Manager',
+  'client_coordinator':   'Client Coordinator',
+  'production_operator':  'Production Operator',
+  'order_fulfillment':    'Customer Order & Fulfillment Specialist'
+};
+// Returns the display label for any role key, including the 'client' pseudo-role
+// and legacy keys (md, ops_director, admin, manager) seen on old timesheet rows.
+// Falls back to Title Case of the snake_case key so unknown values still render.
+window.roleLabel = function(key) {
+  if (!key) return '';
+  if (window.ROLE_LABELS && window.ROLE_LABELS[key]) return window.ROLE_LABELS[key];
+  var LEGACY = { md:'Managing Director', ops_director:'Operations Director', admin:'Admin', manager:'Manager', client:'Client' };
+  if (LEGACY[key]) return LEGACY[key];
+  return String(key).replace(/_/g, ' ').replace(/\b\w/g, function(c){ return c.toUpperCase(); });
+};
+
+// ── Role-based access tiers ──────────────────────────────────────────────────
+// Each constant gates a meaningfully different action class. They overlap
+// substantially but the differences are deliberate — do not collapse into one.
+//
+//   PULSE_ADMIN_ROLES         — Pulse super-admins (invite users, settings cog, header settings)
+//   CLIENT_EDIT_ROLES         — May create/edit/delete client records
+//   BROADCAST_INITIATOR_ROLES — May open the staff broadcast modal
+//   HR_ADMIN_ROLES            — Skip the HR first-login profile-completion gate
+//   EXEC_ROLES                — MD/OD only: canDo() bypass, job cancel/delete/resume,
+//                               bay assignment override, save production results, etc.
+window.PULSE_ADMIN_ROLES         = ['managing_director','operations_director','business_analyst'];
+window.CLIENT_EDIT_ROLES         = ['managing_director','operations_director','business_analyst','commercial_manager'];
+window.BROADCAST_INITIATOR_ROLES = ['managing_director','operations_director','quality_compliance'];
+window.HR_ADMIN_ROLES            = ['managing_director','operations_director','production_manager','business_analyst'];
+window.EXEC_ROLES                = ['managing_director','operations_director'];
+
+// Helpers — pass user.role (or omit to use window.CURRENT_USER.role).
+window.isPulseAdmin   = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.PULSE_ADMIN_ROLES.indexOf(role) >= 0; };
+window.isExec         = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.EXEC_ROLES.indexOf(role) >= 0; };
+window.isHRAdmin      = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.HR_ADMIN_ROLES.indexOf(role) >= 0; };
+window.canEditClients = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.CLIENT_EDIT_ROLES.indexOf(role) >= 0; };
+
 // ── Email helper: fetch LH staff emails by role ───────────────────────────────
 window._lhNotifyEmails = async function() {
   try {
@@ -1852,68 +1908,52 @@ function showDashboard(user) {
   document.body.classList.add('app-active');
   document.querySelectorAll('.page').forEach(function(p) { p.style.display=''; });
   document.body.style.overflow = '';
-  // Header: display name + role label
-  var ROLE_LABELS = {
-    'managing_director':    'Managing Director',
-    'operations_director':  'Operations Director',
-    'business_analyst':     'Business Analyst',
-    'quality_compliance':   'Quality & Compliance Manager',
-    'financial_controller': 'Financial Controller',
-    'commercial_manager':   'Commercial Manager',
-    'ecommerce_manager':    'E-Commerce Manager',
-    'production_manager':   'Production Manager',
-    'warehouse_liquid':     'Warehouse & Liquid Manager',
-    'client_coordinator':   'Client Coordinator',
-    'production_operator':  'Production Operator',
-    'order_fulfillment':    'Customer Order & Fulfillment Specialist'
-  };
-  window.ROLE_LABELS = ROLE_LABELS;
-
+  // Header: display name + role label (canonical registry lives at module level)
   var nameEl = document.getElementById('dashboard-user-name');
   if (nameEl) nameEl.textContent = user.display_name || user.email || '';
 
   var roleEl = document.getElementById('dashboard-user-role');
-  if (roleEl) roleEl.textContent = ROLE_LABELS[user.role] || (user.role || '').replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();});
+  if (roleEl) roleEl.textContent = window.roleLabel(user.role);
 
-  // Invite button — super admins + anyone with invite_users permission
-  var _superAdminRoles = ['managing_director','operations_director','business_analyst'];
+  // Stock-section visibility list (only place this set is used)
+  var STOCK_VIEW_ROLES = ['managing_director','operations_director','financial_controller','business_analyst'];
+  // Finance sidebar visibility list (mirrors edge-function FINANCE_ROLES)
+  var FINANCE_NAV_ROLES = ['managing_director','operations_director','financial_controller','business_analyst','ecommerce_manager'];
+
+  // Invite button — Pulse admins + anyone with invite_users permission
   var inviteBtn = document.getElementById('invite-user-btn');
   if (inviteBtn) {
-    var canInvite = _superAdminRoles.indexOf(user.role) >= 0 || (window.canDo && window.canDo('invite_users'));
+    var canInvite = window.isPulseAdmin(user.role) || (window.canDo && window.canDo('invite_users'));
     inviteBtn.style.display = canInvite ? '' : 'none';
   }
 
-  // Settings nav item (sidebar) — super admins only
+  // Settings nav item (sidebar) — Pulse admins only
   var sbCogBtn = document.getElementById('settings-sb-btn');
-  var _showCog = _superAdminRoles.indexOf(user.role) >= 0;
-  if (sbCogBtn) sbCogBtn.style.display = _showCog ? 'flex' : 'none';
+  if (sbCogBtn) sbCogBtn.style.display = window.isPulseAdmin(user.role) ? 'flex' : 'none';
 
   // Finance nav item (sidebar) — finance roles
-  var _financeRoles = ['managing_director','operations_director','financial_controller','business_analyst','ecommerce_manager'];
   var _sbFinBtn = document.getElementById('sbnav-finance');
-  if (_sbFinBtn) _sbFinBtn.style.display = (_financeRoles.indexOf(user.role) >= 0) ? 'flex' : 'none';
+  if (_sbFinBtn) _sbFinBtn.style.display = (FINANCE_NAV_ROLES.indexOf(user.role) >= 0) ? 'flex' : 'none';
 
   // Header sign-out button — all staff (non-client)
   var hdrSignoutBtn = document.getElementById('header-signout-btn');
   if (hdrSignoutBtn && user.role !== 'client') hdrSignoutBtn.style.display = '';
-  // Header settings cog — super-admins only
+  // Header settings cog — Pulse admins only
   var hdrSettingsBtn = document.getElementById('header-settings-btn');
-  if (hdrSettingsBtn && _superAdminRoles.indexOf(user.role) >= 0) hdrSettingsBtn.style.display = 'flex';
+  if (hdrSettingsBtn && window.isPulseAdmin(user.role)) hdrSettingsBtn.style.display = 'flex';
   // initHeaderClock drives the quick-launch tile
   if (user.role !== 'client') {
     setTimeout(function(){ window.initHeaderClock && window.initHeaderClock(); }, 500);
   }
 
   // Stock value KPI section — MD, Financial Controller, Ops Director, Business Analyst only
-  var _stockRoles = ['managing_director','financial_controller','operations_director','business_analyst'];
   var _stockSection = document.getElementById('kpi-stock-section');
-  if (_stockSection) _stockSection.style.display = _stockRoles.indexOf(user.role) >= 0 ? '' : 'none';
+  if (_stockSection) _stockSection.style.display = STOCK_VIEW_ROLES.indexOf(user.role) >= 0 ? '' : 'none';
 
   // Apply HR permissions immediately on login
   setTimeout(function(){ if(window.applyHRPermissions) window.applyHRPermissions(); }, 600);
   // HR first-login check — non-admin staff only
-  var _hrAdminRoles = ['managing_director','operations_director','production_manager','business_analyst'];
-  if (_hrAdminRoles.indexOf(user.role) < 0 && user.role !== 'client') {
+  if (!window.isHRAdmin(user.role) && user.role !== 'client') {
     setTimeout(function(){ window.checkHRFirstLogin && window.checkHRFirstLogin(); }, 1000);
   }
 
@@ -1999,7 +2039,7 @@ async function handleSession(session) {
     var clientId    = rows.length ? rows[0].client_id    : null;
     var clientName  = rows.length && rows[0].clients     ? rows[0].clients.name : null;
     var displayName = rows.length ? rows[0].display_name : null;
-    var STAFF_ROLES = ['managing_director','operations_director','business_analyst','quality_compliance','financial_controller','commercial_manager','ecommerce_manager','production_manager','warehouse_liquid','client_coordinator','production_operator','order_fulfillment'];
+    var STAFF_ROLES = window.STAFF_ROLES;
 
     // Block terminated (and pending-termination past their last working day) employees.
     try {
@@ -2215,22 +2255,9 @@ function detectInviteToken() {
     var label  = document.getElementById('invite-role-label');
     if (notice) notice.style.display = 'none';
     if (badge && label) {
-      var ROLE_LABELS = {
-        'managing_director':    'Managing Director',
-        'operations_director':  'Operations Director',
-        'business_analyst':     'Business Analyst',
-        'quality_compliance':   'Quality & Compliance Manager',
-        'financial_controller': 'Financial Controller',
-        'commercial_manager':   'Commercial Manager',
-        'ecommerce_manager':    'E-Commerce Manager',
-        'production_manager':   'Production Manager',
-        'warehouse_liquid':     'Warehouse & Liquid Manager',
-        'client_coordinator':   'Client Coordinator',
-        'production_operator':  'Production Operator',
-        'order_fulfillment':    'Customer Order & Fulfillment Specialist',
-        'client':               'Client Portal Account'
-      };
-      var txt = ROLE_LABELS[payload.role] || payload.role;
+      // 'client' pseudo-role displays as "Client Portal Account" only on this
+      // invite-registration badge; everywhere else it's just "Client".
+      var txt = payload.role === 'client' ? 'Client Portal Account' : window.roleLabel(payload.role);
       if (payload.client_name) txt += ' · ' + payload.client_name;
       label.textContent = txt;
       badge.style.display = 'block';
@@ -5068,13 +5095,12 @@ window.openInviteModal = function() {
     rtSel.innerHTML='<option value="">— Select manager —</option>';
     // Populate with all roles that can manage other staff
     var adminRoleKeys=['managing_director','operations_director','business_analyst','production_manager','ecommerce_manager','commercial_manager','financial_controller','quality_compliance','warehouse_liquid'];
-    var adminRoleLabels={'managing_director':'Managing Director','operations_director':'Operations Director','business_analyst':'Business Analyst','production_manager':'Production Manager','ecommerce_manager':'E-Commerce Manager','commercial_manager':'Commercial Manager','financial_controller':'Financial Controller','quality_compliance':'Quality & Compliance Manager','warehouse_liquid':'Warehouse & Liquid Manager'};
     db.select('app_users', '?select=id,display_name,role&order=display_name.asc')
       .then(function(users) {
         (users || []).filter(function(u) { return adminRoleKeys.indexOf(u.role) >= 0; }).forEach(function(u) {
           var opt = document.createElement('option');
           opt.value = u.id;
-          opt.textContent = (u.display_name || u.id.substring(0, 8)) + ' — ' + (adminRoleLabels[u.role] || u.role);
+          opt.textContent = (u.display_name || u.id.substring(0, 8)) + ' — ' + window.roleLabel(u.role);
           rtSel.appendChild(opt);
         });
       })
@@ -5180,13 +5206,12 @@ window.sendInviteEmail = async function() {
   // Send email via Resend
   statusEl.textContent='Sending invite email…';
   try {
-    var roleLabels={managing_director:'Managing Director',operations_director:'Operations Director',quality_compliance:'Quality & Compliance Manager',financial_controller:'Financial Controller',commercial_manager:'Commercial Manager',ecommerce_manager:'E-Commerce Manager',production_manager:'Production Manager',warehouse_liquid:'Warehouse & Liquid Manager',client_coordinator:'Client Coordinator',production_operator:'Production Operator',order_fulfillment:'Customer Order & Fulfillment Specialist',client:'Client'};
     var emailBody='<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#f9f9f9;">'
       +'<div style="background:#0d1b2a;padding:24px;border-radius:8px;text-align:center;margin-bottom:24px;">'
       +'<h1 style="color:#c9a84c;font-size:20px;margin:0;">Lighthouse Drinks</h1>'
       +'<p style="color:#7a93a8;font-size:12px;margin:4px 0 0;">Operations Dashboard</p></div>'
       +'<h2 style="color:#0d1b2a;font-size:18px;">You&#39;re invited to Pulse, '+firstName+'!</h2>'
-      +'<p style="color:#333;line-height:1.6;">You have been added as <strong>'+( roleLabels[role]||role)+'</strong> on the Lighthouse Drinks Pulse operations platform.</p>'
+      +'<p style="color:#333;line-height:1.6;">You have been added as <strong>'+window.roleLabel(role)+'</strong> on the Lighthouse Drinks Pulse operations platform.</p>'
       +'<p style="color:#333;line-height:1.6;">Click the button below to set up your account. This link expires in <strong>7 days</strong>.</p>'
       +'<div style="text-align:center;margin:32px 0;">'
       +'<a href="'+link+'" style="background:#c9a84c;color:#0d1b2a;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:700;font-size:15px;">Set Up My Account</a></div>'
@@ -5534,15 +5559,7 @@ window.copyInviteLink = function() {
           </div>
           <div>
             <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:8px;">Roles allowed to clock in remotely</label>
-            <div style="display:grid;gap:8px;" id="gf-remote-roles">
-              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--white);cursor:pointer;"><input type="checkbox" value="managing_director"> Managing Director</label>
-              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--white);cursor:pointer;"><input type="checkbox" value="operations_director"> Operations Director</label>
-              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--white);cursor:pointer;"><input type="checkbox" value="commercial_manager"> Commercial Manager</label>
-              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--white);cursor:pointer;"><input type="checkbox" value="ecommerce_manager"> E-Commerce Manager</label>
-              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--white);cursor:pointer;"><input type="checkbox" value="production_manager"> Production Manager</label>
-              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--white);cursor:pointer;"><input type="checkbox" value="client_coordinator"> Client Coordinator</label>
-              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--white);cursor:pointer;"><input type="checkbox" value="warehouse_liquid"> Warehouse &amp; Liquid</label>
-            </div>
+            <div style="display:grid;gap:8px;" id="gf-remote-roles"></div>
           </div>
           <div>
             <button onclick="window.saveGeofenceSettings()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save Geofence Settings</button>
@@ -7167,10 +7184,7 @@ window.copyInviteLink = function() {
   function sbPatch(table, query, body) { return window.db.update(table, query, body); }
   function sbDelete(table, query)      { return window.db.delete(table, query); }
 
-  function isAdmin() {
-    var role=window.CURRENT_USER&&window.CURRENT_USER.role;
-    return ['managing_director','operations_director','business_analyst'].indexOf(role)>=0;
-  }
+  function isAdmin() { return window.isPulseAdmin(); }
   function canViewAll() {
     // isAdmin() check first, then permissions matrix
     if (isAdmin()) return true;
@@ -7185,9 +7199,8 @@ window.copyInviteLink = function() {
   // ── First login check ────────────────────────────────────────────────────────
   window.checkHRFirstLogin = async function() {
     if (!window.CURRENT_USER || !window.CURRENT_USER.role) return;
-    var adminRoles = ['managing_director','operations_director','business_analyst'];
-    // Always remove any stale first-login screen for admins
-    if (adminRoles.indexOf(window.CURRENT_USER.role) >= 0) {
+    // Always remove any stale first-login screen for Pulse admins
+    if (window.isPulseAdmin()) {
       var stale = document.getElementById('hr-first-login-screen');
       if (stale) stale.remove();
       return;
@@ -7209,9 +7222,8 @@ window.copyInviteLink = function() {
   };
 
   function showFirstLoginScreen(existing, inviteData) {
-    // Safety check - never lock out admins
-    var adminRoles = ['managing_director','operations_director','production_manager','business_analyst'];
-    if (window.CURRENT_USER && adminRoles.indexOf(window.CURRENT_USER.role) >= 0) return;
+    // Safety check - never lock out HR admins
+    if (window.isHRAdmin()) return;
     // Hide dashboard, show profile completion screen
     var hdr     = document.querySelector('header');
     var nav     = document.querySelector('nav');
@@ -7248,7 +7260,7 @@ window.copyInviteLink = function() {
       // Personal section
       + '<div class="card" style="padding:22px;margin-bottom:16px;">'
       + '<div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:14px;font-weight:700;">Personal Details</div>'
-      + (window.CURRENT_USER&&window.CURRENT_USER.role?'<div style="font-size:12px;color:var(--muted);margin-bottom:14px;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:4px;">&#128188; Your role: <strong style="color:var(--white);">'+({'managing_director':'Managing Director','operations_director':'Operations Director','business_analyst':'Business Analyst','production_manager':'Production Manager','quality_compliance':'Quality & Compliance','financial_controller':'Financial Controller','commercial_manager':'Commercial Manager','ecommerce_manager':'E-Commerce Manager','warehouse_liquid':'Warehouse & Liquid','client_coordinator':'Client Coordinator','production_operator':'Production Operator','order_fulfillment':'Customer Order & Fulfillment Specialist'}[window.CURRENT_USER.role]||window.CURRENT_USER.role)+'</strong></div>':'')
+      + (window.CURRENT_USER&&window.CURRENT_USER.role?'<div style="font-size:12px;color:var(--muted);margin-bottom:14px;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:4px;">&#128188; Your role: <strong style="color:var(--white);">'+window.roleLabel(window.CURRENT_USER.role)+'</strong></div>':'')
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
       + fldH('Title','fl-title','select','--,Mr,Ms,Mrs,Dr,Prof',p.title)
       + fldH('First Name *','fl-first-name','text','',firstName, namesLocked)
@@ -7646,7 +7658,6 @@ window.copyInviteLink = function() {
       if (nameDiv) nameDiv.style.color = selected ? 'var(--gold)' : '';
     });
 
-    var ROLE_LABELS = {managing_director:'Managing Director',operations_director:'Operations Director',production_manager:'Production Manager',quality_compliance:'Quality & Compliance',financial_controller:'Financial Controller',commercial_manager:'Commercial Manager',ecommerce_manager:'E-Commerce Manager',warehouse_liquid:'Warehouse & Liquid',client_coordinator:'Client Coordinator',production_operator:'Production Operator'};
     var users = _hrAllUsers.filter(function(u){ return u.id===userId; });
     var u = users[0] || {};
     var profileNameEl = document.getElementById('hr-profile-name');
@@ -7656,7 +7667,7 @@ window.copyInviteLink = function() {
     } else {
       profileNameEl.innerHTML = '<span style="color:var(--amber);font-size:14px;">⚠ Name not set — go to Personal tab to add name</span>';
     }
-    document.getElementById('hr-profile-role').textContent = ROLE_LABELS[u.role] || u.role || '';
+    document.getElementById('hr-profile-role').textContent = window.roleLabel(u.role);
 
     var adminBtns = document.getElementById('hr-admin-btns');
     if (adminBtns) adminBtns.style.display = 'none';
@@ -7722,12 +7733,26 @@ window.copyInviteLink = function() {
   function populateHRFields(p, u) {
     p = p || {};
     u = u || {};
+    // Populate the Job Title select from the canonical role registry on every
+    // open. Values are display labels (job_title is free text in hr_profiles),
+    // so we keep label-as-value to preserve the prior contract.
+    var jt = document.getElementById('hr-job-title');
+    if (jt) {
+      var current = p.job_title || (u ? window.roleLabel(u.role) : '');
+      var html = '<option value="">-- Select Role --</option>';
+      window.STAFF_ROLES.forEach(function(k){
+        var lbl = window.roleLabel(k);
+        html += '<option value="' + lbl + '">' + lbl + '</option>';
+      });
+      jt.innerHTML = html;
+      if (current) jt.value = current;
+    }
     var fmap = {
       'hr-title':p.title||'','hr-first-name':p.first_name||'','hr-last-name':p.last_name||'',
       'hr-dob':p.date_of_birth||'','hr-email':p.email||u.email||'','hr-mobile':p.mobile||'',
       'hr-pps':p.pps_number||'','hr-addr1':p.address_line1||'','hr-addr2':p.address_line2||'',
       'hr-city':p.city||'','hr-county':p.county||'','hr-eircode':p.eircode||'',
-      'hr-job-title':p.job_title||(u&&window.ROLE_LABELS?window.ROLE_LABELS[u.role]||'':''),'hr-employment-type':p.employment_type||'',
+      'hr-job-title':p.job_title||(u?window.roleLabel(u.role):''),'hr-employment-type':p.employment_type||'',
       'hr-start-date':p.employment_start||'','hr-probation-end':p.probation_end||'',
       'hr-reports-to':(u&&u.role==='managing_director')?'':(p.reports_to||(u&&u.reports_to_id)||''),
       'hr-salary':p.salary_amount||'','hr-salary-type':p.salary_type||'',
@@ -17777,9 +17802,7 @@ window.loadBoms = async function initBoms() {
   };
 
   window.deleteClient = async function(id) {
-    var _cuRole2 = window.CURRENT_USER && window.CURRENT_USER.role;
-    var _canDelClient = ['managing_director','operations_director','business_analyst','commercial_manager'].indexOf(_cuRole2) > -1
-      || (window.canDo && window.canDo('clients_edit'));
+    var _canDelClient = window.canEditClients() || (window.canDo && window.canDo('clients_edit'));
     if (!_canDelClient) { window.toast && window.toast('You do not have permission to delete clients.', 'error'); return; }
     var c = CLIENTS.find(function(x){ return x.id === id; });
     var label = c ? (c.id + ' — ' + c.company) : id;
@@ -17804,10 +17827,7 @@ window.loadBoms = async function initBoms() {
   };
 
   window.saveClient = async function(){
-    var _cuRole = window.CURRENT_USER && window.CURRENT_USER.role;
-    var _superRoles = ['managing_director','operations_director','business_analyst','commercial_manager'];
-    var _canEditClients = _superRoles.indexOf(_cuRole) > -1
-      || (window.canDo && window.canDo('clients_edit'));
+    var _canEditClients = window.canEditClients() || (window.canDo && window.canDo('clients_edit'));
     if (!_canEditClients) {
       window.toast && window.toast('You do not have permission to edit clients.', 'error');
       return;
@@ -19349,11 +19369,10 @@ window.loadBoms = async function initBoms() {
     if (name === 'overview') setTimeout(function() {
       if (!window.CURRENT_USER) return;
       var _role = window.CURRENT_USER.role;
-      var _super = _role==='managing_director'||_role==='operations_director'||_role==='business_analyst';
       function qlApply(id, permKey) {
         var el = document.getElementById(id);
         if (!el) return;
-        var allowed = _super || (window.canDo && window.canDo(permKey));
+        var allowed = window.isPulseAdmin(_role) || (window.canDo && window.canDo(permKey));
         el.style.opacity = allowed ? '1' : '0.4';
         el.style.cursor  = allowed ? 'pointer' : 'not-allowed';
         el.style.filter  = allowed ? '' : 'grayscale(0.4)';
@@ -19361,8 +19380,7 @@ window.loadBoms = async function initBoms() {
       qlApply('ql-new-job', 'jobs_create');
       qlApply('ql-new-sku', 'drygoods_edit');
       qlApply('ql-new-bom', 'boms_edit');
-      var _broadcastRoles = ['managing_director','operations_director','quality_compliance'];
-      var _isBroadcastRole = _broadcastRoles.indexOf(_role) !== -1;
+      var _isBroadcastRole = window.BROADCAST_INITIATOR_ROLES.indexOf(_role) !== -1;
       var _pricingBtn   = document.getElementById('ql-pricing-tool');
       var _broadcastBtn = document.getElementById('ql-staff-broadcast');
       if (_pricingBtn)   _pricingBtn.style.display  = _isBroadcastRole ? 'none' : '';
@@ -19386,11 +19404,8 @@ window.loadBoms = async function initBoms() {
     if (name === 'boms' && window.loadBoms) setTimeout(function(){ window.loadBoms(); }, 100);
     if (name === 'people') setTimeout(function(){
       if(window.applyHRPermissions) window.applyHRPermissions();
-      var adminRoles=['managing_director','operations_director','business_analyst'];
-      var role=window.CURRENT_USER&&window.CURRENT_USER.role;
-      var isAdmin=adminRoles.indexOf(role)>=0;
-      var tab=isAdmin?'mgmt':'roster';
-      var btn=document.querySelector('.people-tab[onclick*="'+tab+'"]');
+      var tab = window.isPulseAdmin() ? 'mgmt' : 'roster';
+      var btn = document.querySelector('.people-tab[onclick*="'+tab+'"]');
       if(window.showPeopleTab&&btn) window.showPeopleTab(tab,btn);
     }, 300);
     document.querySelectorAll('.page').forEach(function(p) { p.classList.remove('active'); });
@@ -22065,7 +22080,7 @@ window.ccxPrintRecord = function() {
             <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:14px;font-weight:700;">Employment Details</div>
             <div id="hr-employment-readonly-note" style="display:none;font-size:11px;color:var(--amber);margin-bottom:14px;padding:10px 12px;background:rgba(232,156,58,0.08);border:1px solid rgba(232,156,58,0.2);border-radius:4px;">&nbsp;&#9888; These fields are set by management.</div>
             <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;">
-              <div class="mfield"><label>Role / Job Title</label><select id="hr-job-title" class="hr-input hr-admin-field" style="color-scheme:dark;"><option value="">-- Select Role --</option><option value="Managing Director">Managing Director</option><option value="Operations Director">Operations Director</option><option value="Business Analyst">Business Analyst</option><option value="Commercial Manager">Commercial Manager</option><option value="Production Manager">Production Manager</option><option value="Quality &amp; Compliance Manager">Quality &amp; Compliance Manager</option><option value="Financial Controller">Financial Controller</option><option value="Warehouse &amp; Liquid Manager">Warehouse &amp; Liquid Manager</option><option value="Client Coordinator">Client Coordinator</option><option value="Production Operator">Production Operator</option></select></div>
+              <div class="mfield"><label>Role / Job Title</label><select id="hr-job-title" class="hr-input hr-admin-field" style="color-scheme:dark;"><option value="">-- Select Role --</option></select></div>
               <div class="mfield"><label>Employment Type *</label><select id="hr-employment-type" class="hr-input hr-admin-field" style="color-scheme:dark;"><option value="">--</option><option value="full_time">Full Time</option><option value="part_time">Part Time</option><option value="contractor">Contractor</option></select></div>
               <div class="mfield"><label>Start Date *</label><input type="date" id="hr-start-date" class="hr-input hr-admin-field"></div>
               <div class="mfield"><label>Probation End *</label><input type="date" id="hr-probation-end" class="hr-input hr-admin-field"></div>
@@ -25789,7 +25804,8 @@ async function loadGoodsIn() {
 // ══ INVITE MODAL ═══════════════════════════════════════════════════════════
 (function() {
 
-var _inviteRole     = 'operations_director';
+// Default invite role — least-privilege; matches the auto-create fallback in handleSession
+var _inviteRole     = 'production_operator';
 var _inviteClientId = null;
 
 
@@ -26876,6 +26892,23 @@ window.bomDisplayName = function(bom) {
   return extras ? base + ' — ' + extras : base;
 };
 
+// ── Job display name helper ──────────────────────────────────────────────────
+// Builds an extended job label by combining the job's product_name with the
+// linked BOM's volume/ABV/region. Two jobs sharing a product (e.g. Lucky Penny)
+// are otherwise indistinguishable in list views. Falls back to product_name
+// when there's no bom_id or the bom isn't in the supplied map.
+window.jobDisplayName = function(job, bomMap) {
+  if (!job) return '';
+  var bom = (bomMap && job.bom_id) ? bomMap[job.bom_id] : null;
+  if (!bom) return job.product_name || '—';
+  return window.bomDisplayName({
+    product_name:    job.product_name || bom.product_name,
+    volume_cl:       bom.volume_cl,
+    abv:             bom.abv,
+    additional_info: bom.additional_info
+  }) || (job.product_name || '—');
+};
+
 // ── Label field visibility helper ────────────────────────────────────────────
 // Shows/hides Volume, Region, and (for back labels) Barcode fields based on
 // the selected category name. prefix is 'ns' (new) or 'es' (edit).
@@ -27943,6 +27976,7 @@ window.saveAdjModal = async function() {
   // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
   var _jobs = [];
   var _jobBoms = [];
+  var _jobsBomMap = {}; // bom_id -> { product_name, volume_cl, abv, additional_info } for extended job labels (Jobs tab)
   var _currentJobId = null;
   var _jobStageFilter = 'live'; // 'live' = new + active combined (the default queue view)
   var _staffMap = {}; // uuid -> display_name
@@ -28035,12 +28069,16 @@ window.saveAdjModal = async function() {
     }
     // Fire all queries in parallel; allSettled means one inaccessible table never
     // blocks the jobs list from rendering.
+    // Note: the boms fetch re-runs on every realtime refresh of _doLoadJobs. BOM
+    // name/volume/ABV/region rarely change during a job lifecycle, so we accept
+    // brief staleness rather than subscribing to the boms table.
     var settled = await Promise.allSettled([
       supaGet('jobs?order=created_at.desc&select=*,clients(name)'),
       supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null'),
       supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
       supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved'),
-      supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged')
+      supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged'),
+      supaGet('boms?select=id,product_name,volume_cl,abv,additional_info')
     ]);
     if (settled[0].status === 'fulfilled' && Array.isArray(settled[0].value)) _jobs = settled[0].value;
     else if (settled[0].status === 'rejected') console.warn('Jobs load error:', settled[0].reason);
@@ -28052,6 +28090,8 @@ window.saveAdjModal = async function() {
     if (settled[3].status === 'fulfilled') (settled[3].value||[]).forEach(function(r){ if (r.job_id) _bomDone[r.job_id] = true; });
     _bomFlagged = {};
     if (settled[4].status === 'fulfilled') (settled[4].value||[]).forEach(function(r){ if (r.job_id) _bomFlagged[r.job_id] = true; });
+    _jobsBomMap = {};
+    if (settled[5].status === 'fulfilled') (settled[5].value||[]).forEach(function(b){ if (b.id) _jobsBomMap[b.id] = b; });
 
     // Auto-promote any 'new' jobs that already have BOM approved + bay held
     _checkAutoPromoteNewJobs();
@@ -28108,8 +28148,9 @@ window.saveAdjModal = async function() {
       } else if (_jobStageFilter !== 'all' && ns !== _jobStageFilter) return false;
       if (search) {
         var s = search.toLowerCase();
-        return (j.id||'').toLowerCase().includes(s)
-          || (j.product_name||'').toLowerCase().includes(s)
+        var label = (window.jobDisplayName(j, _jobsBomMap) || '').toLowerCase();
+        return label.includes(s)
+          || (j.id||'').toLowerCase().includes(s)
           || (j.po_number||'').toLowerCase().includes(s)
           || ((j.clients&&j.clients.name)||'').toLowerCase().includes(s);
       }
@@ -28198,7 +28239,8 @@ window.saveAdjModal = async function() {
 
       var row = '<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openJobDetail(\'' + jid + '\')">';
       row += '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + j.id + '</td>';
-      row += '<td style="font-weight:600;color:var(--white);">' + (j.product_name||'—') + '<span class="mob-tap-hint">' + j.id + ' · ' + clientName + '</span></td>';
+      var _jtLabel = window.jobDisplayName(j, _jobsBomMap);
+      row += '<td style="font-weight:600;color:var(--white);" title="' + _jtLabel.replace(/"/g, '&quot;') + '">' + _jtLabel + '<span class="mob-tap-hint">' + j.id + ' · ' + clientName + '</span></td>';
       row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + clientName + '</td>';
       row += '<td class="mob-hide" style="font-size:12px;">' + target + '</td>';
       row += '<td class="mob-hide">' + signoffs + '</td>';
@@ -28207,8 +28249,7 @@ window.saveAdjModal = async function() {
       var _stageActive = j.stage !== 'complete' && j.stage !== 'cancelled';
       var bayChip = (_stageActive && typeof window._bayChipHTML === 'function') ? window._bayChipHTML(j) : '';
       var _curRole = window.CURRENT_USER && window.CURRENT_USER.role;
-      var _isSuperUser = _curRole === 'managing_director' || _curRole === 'operations_director';
-      var bayEditable = (j.stage === 'new' || j.stage === 'active') && (_isSuperUser || (window.canDo && window.canDo('bay_assign')));
+      var bayEditable = (j.stage === 'new' || j.stage === 'active') && (window.isExec(_curRole) || (window.canDo && window.canDo('bay_assign')));
       var bayWrapped = '';
       if (bayChip) {
         if (bayEditable) {
@@ -28967,9 +29008,6 @@ window.saveAdjModal = async function() {
   };
 
       // ── Auto-create tasks on job creation ────────────────────────────────────────
-  // Roles allowed in task assignment
-  var TASK_ASSIGNABLE_ROLES = ['production_operator','production_manager','operations_director','warehouse_liquid','client_coordinator','quality_compliance'];
-
   async function createInitialTasks(jobId, dilution, chillFiltration, colouring) {
     var today = new Date();
     var in4days = new Date(today);
@@ -29179,18 +29217,18 @@ window.saveAdjModal = async function() {
     cancelBtn.style.display = 'none';
     resumeBtn.style.display = 'none';
 
-    var isMD  = window.CURRENT_USER && (window.CURRENT_USER.role === 'managing_director' || window.CURRENT_USER.role === 'operations_director');
+    var isExec = window.isExec();
 
     if (j.stage === 'on_hold') {
       stageInfo.textContent = 'Job is on hold. Resume to continue.';
       resumeBtn.style.display = '';
     } else if (j.stage === 'cancelled') {
       stageInfo.textContent = 'Job has been cancelled.';
-      resumeBtn.style.display = isMD ? '' : 'none';
+      resumeBtn.style.display = isExec ? '' : 'none';
     } else if (j.stage === 'complete') {
       stageInfo.textContent = 'Job complete.';
     } else {
-      // Active stages — show advance + hold + cancel (cancel = MD only)
+      // Active stages — show advance + hold + cancel (cancel = exec only)
       if (j.stage === 'new') {
         advBtn.textContent = 'Move to Active →';
         advBtn.style.display = '';
@@ -29201,7 +29239,7 @@ window.saveAdjModal = async function() {
         stageInfo.textContent = 'Requires: Liquid sign-off · Supply chain sign-off · Production checks (on-line + off-line) · Weights & Measures · Results tab filled.';
       }
       holdBtn.style.display   = '';
-      cancelBtn.style.display = isMD ? '' : 'none';
+      cancelBtn.style.display = isExec ? '' : 'none';
     }
 
     // Load audit log timeline
@@ -29340,7 +29378,7 @@ window.saveAdjModal = async function() {
           row.innerHTML = '<div style="flex:1;">'
             + '<div style="font-size:13px;color:var(--white);">' + taskTitle(t) + '</div>'
             + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">'
-            + (ROLE_DISPLAY[t.assigned_role] || (t.assigned_role||'').replace(/_/g,' '))
+            + window.roleLabel(t.assigned_role)
             + (t.due_date ? ' · Due ' + t.due_date : '')
             + '</div></div>'
             + '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">'
@@ -29596,15 +29634,6 @@ window.saveAdjModal = async function() {
         return;
       }
 
-      var ROLE_DISPLAY = {
-        quality_compliance: 'Quality & Compliance',
-        client_coordinator: 'Supply Chain',
-        warehouse_liquid:   'Warehouse / Liquid',
-        production_manager: 'Production Manager',
-        managing_director:  'Managing Director',
-        operations_director:'Operations Director'
-      };
-
       // Column header row
       var colHdr = document.createElement('div');
       colHdr.style.cssText = 'display:grid;grid-template-columns:1fr 160px 160px 100px;gap:12px;padding:0 0 8px 0;border-bottom:2px solid var(--navy-border);margin-bottom:4px;';
@@ -29619,7 +29648,7 @@ window.saveAdjModal = async function() {
         var _resolvedName = t.assigned_to ? _localNameMap[t.assigned_to] : null;
         var assignedName = _resolvedName || 'Not Assigned';
         var assignedColor = _resolvedName ? 'var(--white)' : 'rgba(255,255,255,0.35)';
-        var roleLabel = ROLE_DISPLAY[t.assigned_role] || (t.assigned_role||'').replace(/_/g,' ');
+        var roleLabel = window.roleLabel(t.assigned_role);
 
         var row = document.createElement('div');
         row.style.cssText = 'display:grid;grid-template-columns:1fr 160px 160px 100px;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--navy-border);';
@@ -29741,11 +29770,9 @@ window.saveAdjModal = async function() {
 
     // ── Gate 2: Active → Complete ────────────────────────────────────────────
     if (nextStage === 'complete') {
-      // MD and Operations Director always have full job completion rights
-      var _completingRole = window.CURRENT_USER && window.CURRENT_USER.role;
-      var _isSuperRole = _completingRole === 'managing_director' || _completingRole === 'operations_director';
-      // Permission checks for sign-off tasks gated at this stage (bypassed for MD/OD)
-      if (!_isSuperRole) {
+      // Exec roles (MD/OD) always have full job completion rights;
+      // others must hold the relevant sign-off permissions.
+      if (!window.isExec()) {
         var permBlocking = [];
         if (window.canDo && !window.canDo('jobs_signoff_liquid'))     permBlocking.push('Liquid Sign-Off permission');
         if (window.canDo && !window.canDo('jobs_signoff_components')) permBlocking.push('Supply Chain Sign-Off permission');
@@ -30505,8 +30532,7 @@ window.saveAdjModal = async function() {
   };
 
   window._cancelJob = async function() {
-    var isMD = window.CURRENT_USER && (window.CURRENT_USER.role === 'managing_director' || window.CURRENT_USER.role === 'operations_director');
-    if (!isMD) { window.toast && window.toast("You don't have permission to cancel jobs.", 'error'); return; }
+    if (!window.isExec()) { window.toast && window.toast("You don't have permission to cancel jobs.", 'error'); return; }
     var j = _jobs.find(function(x){ return x.id === _currentJobId; });
     if (!j) return;
     var result = await _showReasonModal('Cancel Job', 'Cancellation Reason *', null, 'var(--red)');
@@ -30637,7 +30663,7 @@ window.saveAdjModal = async function() {
 
   window.deleteJobDirect = async function(jobId) {
     var role = window.CURRENT_USER_ROLE || (window.CURRENT_USER && window.CURRENT_USER.role) || '';
-    if (role !== 'managing_director' && role !== 'operations_director' && role !== 'business_analyst') {
+    if (!window.isPulseAdmin(role)) {
       window.toast && window.toast('Only Managing Director, Operations Director or Business Analyst can delete jobs.', 'error');
       return;
     }
@@ -30658,9 +30684,9 @@ window.saveAdjModal = async function() {
     var j = _jobs.find(function(x){ return x.id === _currentJobId; });
     if (!j) return;
 
-    // Only Managing Director or Operations Director can delete
+    // Pulse admins (MD / Operations Director / Business Analyst) only
     var role = window.CURRENT_USER_ROLE || (window.CURRENT_USER && window.CURRENT_USER.role) || '';
-    if (role !== 'managing_director' && role !== 'operations_director' && role !== 'business_analyst') {
+    if (!window.isPulseAdmin(role)) {
       window.toast && window.toast('Only Managing Director, Operations Director or Business Analyst can delete jobs.', 'error');
       return;
     }
@@ -31718,8 +31744,7 @@ window.saveAdjModal = async function() {
   }
 
   window.saveResults = async function(jobId) {
-    var _saveRole = window.CURRENT_USER && window.CURRENT_USER.role;
-    var _canSaveResults = _saveRole === 'managing_director' || _saveRole === 'operations_director'
+    var _canSaveResults = window.isExec()
       || (window.canDo && (window.canDo('jobs_advance') || window.canDo('jobs_signoff_quality')));
     if (!_canSaveResults) { window.toast && window.toast('You do not have permission to save production results.', 'error'); return; }
     var gv = function(id) {
@@ -35812,7 +35837,7 @@ window.saveAdjModal = async function() {
 
   window.saveQCModal = async function() {
     var _qcRole = window.CURRENT_USER && window.CURRENT_USER.role;
-    var _canQC = _qcRole === 'managing_director' || _qcRole === 'operations_director' || _qcRole === 'quality_compliance'
+    var _canQC = window.isExec(_qcRole) || _qcRole === 'quality_compliance'
       || (window.canDo && (window.canDo('jobs_signoff_quality') || window.canDo('jobs_advance')));
     if (!_canQC) { window.toast && window.toast('You do not have permission to save QC checks.', 'error'); return; }
     var jobId = _qcModalJobId, type = _qcModalType, round = _qcModalRound;
@@ -37067,6 +37092,7 @@ window.saveAdjModal = async function() {
 
   var _weekOffset         = 0;
   var _schedJobs          = [];
+  var _schedBomMap        = {};   // bom_id -> { product_name, volume_cl, abv, additional_info } for extended job labels
   var _schedDowntime      = [];   // downtime_logs rows for calendar rendering
   var _schedTimerInterval = null;
   var _schedRtChannel     = null;
@@ -37334,9 +37360,13 @@ window.saveAdjModal = async function() {
       var bomIds = [];
       jobs.forEach(function(j) { if (j.bom_id && bomIds.indexOf(j.bom_id) < 0) bomIds.push(j.bom_id); });
       var bphMap = {};
+      _schedBomMap = {};
       if (bomIds.length) {
-        var boms = await sbGet('boms?id=in.(' + bomIds.join(',') + ')&select=id,bph');
-        boms.forEach(function(b) { bphMap[b.id] = b.bph || 0; });
+        var boms = await sbGet('boms?id=in.(' + bomIds.join(',') + ')&select=id,bph,product_name,volume_cl,abv,additional_info');
+        boms.forEach(function(b) {
+          bphMap[b.id] = b.bph || 0;
+          _schedBomMap[b.id] = b;
+        });
       }
       // Pre-fetch last actual BPH for all unique BOMs
       _lastBphMap = {};
@@ -37529,7 +37559,8 @@ window.saveAdjModal = async function() {
       h += '<span style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:' + stateCol + ';">&#9679; ' + stateLabel + '</span>';
       h += '<a href="javascript:void(0)" onclick="window.openJobDetail&&window.openJobDetail(\'' + esc(j.id) + '\')" style="font-size:10px;font-weight:700;color:var(--gold);text-decoration:none;">' + esc(j.id) + '</a>';
       h += '</div>';
-      h += '<div style="font-size:15px;font-weight:700;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px;" title="' + esc(j.product_name || '') + '">' + esc(j.product_name || '—') + '</div>';
+      var _aJobLabel = window.jobDisplayName(j, _schedBomMap);
+      h += '<div style="font-size:15px;font-weight:700;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px;" title="' + esc(_aJobLabel) + '">' + esc(_aJobLabel) + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);">' + (j.clientName ? esc(j.clientName) + ' &nbsp;&middot;&nbsp; ' : '') + (j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '') + '</div>';
       h += '</div>';
 
@@ -37607,7 +37638,8 @@ window.saveAdjModal = async function() {
       h += '<div style="display:grid;grid-template-columns:' + cols + ';gap:6px;align-items:center;padding:7px 12px;border-bottom:1px solid rgba(36,61,87,0.4);' + (idx % 2 ? 'background:rgba(255,255,255,0.015);' : '') + '">';
       h += '<div style="font-size:13px;font-weight:700;color:var(--amber);">#' + (idx + 1) + '</div>';
       h += '<a href="javascript:void(0)" onclick="window.openJobDetail&&window.openJobDetail(\'' + esc(j.id) + '\')" style="font-size:12px;font-weight:700;color:var(--gold);text-decoration:none;">' + esc(j.id) + '</a>';
-      h += '<div style="font-size:12px;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(j.product_name || '—') + '</div>';
+      var _nJobLabel = window.jobDisplayName(j, _schedBomMap);
+      h += '<div style="font-size:12px;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(_nJobLabel) + '">' + esc(_nJobLabel) + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(j.clientName || '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);text-align:right;">' + (j.bottle_target ? j.bottle_target.toLocaleString() : '—') + '</div>';
       h += '<div style="font-size:11px;color:var(--muted);text-align:right;">' + (j.job_target_type === 'liquid' && j.liquid_litres ? Number(j.liquid_litres).toLocaleString() + ' L' : '—') + '</div>';
@@ -41959,6 +41991,7 @@ window.saveAdjModal = async function() {
     { key:'roster_edit',        label:'Edit roster',                 category:'People' },
     { key:'timesheet_edit',     label:'Edit & delete clock records', category:'People' },
     { key:'hr_view_directory',  label:'View full employee directory (incl. terminated)', category:'People' },
+    { key:'hr_view_all',        label:'View HR profiles for all roles', category:'People' },
     { key:'reports_view',       label:'View reports',                category:'Reports' },
     { key:'settings_access',    label:'Access settings',             category:'System' },
     { key:'invite_users',       label:'Invite new users',            category:'System' },
@@ -41968,7 +42001,9 @@ window.saveAdjModal = async function() {
     { key:'managing_director',   label:'MD' },
     { key:'operations_director', label:'Ops Dir' },
     { key:'business_analyst',    label:'Biz Analyst' },
+    { key:'financial_controller',label:'Fin Ctrl' },
     { key:'commercial_manager',  label:'Commercial' },
+    { key:'ecommerce_manager',   label:'E-Comm' },
     { key:'production_manager',  label:'Prod Mgr' },
     { key:'quality_compliance',  label:'Quality' },
     { key:'warehouse_liquid',    label:'Warehouse' },
@@ -41977,20 +42012,24 @@ window.saveAdjModal = async function() {
     { key:'order_fulfillment',   label:'Order Fulfil.' },
   ];
 
-  // Default permissions (MD and Ops Dir always get everything)
+  // Default permissions — every role has an explicit value for every key in
+  // PERMISSION_DEFS, so the Settings → Permissions Matrix can render every cell.
+  // Existing values preserved verbatim from prior versions; missing keys
+  // backfilled with 0. MD and Ops Dir get all 1's (they also have a hardcoded
+  // bypass in canDo() at the bottom of this script).
   var DEFAULT_PERMISSIONS = {
-    managing_director:   { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:1,reports_view:1,settings_access:1 },
-    operations_director: { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:1,boms_lock:1,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:1,reports_view:1,settings_access:1 },
-    business_analyst:    { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,boms_edit:1,boms_lock:0,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_all:1,hr_view_directory:1,reports_view:1,settings_access:1 },
-    financial_controller:{ jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:1,reports_view:1,settings_access:0 },
-    commercial_manager:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:1,settings_access:0 },
-    ecommerce_manager:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:1,settings_access:0 },
-    production_manager:  { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,boms_edit:0,boms_lock:0,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:0,reports_view:1,settings_access:0 },
-    quality_compliance:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:1,boms_lock:1,labels_manage:1,production_control:0,changeover_override:0,bay_assign:1,bay_release:1,drygoods_edit:0,clients_edit:0,roster_view:0,roster_edit:0,timesheet_edit:0,hr_view_directory:0,reports_view:1,settings_access:0 },
-    warehouse_liquid:    { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:0,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:1,liquid_products_edit:1,boms_edit:0,boms_lock:0,labels_manage:0,production_control:1,changeover_override:0,bay_assign:0,bay_release:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:0,settings_access:0 },
-    client_coordinator:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,labels_manage:1,production_control:0,changeover_override:0,bay_assign:1,bay_release:1,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:0,settings_access:0 },
-    production_operator: { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,blending_write:0,boms_edit:0,boms_lock:0,production_control:1,changeover_override:0,bay_assign:0,bay_release:1,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:0,settings_access:0 },
-    order_fulfillment:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:1,jobs_edit_supply_chain:1,blending_write:0,liquid_products_edit:0,boms_edit:0,boms_lock:0,labels_manage:1,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_all:0,hr_view_directory:0,reports_view:1,settings_access:0 },
+    managing_director:   { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,boms_edit:1,boms_lock:1,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,blending_write:1,liquid_products_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:1,hr_view_all:1,reports_view:1,settings_access:1,invite_users:1 },
+    operations_director: { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,boms_edit:1,boms_lock:1,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,blending_write:1,liquid_products_edit:1,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:1,hr_view_all:1,reports_view:1,settings_access:1,invite_users:1 },
+    business_analyst:    { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,boms_edit:1,boms_lock:0,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,blending_write:1,liquid_products_edit:0,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:1,hr_view_all:1,reports_view:1,settings_access:1,invite_users:0 },
+    financial_controller:{ jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,blending_write:0,liquid_products_edit:0,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:1,hr_view_all:0,reports_view:1,settings_access:0,invite_users:0 },
+    commercial_manager:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,blending_write:0,liquid_products_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:0,hr_view_all:0,reports_view:1,settings_access:0,invite_users:0 },
+    ecommerce_manager:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,blending_write:0,liquid_products_edit:0,drygoods_edit:1,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:0,hr_view_all:0,reports_view:1,settings_access:0,invite_users:0 },
+    production_manager:  { jobs_create:1,jobs_advance:1,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:1,jobs_edit_supply_chain:1,boms_edit:0,boms_lock:0,labels_manage:1,production_control:1,changeover_override:1,bay_assign:1,bay_release:1,blending_write:1,liquid_products_edit:0,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:1,timesheet_edit:1,hr_view_directory:0,hr_view_all:0,reports_view:1,settings_access:0,invite_users:0 },
+    quality_compliance:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:1,jobs_signoff_components:0,jobs_edit_supply_chain:0,boms_edit:1,boms_lock:1,labels_manage:1,production_control:0,changeover_override:0,bay_assign:1,bay_release:1,blending_write:0,liquid_products_edit:0,drygoods_edit:0,clients_edit:0,roster_view:0,roster_edit:0,timesheet_edit:0,hr_view_directory:0,hr_view_all:0,reports_view:1,settings_access:0,invite_users:0 },
+    warehouse_liquid:    { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:1,jobs_signoff_quality:0,jobs_signoff_components:1,jobs_edit_supply_chain:1,boms_edit:0,boms_lock:0,labels_manage:0,production_control:1,changeover_override:0,bay_assign:0,bay_release:1,blending_write:1,liquid_products_edit:1,drygoods_edit:1,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:0,hr_view_all:0,reports_view:0,settings_access:0,invite_users:0 },
+    client_coordinator:  { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,boms_edit:0,boms_lock:0,labels_manage:1,production_control:0,changeover_override:0,bay_assign:1,bay_release:1,blending_write:0,liquid_products_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:0,hr_view_all:0,reports_view:0,settings_access:0,invite_users:0 },
+    production_operator: { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:0,jobs_edit_supply_chain:0,boms_edit:0,boms_lock:0,labels_manage:0,production_control:1,changeover_override:0,bay_assign:0,bay_release:1,blending_write:0,liquid_products_edit:0,drygoods_edit:0,clients_edit:0,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:0,hr_view_all:0,reports_view:0,settings_access:0,invite_users:0 },
+    order_fulfillment:   { jobs_create:0,jobs_advance:0,jobs_signoff_liquid:0,jobs_signoff_quality:0,jobs_signoff_components:1,jobs_edit_supply_chain:1,boms_edit:0,boms_lock:0,labels_manage:1,production_control:0,changeover_override:0,bay_assign:0,bay_release:0,blending_write:0,liquid_products_edit:0,drygoods_edit:0,clients_edit:1,roster_view:1,roster_edit:0,timesheet_edit:0,hr_view_directory:0,hr_view_all:0,reports_view:1,settings_access:0,invite_users:0 },
   };
 
   var _permissions = JSON.parse(JSON.stringify(DEFAULT_PERMISSIONS));
@@ -42121,8 +42160,7 @@ window.saveAdjModal = async function() {
     try {
       var users = await sbGet('app_users?select=*&order=created_at.asc');
       if (!users.length) { el.innerHTML='<div style="color:var(--muted);font-size:13px;">No users found.</div>'; return; }
-      var roleLabels = { managing_director:'Managing Director',operations_director:'Operations Director',business_analyst:'Business Analyst',commercial_manager:'Commercial Manager',ecommerce_manager:'E-Commerce Manager',production_manager:'Production Manager',quality_compliance:'Quality & Compliance',financial_controller:'Financial Controller',warehouse_liquid:'Warehouse & Liquid',client_coordinator:'Client Coordinator',production_operator:'Production Operator',order_fulfillment:'Order & Fulfillment Specialist',client:'Client' };
-      var roleKeys   = ['managing_director','operations_director','business_analyst','commercial_manager','ecommerce_manager','production_manager','quality_compliance','financial_controller','warehouse_liquid','client_coordinator','production_operator','order_fulfillment','client'];
+      var roleKeys = window.STAFF_ROLES.concat(['client']);
 
       var html = '<table class="data-table" style="width:100%;"><thead><tr>'
         +'<th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th style="text-align:center;">Actions</th>'
@@ -42138,7 +42176,7 @@ window.saveAdjModal = async function() {
 
         var roleSelect = '<select data-uid="' + uid + '" class="settings-role-select" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;padding:3px 6px;border-radius:3px;font-family:Lato,sans-serif;cursor:pointer;color-scheme:dark;">';
         roleKeys.forEach(function(rk) {
-          roleSelect += '<option value="' + rk + '"' + (u.role === rk ? ' selected' : '') + '>' + roleLabels[rk] + '</option>';
+          roleSelect += '<option value="' + rk + '"' + (u.role === rk ? ' selected' : '') + '>' + window.roleLabel(rk) + '</option>';
         });
         roleSelect += '</select>';
 
@@ -42261,19 +42299,31 @@ window.saveAdjModal = async function() {
   };
 
   // ── Geofence in settings ─────────────────────────────────────────────────────
+  // Render the remote-clock-in checkbox list from the canonical role registry.
+  // Existing geofence_settings.allow_remote_roles values continue to apply
+  // (they're keyed by role string, identical to the new option values).
+  function _renderGeofenceRoleCheckboxes(remotes) {
+    var box = document.getElementById('gf-remote-roles');
+    if (!box) return;
+    var html = '';
+    window.STAFF_ROLES.forEach(function(k){
+      var checked = (remotes||[]).indexOf(k) >= 0 ? ' checked' : '';
+      html += '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--white);cursor:pointer;">'
+        + '<input type="checkbox" value="' + k + '"' + checked + '> ' + window.roleLabel(k)
+        + '</label>';
+    });
+    box.innerHTML = html;
+  }
   async function loadGeofenceIntoSettings() {
     try {
       var rows = await sbGet('geofence_settings?id=eq.1&limit=1');
+      var g = rows[0] || {};
       if (rows[0]) {
-        var g = rows[0];
         document.getElementById('gf-lat').value = g.latitude||'';
         document.getElementById('gf-lng').value = g.longitude||'';
         document.getElementById('gf-radius').value = g.radius_metres||200;
-        var remotes = g.allow_remote_roles||[];
-        document.querySelectorAll('#gf-remote-roles input').forEach(function(cb){
-          cb.checked = remotes.indexOf(cb.value)>=0;
-        });
       }
+      _renderGeofenceRoleCheckboxes(g.allow_remote_roles||[]);
     } catch(e) { window.logError('load geofence settings', e); }
   }
 
@@ -43317,12 +43367,6 @@ window.mgmtLoadReports = async function(){
       el.innerHTML='<span style="color:var(--muted);">No direct reports found. Set \u201cReports To\u201d in Employee Details \u2192 Employment tab.</span>';
       return;
     }
-    var RL={'managing_director':'Managing Director','operations_director':'Operations Director',
-      'business_analyst':'Business Analyst','commercial_manager':'Commercial Manager',
-      'ecommerce_manager':'E-Commerce Manager','production_manager':'Production Manager',
-      'quality_compliance':'Quality & Compliance','warehouse_liquid':'Warehouse & Liquid',
-      'client_coordinator':'Client Coordinator','production_operator':'Production Operator',
-      'financial_controller':'Financial Controller'};
     // Store email lookup on window so onclick can retrieve it without escaping
     window._reportEmails = {};
     allUsers.forEach(function(u){ if(u.email) window._reportEmails[u.id]=u.email; });
@@ -43337,7 +43381,7 @@ window.mgmtLoadReports = async function(){
     myReports.forEach(function(p){
       var u=allUsers.find(function(x){return x.id===p.user_id;})||{};
       var name=u.display_name||(p.first_name+' '+p.last_name).trim()||p.user_id.slice(0,8);
-      var role=RL[u.role]||(u.role||'').replace(/_/g,' ')||'\u2014';
+      var role=window.roleLabel(u.role)||'\u2014';
       var ini=name.trim().split(' ').map(function(w){return w[0]||'';}).join('').toUpperCase().slice(0,2);
       var nrd=p.next_review_date?(function(){var d=new Date(p.next_review_date);if(d<new Date())d.setFullYear(d.getFullYear()+1);return d.toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'})+'<br><span style="font-size:9px;font-weight:700;letter-spacing:0.08em;color:var(--green);text-transform:uppercase;">&#10003; Scheduled</span>';})():'<span style="color:var(--muted);">—</span>';
       html+='<tr style="border-bottom:1px solid rgba(36,61,87,0.5);">'
@@ -44260,7 +44304,7 @@ window.tsLoad=async function(){
   tb.style.cssText='display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--navy-border);background:var(--navy-mid);flex-shrink:0;';
   tb.innerHTML=
     '<span style="font-size:13px;font-weight:700;color:var(--white);flex:1;">'+_selName
-    +(_selRole?'<span style="font-size:10px;color:var(--muted);font-weight:400;margin-left:6px;">'+({'managing_director':'Managing Director','operations_director':'Operations Director','commercial_manager':'Commercial Manager','ecommerce_manager':'E-Commerce Manager','production_manager':'Production Manager','quality_compliance':'Quality & Compliance','warehouse_liquid':'Warehouse & Liquid','client_coordinator':'Client Coordinator','production_operator':'Production Operator','financial_controller':'Financial Controller','md':'Managing Director','ops_director':'Operations Director','admin':'Admin','manager':'Manager'}[_selRole]||(_selRole||'').replace(/_/g,' '))+"</span>":'')
+    +(_selRole?'<span style="font-size:10px;color:var(--muted);font-weight:400;margin-left:6px;">'+window.roleLabel(_selRole)+"</span>":'')
     +'</span>'
     +'<div style="display:flex;align-items:center;gap:2px;">'
     +'<button onclick="window.tsPrev()" class="btn btn-outline" style="padding:4px 10px;font-size:14px;line-height:1;">\u2039</button>'
@@ -45244,8 +45288,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   // ── Reorder: swap priority with adjacent neighbour ──────────────────────
   var _baySwappingJobs = {};   // per-job lock — prevents double-click corruption
   window._bayWaitlistMove = async function(jobId, direction) {
-    var _mvrRole = window.CURRENT_USER && window.CURRENT_USER.role;
-    var _canMove = _mvrRole === 'managing_director' || _mvrRole === 'operations_director' || (window.canDo && window.canDo('bay_assign'));
+    var _canMove = window.isExec() || (window.canDo && window.canDo('bay_assign'));
     if (!_canMove) return;
     if (_baySwappingJobs[jobId]) return;   // already in-flight for this job
     _baySwappingJobs[jobId] = true;
@@ -45309,8 +45352,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 
   // ── Set an explicit priority (click-to-edit from Jobs table). Shifts others as needed. ─
   window._bayEditPriority = async function(jobId) {
-    var _epRole = window.CURRENT_USER && window.CURRENT_USER.role;
-    var _canEdit = _epRole === 'managing_director' || _epRole === 'operations_director' || (window.canDo && window.canDo('bay_assign'));
+    var _canEdit = window.isExec() || (window.canDo && window.canDo('bay_assign'));
     if (!_canEdit) { window.toast && window.toast('You don\'t have permission to reorder the planning queue.', 'error'); return; }
     try {
       var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,stage,bay_waitlist_priority');
@@ -45724,7 +45766,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       // Auto-queue any planning jobs without a priority before we paint
       try { await window._bayAutoQueuePlanning(); } catch(e) {}
 
-      var held = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id,product_name,job_bay,bay_assigned_at,bay_assigned_by,stage,clients(name)&order=job_bay.asc');
+      var held = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id,product_name,bom_id,job_bay,bay_assigned_at,bay_assigned_by,stage,clients(name)&order=job_bay.asc');
       // heldByBay[n] = array of jobs — supports multiple jobs per bay
       var heldByBay = {};
       (held||[]).forEach(function(j){
@@ -45733,7 +45775,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       });
       // Also mark bays occupied by extra_bays assignments (requires SQL migration: ALTER TABLE jobs ADD COLUMN IF NOT EXISTS extra_bays text[] DEFAULT '{}')
       try {
-        var extraHeld = await apiGet('jobs?extra_bays=not.is.null&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id,product_name,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,stage,clients(name)');
+        var extraHeld = await apiGet('jobs?extra_bays=not.is.null&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id,product_name,bom_id,job_bay,extra_bays,bay_assigned_at,bay_assigned_by,stage,clients(name)');
         (extraHeld||[]).forEach(function(j) {
           (j.extra_bays||[]).forEach(function(bayNo) {
             if (bayNo) {
@@ -45772,7 +45814,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
               +   '<a href="javascript:void(0)" onclick="window.openJobDetail&&window.openJobDetail(\'' + esc(j.id) + '\')" style="font-size:12px;font-weight:700;color:var(--gold);text-decoration:none;">' + esc(j.id) + '</a>'
               +   stageChip
               + '</div>'
-              + '<div style="font-size:11px;color:var(--white);line-height:1.3;">' + esc(j.product_name||'—') + '</div>'
+              + '<div style="font-size:11px;color:var(--white);line-height:1.3;" title="' + esc(window.jobDisplayName(j, _schedBomMap)) + '">' + esc(window.jobDisplayName(j, _schedBomMap)) + '</div>'
               + '<div style="font-size:10px;color:var(--muted);">' + esc((j.clients && j.clients.name) || '—') + '</div>'
               + (ass ? '<div style="font-size:9px;color:var(--muted);">' + ass + '</div>' : '')
               + btns
@@ -45809,8 +45851,18 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   // ── Print the Next Jobs list ─────────────────────────────────────────────
   window._printNextJobs = async function() {
     try {
-      var jobs = await apiGet('jobs?stage=in.(new,active)&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=20&select=id,product_name,bottle_target,bay_waitlist_priority,job_bay,bay_released_at,clients(name)');
+      var jobs = await apiGet('jobs?stage=in.(new,active)&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=20&select=id,product_name,bom_id,bottle_target,bay_waitlist_priority,job_bay,bay_released_at,clients(name)');
       if (!jobs || !jobs.length) { window.toast && window.toast('No jobs in the priority list.', 'error'); return; }
+      // Fetch BOM extras for the extended product label (e.g. "Lucky Penny — 70cl · 46% · EU/ROW")
+      var bomMap = {};
+      var bomIds = [];
+      jobs.forEach(function(j) { if (j.bom_id && bomIds.indexOf(j.bom_id) < 0) bomIds.push(j.bom_id); });
+      if (bomIds.length) {
+        try {
+          var boms = await apiGet('boms?id=in.(' + bomIds.join(',') + ')&select=id,product_name,volume_cl,abv,additional_info');
+          (boms||[]).forEach(function(b) { if (b.id) bomMap[b.id] = b; });
+        } catch(bomErr) { /* fall back to product_name only */ }
+      }
       var dateStr = new Date().toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' });
       var rows = jobs.map(function(w) {
         var cn = w.clients && w.clients.name ? w.clients.name : '—';
@@ -45818,7 +45870,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         var bay = (w.job_bay && !w.bay_released_at) ? 'Bay ' + w.job_bay : '—';
         return '<tr><td style="padding:10px 12px;font-size:16px;font-weight:700;color:#e89c3a;">#' + w.bay_waitlist_priority + '</td>'
           + '<td style="padding:10px 12px;font-family:monospace;font-size:12px;">' + w.id + '</td>'
-          + '<td style="padding:10px 12px;font-size:13px;font-weight:600;">' + (w.product_name||'—') + '</td>'
+          + '<td style="padding:10px 12px;font-size:13px;font-weight:600;">' + window.jobDisplayName(w, bomMap) + '</td>'
           + '<td style="padding:10px 12px;font-size:12px;color:#555;">' + cn + '</td>'
           + '<td style="padding:10px 12px;font-size:12px;text-align:right;">' + bt + '</td>'
           + '<td style="padding:10px 12px;font-size:12px;text-align:center;font-weight:700;color:#3dba78;">' + bay + '</td>'
