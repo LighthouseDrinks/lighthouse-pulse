@@ -21177,9 +21177,9 @@ window._approvalsBadgePoll = async function() {
               <input type="number" id="dl-water-litres" placeholder="e.g. 45.2" min="0" step="0.1" oninput="window.calcDilutePreview()">
             </div>
             <div class="mfield">
-              <label>New CBW Rotation *</label>
+              <label>New CBW Rotation</label>
               <input type="text" id="dl-cbw" placeholder="e.g. R-2025-043">
-              <div class="field-hint">Required after dilution</div>
+              <div class="field-hint">Optional — assign later once issued. Leave blank if not yet known.</div>
             </div>
           </div>
         </div>
@@ -38769,6 +38769,81 @@ window.saveAdjModal = async function() {
     return null;
   }
 
+  // Resolve a Dilute "+ Register New Vessel" destination row by reading its
+  // dl-dnv-* inputs, validating, registering the vessel (LH path) or
+  // creating a client-vessel liquid_containers row, then returning the new
+  // liquid_containers UUID. Returns null on validation failure (caller should
+  // abort) and toasts the reason. Does NOT call loadBlData — the dilute save
+  // flow re-loads _bl once after pre-resolving all destinations.
+  async function _resolveNewVesselDest(idx) {
+    var clientSel = document.getElementById('dl-dnv-client-' + idx);
+    var typeSel   = document.getElementById('dl-dnv-type-' + idx);
+    var codeEl    = document.getElementById('dl-dnv-code-' + idx);
+    var capEl     = document.getElementById('dl-dnv-cap-' + idx);
+    var locEl     = document.getElementById('dl-dnv-loc-' + idx);
+    var cvDisp    = document.getElementById('dl-dnv-cvref-' + idx);
+    var clientId  = clientSel ? clientSel.value : '';
+    var type      = typeSel   ? typeSel.value   : '';
+    if (!clientId) { window.toast && window.toast('Pick an Owner / Client for the new vessel.', 'error'); return null; }
+    if (!type)     { window.toast && window.toast('Pick a Vessel Type for the new vessel.',     'error'); return null; }
+    var isClientVessel = window._cmIsLighthouseClient ? !window._cmIsLighthouseClient(clientId, clientSel) : false;
+    var capacity = parseFloat(capEl && capEl.value) || null;
+    if ((type === 'tanker' || type === 'other') && !capacity) {
+      window.toast && window.toast('Enter Capacity for the new ' + type + ' vessel.', 'error');
+      return null;
+    }
+    var location = (locEl && locEl.value || '').trim() || null;
+    var code = isClientVessel
+      ? ((cvDisp && cvDisp.textContent || '').trim())
+      : ((codeEl && codeEl.value || '').trim().toUpperCase());
+    if (!code || code === '—') {
+      window.toast && window.toast(isClientVessel ? 'Could not auto-generate vessel reference — try reselecting the client.' : 'Vessel code is required for the new vessel.', 'error');
+      return null;
+    }
+    try {
+      var payload = {
+        type:            type,
+        reference:       code,
+        client_id:       clientId,
+        capacity_litres: capacity,
+        location:        location,
+        status:          'empty',
+        current_litres:  0,
+        current_lpa:     0
+      };
+      if (isClientVessel) {
+        payload.vessel_id           = null;
+        payload.is_client_vessel    = true;
+        payload.client_vessel_label = code;
+      } else {
+        var vesselCode = await _ensureVessel(code, type, capacity, location);
+        if (!vesselCode) {
+          window.toast && window.toast('Could not register vessel "' + code + '". Check for duplicates and try again.', 'error');
+          return null;
+        }
+        payload.vessel_id        = vesselCode;
+        payload.is_client_vessel = false;
+        payload.reference        = vesselCode;
+      }
+      var ins = await window.db.insert('liquid_containers', payload);
+      var newId = ins && ins[0] && ins[0].id;
+      if (!newId) {
+        window.toast && window.toast('Failed to create liquid container for new vessel.', 'error');
+        return null;
+      }
+      return newId;
+    } catch(e) {
+      var msg = (e && e.message) || String(e);
+      if (msg.indexOf('23505') > -1 || msg.indexOf('duplicate key') > -1 || msg.indexOf('reference_unique') > -1) {
+        window.toast && window.toast('A container with reference "' + code + '" already exists. Pick a different code.', 'error');
+      } else {
+        window.toast && window.toast('Error registering vessel: ' + msg, 'error');
+      }
+      window.logError && window.logError('resolve new dest vessel', e);
+      return null;
+    }
+  }
+
   function autoStatus(litres, capacity) {
     if (litres <= 0) return 'empty';
     if (capacity > 0 && litres >= capacity) return 'full';
@@ -40292,6 +40367,8 @@ window.saveAdjModal = async function() {
         });
       }
     }
+    html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Or register a new vessel ────</option>';
+    html += '<option value="__newvessel__" style="background:#0d1b2a;color:#c9a84c;font-style:italic;">+ Register New Vessel…</option>';
     return html;
   }
 
@@ -40421,11 +40498,13 @@ window.saveAdjModal = async function() {
       + '<select id="dl-dc-' + idx + '" onchange="window.onDLDestChange(' + idx + ')" style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">' + _dlDestOptHtml(srcIds) + '</select>'
       + '<button onclick="window.removeDLDest(' + idx + ')" style="flex-shrink:0;background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 9px;border-radius:3px;cursor:pointer;">✕</button>'
       + '</div>'
+      + _dlNewVesselSubBlockHtml(idx)
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:center;">'
       + '<div id="dl-dcap-' + idx + '" style="font-size:11px;padding:6px 10px;background:rgba(0,0,0,0.25);border:1px solid var(--navy-border);border-radius:3px;color:var(--muted);">Capacity: —</div>'
       + '<input type="number" id="dl-dl-' + idx + '" placeholder="Volume to fill (L)" min="0" step="0.1" oninput="window.calcDilutePreview()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;width:100%;box-sizing:border-box;">'
       + '</div>';
     wrap.appendChild(row);
+    _dlPopulateNewVesselClients(idx);
     window.calcDilutePreview();
   };
 
@@ -40437,14 +40516,19 @@ window.saveAdjModal = async function() {
   window.onDLDestChange = function(idx) {
     var sel  = document.getElementById('dl-dc-' + idx);
     var capEl = document.getElementById('dl-dcap-' + idx);
+    var nvWrap = document.getElementById('dl-dnv-wrap-' + idx);
+    var isNew = sel && sel.value === '__newvessel__';
+    if (nvWrap) nvWrap.style.display = isNew ? '' : 'none';
     if (sel && capEl) {
-      var cont = sel.value ? _bl.find(function(c){ return c.id === sel.value; }) : null;
+      var cont = sel.value && !isNew ? _bl.find(function(c){ return c.id === sel.value; }) : null;
       if (cont) {
         var cap = parseFloat(cont.capacity_litres||0);
         var cur = parseFloat(cont.current_litres||0);
         var avail = cap > 0 ? (cap - cur) : null;
         capEl.textContent = avail !== null ? ('Avail cap: ' + avail.toFixed(0) + 'L') : ('Current: ' + cur.toFixed(0) + 'L');
         capEl.style.color = (avail !== null && avail <= 0) ? 'var(--red)' : 'var(--muted)';
+      } else if (isNew) {
+        window._dlOnNewVesselTypeChange(idx);
       } else {
         capEl.textContent = 'Capacity: —';
         capEl.style.color = 'var(--muted)';
@@ -40452,6 +40536,134 @@ window.saveAdjModal = async function() {
     }
     window.calcDilutePreview();
   };
+
+  // ─────────────────────────────────────────────────────────────────────
+  // DILUTE — inline "+ Register New Vessel" sub-block helpers
+  // ─────────────────────────────────────────────────────────────────────
+
+  function _dlNewVesselSubBlockHtml(idx) {
+    return '<div id="dl-dnv-wrap-' + idx + '" style="display:none;margin-bottom:8px;padding:10px 12px;background:rgba(201,168,76,0.05);border:1px solid rgba(201,168,76,0.3);border-radius:4px;">'
+      + '<div style="font-size:9px;letter-spacing:0.16em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:8px;">Register New Vessel</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">'
+      + '<div><label style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Owner / Client *</label>'
+      +   '<select id="dl-dnv-client-' + idx + '" onchange="window._dlOnNewVesselClientChange(' + idx + ')" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:11px;border-radius:3px;box-sizing:border-box;"><option value="">— Select client —</option></select></div>'
+      + '<div><label style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Vessel Type *</label>'
+      +   '<select id="dl-dnv-type-' + idx + '" onchange="window._dlOnNewVesselTypeChange(' + idx + ')" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:11px;border-radius:3px;box-sizing:border-box;">'
+      +     '<option value="ibc">IBC</option><option value="blue_drum">Blue Drum</option><option value="tank">Tank</option><option value="tanker">Tanker</option>'
+      +   '</select></div>'
+      + '</div>'
+      + '<div id="dl-dnv-lh-row-' + idx + '" style="margin-bottom:8px;">'
+      +   '<label style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Vessel Code *</label>'
+      +   '<input type="text" id="dl-dnv-code-' + idx + '" placeholder="e.g. IBC-007" autocomplete="off" oninput="this.value=this.value.toUpperCase()" style="width:100%;background:var(--navy-dark);border:1px solid var(--gold);color:var(--gold);padding:6px 8px;font-size:12px;font-family:monospace;font-weight:700;border-radius:3px;box-sizing:border-box;">'
+      +   '<div style="font-size:10px;color:var(--muted);margin-top:2px;">Auto-suggested by type — edit if needed.</div>'
+      + '</div>'
+      + '<div id="dl-dnv-cv-row-' + idx + '" style="display:none;margin-bottom:8px;">'
+      +   '<label style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Client Vessel Reference (auto)</label>'
+      +   '<div id="dl-dnv-cvref-' + idx + '" style="font-family:monospace;font-size:12px;font-weight:700;background:rgba(232,152,58,0.06);border:1px solid rgba(232,152,58,0.28);color:var(--amber,#e8983a);padding:6px 8px;border-radius:3px;letter-spacing:0.06em;">—</div>'
+      +   '<div style="font-size:10px;color:var(--muted);margin-top:2px;">Auto-generated from client + type. This liquid is in the client\'s own vessel and will not be added to the LH fleet.</div>'
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">'
+      +   '<div><label style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Capacity (L)</label>'
+      +     '<input type="number" id="dl-dnv-cap-' + idx + '" min="0" step="0.1" placeholder="e.g. 1000" oninput="window.calcDilutePreview()" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:11px;border-radius:3px;box-sizing:border-box;"></div>'
+      +   '<div><label style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Location</label>'
+      +     '<input type="text" id="dl-dnv-loc-' + idx + '" placeholder="e.g. Warehouse A" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:11px;border-radius:3px;box-sizing:border-box;"></div>'
+      + '</div>'
+      + '</div>';
+  }
+
+  function _dlPopulateNewVesselClients(idx) {
+    var sel = document.getElementById('dl-dnv-client-' + idx);
+    if (!sel) return;
+    var clients = (typeof _blClients !== 'undefined' && _blClients) ? _blClients : (window._blClients || window.CLIENTS || []);
+    var opts = '<option value="">— Select client —</option>';
+    clients.filter(function(c){
+      var s = c.lifecycle_stage || 'client';
+      return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
+    }).forEach(function(c){
+      opts += '<option value="' + c.id + '">' + window.escapeHtml(c.name || c.company || c.id) + '</option>';
+    });
+    sel.innerHTML = opts;
+    Array.from(sel.options).forEach(function(o){
+      if (o.text.toLowerCase().indexOf('lighthouse') >= 0) sel.value = o.value;
+    });
+    window._dlOnNewVesselClientChange(idx);
+  }
+
+  window._dlOnNewVesselClientChange = function(idx) {
+    var clientSel = document.getElementById('dl-dnv-client-' + idx);
+    var lhRow     = document.getElementById('dl-dnv-lh-row-' + idx);
+    var cvRow     = document.getElementById('dl-dnv-cv-row-' + idx);
+    if (!clientSel) return;
+    var clientId = clientSel.value;
+    var isClientVessel = clientId && window._cmIsLighthouseClient
+      ? !window._cmIsLighthouseClient(clientId, clientSel)
+      : false;
+    if (lhRow) lhRow.style.display = isClientVessel ? 'none' : '';
+    if (cvRow) cvRow.style.display = isClientVessel ? '' : 'none';
+    if (isClientVessel) {
+      var name = clientSel.options[clientSel.selectedIndex] ? clientSel.options[clientSel.selectedIndex].text : '';
+      var ref  = window._nextClientVesselRef ? window._nextClientVesselRef(clientId, name) : '';
+      var dispEl = document.getElementById('dl-dnv-cvref-' + idx);
+      if (dispEl) dispEl.textContent = ref || '—';
+    } else {
+      window._dlOnNewVesselTypeChange(idx);
+    }
+  };
+
+  window._dlOnNewVesselTypeChange = function(idx) {
+    var typeSel = document.getElementById('dl-dnv-type-' + idx);
+    var codeEl  = document.getElementById('dl-dnv-code-' + idx);
+    var capEl   = document.getElementById('dl-dnv-cap-' + idx);
+    var clientSel = document.getElementById('dl-dnv-client-' + idx);
+    if (!typeSel) return;
+    var type = typeSel.value;
+    var CAPS = { ibc: 1000, blue_drum: 200, tank: 12500 };
+    if (capEl && (!capEl.value || capEl.dataset.autofilled === '1')) {
+      var defaultCap = CAPS[type];
+      if (defaultCap !== undefined) {
+        capEl.value = defaultCap;
+        capEl.dataset.autofilled = '1';
+      } else {
+        if (capEl.dataset.autofilled === '1') capEl.value = '';
+        delete capEl.dataset.autofilled;
+      }
+    }
+    var isClientVessel = clientSel && clientSel.value && window._cmIsLighthouseClient
+      ? !window._cmIsLighthouseClient(clientSel.value, clientSel)
+      : false;
+    if (!isClientVessel && codeEl) {
+      var prefixMap = (typeof _vrTypePrefix !== 'undefined' && _vrTypePrefix) ? _vrTypePrefix : { ibc:'IBC-', blue_drum:'DRM-', tank:'TNK-', other:'VES-' };
+      var prefix = prefixMap[type] || 'VES-';
+      var allVessels = (window._vrVessels || []);
+      var maxN = 0;
+      allVessels.forEach(function(v){
+        if (!v.id || v.id.indexOf(prefix) !== 0) return;
+        var n = parseInt(v.id.slice(prefix.length), 10) || 0;
+        if (n > maxN) maxN = n;
+      });
+      codeEl.value = prefix + String(maxN + 1).padStart(3, '0');
+    } else if (isClientVessel) {
+      window._dlOnNewVesselClientChange(idx);
+    }
+    _dlUpdateNewVesselCapDisplay(idx);
+    window.calcDilutePreview();
+  };
+
+  function _dlUpdateNewVesselCapDisplay(idx) {
+    var sel = document.getElementById('dl-dc-' + idx);
+    if (!sel || sel.value !== '__newvessel__') return;
+    var capEl = document.getElementById('dl-dcap-' + idx);
+    var nvCap = parseFloat((document.getElementById('dl-dnv-cap-' + idx) || {}).value) || 0;
+    if (capEl) {
+      if (nvCap > 0) {
+        capEl.textContent = 'Avail cap: ' + nvCap.toFixed(0) + 'L';
+        capEl.style.color = 'var(--muted)';
+      } else {
+        capEl.textContent = 'Capacity: —';
+        capEl.style.color = 'var(--muted)';
+      }
+    }
+  }
 
   // ─────────────────────────────────────────────────────────────────────
   // BLEND — destination row helpers
@@ -41150,16 +41362,31 @@ window.saveAdjModal = async function() {
       var l = parseFloat(litEl && litEl.value) || 0;
       allocated += l;
       if (sel && sel.value && l > 0) {
-        var cont = _bl.find(function(c){ return c.id === sel.value; });
-        if (cont) {
-          var cap = parseFloat(cont.capacity_litres||0);
-          var cur = parseFloat(cont.current_litres||0);
-          var avail = cap > 0 ? cap - cur : Infinity;
-          if (l > avail + 0.01) {
-            capWarns.push(window.escapeHtml(cont.reference) + ': needs ' + l.toFixed(0) + 'L, only ' + (avail === Infinity ? '∞' : avail.toFixed(0)) + 'L available');
+        if (sel.value === '__newvessel__') {
+          var nvCap = parseFloat((document.getElementById('dl-dnv-cap-' + idx) || {}).value) || 0;
+          var nvAvail = nvCap > 0 ? nvCap : Infinity;
+          var nvCodeEl = document.getElementById('dl-dnv-code-' + idx);
+          var nvCvEl   = document.getElementById('dl-dnv-cvref-' + idx);
+          var nvLabel  = (nvCodeEl && nvCodeEl.value) || (nvCvEl && nvCvEl.textContent) || 'New vessel';
+          if (l > nvAvail + 0.01) {
+            capWarns.push(window.escapeHtml(nvLabel) + ': needs ' + l.toFixed(0) + 'L, only ' + nvAvail.toFixed(0) + 'L capacity');
             if (litEl) litEl.style.borderColor = 'var(--red)';
           } else {
             if (litEl) litEl.style.borderColor = 'var(--navy-border)';
+          }
+          _dlUpdateNewVesselCapDisplay(idx);
+        } else {
+          var cont = _bl.find(function(c){ return c.id === sel.value; });
+          if (cont) {
+            var cap = parseFloat(cont.capacity_litres||0);
+            var cur = parseFloat(cont.current_litres||0);
+            var avail = cap > 0 ? cap - cur : Infinity;
+            if (l > avail + 0.01) {
+              capWarns.push(window.escapeHtml(cont.reference) + ': needs ' + l.toFixed(0) + 'L, only ' + (avail === Infinity ? '∞' : avail.toFixed(0)) + 'L available');
+              if (litEl) litEl.style.borderColor = 'var(--red)';
+            } else {
+              if (litEl) litEl.style.borderColor = 'var(--navy-border)';
+            }
           }
         }
       }
@@ -41193,7 +41420,6 @@ window.saveAdjModal = async function() {
     var inPlace = (document.getElementById('dl-in-place')||{}).checked && _countDLSrcRows() === 1;
 
     if (!waterL)  { window.toast && window.toast('Enter RO water volume.', 'error'); return; }
-    if (!newRot)  { window.toast && window.toast('New CBW rotation is required after dilution.', 'error'); return; }
 
     // Collect sources
     var sources = _getDLSources();
@@ -41214,8 +41440,23 @@ window.saveAdjModal = async function() {
     // ── Collect and validate destinations ──
     var dests = [];
     if (!inPlace) {
-      // Pre-resolve any __vessel__ destination values into real liquid_containers IDs
+      // Pre-resolve any __newvessel__ destination rows first (these register a
+      // brand-new vessel + create a liquid_containers row). Done before the
+      // __vessel__ pass so the subsequent _bl reload covers both.
       var _dlDestSels = document.querySelectorAll('[id^="dl-dc-"]');
+      for (var _dnvi = 0; _dnvi < _dlDestSels.length; _dnvi++) {
+        if (_dlDestSels[_dnvi].value === '__newvessel__') {
+          var _dnvIdx = _dlDestSels[_dnvi].id.replace('dl-dc-','');
+          // Skip rows with no litres allocated — would create an orphan empty container.
+          var _dnvLitres = parseFloat((document.getElementById('dl-dl-' + _dnvIdx) || {}).value) || 0;
+          if (_dnvLitres <= 0) continue;
+          var _dnvId  = await _resolveNewVesselDest(_dnvIdx);
+          if (!_dnvId) return; // _resolveNewVesselDest already toasted; abort save
+          _dlDestSels[_dnvi].value = _dnvId;
+        }
+      }
+      // Pre-resolve any __vessel__ destination values into real liquid_containers IDs
+      _dlDestSels = document.querySelectorAll('[id^="dl-dc-"]');
       for (var _dvi = 0; _dvi < _dlDestSels.length; _dvi++) {
         if (_dlDestSels[_dvi].value && _dlDestSels[_dvi].value.indexOf('__vessel__') === 0) {
           var _dlResolved = await _resolveDestId(_dlDestSels[_dvi].value, null);
@@ -41264,7 +41505,7 @@ window.saveAdjModal = async function() {
         var newABV2 = newTL > 0 ? src.lpa / newTL * 100 : 0;
         await window.db.update('liquid_containers', '?id=eq.' + src.cont.id, {
           current_litres: Math.round(newTL*1e4)/1e4, current_lpa: Math.round(src.lpa*1e4)/1e4,
-          abv: Math.round(newABV2*100)/100, cbw_rotation: newRot,
+          abv: Math.round(newABV2*100)/100, cbw_rotation: newRot || null,
           status: autoStatus(newTL, parseFloat(src.cont.capacity_litres||0))
         });
         await writeHistory({ container_id: src.cont.id, event_type: 'dilution', event_group_id: egid,
@@ -41309,7 +41550,7 @@ window.saveAdjModal = async function() {
           var dlSpirit = (dlSpiritSel && dlSpiritSel.value) ? dlSpiritSel.value : sources[0].cont.spirit_type;
           await window.db.update('liquid_containers', '?id=eq.' + d.cont.id, {
             current_litres: Math.round(dNewL*1e4)/1e4, current_lpa: Math.round(dNewLP*1e4)/1e4,
-            abv: Math.round(dNewABV*100)/100, cbw_rotation: newRot,
+            abv: Math.round(dNewABV*100)/100, cbw_rotation: newRot || null,
             spirit_type: dlSpirit,
             status: autoStatus(dNewL, parseFloat(d.cont.capacity_litres||0))
           });
