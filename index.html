@@ -10297,6 +10297,9 @@ async function deleteJob(id) {
 }
 
 async function saveJob(){
+  // Guard against duplicate submissions during slow networks (see saveNewJob).
+  if (window._saveJobInFlight) return;
+
   var prodEl=el('mf-product'), cliEl=el('mf-client');
   if(!prodEl||!cliEl) return;
   var product  = prodEl.value.trim();
@@ -10315,6 +10318,8 @@ async function saveJob(){
       return;
     }
   }
+
+  window._saveJobInFlight = true;
 
   function gv(id){ var e=el(id); return e?e.value.trim():''; }
   var target   = gv('mf-target')||'Liquid';
@@ -10403,6 +10408,7 @@ async function saveJob(){
   } catch(e) {
     toast('Error saving job: ' + e.message, 'error');
   } finally {
+    window._saveJobInFlight = false;
     if (saveBtn) { saveBtn.disabled=false; saveBtn.textContent=editId?'Save Changes':'Save Job'; }
   }
 }
@@ -21094,9 +21100,11 @@ window.approveJobSubmission = async function(id, opts) {
       approved_at: new Date().toISOString()
     });
 
-    // Create initial tasks and show task assignment popup
-    try { window.createInitialTasks && await window.createInitialTasks(newJobId, dilution, chillFiltration, colouring); }
-    catch(tErr) { window.logError && window.logError('createInitialTasks', tErr); }
+    // Initialise BOM-derived components for the job. Supply Chain + Liquid
+    // sign-off tasks are no longer auto-fired here — the manager fires them
+    // from the job's Tasks tab via "Assign Tasks" when ready.
+    try { window.initJobOnCreate && await window.initJobOnCreate(newJobId); }
+    catch(tErr) { window.logError && window.logError('initJobOnCreate', tErr); }
 
     // Auto-send BOM confirmation to client
     try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(newJobId); }
@@ -29251,6 +29259,12 @@ window.saveAdjModal = async function() {
   window.toggleDilution = function() { window.calcJobYield(); };
 
   window.saveNewJob = async function() {
+    // Guard against duplicate Create Job submissions during slow networks.
+    // The button's `disabled` flag alone is not enough — a thrown POST can
+    // re-enable the button via the finally block while the previous request
+    // has actually succeeded server-side.
+    if (window._saveNewJobInFlight) return;
+
     var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
     var hv = function(id){ var e=document.getElementById(id); return e?e.value:''; }; // hidden fields
     var editId = gv('njm-edit-id');
@@ -29282,6 +29296,7 @@ window.saveAdjModal = async function() {
       }
     }
 
+    window._saveNewJobInFlight = true;
     var btn = document.getElementById('njm-save-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
 
@@ -29361,8 +29376,8 @@ window.saveAdjModal = async function() {
         var _btn = document.getElementById('njm-save-btn');
         if (_btn) { _btn.disabled = false; _btn.textContent = 'Create Job'; }
         if (saved && saved.id) {
-          try { await createInitialTasks(saved.id, dilution, chillFiltration, colouring); }
-          catch(tErr) { window.logError && window.logError('createInitialTasks', tErr); }
+          try { await initJobOnCreate(saved.id); }
+          catch(tErr) { window.logError && window.logError('initJobOnCreate', tErr); }
           // Auto-send BOM confirmation to client
           try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(saved.id); }
           catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate', bErr); }
@@ -29375,6 +29390,7 @@ window.saveAdjModal = async function() {
     } catch(e) {
       window.toast && window.toast('Error: ' + e.message, 'error');
     } finally {
+      window._saveNewJobInFlight = false;
       var btnEnd = document.getElementById('njm-save-btn');
       if (btnEnd) {
         btnEnd.disabled = false;
@@ -29585,119 +29601,47 @@ window.saveAdjModal = async function() {
     }
   };
 
-      // ── Auto-create tasks on job creation ────────────────────────────────────────
-  async function createInitialTasks(jobId, dilution, chillFiltration, colouring) {
-    var today = new Date();
-    var in4days = new Date(today);
+  // ── Job-creation init: populate component rows from BOM ──────────────────────
+  // Supply Chain + Liquid Sign-Off tasks are NOT auto-fired here. Managers fire
+  // them later from the job's Tasks tab via the "Assign Tasks" button.
+  async function initJobOnCreate(jobId) {
+    try { await window.initComponentsFromBOM(jobId, true); }
+    catch(e) { window.logError('initComponentsFromBOM', e); }
+  }
+  window.initJobOnCreate = initJobOnCreate;
+  window.createInitialTasks = initJobOnCreate;
+
+  // Canonical pipeline tasks for a job. liquid_signoff carries a +4 working-day
+  // due date computed at fire time so the original behaviour is preserved when
+  // the manager fires the task later (instead of at job creation).
+  function _canonicalJobTasks() {
+    var d = new Date();
     var added = 0;
     while (added < 4) {
-      in4days.setDate(in4days.getDate() + 1);
-      if (in4days.getDay() !== 0 && in4days.getDay() !== 6) added++;
+      d.setDate(d.getDate() + 1);
+      if (d.getDay() !== 0 && d.getDay() !== 6) added++;
     }
-    var dueDateStr = in4days.toISOString().split('T')[0];
-
-    // Build liquid prep task title
-    var liquidParts = ['Liquid Sign-Off'];
-    if (dilution) liquidParts.push('dilution required');
-    if (chillFiltration) liquidParts.push('chill filtration required');
-    if (colouring) liquidParts.push('colouring required (post-dilution)');
-    var liquidTitle = liquidParts.join(' — ');
-
-    var taskDefs = [
-      { task_type:'components',     title:'Supply Chain Sign Off',        assigned_role:'client_coordinator',  due_date:null },
-      { task_type:'liquid_signoff', title:'Liquid Sign Off',              assigned_role:'warehouse_liquid',    due_date:dueDateStr }
+    var dueDateStr = d.toISOString().split('T')[0];
+    return [
+      { task_type:'components',     title:'Supply Chain Sign Off', assigned_role:'client_coordinator', due_date:null },
+      { task_type:'liquid_signoff', title:'Liquid Sign Off',       assigned_role:'warehouse_liquid',   due_date:dueDateStr }
     ];
-
-    // Auto-init components from BOM
-    try { await window.initComponentsFromBOM(jobId, true); } catch(e) { window.logError('initComponentsFromBOM', e); }
-
-    // Fetch all staff for assignment popup — show everyone with an account
-    var staffList = [];
-    try {
-      staffList = await supaGet('app_users?select=auth_user_id,display_name,role&order=display_name.asc');
-    } catch(e) { window.logError('load staff for task assignment', e); }
-
-    // Show task assignment popup
-    await showTaskAssignmentPopup(jobId, taskDefs, staffList);
-  }
-  window.createInitialTasks = createInitialTasks;
-
-  // ── Task assignment popup ────────────────────────────────────────────────────
-  function showTaskAssignmentPopup(jobId, taskDefs, staffList) {
-    return new Promise(function(resolve) {
-      // Build popup
-      var ov = document.createElement('div');
-      ov.style.cssText = 'position:fixed;inset:0;z-index:1100;background:rgba(5,12,20,0.92);display:flex;align-items:center;justify-content:center;padding:24px;';
-
-      var box = document.createElement('div');
-      box.style.cssText = 'background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px;width:100%;max-width:600px;max-height:90vh;overflow-y:auto;';
-
-      var html = '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">New Job Created</div>'
-        + '<div style="font-size:18px;font-weight:700;color:var(--white);font-family:Merriweather,serif;margin-bottom:4px;">Assign Tasks</div>'
-        + '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">Assign each task to a staff member. Tasks will appear in their Overview dashboard.</div>';
-
-      var staffOptions = '<option value="" style="background:#0d1b2a;color:#ffffff;">— Unassigned —</option>'
-        + staffList.map(function(u) {
-          var name = u.display_name || u.auth_user_id.substring(0,8);
-          return '<option value="' + u.auth_user_id + '" style="background:#0d1b2a;color:#ffffff;">' + name + ' (' + (u.role||'').replace(/_/g,' ') + ')</option>';
-        }).join('');
-
-      var taskInputs = [];
-      taskDefs.forEach(function(t, idx) {
-        var inputId = 'tap-user-' + idx;
-        taskInputs.push(inputId);
-        html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--navy-border);gap:12px;">'
-          + '<div style="flex:1;"><div style="font-size:13px;color:var(--white);">' + taskTitle(t) + '</div>'
-          + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">' + (t.assigned_role||'').replace(/_/g,' ').toUpperCase() + (t.due_date ? ' · Due ' + t.due_date : '') + '</div></div>'
-          + '<select id="' + inputId + '" style="background:#0d1b2a;border:1px solid var(--navy-border);color:#ffffff;padding:6px 10px;font-size:12px;border-radius:4px;min-width:180px;font-family:Lato,sans-serif;">' + staffOptions + '</select>'
-          + '</div>';
-      });
-
-      html += '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">'
-        + '<button id="tap-skip-btn" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:8px 18px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-size:12px;">Skip Assignment</button>'
-        + '<button id="tap-save-btn" style="background:var(--gold);border:none;color:var(--navy-dark);font-weight:700;padding:8px 20px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;font-size:12px;">Save & Assign</button>'
-        + '</div>';
-
-      box.innerHTML = html;
-      ov.appendChild(box);
-      document.body.appendChild(ov);
-
-      async function saveAndClose() {
-        var saveBtn = document.getElementById('tap-save-btn');
-        if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
-
-        for (var i=0;i<taskDefs.length;i++) {
-          var sel = document.getElementById('tap-user-' + i);
-          var assignedTo = sel ? sel.value : '';
-          var taskPayload = Object.assign({ job_id:jobId, status:'pending', assigned_to:assignedTo||null }, taskDefs[i]);
-          try { await supaMut('POST','job_tasks','',taskPayload); }
-          catch(e) { console.warn('Task save failed:', e.message); }
-        }
-
-        document.body.removeChild(ov);
-        window.toast && window.toast('Job created and tasks assigned.', 'success');
-        resolve();
-      }
-
-      document.getElementById('tap-save-btn').addEventListener('click', saveAndClose);
-      document.getElementById('tap-skip-btn').addEventListener('click', async function() {
-        // Save tasks without assignment
-        for (var i=0;i<taskDefs.length;i++) {
-          try { await supaMut('POST','job_tasks','',Object.assign({job_id:jobId,status:'pending'},taskDefs[i])); }
-          catch(e) { window.logError('create job task', e); }
-        }
-        document.body.removeChild(ov);
-        window.toast && window.toast('Job created. Tasks unassigned.', 'success');
-        resolve();
-      });
-    });
   }
 
   window.openReassignTasks = async function(jobId) {
     try {
-      var tasks = await supaGet('job_tasks?job_id=eq.' + jobId + '&order=created_at.asc');
-      tasks = tasks.filter(function(t){ return t.task_type !== 'weights_measures'; });
+      var existing = await supaGet('job_tasks?job_id=eq.' + jobId + '&order=created_at.asc');
+      existing = existing.filter(function(t){ return t.task_type !== 'weights_measures'; });
       var staffList = await supaGet('app_users?select=auth_user_id,display_name,role&order=display_name.asc');
+
+      // Merge: existing rows first, then any canonical task that hasn't been
+      // fired yet appears as a virtual row the manager can assign to create.
+      var existingTypes = {};
+      existing.forEach(function(t){ existingTypes[t.task_type] = true; });
+      var rows = existing.map(function(t){ return { virtual:false, task:t }; });
+      _canonicalJobTasks().forEach(function(c){
+        if (!existingTypes[c.task_type]) rows.push({ virtual:true, def:c });
+      });
 
       var staffOptions = '<option value="" style="background:#0d1b2a;color:#fff;">— Unassigned —</option>'
         + staffList.map(function(u){
@@ -29711,13 +29655,22 @@ window.saveAdjModal = async function() {
       box.style.cssText = 'background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px;width:100%;max-width:600px;max-height:90vh;overflow-y:auto;';
 
       var html = '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">Job ' + jobId + '</div>'
-        + '<div style="font-size:18px;font-weight:700;color:var(--white);font-family:Merriweather,serif;margin-bottom:16px;">Reassign Tasks</div>';
+        + '<div style="font-size:18px;font-weight:700;color:var(--white);font-family:Merriweather,serif;margin-bottom:6px;">Assign Tasks</div>'
+        + '<div style="font-size:11px;color:var(--muted);margin-bottom:16px;">Pick an assignee to fire a task that hasn\u2019t been created yet, or to reassign an existing one.</div>';
 
-      tasks.forEach(function(t, idx) {
+      rows.forEach(function(r, idx) {
+        var titleText, statusBadge;
+        if (r.virtual) {
+          titleText = taskTitle(r.def);
+          statusBadge = '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:2px 8px;border-radius:3px;background:rgba(232,156,58,0.15);color:var(--amber);">Not yet fired</span>';
+        } else {
+          titleText = taskTitle(r.task);
+          statusBadge = '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">' + (r.task.status||'').toUpperCase() + '</span>';
+        }
         html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--navy-border);gap:12px;">'
-          + '<div style="flex:1;"><div style="font-size:13px;color:var(--white);">' + taskTitle(t) + '</div>'
-          + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">' + (t.status||'').toUpperCase() + '</div></div>'
-          + '<select id="rta-' + idx + '" data-task-id="' + t.id + '" style="background:#0d1b2a;border:1px solid var(--navy-border);color:#ffffff;padding:6px 10px;font-size:12px;border-radius:4px;min-width:180px;font-family:Lato,sans-serif;">'
+          + '<div style="flex:1;"><div style="font-size:13px;color:var(--white);">' + titleText + '</div>'
+          + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">' + statusBadge + '</div></div>'
+          + '<select id="rta-' + idx + '" style="background:#0d1b2a;border:1px solid var(--navy-border);color:#ffffff;padding:6px 10px;font-size:12px;border-radius:4px;min-width:180px;font-family:Lato,sans-serif;">'
           + staffOptions
           + '</select></div>';
       });
@@ -29731,26 +29684,55 @@ window.saveAdjModal = async function() {
       ov.appendChild(box);
       document.body.appendChild(ov);
 
-      // Pre-select current assignees
-      tasks.forEach(function(t, idx) {
-        var sel = document.getElementById('rta-' + idx);
-        if (sel && t.assigned_to) sel.value = t.assigned_to;
+      // Pre-select current assignees on existing rows
+      rows.forEach(function(r, idx) {
+        if (!r.virtual && r.task.assigned_to) {
+          var sel = document.getElementById('rta-' + idx);
+          if (sel) sel.value = r.task.assigned_to;
+        }
       });
 
       document.getElementById('rta-cancel').onclick = function(){ document.body.removeChild(ov); };
       document.getElementById('rta-save').onclick = async function() {
         var saveBtn = document.getElementById('rta-save');
         saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
-        for (var i=0;i<tasks.length;i++) {
+        var fired = 0, reassigned = 0;
+        for (var i=0;i<rows.length;i++) {
           var sel = document.getElementById('rta-' + i);
-          if (sel) {
-            try { await supaMut('PATCH','job_tasks','?id=eq.'+tasks[i].id,{assigned_to:sel.value||null}); }
-            catch(e){ console.warn('Reassign failed:', e); }
+          if (!sel) continue;
+          var assignee = sel.value || null;
+          var r = rows[i];
+          if (r.virtual) {
+            if (!assignee) continue; // leave unfired tasks alone when no one is picked
+            try {
+              // Race-safety: another manager may have just fired this task. Check
+              // the live state before deciding between PATCH and POST.
+              var live = await supaGet('job_tasks?job_id=eq.' + jobId + '&task_type=eq.' + r.def.task_type + '&limit=1');
+              if (live && live.length) {
+                await supaMut('PATCH','job_tasks','?id=eq.'+live[0].id,{ assigned_to: assignee });
+                reassigned++;
+              } else {
+                var payload = Object.assign({ job_id:jobId, status:'pending', assigned_to:assignee }, r.def);
+                await supaMut('POST','job_tasks','', payload);
+                fired++;
+              }
+            } catch(e) { console.warn('Fire task failed:', e && e.message); window.logError && window.logError('fire job task', e); }
+          } else {
+            try {
+              await supaMut('PATCH','job_tasks','?id=eq.'+r.task.id,{ assigned_to: assignee });
+              reassigned++;
+            } catch(e) { console.warn('Reassign failed:', e && e.message); }
           }
         }
         document.body.removeChild(ov);
-        window.toast && window.toast('Tasks reassigned.','success');
-        if (_currentJobId) loadJobTasksForDetail(_currentJobId);
+        var msgParts = [];
+        if (fired) msgParts.push(fired + ' task' + (fired>1?'s':'') + ' fired');
+        if (reassigned) msgParts.push(reassigned + ' reassigned');
+        window.toast && window.toast(msgParts.length ? msgParts.join(' \u00b7 ') + '.' : 'No changes.', 'success');
+        if (_currentJobId) {
+          if (typeof loadJobTasksForDetail === 'function') loadJobTasksForDetail(_currentJobId);
+          if (typeof loadTasksTab === 'function') loadTasksTab(_currentJobId);
+        }
       };
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
@@ -29935,14 +29917,14 @@ window.saveAdjModal = async function() {
       taskHeader.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;';
       taskHeader.innerHTML = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);">Tasks</div>';
       var reassignBtn = document.createElement('button');
-      reassignBtn.textContent = 'Reassign Tasks';
+      reassignBtn.textContent = 'Assign Tasks';
       reassignBtn.style.cssText = 'background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;';
       reassignBtn.onclick = function(){ window.openReassignTasks(jobId); };
       taskHeader.appendChild(reassignBtn);
       taskDiv.appendChild(taskHeader);
 
       if (!tasks.length) {
-        taskDiv.innerHTML += '<div style="color:var(--muted);font-size:12px;">No tasks yet.</div>';
+        taskDiv.innerHTML += '<div style="color:var(--muted);font-size:12px;line-height:1.5;">No tasks yet. Click <strong style="color:var(--white);">Assign Tasks</strong> above to fire Supply Chain and Liquid sign-offs when you\u2019re ready.</div>';
       } else {
         tasks.forEach(function(t) {
           var ts = STATUS_STYLE_T[t.status]||STATUS_STYLE_T.pending;
@@ -30203,14 +30185,14 @@ window.saveAdjModal = async function() {
       tasksHdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;';
       tasksHdr.innerHTML = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">Tasks</div>';
       var rBtn = document.createElement('button');
-      rBtn.textContent = 'Reassign Tasks';
+      rBtn.textContent = 'Assign Tasks';
       rBtn.style.cssText = 'background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;';
       rBtn.onclick = function(){ window.openReassignTasks(jobId); };
       tasksHdr.appendChild(rBtn);
       el.appendChild(tasksHdr);
 
       if (!tasks.length) {
-        el.innerHTML += '<div style="color:var(--muted);font-size:12px;">No tasks yet.</div>';
+        el.innerHTML += '<div style="color:var(--muted);font-size:12px;line-height:1.5;">No tasks yet. Click <strong style="color:var(--white);">Assign Tasks</strong> above to fire Supply Chain and Liquid sign-offs when you\u2019re ready.</div>';
         return;
       }
 
@@ -30368,10 +30350,16 @@ window.saveAdjModal = async function() {
       tasks2.forEach(function(t){ taskMap[t.task_type] = t; });
 
       var taskBlocking = [];
-      if (!taskMap['liquid_signoff'] || taskMap['liquid_signoff'].status !== 'completed')
+      if (!taskMap['liquid_signoff']) {
+        taskBlocking.push({ label: 'Liquid Sign Off', hint: 'Not fired yet — click Assign Tasks in the Tasks tab to fire this task.' });
+      } else if (taskMap['liquid_signoff'].status !== 'completed') {
         taskBlocking.push({ label: 'Liquid Sign Off', hint: 'Must be signed off in the Liquid tab.' });
-      if (!taskMap['components'] || taskMap['components'].status !== 'completed')
+      }
+      if (!taskMap['components']) {
+        taskBlocking.push({ label: 'Supply Chain Sign Off', hint: 'Not fired yet — click Assign Tasks in the Tasks tab to fire this task.' });
+      } else if (taskMap['components'].status !== 'completed') {
         taskBlocking.push({ label: 'Supply Chain Sign Off', hint: 'Coordinator must confirm all items ordered.' });
+      }
 
       // 2a-bis. Production checks — require at least one on-line AND one off-line round
       try {
