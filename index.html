@@ -5865,7 +5865,7 @@ window.copyInviteLink = function() {
 <!-- ══ ROLE EDITOR MODAL ═════════════════════════════════════════════════════ -->
 <!-- Settings → Roles. Add new roles, edit/delete existing ones. CRUD writes go
      through the roles-admin edge function (defence-in-depth on top of RLS). -->
-<div id="role-modal-overlay" style="display:none;position:fixed;inset:0;z-index:340;background:rgba(5,12,20,0.85);align-items:center;justify-content:center;padding:20px;">
+<div id="role-modal-overlay" style="display:none;position:fixed;inset:0;z-index:700;background:rgba(5,12,20,0.85);align-items:center;justify-content:center;padding:20px;">
   <div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:24px 28px;max-width:760px;width:100%;max-height:90vh;overflow-y:auto;box-sizing:border-box;">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;gap:16px;">
       <div>
@@ -10903,6 +10903,55 @@ var BOM_DROPDOWNS = [
   { id:'bm-tin',            heading:'Tin'               }
 ];
 
+// Canonical mapping of BOM SKU columns → display labels.
+// Single source of truth used by initComponentsFromBOM and _propagateBomToActiveJobs
+// so that adding a new BOM component column only requires editing this list.
+window._BOM_SKU_COLUMNS = [
+  { col: 'liquid_sku_id',       label: 'Liquid' },
+  { col: 'bottle_sku_id',       label: 'Bottle' },
+  { col: 'cork_sku_id',         label: 'Cork' },
+  { col: 'ropp_sku_id',         label: 'ROPP Capsule' },
+  { col: 'foil_sku_id',         label: 'Foil / Heat Shrink' },
+  { col: 'front_label_sku_id',  label: 'Front Label' },
+  { col: 'back_label_sku_id',   label: 'Back Label' },
+  { col: 'neck_label_sku_id',   label: 'Neck Label' },
+  { col: 'shipper_sku_id',      label: 'Shipper' },
+  { col: 'divider_sku_id',      label: 'Divider / Insert' },
+  { col: 'string_twine_sku_id', label: 'String / Twine' },
+  { col: 'monocarton_sku_id',   label: 'Monocarton' },
+  { col: 'gift_tube_sku_id',    label: 'Gift Tube' },
+  { col: 'tube_lid_sku_id',     label: 'Tube Lid' },
+  { col: 'tin_sku_id',          label: 'Tin' }
+];
+
+// Compute the per-job qty_required for one BOM SKU column.
+// Shippers and dividers are case items (ceil(bottles / bottles_per_shipper)).
+// Liquid SKU has no bottle-based qty (qty tracked in litres elsewhere).
+// All other items use the bottle target directly.
+// For liquid-target jobs, derives bottle count from liquid_litres + BOM volume,
+// applying dilution adjustment when ABV in/out are both known.
+window._bomQtyFor = function(skuCol, job, bom) {
+  if (!job || !bom) return null;
+  var effectiveBottles = job.bottle_target || null;
+  if (!effectiveBottles && job.job_target_type === 'liquid' && job.liquid_litres && bom.volume_cl) {
+    var capL = bom.volume_cl / 100;
+    var workingLitres = job.liquid_litres;
+    if (job.abv_in && job.bottling_abv) {
+      workingLitres = (job.liquid_litres * job.abv_in) / job.bottling_abv;
+    }
+    effectiveBottles = Math.round(workingLitres / capL) || null;
+  }
+  if (skuCol === 'liquid_sku_id') return null;
+  var isCaseItem = (skuCol === 'shipper_sku_id' || skuCol === 'divider_sku_id');
+  if (isCaseItem) {
+    if (effectiveBottles && bom.bottles_per_shipper) {
+      return Math.ceil(effectiveBottles / bom.bottles_per_shipper);
+    }
+    return effectiveBottles || null;
+  }
+  return effectiveBottles || null;
+};
+
 window.onBomClientChange = async function() {
   var clientId = gv('bm-client');
 
@@ -11929,11 +11978,170 @@ window.requestBomApproval = async function(bomId) {
   }
 };
 
+// Count of active jobs (stages new/active/on_hold) linked to a BOM. Used by the
+// approval confirm dialog to warn the approver before re-syncing live jobs.
+// Returns 0 on error so a transient DB hiccup never blocks the approval flow.
+async function _bomCountActiveJobs(bomId) {
+  try {
+    var rows = await window.db.select('jobs', '?bom_id=eq.' + bomId + '&stage=in.(new,active,on_hold)&select=id');
+    return Array.isArray(rows) ? rows.length : 0;
+  } catch(e) {
+    console.warn('_bomCountActiveJobs error:', e);
+    return 0;
+  }
+}
+
+// After a BOM is re-approved, walk every active job linked to it and full-sync
+// job_components so the Supply Chain tab matches the latest BOM:
+//   - insert rows for new BOM SKUs
+//   - patch qty_required on existing rows (preserves PO / exclude / supplier fields)
+//   - remove rows for SKUs that were dropped from the BOM (only when sku_id is non-null)
+// When the component set changes (insert or remove) the coordinator's Supply Chain
+// sign-off (job_drygoods_prep.signed_by_coordinator) is cleared so they must
+// re-confirm with the new components.
+// Per-job failures are logged but do not abort the loop; the caller wraps this
+// in its own try/catch so a sync failure can never mask the BOM approval itself.
+async function _propagateBomToActiveJobs(bomId) {
+  var summary = { jobsTouched: 0, inserted: 0, updated: 0, removed: 0, signoffsCleared: 0 };
+  var jobs = await window.db.select('jobs',
+    '?bom_id=eq.' + bomId +
+    '&stage=in.(new,active,on_hold)' +
+    '&select=id,bom_id,job_target_type,bottle_target,liquid_litres,abv_in,bottling_abv'
+  );
+  if (!Array.isArray(jobs) || !jobs.length) return summary;
+
+  var bomRows = await window.db.select('boms', '?id=eq.' + bomId + '&select=*');
+  if (!bomRows || !bomRows.length) return summary;
+  var bom = bomRows[0];
+
+  var skuCols = window._BOM_SKU_COLUMNS;
+
+  // Map: sku_id -> { col, label } for every SKU referenced by this BOM
+  var bomSkuMap = {};
+  for (var ci = 0; ci < skuCols.length; ci++) {
+    var skuId = bom[skuCols[ci].col];
+    if (skuId) bomSkuMap[skuId] = skuCols[ci];
+  }
+  var bomSkuIds = Object.keys(bomSkuMap);
+
+  // Pre-fetch descriptions and latest unit costs for newly-inserted rows
+  var descMap = {}, priceMap = {};
+  if (bomSkuIds.length) {
+    try {
+      var skuRows = await window.db.select('dry_goods_skus',
+        '?id=in.(' + bomSkuIds.join(',') + ')&select=id,description');
+      (skuRows || []).forEach(function(r){ descMap[r.id] = r.description; });
+    } catch(e) { window.logError && window.logError('propagate: load SKU descriptions', e); }
+    try {
+      var batchRows = await window.db.select('dry_goods_batches',
+        '?sku_id=in.(' + bomSkuIds.join(',') + ')&select=sku_id,unit_cost&order=delivery_date.desc');
+      (batchRows || []).forEach(function(b){
+        if (b.unit_cost != null && priceMap[b.sku_id] == null) {
+          priceMap[b.sku_id] = parseFloat(b.unit_cost);
+        }
+      });
+    } catch(e) { window.logError && window.logError('propagate: load SKU batch prices', e); }
+  }
+
+  for (var ji = 0; ji < jobs.length; ji++) {
+    var job = jobs[ji];
+    var jobChanged = false;
+    var setChanged = false; // true if a row was inserted or removed (triggers sign-off clear)
+    try {
+      var existing = await window.db.select('job_components', '?job_id=eq.' + job.id);
+      existing = Array.isArray(existing) ? existing : [];
+
+      // Index existing rows by sku_id (skip null sku_id rows — leave manual additions alone)
+      var existingBySku = {};
+      existing.forEach(function(r){ if (r.sku_id) existingBySku[r.sku_id] = r; });
+
+      // 1. Remove rows whose sku_id is non-null and not in the BOM
+      var removeIds = [];
+      existing.forEach(function(r){
+        if (r.sku_id && !bomSkuMap[r.sku_id]) removeIds.push(r.id);
+      });
+      if (removeIds.length) {
+        try {
+          await window.db.delete('job_components', '?id=in.(' + removeIds.join(',') + ')');
+          summary.removed += removeIds.length;
+          jobChanged = true;
+          setChanged = true;
+        } catch(e) { window.logError && window.logError('propagate: delete rows', e); }
+      }
+
+      // 2. Patch qty_required on rows that survive
+      for (var bsi = 0; bsi < bomSkuIds.length; bsi++) {
+        var sId = bomSkuIds[bsi];
+        var existRow = existingBySku[sId];
+        if (!existRow) continue;
+        var newQty = window._bomQtyFor(bomSkuMap[sId].col, job, bom);
+        if (existRow.qty_required !== newQty) {
+          try {
+            await window.db.update('job_components', '?id=eq.' + existRow.id, { qty_required: newQty });
+            summary.updated += 1;
+            jobChanged = true;
+          } catch(e) { window.logError && window.logError('propagate: patch qty', e); }
+        }
+      }
+
+      // 3. Insert rows for BOM SKUs not already present
+      for (var bsi2 = 0; bsi2 < bomSkuIds.length; bsi2++) {
+        var newSku = bomSkuIds[bsi2];
+        if (existingBySku[newSku]) continue;
+        var meta = bomSkuMap[newSku];
+        var qty = window._bomQtyFor(meta.col, job, bom);
+        try {
+          await window.db.insert('job_components', {
+            job_id:       job.id,
+            sku_id:       newSku,
+            item_name:    descMap[newSku] || meta.label,
+            qty_required: qty,
+            unit_price:   priceMap[newSku] != null ? priceMap[newSku] : null
+          });
+          summary.inserted += 1;
+          jobChanged = true;
+          setChanged = true;
+        } catch(e) { window.logError && window.logError('propagate: insert row', e); }
+      }
+
+      // 4. Invalidate Supply Chain sign-off when the component set changed
+      if (setChanged) {
+        try {
+          var prepRows = await window.db.select('job_drygoods_prep',
+            '?job_id=eq.' + job.id + '&signed_by_coordinator=not.is.null&select=id&limit=1');
+          if (prepRows && prepRows.length) {
+            await window.db.update('job_drygoods_prep', '?job_id=eq.' + job.id, {
+              signed_by_coordinator: null,
+              signed_at_coordinator: null
+            });
+            summary.signoffsCleared += 1;
+          }
+        } catch(e) { window.logError && window.logError('propagate: clear sign-off', e); }
+      }
+
+      if (jobChanged) summary.jobsTouched += 1;
+    } catch(e) {
+      window.logError && window.logError('propagate: per-job sync', e);
+    }
+  }
+
+  return summary;
+}
+
 window.approveBom = async function(bomId) {
   var bom = BOMS.find(function(b){ return b.id === bomId; });
   if (!bom) return;
   if (!(window.canDo && window.canDo('boms_lock'))) { window.toast && window.toast('You do not have permission to approve BOMs.', 'error'); return; }
-  if (!(await window.lpConfirm('Approve and lock "' + (window.bomDisplayName(bom) || bom.product) + '"?\n\nThis BOM will be locked from editing until someone returns it to draft.', { title: 'Approve BOM', confirmLabel: 'Approve & lock', destructive: false }))) return;
+
+  // Warn the approver up front if active jobs will be re-synced. Pre-flight count
+  // failures degrade silently to the original single-line prompt.
+  var activeJobCount = await _bomCountActiveJobs(bomId);
+  var confirmMsg = 'Approve and lock "' + (window.bomDisplayName(bom) || bom.product) + '"?\n\nThis BOM will be locked from editing until someone returns it to draft.';
+  if (activeJobCount > 0) {
+    confirmMsg += '\n\n' + activeJobCount + ' active job(s) link to this BOM and will be re-synced with the latest components. Any existing Supply Chain sign-off on those jobs will be cleared.';
+  }
+  if (!(await window.lpConfirm(confirmMsg, { title: 'Approve BOM', confirmLabel: 'Approve & lock', destructive: false }))) return;
+
   try {
     var prevStatus = bom.status || 'pending';
     var actor = _bomWorkflowUser();
@@ -11949,10 +12157,33 @@ window.approveBom = async function(bomId) {
       revised_by: actor
     });
     await _bomRecordHistory(bomId, 'approved', prevStatus, 'approved', actor, newRevision);
-    window.toast && window.toast('BOM approved and locked.', 'success');
   } catch(e) {
     window.toast && window.toast('Failed: ' + e.message, 'error');
+    return;
   }
+
+  // Propagation runs in its own try/catch so a sync failure can never roll back
+  // or mask the BOM approval (which is already committed at this point).
+  var syncMsg = '';
+  var syncFailed = false;
+  try {
+    var sync = await _propagateBomToActiveJobs(bomId);
+    if (sync && sync.jobsTouched) {
+      var parts = [];
+      if (sync.inserted) parts.push(sync.inserted + ' added');
+      if (sync.updated)  parts.push(sync.updated  + ' qty updated');
+      if (sync.removed)  parts.push(sync.removed  + ' removed');
+      syncMsg = ' Synced ' + sync.jobsTouched + ' active job(s)';
+      if (parts.length) syncMsg += ' (' + parts.join(', ') + ')';
+      if (sync.signoffsCleared) syncMsg += '. Supply Chain sign-off cleared on ' + sync.signoffsCleared + ' job(s).';
+      else syncMsg += '.';
+    }
+  } catch(syncErr) {
+    window.logError && window.logError('approveBom propagation', syncErr);
+    syncMsg = ' Active-job sync failed — open Supply Chain to refresh manually (see console).';
+    syncFailed = true;
+  }
+  window.toast && window.toast('BOM approved and locked.' + syncMsg, syncFailed ? 'warn' : 'success');
 };
 
 // Builds a set of BOM IDs that are signed off on an uncompleted job. Called from
@@ -31517,24 +31748,7 @@ window.saveAdjModal = async function() {
       }
       var bom = bomRows[0];
 
-      // Map of column name -> label
-      var skuCols = [
-        { col: 'liquid_sku_id',       label: 'Liquid' },
-        { col: 'bottle_sku_id',       label: 'Bottle' },
-        { col: 'cork_sku_id',         label: 'Cork' },
-        { col: 'ropp_sku_id',         label: 'ROPP Capsule' },
-        { col: 'foil_sku_id',         label: 'Foil / Heat Shrink' },
-        { col: 'front_label_sku_id',  label: 'Front Label' },
-        { col: 'back_label_sku_id',   label: 'Back Label' },
-        { col: 'neck_label_sku_id',   label: 'Neck Label' },
-        { col: 'shipper_sku_id',      label: 'Shipper' },
-        { col: 'divider_sku_id',      label: 'Divider / Insert' },
-        { col: 'string_twine_sku_id', label: 'String / Twine' },
-        { col: 'monocarton_sku_id',   label: 'Monocarton' },
-        { col: 'gift_tube_sku_id',    label: 'Gift Tube' },
-        { col: 'tube_lid_sku_id',     label: 'Tube Lid' },
-        { col: 'tin_sku_id',          label: 'Tin' }
-      ];
+      var skuCols = window._BOM_SKU_COLUMNS;
 
       // Collect non-null SKU IDs and look up descriptions + latest batch unit cost
       var skuIds = skuCols.map(function(s){ return bom[s.col]; }).filter(Boolean);
@@ -31563,27 +31777,7 @@ window.saveAdjModal = async function() {
         if (!skuId) continue;
         var itemName = descMap[skuId] || skuCols[i].label;
         var unitPrice = priceMap[skuId] != null ? priceMap[skuId] : null;
-
-        // Qty logic: shippers and dividers = ceil(bottles / case_size), others = bottle target
-        // For liquid-target jobs, derive bottle count from liquid_litres + BOM volume, with dilution if ABV data is available
-        var effectiveBottles = j.bottle_target;
-        if (!effectiveBottles && j.job_target_type === 'liquid' && j.liquid_litres && bom.volume_cl) {
-          var capL = bom.volume_cl / 100;
-          var workingLitres = j.liquid_litres;
-          if (j.abv_in && j.bottling_abv) {
-            workingLitres = (j.liquid_litres * j.abv_in) / j.bottling_abv;
-          }
-          effectiveBottles = Math.round(workingLitres / capL) || null;
-        }
-        var isCaseItem = skuCols[i].col === 'shipper_sku_id' || skuCols[i].col === 'divider_sku_id';
-        var qty;
-        if (isCaseItem && effectiveBottles && bom.bottles_per_shipper) {
-          qty = Math.ceil(effectiveBottles / bom.bottles_per_shipper);
-        } else if (skuCols[i].col === 'liquid_sku_id') {
-          qty = null; // liquid qty is in litres, handled separately
-        } else {
-          qty = effectiveBottles || null;
-        }
+        var qty = window._bomQtyFor(skuCols[i].col, j, bom);
 
         await supaMut('POST','job_components','', {
           job_id:       jobId,
