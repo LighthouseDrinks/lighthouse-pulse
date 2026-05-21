@@ -1148,7 +1148,7 @@ window.loadRoles = function loadRoles(force) {
 window._lhNotifyEmails = async function() {
   try {
     var rows = await window.db.select('app_users',
-      '?role=in.(' + window.LH_NOTIFY_ROLES.join(',') + ')&select=email') || [];
+      '?status=eq.active&role=in.(' + window.LH_NOTIFY_ROLES.join(',') + ')&select=email') || [];
     return rows.map(function(r){ return r.email; }).filter(Boolean);
   } catch(_e) { console.error('[notify] Failed to fetch LH staff emails:', _e); return []; }
 };
@@ -1564,6 +1564,21 @@ const db = {
 
 // Expose db globally so all script blocks can use the same client
 window.db = db;
+
+// ── Active-user helpers ──────────────────────────────────────────────────────
+// Terminated employees must not appear in live rosters, assignment dropdowns,
+// or email recipient lists. Use these helpers anywhere a CURRENT staff list is
+// needed; raw app_users fetches should only be used where historical names
+// must still render (e.g. avatar lookups for old records, Settings > Users).
+window.ACTIVE_STATUS_FILTER = 'status=eq.active';
+window.db.activeUsers = function(extra) {
+  return window.db.select('app_users', '?' + window.ACTIVE_STATUS_FILTER + (extra || ''));
+};
+window.getActiveAppUsers = function() {
+  return (window.APP_USERS || []).filter(function(u) {
+    return u.status !== 'terminated' && u.status !== 'pending_termination';
+  });
+};
 
 // ── App-level cache (populated on first load) ─────────────────────────────────
 window.APP = {
@@ -5257,7 +5272,7 @@ window.openInviteModal = function() {
     rtSel.innerHTML='<option value="">— Select manager —</option>';
     // Populate with all roles that can manage other staff (is_manager flag in roles table)
     var adminRoleKeys = window.MANAGER_ROLES;
-    db.select('app_users', '?select=id,display_name,role&order=display_name.asc')
+    db.activeUsers('&select=id,display_name,role&order=display_name.asc')
       .then(function(users) {
         (users || []).filter(function(u) { return adminRoleKeys.indexOf(u.role) >= 0; }).forEach(function(u) {
           var opt = document.createElement('option');
@@ -8324,6 +8339,10 @@ window.copyInviteLink = function() {
         _hrCurrentUserId = null; _hrCurrentProfile = null;
         document.getElementById('hr-empty-state').style.display = '';
         document.getElementById('hr-profile-view').style.display = 'none';
+        // Drop caches so the terminated user disappears from the roster
+        // grid and CRM dropdowns without needing a page reload.
+        if (window.rosterInvalidateEmps) window.rosterInvalidateEmps();
+        if (window.loadAppUsers) window.loadAppUsers(true);
         loadHRList();
       } catch(e) {
         btn.disabled = false;
@@ -8360,6 +8379,9 @@ window.copyInviteLink = function() {
       var _successMsg = _isPendingCancel ? 'Scheduled termination cancelled.' : 'Employee reactivated.';
       window.toast && window.toast(_successMsg, 'success');
       var uid = _hrCurrentUserId;
+      // Drop caches so the reactivated user reappears immediately
+      if (window.rosterInvalidateEmps) window.rosterInvalidateEmps();
+      if (window.loadAppUsers) window.loadAppUsers(true);
       loadHRList().then(function(){ window.openHRProfile(uid); });
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
@@ -15361,9 +15383,13 @@ window.loadBoms = async function initBoms() {
     var idPrev    = document.getElementById('deal-id-preview');
     var delBtn    = document.getElementById('df-delete-btn');
 
-    // Populate owner dropdown from real app_users
+    // Populate owner dropdown from real app_users — active staff only.
+    // Historical deal rows still show terminated owners via the cached lookup,
+    // we only prevent NEW assignments to terminated/pending employees here.
     if (ownerSel) {
-      var users = (window.APP_USERS||[]).filter(function(u){ return u.role !== 'client'; });
+      var users = (window.APP_USERS||[]).filter(function(u){
+        return u.role !== 'client' && u.status !== 'terminated' && u.status !== 'pending_termination';
+      });
       ownerSel.innerHTML = '<option value="">— Unassigned —</option>' + users.map(function(u){
         return '<option value="'+esc(u.id)+'">'+(u.display_name||u.email||u.id)+'</option>';
       }).join('');
@@ -16777,10 +16803,13 @@ window.loadBoms = async function initBoms() {
   }
 
   // ── Load users cache ──────────────────────────────────────────────────
+  // Cache holds EVERYONE (including terminated) so historical rows can still
+  // render the correct name/avatar. Dropdowns must use populateUserSelect or
+  // window.getActiveAppUsers() to exclude terminated employees.
   async function loadAppUsers(force){
     if (!force && APP_USERS.length) return APP_USERS;
     try {
-      var rows = await db.select('app_users', '?select=id,display_name,role,email&order=display_name.asc');
+      var rows = await db.select('app_users', '?select=id,display_name,role,email,status&order=display_name.asc');
       APP_USERS = rows || [];
       window.APP_USERS = APP_USERS;
       USERS_BY_ID = {};
@@ -16799,6 +16828,8 @@ window.loadBoms = async function initBoms() {
     var html = '<option value="">' + (opts.placeholder || '— Choose —') + '</option>';
     APP_USERS.forEach(function(u){
       if (skipIds.indexOf(u.id) >= 0) return;
+      // Hide terminated / pending-termination employees from new assignment lists
+      if (u.status === 'terminated' || u.status === 'pending_termination') return;
       html += '<option value="'+esc(u.id)+'">'+esc(u.display_name||u.email||u.id)+'</option>';
     });
     selectEl.innerHTML = html;
@@ -27931,7 +27962,7 @@ window.openAddBatchModalForSKU = async function(skuId) {
   if (rby) {
     rby.innerHTML = '<option value="">— Select user —</option>';
     try {
-      var users = await supaFetch('app_users', '?select=auth_user_id,display_name&order=display_name.asc');
+      var users = await supaFetch('app_users', '?status=eq.active&select=auth_user_id,display_name&order=display_name.asc');
       users.forEach(function(u) {
         var label = u.display_name||'';
         if (!label || /^[0-9a-f]{8}-[0-9a-f]{4}/i.test(label)) {
@@ -28124,7 +28155,7 @@ window.saveNewBatch = async function() {
 window._notifyQCNotSatisfactoryDelivery = async function(info) {
   try {
     if (!window.sendEmail) return;
-    var qcUsers = await window.db.select('app_users', '?role=eq.quality_compliance&select=email,display_name');
+    var qcUsers = await window.db.select('app_users', '?status=eq.active&role=eq.quality_compliance&select=email,display_name');
     var recipients = (qcUsers||[]).map(function(u){ return u.email; }).filter(Boolean);
     if (!recipients.length) { console.warn('No Quality & Compliance users with email found; skipping notification.'); return; }
 
@@ -29716,7 +29747,7 @@ window.saveAdjModal = async function() {
     try {
       var existing = await supaGet('job_tasks?job_id=eq.' + jobId + '&order=created_at.asc');
       existing = existing.filter(function(t){ return t.task_type !== 'weights_measures'; });
-      var staffList = await supaGet('app_users?select=auth_user_id,display_name,role&order=display_name.asc');
+      var staffList = await supaGet('app_users?status=eq.active&select=auth_user_id,display_name,role&order=display_name.asc');
 
       // Merge: existing rows first, then any canonical task that hasn't been
       // fired yet appears as a virtual row the manager can assign to create.
@@ -42862,14 +42893,26 @@ window.saveAdjModal = async function() {
         var authId = esc(u.auth_user_id || '');
         var joined = u.created_at ? new Date(u.created_at).toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'}) : '—';
 
+        // Visual cue for terminated / pending-termination accounts so admins
+        // don't accidentally re-assign roles to inactive staff.
+        var isTerminated = u.status === 'terminated';
+        var isPending    = u.status === 'pending_termination';
+        var rowStyle     = (isTerminated || isPending) ? 'opacity:0.55;' : '';
+        var statusBadge  = '';
+        if (isPending) {
+          statusBadge = '<span style="font-size:9px;background:rgba(201,168,76,0.15);color:var(--amber);border:1px solid rgba(201,168,76,0.3);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;">PENDING</span>';
+        } else if (isTerminated) {
+          statusBadge = '<span style="font-size:9px;background:rgba(220,53,69,0.15);color:#e05a6a;border:1px solid rgba(220,53,69,0.3);border-radius:3px;padding:1px 5px;margin-left:6px;font-weight:700;letter-spacing:0.05em;">TERMINATED</span>';
+        }
+
         var roleSelect = '<select data-uid="' + uid + '" class="settings-role-select" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;padding:3px 6px;border-radius:3px;font-family:Lato,sans-serif;cursor:pointer;color-scheme:dark;">';
         roleKeys.forEach(function(rk) {
           roleSelect += '<option value="' + rk + '"' + (u.role === rk ? ' selected' : '') + '>' + window.roleLabel(rk) + '</option>';
         });
         roleSelect += '</select>';
 
-        html += '<tr>'
-          + '<td style="font-size:12px;font-weight:600;padding:10px 8px;">' + name + '</td>'
+        html += '<tr style="' + rowStyle + '">'
+          + '<td style="font-size:12px;font-weight:600;padding:10px 8px;">' + name + statusBadge + '</td>'
           + '<td style="font-size:11px;color:var(--muted);padding:10px 8px;">' + email + '</td>'
           + '<td style="padding:10px 8px;">' + roleSelect + '</td>'
           + '<td style="font-size:11px;color:var(--muted);padding:10px 8px;">' + joined + '</td>'
@@ -43081,10 +43124,11 @@ window.saveAdjModal = async function() {
         .filter(function(r){ return r.key !== 'client'; })
         .sort(function(a,b){ return (a.sort_order||0) - (b.sort_order||0); });
 
-      // User-count per role for the delete gate.
+      // User-count per role for the delete gate — active users only so
+      // terminated employees don't inflate counts or block role deletion.
       var counts = {};
       try {
-        var users = await sbGet('app_users?select=role');
+        var users = await sbGet('app_users?status=eq.active&select=role');
         (users || []).forEach(function(u){ counts[u.role] = (counts[u.role]||0) + 1; });
       } catch(_e) { /* counts optional */ }
 
@@ -44314,7 +44358,7 @@ window.mgmtPopulateEmps = async function(){
   if(!sel) return;
   // Clear and repopulate each time
   sel.innerHTML='<option value="">-- Select --</option>';
-  var users = await get('app_users?order=display_name.asc&select=id,display_name,role&limit=200');
+  var users = await get('app_users?status=eq.active&order=display_name.asc&select=id,display_name,role&limit=200');
   users.filter(function(u){return u.role!=='client';}).forEach(function(u){
     var o = document.createElement('option');
     o.value = u.id;
@@ -44349,7 +44393,7 @@ window.mgmtLoadLeaveOverview = async function(){
     var yr=new Date().getFullYear();
     var NON_ANNUAL_CATS=['sick','maternity_paternity','compassionate','unpaid','other'];
     var results=await Promise.all([
-      get('app_users?select=id,display_name,email,role&order=display_name.asc&limit=200'),
+      get('app_users?status=eq.active&select=id,display_name,email,role&order=display_name.asc&limit=200'),
       get('hr_profiles?select=user_id,leave_entitlement,employment_type,employment_start&limit=200'),
       get('leave_requests?status=neq.cancelled&start_date=gte.'+yr+'-01-01&select=user_id,days,status,leave_category&limit=500')
     ]);
@@ -44434,7 +44478,7 @@ window.mgmtInitHistory = async function(){
   // Populate employee dropdown
   var empSel=document.getElementById('mgmt-hist-emp');
   if(empSel&&empSel.options.length<=1){
-    var users=await get('app_users?order=display_name.asc&select=id,display_name,role&limit=200');
+    var users=await get('app_users?status=eq.active&order=display_name.asc&select=id,display_name,role&limit=200');
     users.filter(function(u){return u.role!=='client';}).forEach(function(u){
       var o=document.createElement('option'); o.value=u.id;
       o.textContent=u.display_name||u.id.slice(0,8); empSel.appendChild(o);
@@ -44506,9 +44550,10 @@ window.mgmtLoadReports = async function(){
   var cu=window.CURRENT_USER; if(!cu)return;
   var myAppId=cu.app_user_id||cu.id;
   try{
-    var allUsers=await get('app_users?select=id,display_name,role,email&order=display_name.asc&limit=200');
+    var allUsers=await get('app_users?status=eq.active&select=id,display_name,role,email&order=display_name.asc&limit=200');
     var profiles=await get('hr_profiles?select=user_id,reports_to,first_name,last_name,next_review_date&limit=200');
-    var myReports=profiles.filter(function(p){return p.reports_to===myAppId;});
+    var activeIds={}; allUsers.forEach(function(u){ activeIds[u.id]=true; });
+    var myReports=profiles.filter(function(p){return p.reports_to===myAppId && activeIds[p.user_id];});
     if(!myReports.length){
       el.innerHTML='<span style="color:var(--muted);">No direct reports found. Set \u201cReports To\u201d in Employee Details \u2192 Employment tab.</span>';
       return;
@@ -44640,7 +44685,7 @@ window.lvCatLabel = function(cat){
 window.mgmtPopulateApplyEmps = async function(){
   var sel=document.getElementById('mgmt-apply-emp');
   if(!sel||sel.options.length>1) return;
-  var users=await get('app_users?order=display_name.asc&select=id,display_name,role&limit=200');
+  var users=await get('app_users?status=eq.active&order=display_name.asc&select=id,display_name,role&limit=200');
   users.filter(function(u){return u.role!=='client';}).forEach(function(u){
     var o=document.createElement('option'); o.value=u.id;
     o.textContent=u.display_name||u.id.slice(0,8); sel.appendChild(o);
@@ -44739,7 +44784,7 @@ window.lvCalRender=async function(yr,mo){
     var monthStart=yr+'-'+pad(mo+1)+'-01';
     var monthEnd=yr+'-'+pad(mo+1)+'-'+pad(daysInMonth);
     var results=await Promise.all([
-      get('app_users?select=id,display_name,role&order=display_name.asc&limit=200'),
+      get('app_users?status=eq.active&select=id,display_name,role&order=display_name.asc&limit=200'),
       get('leave_requests?status=neq.cancelled&start_date=lte.'+monthEnd+'&end_date=gte.'+monthStart+'&select=user_id,start_date,end_date,leave_category,status&limit=500')
     ]);
     var users=results[0].filter(function(u){return u.role!=='client';});
@@ -44870,7 +44915,7 @@ async function loadRoster(){
   var days=wdays(_wo),ws=ds(days[0]),we=ds(days[6]);
   var lbl=document.getElementById('roster-week-label');
   if(lbl) lbl.textContent=days[0].toLocaleDateString('en-IE',{day:'numeric',month:'short'})+' \u2013 '+days[6].toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'});
-  if(!_emps.length){var u=await get('app_users?order=display_name.asc&select=id,auth_user_id,display_name,role');_emps=u.filter(function(x){return x.role!=='client';});}
+  if(!_emps.length){var u=await get('app_users?status=eq.active&order=display_name.asc&select=id,auth_user_id,display_name,role');_emps=u.filter(function(x){return x.role!=='client';});}
   var sh=await get('roster_shifts?week_start=eq.'+ws+'&order=shift_date.asc');
   _roster={};
   sh.forEach(function(s){_roster[rk(s.user_id,s.shift_date)]={id:s.id,sn:s.shift_name,st:s.start_time,et:s.end_time,pub:s.published};});
@@ -44986,6 +45031,7 @@ async function svShift(uid,d2,nm,st,et){
 async function rmShift(uid,d2){if(!canEditRoster()){denyRosterEdit();return;}var key=rk(uid,d2),ex=_roster[key];if(!ex) return;try{if(ex.id) await del('roster_shifts','?id=eq.'+ex.id);delete _roster[key];renderRoster();}catch(e){window.toast&&window.toast('Error: '+e.message,'error');}}
 window.rosterPrev=function(){_wo--;_emps=[];loadRoster();};
 window.rosterNext=function(){_wo++;_emps=[];loadRoster();};
+window.rosterInvalidateEmps=function(){_emps=[];};
 window.rosterCopyLastWeek=async function(){
   if(!canEditRoster()){denyRosterEdit();return;}
   var td=wdays(_wo),ld=wdays(_wo-1),ws=ds(td[0]);
@@ -45893,18 +45939,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   }
 
   // Fetch the list of internal users who should receive the approval/rejection
-  // email by role. We read app_users joined to the employees table for display
-  // names. If either table name differs in your schema, the code falls back
-  // to raw emails from app_users.
+  // email by role. We read app_users by role and filter to active staff so
+  // terminated employees never receive client-decision notifications.
   function getTrioRecipients() {
     // Active users whose role is Quality, Client Coordinator, or Ops Director.
     var roles = ['quality_compliance','client_coordinator','operations_director'];
     var roleFilter = '(' + roles.map(function(r){ return '"' + r + '"'; }).join(',') + ')';
-    return apiGet('app_users?role=in.' + encodeURIComponent(roleFilter) + '&active=eq.true&select=email,display_name,role')
-      .catch(function(){
-        // Fallback: older schemas may not expose the `active` column
-        return apiGet('app_users?role=in.' + encodeURIComponent(roleFilter) + '&select=email,display_name,role').catch(function(){ return []; });
-      });
+    return apiGet('app_users?status=eq.active&role=in.' + encodeURIComponent(roleFilter) + '&select=email,display_name,role')
+      .catch(function(){ return []; });
   }
 
   function renderBody(rec, job, client, statusMsg) {
@@ -46356,14 +46398,9 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   // ── Email recipients (role-based, active users only) ─────────────────────
   async function getBayRecipients() {
     try {
-      var rows = await apiGet('app_users?role=in.(production_manager,operations_director,managing_director,client_coordinator,quality_compliance)&active=eq.true&select=email');
+      var rows = await apiGet('app_users?status=eq.active&role=in.(production_manager,operations_director,managing_director,client_coordinator,quality_compliance)&select=email');
       return (rows || []).map(function(r){ return r.email; }).filter(Boolean);
-    } catch(e) {
-      try {
-        var rows2 = await apiGet('app_users?role=in.(production_manager,operations_director,managing_director,client_coordinator,quality_compliance)&select=email');
-        return (rows2 || []).map(function(r){ return r.email; }).filter(Boolean);
-      } catch(e2) { return []; }
-    }
+    } catch(e) { return []; }
   }
 
   // ── Email alert — fires on every release (manual or auto) ────────────────
@@ -47910,7 +47947,7 @@ async function _smpFillDropdowns(presetClientId, presetDealId) {
   var aSel = document.getElementById('smp-task-assignee');
   if (aSel && aSel.options.length <= 1) {
     try {
-      var users = await _smpDB().select('app_users','?select=id,display_name&order=display_name.asc') || [];
+      var users = await _smpDB().select('app_users','?status=eq.active&select=id,display_name&order=display_name.asc') || [];
       users.forEach(function(u){
         var o = document.createElement('option');
         o.value = u.id;
@@ -48447,7 +48484,7 @@ if (typeof _origOpenDD === 'function') {
 
     try {
       var roleFilter = '(' + roles.join(',') + ')';
-      var users = await window.db.select('app_users', '?role=in.' + encodeURIComponent(roleFilter) + '&select=email,display_name');
+      var users = await window.db.select('app_users', '?status=eq.active&role=in.' + encodeURIComponent(roleFilter) + '&select=email,display_name');
       var emails = (users || []).map(function(u) { return u.email; }).filter(Boolean);
 
       if (!emails.length) {
