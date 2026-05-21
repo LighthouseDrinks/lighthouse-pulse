@@ -16692,6 +16692,7 @@ window.loadBoms = async function initBoms() {
   var APP_USERS   = [];   // [{id, display_name, role, email}]
   var USERS_BY_ID = {};
   var TASKS       = [];   // CRM tasks only (task_type='crm')
+  var OPS_TASKS   = [];   // operational tasks assigned to current user via assigned_to (auth UUID): hr_profile_setup, sign-offs, etc. Kept separate from TASKS to avoid corrupting CRM-shape consumers (openTaskModal, renderKpis, renderTaskRow).
   var NOTIFS      = [];   // current user's notifications
 
   window.APP_USERS = APP_USERS;
@@ -16913,16 +16914,32 @@ window.loadBoms = async function initBoms() {
 
   // ── Tasks: load + cache ───────────────────────────────────────────────
   async function reloadTasks(){
-    try {
-      var rows = await db.select('job_tasks', '?task_type=eq.crm&order=due_at.asc.nullslast,created_at.desc&limit=500');
-      TASKS = rows || [];
-    } catch(e) {
-      // Fallback: Postgrest older may not support nullslast
+    var authUuid = window.CURRENT_USER && window.CURRENT_USER.id;
+
+    var crmP = (async function(){
       try {
-        var r2 = await db.select('job_tasks', '?task_type=eq.crm&order=created_at.desc&limit=500');
-        TASKS = r2 || [];
-      } catch(e2){ window.logError && window.logError('reloadTasks', e2); TASKS = []; }
-    }
+        var rows = await db.select('job_tasks', '?task_type=eq.crm&order=due_at.asc.nullslast,created_at.desc&limit=500');
+        return rows || [];
+      } catch(e) {
+        try {
+          var r2 = await db.select('job_tasks', '?task_type=eq.crm&order=created_at.desc&limit=500');
+          return r2 || [];
+        } catch(e2){ window.logError && window.logError('reloadTasks', e2); return []; }
+      }
+    })();
+
+    var opsP = (async function(){
+      if (!authUuid) return [];
+      try {
+        var rows = await db.select('job_tasks', '?assigned_to=eq.' + encodeURIComponent(authUuid) + '&status=neq.completed&task_type=neq.weights_measures&task_type=neq.crm&order=created_at.asc&limit=200');
+        return rows || [];
+      } catch(e){ window.logError && window.logError('reloadTasks.ops', e); return []; }
+    })();
+
+    var results = await Promise.all([crmP, opsP]);
+    TASKS = results[0];
+    OPS_TASKS = results[1];
+
     updateMyTasksBadge();
     if (document.getElementById('page-my-tasks') && !document.getElementById('page-my-tasks').classList.contains('hidden')) {
       renderMyTasks();
@@ -16937,7 +16954,11 @@ window.loadBoms = async function initBoms() {
       return !t.completed_at && t.assignee_id === me;
     });
     var overdue = mine.filter(function(t){ return t.due_at && new Date(t.due_at) < new Date(); }).length;
-    var n = mine.length;
+    var authUuid = window.CURRENT_USER && window.CURRENT_USER.id;
+    var opsMine = (OPS_TASKS || []).filter(function(t){
+      return t.status !== 'completed' && t.assigned_to === authUuid;
+    });
+    var n = mine.length + opsMine.length;
     if (n > 0) {
       badge.textContent = n > 99 ? '99+' : n;
       badge.style.display = '';
@@ -17500,10 +17521,68 @@ window.loadBoms = async function initBoms() {
       + '</div>';
   }
 
+  var OPS_TYPE_LABEL = {
+    hr_profile_setup: 'HR profile',
+    liquid_signoff:   'Liquid sign-off',
+    components:       'Components',
+    drygoods_prep:    'Drygoods prep',
+    quality:          'Quality',
+    bom_link:         'BOM link',
+    weights_measures: 'Weights & measures'
+  };
+
+  function renderOpsTaskRow(t){
+    var typeLabel = OPS_TYPE_LABEL[t.task_type] || (t.task_type || 'Task').replace(/_/g,' ');
+    var ctx = [];
+    if (t.job_id) ctx.push('Job <span style="color:var(--gold);">' + esc(t.job_id) + '</span>');
+    if (t.status && t.status !== 'pending') ctx.push(esc(t.status));
+    var notes = t.notes ? '<div style="font-size:11px;color:var(--text);margin-top:4px;line-height:1.4;">' + esc(t.notes) + '</div>' : '';
+    return '<div data-ops-id="' + esc(t.id) + '" style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--navy-border);cursor:pointer;" onmouseover="this.style.background=\'rgba(255,255,255,0.02)\';" onmouseout="this.style.background=\'transparent\';">'
+      + '<span style="width:6px;height:6px;border-radius:50%;background:var(--gold);flex:0 0 auto;"></span>'
+      + '<div style="flex:1;min-width:0;">'
+      +   '<div style="font-size:13px;color:var(--white);font-weight:600;">' + esc(t.title||'(Untitled)') + '</div>'
+      +   '<div style="font-size:11px;color:var(--muted);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">'
+      +     '<span style="background:rgba(214,185,90,0.12);color:var(--gold);padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;">' + esc(typeLabel) + '</span>'
+      +     (ctx.length ? '<span style="opacity:0.4;">·</span> ' + ctx.join(' <span style=\"opacity:0.4;\">·</span> ') : '')
+      +   '</div>'
+      +   notes
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--gold);flex:0 0 auto;">Open &rarr;</div>'
+      + '</div>';
+  }
+
+  function renderOpsSection(){
+    var authUuid = window.CURRENT_USER && window.CURRENT_USER.id;
+    var ops = (OPS_TASKS || []).filter(function(t){
+      return t.status !== 'completed' && t.assigned_to === authUuid;
+    });
+    if (!ops.length) return '';
+    return '<div style="border-bottom:1px solid var(--navy-border);">'
+      +   '<div style="display:flex;align-items:center;gap:8px;padding:12px 16px;background:rgba(214,185,90,0.04);">'
+      +     '<div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--gold);">Action items</div>'
+      +     '<div style="font-size:11px;color:var(--muted);">' + ops.length + '</div>'
+      +     '<div style="margin-left:auto;font-size:10px;color:var(--muted);">HR, sign-offs, approvals</div>'
+      +   '</div>'
+      +   ops.map(renderOpsTaskRow).join('')
+      + '</div>';
+  }
+
+  function bindOpsRows(host){
+    host.querySelectorAll('[data-ops-id]').forEach(function(row){
+      row.addEventListener('click', function(){
+        var id = this.getAttribute('data-ops-id');
+        var t = (OPS_TASKS || []).find(function(x){ return x.id === id; });
+        if (t && window.openOpsTask) window.openOpsTask(t);
+      });
+    });
+  }
+
   function renderMyTasks(){
     var host = document.getElementById('mt-list'); if (!host) return;
     renderKpis();
+    var opsHtml = renderOpsSection();
     var list = filteredTasks();
+    var crmHtml;
     if (!list.length) {
       var emptyMsg = ({
         assigned:  'No tasks assigned to you. Take a breath.',
@@ -17512,10 +17591,15 @@ window.loadBoms = async function initBoms() {
         completed: 'No completed tasks match these filters.',
         all:       'No open tasks match these filters.'
       })[_mtState.view] || 'No tasks match these filters.';
-      host.innerHTML = '<div style="padding:48px 20px;text-align:center;color:var(--muted);font-size:13px;">' + emptyMsg + '</div>';
-      return;
+      // Suppress empty-state message when ops items already fill the card
+      crmHtml = opsHtml
+        ? ''
+        : '<div style="padding:48px 20px;text-align:center;color:var(--muted);font-size:13px;">' + emptyMsg + '</div>';
+    } else {
+      crmHtml = list.map(renderTaskRow).join('');
     }
-    host.innerHTML = list.map(renderTaskRow).join('');
+    host.innerHTML = opsHtml + crmHtml;
+    if (opsHtml) bindOpsRows(host);
   }
   window.renderMyTasks = renderMyTasks;
 
@@ -22411,7 +22495,7 @@ window.ccxPrintRecord = function() {
   <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
     <div>
       <div class="page-heading" style="margin-bottom:4px;">My Tasks</div>
-      <div style="font-size:12px;color:var(--muted);">Cross-team handoffs, reminders, and @mentions across Pulse.</div>
+      <div style="font-size:12px;color:var(--muted);">Your action items, cross-team handoffs, reminders, and @mentions across Pulse.</div>
     </div>
     <button class="btn btn-gold" onclick="window.openTaskModal()" style="font-size:13px;padding:8px 16px;">+ New Task</button>
   </div>
@@ -37030,6 +37114,14 @@ window.saveAdjModal = async function() {
       if (tb) window.showJobTab(tabName, tb);
     }, 700);
   }
+
+  // Exposed for cross-scope callers (sidebar My Tasks page renderer) — routes
+  // an operational task to its destination using the same logic as the Overview
+  // "Your Tasks" card.
+  window.openOpsTask = function(task) {
+    if (!task) return;
+    openTaskInJob(task.job_id, task.task_type, task);
+  };
 
   function renderOverviewTasks(tasks, bomItems) {
     var el = document.getElementById('overview-tasks-list');
