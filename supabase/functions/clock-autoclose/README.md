@@ -8,7 +8,9 @@ and the pg_cron entry that calls this function.
 ## Deploy
 
 ```bash
-supabase functions deploy clock-autoclose
+# --no-verify-jwt because we call the function from pg_cron (no JWT
+# context); the function does its own bearer-token check.
+supabase functions deploy clock-autoclose --no-verify-jwt
 ```
 
 ## Required secrets
@@ -22,15 +24,32 @@ supabase functions deploy clock-autoclose
 ## Wire up the cron caller
 
 The migration creates the `clock-autoclose-nightly` pg_cron entry, but it can
-only call your function if the URL + token are stored as database settings.
-Run these **once** in the production database (Supabase SQL editor):
+only call your function if the URL + the same token are stored in
+`supabase_vault`. Run these **once** in the production database
+(Supabase SQL editor or `supabase db query --linked`):
 
 ```sql
-ALTER DATABASE postgres
-  SET app.clock_autoclose_url   = 'https://<project-ref>.functions.supabase.co/clock-autoclose';
-ALTER DATABASE postgres
-  SET app.clock_autoclose_token = '<same value as CLOCK_AUTOCLOSE_TOKEN secret>';
-SELECT pg_reload_conf();
+select vault.create_secret(
+  'https://<project-ref>.functions.supabase.co/clock-autoclose',
+  'clock_autoclose_url',
+  'URL for clock-autoclose nightly EF'
+);
+select vault.create_secret(
+  '<same value as CLOCK_AUTOCLOSE_TOKEN function secret>',
+  'clock_autoclose_token',
+  'Bearer token for clock-autoclose nightly EF'
+);
+```
+
+The pg_cron entry reads `vault.decrypted_secrets` at run time, so the
+bearer token never appears in `cron.job`. To rotate, set a new
+`CLOCK_AUTOCLOSE_TOKEN` function secret and update the matching vault
+secret in one step:
+
+```sql
+update vault.secrets
+   set secret = '<new token>'
+ where name  = 'clock_autoclose_token';
 ```
 
 After this, the cron job at 02:00 UTC will POST to the function with the
