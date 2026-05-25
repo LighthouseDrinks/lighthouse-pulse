@@ -2084,8 +2084,10 @@ async function showDashboard(user) {
   // Header settings cog — Pulse admins only
   var hdrSettingsBtn = document.getElementById('header-settings-btn');
   if (hdrSettingsBtn && window.isPulseAdmin(user.role)) hdrSettingsBtn.style.display = 'flex';
-  // initHeaderClock drives the quick-launch tile
+  // Header clock button + initHeaderClock drives both header and quick-launch tile
   if (user.role !== 'client') {
+    var hdrClockBtn = document.getElementById('header-clock-btn');
+    if (hdrClockBtn) hdrClockBtn.style.display = '';
     setTimeout(function(){ window.initHeaderClock && window.initHeaderClock(); }, 500);
   }
 
@@ -5539,6 +5541,13 @@ window.copyInviteLink = function() {
 <header>
   <div class="header-logo">Lighthouse Drinks<span>Operations Dashboard</span></div>
   <div class="header-right">
+    <button id="header-clock-btn"
+      onclick="window.headerClockAction && window.headerClockAction()"
+      aria-label="Clock in / out"
+      title="Clock in / out"
+      style="display:none;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:8px 12px;border-radius:6px;font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.08em;cursor:pointer;min-height:36px;min-width:44px;touch-action:manipulation;">
+      &#9654; Clock In
+    </button>
     <div class="header-meta" id="header-live-clock" style="font-variant-numeric:tabular-nums;"></div>
     <!-- Weather widget -->
     <div id="header-weather" class="mob-hide" style="display:none;align-items:center;gap:6px;padding:0 12px;border-left:1px solid var(--navy-border);border-right:1px solid var(--navy-border);">
@@ -12829,7 +12838,7 @@ window.loadBoms = async function initBoms() {
         <div style="font-size:10px;color:var(--muted);margin-top:3px;">Email your team</div>
       </button>
     </div>
-    <button id="ql-clock-in" onclick="window.headerClockAction&&window.headerClockAction()" style="display:none;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid var(--green);border-radius:6px;padding:16px 14px;cursor:pointer;text-align:left;font-family:Lato,sans-serif;transition:border-color .15s;" onmouseover="this.style.borderColor='var(--green)'" onmouseout="this.style.borderColor='var(--navy-border)';this.style.borderTopColor='var(--green)'">
+    <button id="ql-clock-in" onclick="window.headerClockAction&&window.headerClockAction()" aria-label="Clock in" style="display:none;background:var(--navy-card);border:1px solid var(--navy-border);border-top:3px solid var(--green);border-radius:6px;padding:16px 14px;cursor:pointer;text-align:left;font-family:Lato,sans-serif;transition:border-color .15s, background-color .15s;touch-action:manipulation;min-height:44px;">
       <div id="ql-clock-in-icon" style="font-size:18px;margin-bottom:8px;">⏱</div>
       <div id="ql-clock-in-label" style="font-size:12px;font-weight:700;color:var(--white);">Clock In</div>
       <div id="ql-clock-in-sub" style="font-size:10px;color:var(--muted);margin-top:3px;">Log your attendance</div>
@@ -37511,48 +37520,36 @@ window.saveAdjModal = async function() {
     try {
       var _dubP = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Dublin',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
       var _dub = {};_dubP.forEach(function(x){if(x.type!=='literal')_dub[x.type]=x.value;});
-      var todayStr = _dub.year + '-' + _dub.month + '-' + _dub.day;
       var _dubFromMs = Date.UTC(+_dub.year, +_dub.month-1, +_dub.day, 0, 0, 0);
       var _dubFmt = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Dublin',hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(_dubFromMs));
       var _o={};_dubFmt.forEach(function(x){if(x.type!=='literal')_o[x.type]=parseInt(x.value,10);});
       if(_o.hour===24)_o.hour=0;
       var _dubOff = Math.round((Date.UTC(_o.year,_o.month-1,_o.day,_o.hour,_o.minute,_o.second) - _dubFromMs)/60000);
       var _dubFromIso = new Date(_dubFromMs - _dubOff*60000).toISOString();
-      var rows = await supaGet('clock_events?user_id=eq.' + uid + '&timestamp=gte.' + _dubFromIso + '&order=timestamp.asc');
+      // Pull a wider window (last 24h) so an overnight shift started before
+      // Dublin-midnight is still captured by the reducer.
+      var _lookback = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      var _sinceIso = _lookback < _dubFromIso ? _lookback : _dubFromIso;
+      var rows = await supaGet('clock_events?user_id=eq.' + uid + '&timestamp=gte.' + _sinceIso + '&order=timestamp.asc');
       if (!rows || !rows.length) {
         el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px 0;">You haven\'t clocked in today.</div>';
         return;
       }
 
+      var derived = window.deriveClockState(rows, { staleHoursForActive: 16 });
       var TYPE_LABEL = { clock_in: 'Clocked in', clock_out: 'Clocked out', break_start: 'Break started', break_end: 'Break ended' };
-      var TYPE_COLOUR = { clock_in: 'var(--green)', clock_out: 'var(--muted)', break_start: 'var(--amber)', break_end: 'var(--blue)' };
+      var TYPE_COLOUR = { clock_in: 'var(--green)', clock_out: 'var(--muted)', break_start: 'var(--amber)', break_end: '#5fbcd9' };
 
       function fmt(ts) { return new Date(ts).toLocaleTimeString('en-IE', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Dublin' }); }
-      function dur(from, to) {
-        var ms = new Date(to).getTime() - new Date(from).getTime();
-        var h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
-        return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
-      }
+      function fmtMs(ms) { if (!ms || ms <= 0) return '0m'; var h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000); return h > 0 ? h+'h '+m+'m' : m+'m'; }
 
-      // Calculate total work time and current state
-      var totalWorkMs = 0, breakMs = 0;
-      var lastClockIn = null, lastBreakStart = null;
-      var currentState = 'clocked_out';
-      rows.forEach(function(r) {
-        if (r.event_type === 'clock_in')      { lastClockIn = r.timestamp; currentState = 'clocked_in'; }
-        else if (r.event_type === 'break_start') { lastBreakStart = r.timestamp; currentState = 'on_break'; }
-        else if (r.event_type === 'break_end')   { if (lastBreakStart) breakMs += new Date(r.timestamp) - new Date(lastBreakStart); lastBreakStart = null; currentState = 'clocked_in'; }
-        else if (r.event_type === 'clock_out')   { if (lastClockIn) totalWorkMs += new Date(r.timestamp) - new Date(lastClockIn); lastClockIn = null; currentState = 'clocked_out'; }
-      });
-      // If still clocked in, add time up to now
-      if (currentState === 'clocked_in' && lastClockIn) totalWorkMs += Date.now() - new Date(lastClockIn);
-      if (currentState === 'on_break' && lastBreakStart) breakMs += Date.now() - new Date(lastBreakStart);
-      var netWorkMs = totalWorkMs - breakMs;
-      function fmtMs(ms) { var h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000); return h > 0 ? h+'h '+m+'m' : m+'m'; }
+      var workMs  = derived.workMs;
+      var breakMs = derived.breakMs;
+      var netWorkMs = Math.max(0, workMs - breakMs);
 
-      // Status banner
-      var statusColour = currentState === 'clocked_in' ? 'var(--green)' : currentState === 'on_break' ? 'var(--amber)' : 'var(--muted)';
-      var statusLabel  = currentState === 'clocked_in' ? '● Clocked in' : currentState === 'on_break' ? '● On break' : '○ Clocked out';
+      var statusColour = derived.state === 'clocked_in' ? 'var(--green)' : derived.state === 'on_break' ? 'var(--amber)' : 'var(--muted)';
+      var statusLabel  = derived.state === 'clocked_in' ? '\u25CF Clocked in' : derived.state === 'on_break' ? '\u25CF On break' : '\u25CB Clocked out';
+
       var html = '<div style="display:flex;gap:20px;margin-bottom:14px;flex-wrap:wrap;">'
         + '<div><div style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:3px;">Status</div>'
         +   '<div style="font-size:12px;font-weight:700;color:' + statusColour + ';">' + statusLabel + '</div></div>'
@@ -37564,14 +37561,45 @@ window.saveAdjModal = async function() {
       }
       html += '</div>';
 
-      // Event timeline
+      // Banner if any anomalies (duplicate taps, orphans, etc.)
+      var anomalies = derived.anomalies || [];
+      if (anomalies.length) {
+        html += '<div style="background:rgba(232,156,58,0.10);border:1px solid rgba(232,156,58,0.30);border-radius:5px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:var(--amber);">'
+          + '<strong>\u26A0 ' + anomalies.length + ' duplicate or orphaned event' + (anomalies.length === 1 ? '' : 's') + ' detected.</strong> '
+          + 'Time totals above ignore these. Ask an admin to review your timesheet if the totals look wrong.'
+          + '</div>';
+      }
+
+      // Dedupe consecutive same-type events for display: collapse {a, a} into
+      // {a, dup-count=1}. Anomaly ids let us mark each row.
+      var anomalyIdSet = {};
+      anomalies.forEach(function(a){ if (a && a.event && a.event.id) anomalyIdSet[a.event.id] = a.kind; });
+
+      var collapsed = [];
+      rows.forEach(function(r){
+        var last = collapsed[collapsed.length - 1];
+        if (last && last.event_type === r.event_type) {
+          last._dupCount = (last._dupCount || 0) + 1;
+          last._dupLastTs = r.timestamp;
+        } else {
+          collapsed.push(Object.assign({}, r));
+        }
+      });
+
       html += '<div style="border-top:1px solid var(--navy-border);padding-top:10px;">';
-      rows.forEach(function(r) {
+      collapsed.forEach(function(r) {
         var col = TYPE_COLOUR[r.event_type] || 'var(--muted)';
         var lbl = TYPE_LABEL[r.event_type]  || r.event_type;
+        var dupTag = '';
+        if (r._dupCount) {
+          dupTag = ' <span style="background:rgba(232,156,58,0.18);color:var(--amber);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:6px;letter-spacing:0.04em;">DUPLICATE \u00D7' + (r._dupCount + 1) + '</span>';
+        } else if (anomalyIdSet[r.id]) {
+          dupTag = ' <span style="background:rgba(232,156,58,0.18);color:var(--amber);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:6px;letter-spacing:0.04em;">' + (anomalyIdSet[r.id].toUpperCase().replace(/_/g,' ')) + '</span>';
+        }
+        var syntheticTag = r.synthetic ? ' <span style="background:rgba(160,160,160,0.18);color:var(--muted);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:6px;letter-spacing:0.04em;" title="Auto-closed at end of day">AUTO-CLOSED</span>' : '';
         html += '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid rgba(36,61,87,0.4);">'
           + '<span style="width:8px;height:8px;border-radius:50%;background:' + col + ';flex-shrink:0;"></span>'
-          + '<span style="font-size:11px;color:var(--white);font-weight:600;">' + lbl + '</span>'
+          + '<span style="font-size:11px;color:var(--white);font-weight:600;">' + lbl + dupTag + syntheticTag + '</span>'
           + '<span style="font-size:11px;color:var(--muted);margin-left:auto;">' + fmt(r.timestamp) + '</span>'
           + '</div>';
       });
@@ -43796,59 +43824,230 @@ window.saveAdjModal = async function() {
 </script>
 <!-- ══ HEADER CLOCK SCRIPT ══════════════════════════════════════════════════ -->
 <script>
+/* Shared reducer — single source of truth for every clock surface.
+   Inputs:  events (array; will be sorted ascending) and opts
+              { staleHoursForActive: 16 } - any "open" event older than this
+              is treated as forgotten and the user is shown clocked_out.
+   Output:  { state, since, workMs, breakMs, sessions, anomalies,
+              nextValidEvents }
+   - state ∈ 'clocked_in' | 'on_break' | 'clocked_out'
+   - since: ISO timestamp of the event that started the current state, or null
+   - workMs / breakMs: net work and break time (sum across all sessions)
+   - sessions: [{ start, end, breaks, durationMs, crossesMidnight }]
+   - anomalies: [{ event, kind }]; kinds = duplicate_clock_in,
+       duplicate_break_start, duplicate_clock_out, duplicate_break_end,
+       orphan_break_end, orphan_clock_out
+   - nextValidEvents: which event types are valid right now (for menus)
+
+   Time-zone notes:
+     All arithmetic is on UTC ms diffs (Date.getTime()), so overnight shifts
+     and DST transitions compute correctly without TZ-specific handling.
+*/
+window.deriveClockState = function(events, opts) {
+  opts = opts || {};
+  var STALE_MS = (opts.staleHoursForActive || 16) * 3600 * 1000;
+  var list = (events || []).slice().sort(function(a, b){
+    return new Date(a.timestamp) - new Date(b.timestamp);
+  });
+
+  var state = 'clocked_out';
+  var sinceTs = null;
+  var workMs = 0, breakMs = 0;
+  var sessions = [];
+  var anomalies = [];
+  var openSession = null;     // { start, breaks: [{s, e}], end, lastClockInTs }
+  var openBreakStart = null;
+
+  function pushAnomaly(ev, kind) { anomalies.push({ event: ev, kind: kind }); }
+  function endOpenBreakIfAny(atIso) {
+    if (openBreakStart && openSession) {
+      var dur = new Date(atIso) - new Date(openBreakStart.timestamp);
+      if (dur > 0) breakMs += dur;
+      openSession.breaks.push({ s: openBreakStart, e: { timestamp: atIso, synthetic: true } });
+      openBreakStart = null;
+    }
+  }
+
+  list.forEach(function(e){
+    var t = e.event_type;
+    if (t === 'clock_in') {
+      if (openSession) {
+        // Duplicate clock_in (no clock_out between). Keep first session open;
+        // mark this as an anomaly. Do not start a new session.
+        pushAnomaly(e, 'duplicate_clock_in');
+        return;
+      }
+      openSession = { start: e, breaks: [], end: null };
+      sinceTs = e.timestamp;
+      state = 'clocked_in';
+    } else if (t === 'break_start') {
+      if (!openSession) { pushAnomaly(e, 'orphan_break_start'); return; }
+      if (openBreakStart) {
+        pushAnomaly(e, 'duplicate_break_start');
+        return;
+      }
+      openBreakStart = e;
+      sinceTs = e.timestamp;
+      state = 'on_break';
+    } else if (t === 'break_end') {
+      if (!openSession || !openBreakStart) { pushAnomaly(e, 'orphan_break_end'); return; }
+      var bDur = new Date(e.timestamp) - new Date(openBreakStart.timestamp);
+      if (bDur > 0) breakMs += bDur;
+      openSession.breaks.push({ s: openBreakStart, e: e });
+      openBreakStart = null;
+      sinceTs = e.timestamp;
+      state = 'clocked_in';
+    } else if (t === 'clock_out') {
+      if (!openSession) { pushAnomaly(e, 'orphan_clock_out'); return; }
+      endOpenBreakIfAny(e.timestamp);
+      var wDur = new Date(e.timestamp) - new Date(openSession.start.timestamp);
+      // breakMs already accounted for; subtract from gross to compute work
+      openSession.end = e;
+      openSession.durationMs = wDur;
+      openSession.crossesMidnight = (function(){
+        try {
+          var s = new Date(openSession.start.timestamp).toISOString().slice(0,10);
+          var ee = new Date(e.timestamp).toISOString().slice(0,10);
+          return s !== ee;
+        } catch(_) { return false; }
+      })();
+      workMs += wDur;
+      sessions.push(openSession);
+      openSession = null;
+      sinceTs = e.timestamp;
+      state = 'clocked_out';
+    }
+  });
+
+  // If still open at the end of the event list, count up to now and surface
+  if (openSession) {
+    var now = Date.now();
+    var startMs = new Date(openSession.start.timestamp).getTime();
+    if (now - startMs > STALE_MS) {
+      // Forgotten shift — treat as clocked_out for UI purposes, but flag it.
+      pushAnomaly(openSession.start, 'stale_open_session');
+      state = 'clocked_out'; sinceTs = null;
+    } else {
+      // Live session — accrue work to now (less any open break)
+      if (openBreakStart) {
+        var bDurNow = now - new Date(openBreakStart.timestamp).getTime();
+        if (bDurNow > 0) breakMs += bDurNow;
+      }
+      workMs += now - startMs;
+      // The reducer still reports state/since from the last event we processed
+    }
+  }
+
+  var nextValidEvents;
+  if (state === 'clocked_out') nextValidEvents = ['clock_in'];
+  else if (state === 'on_break') nextValidEvents = ['break_end', 'clock_out'];
+  else /* clocked_in */         nextValidEvents = ['break_start', 'clock_out'];
+
+  return {
+    state: state,
+    since: sinceTs,
+    workMs: workMs,
+    breakMs: Math.max(0, breakMs),
+    sessions: sessions,
+    anomalies: anomalies,
+    nextValidEvents: nextValidEvents
+  };
+};
+</script>
+
+<script>
 (function() {
   'use strict';
 
   // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
   var _hClockState = 'clocked_out';
   var _hClockSince = null;
+  var _hPending    = null;   // 'clock_in' | 'break_start' | 'break_end' | 'clock_out' | null
+  var _hBusy       = false;
+  var _hAnomalies  = 0;
   var _hTicker     = null;
+  var _hMenuCleanup = null;
 
   async function loadHeaderClockState() {
     if (!window.CURRENT_USER) return;
+    var uid = window.CURRENT_USER && window.CURRENT_USER.id;
+    if (!uid) return;
     try {
-      var rows = await window.db.select('clock_events', '?order=timestamp.desc&limit=100');
+      // Pull only THIS user's events from the last 24h, ordered ascending.
+      // 24h is enough for any active session; sustains overnight shifts.
+      var sinceIso = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      var rows = await window.db.select('clock_events',
+        '?user_id=eq.' + encodeURIComponent(uid)
+        + '&timestamp=gte.' + encodeURIComponent(sinceIso)
+        + '&order=timestamp.asc&limit=200');
       if (!Array.isArray(rows)) rows = [];
-      var uid = window.CURRENT_USER.id || '';
-      var mine = rows.filter(function(x){ return x.user_id === uid; });
-      var last = mine[0] || null;
-      if (!last || last.event_type === 'clock_out') {
-        _hClockState = 'clocked_out'; _hClockSince = null;
-      } else if (last.event_type === 'clock_in') {
-        _hClockState = 'clocked_in'; _hClockSince = last.timestamp;
-      } else if (last.event_type === 'break_start') {
-        _hClockState = 'on_break'; _hClockSince = last.timestamp;
-      }
-      renderHeaderClockBtn();
+      var derived = window.deriveClockState(rows, { staleHoursForActive: 16 });
+      _hClockState = derived.state;
+      _hClockSince = derived.since;
+      _hAnomalies  = derived.anomalies ? derived.anomalies.length : 0;
+      renderAll();
     } catch(e) { console.warn('Header clock state error:', e); }
   }
 
   function fmtDur(fromStr) {
     if (!fromStr) return '';
     var diff = Date.now() - new Date(fromStr).getTime();
+    if (diff < 0) return '0m';
     var h = Math.floor(diff/3600000), m = Math.floor((diff%3600000)/60000);
     return h > 0 ? h+'h '+m+'m' : m+'m';
   }
 
-  function renderHeaderClockBtn() {
+  function fmtSince(iso) {
+    if (!iso) return '';
+    try {
+      return new Date(iso).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Dublin'});
+    } catch(_) { return ''; }
+  }
+
+  /* ── Apply colours/labels to BOTH surfaces from the shared state ─────────── */
+  function renderAll() { renderHeaderBtn(); syncQlClockTile(); }
+
+  function colourFor(state) {
+    if (state === 'clocked_in')  return { border: 'var(--green)',  text: 'var(--green)',  bg: 'rgba(74,199,120,0.10)' };
+    if (state === 'on_break')    return { border: 'var(--amber)',  text: 'var(--amber)',  bg: 'rgba(232,156,58,0.10)' };
+    return                              { border: 'var(--muted)',  text: 'var(--muted)',  bg: 'rgba(255,255,255,0.06)' };
+  }
+
+  function renderHeaderBtn() {
     var btn = document.getElementById('header-clock-btn');
-    if (btn) {
-      if (_hClockState === 'clocked_in') {
-        var since = _hClockSince ? new Date(_hClockSince).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Dublin'}) : '';
-        btn.style.borderColor = 'var(--green)';
-        btn.style.color = 'var(--green)';
-        btn.innerHTML = '&#9654; In ' + (since||'') + (_hClockSince ? ' &middot; ' + fmtDur(_hClockSince) : '') + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
-      } else if (_hClockState === 'on_break') {
-        btn.style.borderColor = 'var(--amber)';
-        btn.style.color = 'var(--amber)';
-        btn.innerHTML = '&#9646; Break &middot; ' + fmtDur(_hClockSince) + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
-      } else {
-        btn.style.borderColor = 'var(--muted)';
-        btn.style.color = 'var(--muted)';
-        btn.innerHTML = '&#9654; Clock In';
-      }
+    if (!btn) return;
+    btn.style.transition = 'border-color .15s, color .15s, background-color .15s';
+    btn.style.touchAction = 'manipulation';
+
+    if (_hPending) {
+      btn.style.borderColor = 'var(--gold-dim)';
+      btn.style.color = 'var(--gold)';
+      btn.style.background = 'rgba(201,168,76,0.08)';
+      btn.style.pointerEvents = 'none';
+      btn.disabled = true;
+      btn.innerHTML = '<span class="hdrclk-spin">\u29D7</span> Checking\u2026';
+      btn.setAttribute('aria-label', 'Clock action in progress, please wait');
+      return;
     }
-    syncQlClockTile();
+    btn.style.pointerEvents = '';
+    btn.disabled = false;
+
+    var c = colourFor(_hClockState);
+    btn.style.borderColor = c.border;
+    btn.style.color = c.text;
+    btn.style.background = '';
+
+    if (_hClockState === 'clocked_in') {
+      var sinceTxt = fmtSince(_hClockSince);
+      btn.innerHTML = '&#9654; In ' + (sinceTxt||'') + (_hClockSince ? ' &middot; ' + fmtDur(_hClockSince) : '') + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
+      btn.setAttribute('aria-label', 'Clocked in since ' + (sinceTxt || 'unknown') + '. Tap to start break or clock out.');
+    } else if (_hClockState === 'on_break') {
+      btn.innerHTML = '&#9646; Break &middot; ' + fmtDur(_hClockSince) + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
+      btn.setAttribute('aria-label', 'On break for ' + fmtDur(_hClockSince) + '. Tap to end break or clock out.');
+    } else {
+      btn.innerHTML = '&#9654; Clock In';
+      btn.setAttribute('aria-label', 'Clock in');
+    }
   }
 
   function syncQlClockTile() {
@@ -43857,79 +44056,128 @@ window.saveAdjModal = async function() {
     var sub   = document.getElementById('ql-clock-in-sub');
     var icon  = document.getElementById('ql-clock-in-icon');
     if (!tile) return;
+    tile.style.transition = 'border-color .15s, background-color .15s';
+    tile.style.touchAction = 'manipulation';
+
+    if (_hPending) {
+      tile.style.borderTopColor = 'var(--gold)';
+      tile.style.borderColor    = 'var(--gold-dim)';
+      tile.style.pointerEvents  = 'none';
+      tile.style.opacity        = '0.85';
+      if (icon)  icon.textContent  = '\u29D7';
+      if (label) { label.textContent = 'Checking\u2026'; label.style.color = 'var(--gold)'; }
+      if (sub)   sub.textContent   = 'Verifying location';
+      tile.setAttribute('aria-label', 'Clock action in progress, please wait');
+      return;
+    }
+    tile.style.pointerEvents = '';
+    tile.style.opacity = '';
+
     if (_hClockState === 'clocked_in') {
-      var since = _hClockSince ? new Date(_hClockSince).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Dublin'}) : '';
+      var sinceTxt = fmtSince(_hClockSince);
       tile.style.borderTopColor = 'var(--green)';
-      tile.onmouseover = function(){ this.style.borderColor='var(--green)'; };
-      if (icon)  icon.textContent  = '✅';
-      if (label) label.textContent = 'Clocked In' + (since ? ' · ' + since : '');
-      if (sub)   sub.textContent   = fmtDur(_hClockSince) + ' — tap to clock out';
+      tile.style.borderColor    = 'var(--navy-border)';
+      if (icon)  icon.textContent  = '\u2705';
+      if (label) { label.textContent = 'Clocked In' + (sinceTxt ? ' \u00b7 ' + sinceTxt : ''); label.style.color = 'var(--green)'; }
+      if (sub)   sub.textContent   = fmtDur(_hClockSince) + ' \u2014 tap to clock out';
+      tile.setAttribute('aria-label', 'Clocked in since ' + (sinceTxt || 'unknown') + '. Tap to start break or clock out.');
     } else if (_hClockState === 'on_break') {
       tile.style.borderTopColor = 'var(--amber,#e89c3a)';
-      tile.onmouseover = function(){ this.style.borderColor='var(--amber,#e89c3a)'; };
-      if (icon)  icon.textContent  = '☕';
+      tile.style.borderColor    = 'var(--navy-border)';
+      if (icon)  icon.textContent  = '\u2615';
       if (label) { label.textContent = 'On Break'; label.style.color = 'var(--amber,#e89c3a)'; }
-      if (sub)   sub.textContent   = fmtDur(_hClockSince) + ' — tap to end break';
+      if (sub)   sub.textContent   = fmtDur(_hClockSince) + ' \u2014 tap to end break';
+      tile.setAttribute('aria-label', 'On break for ' + fmtDur(_hClockSince) + '. Tap to end break or clock out.');
     } else {
       tile.style.borderTopColor = 'var(--green)';
-      tile.onmouseover = function(){ this.style.borderColor='var(--green)'; };
-      if (icon)  icon.textContent  = '⏱';
+      tile.style.borderColor    = 'var(--navy-border)';
+      if (icon)  icon.textContent  = '\u23F1';
       if (label) { label.textContent = 'Clock In'; label.style.color = 'var(--white)'; }
       if (sub)   sub.textContent   = 'Log your attendance';
+      tile.setAttribute('aria-label', 'Clock in');
     }
   }
   window._syncQlClockTile = syncQlClockTile;
 
-  /* Drop-up/down menu when clocked in or on break */
+  /* ── Drop-up/down menu when clocked in or on break ─────────────────────── */
+  function dismissClockMenu() {
+    var m = document.getElementById('_clock-menu');
+    if (m) m.remove();
+    if (_hMenuCleanup) { try { _hMenuCleanup(); } catch(_) {} _hMenuCleanup = null; }
+  }
+
   function showClockMenu() {
     var ex = document.getElementById('_clock-menu');
-    if (ex) { ex.remove(); return; }
-    // On mobile the header button is hidden — anchor to the quick-launch tile instead
-    var btn = document.getElementById('header-clock-btn');
+    if (ex) { dismissClockMenu(); return; }
+
+    var hdr  = document.getElementById('header-clock-btn');
     var tile = document.getElementById('ql-clock-in');
-    var anchor = (btn && btn.offsetParent) ? btn : (tile && tile.offsetParent ? tile : null);
+    var anchor = (hdr && hdr.offsetParent) ? hdr : (tile && tile.offsetParent ? tile : null);
     if (!anchor) return;
     var rect = anchor.getBoundingClientRect();
     var menu = document.createElement('div');
     menu.id = '_clock-menu';
-    menu.style.cssText = 'position:fixed;z-index:1100;background:#0e1e2e;border:1px solid rgba(201,168,76,0.25);border-radius:6px;box-shadow:0 8px 32px rgba(0,0,0,0.6);min-width:170px;overflow:hidden;';
-    // Position below the anchor, but clamp to viewport so it never goes off-screen
-    var menuTop = rect.bottom + 6;
-    menu.style.left = Math.min(rect.left, window.innerWidth - 176) + 'px';
-    menu.style.top = menuTop + 'px';
+    menu.style.cssText = 'position:fixed;z-index:1100;background:#0e1e2e;border:1px solid rgba(201,168,76,0.25);border-radius:6px;box-shadow:0 8px 32px rgba(0,0,0,0.6);min-width:180px;overflow:hidden;';
 
-    var options = [];
-    if (_hClockState === 'clocked_in') {
-      options = [
-        { label: '&#9646; Start Break', color: '#e89c3a', bg: 'rgba(232,156,58,0.08)',  event: 'break_start' },
-        { label: '&#9632; Clock Out',   color: '#e05757', bg: 'rgba(224,87,87,0.08)',   event: 'clock_out'   }
-      ];
-    } else if (_hClockState === 'on_break') {
-      options = [
-        { label: '&#9654; End Break',  color: '#4ac778', bg: 'rgba(74,199,120,0.08)',  event: 'break_end'  },
-        { label: '&#9632; Clock Out',  color: '#e05757', bg: 'rgba(224,87,87,0.08)',   event: 'clock_out'  }
-      ];
-    }
+    // Build option list from the shared reducer so menu can never disagree.
+    var nextValid = (_hClockState === 'clocked_in')
+      ? ['break_start','clock_out']
+      : (_hClockState === 'on_break' ? ['break_end','clock_out'] : []);
+    var STYLES = {
+      break_start: { label: '&#9646; Start Break', color: '#e89c3a', bg: 'rgba(232,156,58,0.08)' },
+      break_end:   { label: '&#9654; End Break',   color: '#4ac778', bg: 'rgba(74,199,120,0.08)' },
+      clock_out:   { label: '&#9632; Clock Out',   color: '#e05757', bg: 'rgba(224,87,87,0.08)'  }
+    };
+    if (!nextValid.length) return;
 
-    options.forEach(function(opt, i) {
+    nextValid.forEach(function(evType, i) {
+      var s = STYLES[evType]; if (!s) return;
       var item = document.createElement('button');
       var borderTop = i > 0 ? 'border-top:1px solid rgba(255,255,255,0.06);' : '';
-      item.style.cssText = 'display:block;width:100%;padding:11px 16px;background:transparent;' + borderTop + 'border-left:none;border-right:none;border-bottom:none;color:' + opt.color + ';font-size:12px;font-weight:700;font-family:Lato,sans-serif;cursor:pointer;text-align:left;letter-spacing:0.02em;';
-      item.innerHTML = opt.label;
-      item.onmouseover = function(){ this.style.background = opt.bg; this.style.paddingLeft = '20px'; this.style.color = opt.color; };
-      item.onmouseout  = function(){ this.style.background = ''; this.style.paddingLeft = '16px'; this.style.color = opt.color; };
-      item.onclick = function(){
-        menu.remove();
-        fireClockEvent(opt.event);
-      };
+      item.style.cssText = 'display:block;width:100%;padding:13px 18px;background:transparent;' + borderTop + 'border-left:none;border-right:none;border-bottom:none;color:' + s.color + ';font-size:12px;font-weight:700;font-family:Lato,sans-serif;cursor:pointer;text-align:left;letter-spacing:0.02em;touch-action:manipulation;min-height:44px;';
+      item.innerHTML = s.label;
+      item.setAttribute('aria-label', s.label.replace(/&[^;]+;/g,'').trim());
+      // Hover (desktop) and active (touch) feedback
+      item.onmouseover = function(){ this.style.background = s.bg; this.style.paddingLeft = '22px'; };
+      item.onmouseout  = function(){ this.style.background = '';    this.style.paddingLeft = '18px'; };
+      item.addEventListener('touchstart', function(){ this.style.background = s.bg; }, { passive: true });
+      item.addEventListener('touchend',   function(){ this.style.background = ''; }, { passive: true });
+      item.onclick = function(){ dismissClockMenu(); fireClockEvent(evType); };
       menu.appendChild(item);
     });
 
     document.body.appendChild(menu);
+
+    // Position: prefer below the anchor, fall back to above if it would clip.
+    var menuRect = menu.getBoundingClientRect();
+    var menuH = menuRect.height || (nextValid.length * 48);
+    var menuW = menuRect.width  || 200;
+    var menuTop = rect.bottom + 6;
+    if (menuTop + menuH > window.innerHeight - 8) {
+      menuTop = Math.max(8, rect.top - menuH - 6);
+    }
+    menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - menuW - 8)) + 'px';
+    menu.style.top  = menuTop + 'px';
+
+    // Dismiss on outside click, scroll, resize, orientation change, or escape.
     setTimeout(function(){
-      document.addEventListener('click', function h(e){
-        if(!menu.contains(e.target) && e.target !== btn){ menu.remove(); document.removeEventListener('click',h); }
-      });
+      function outside(e){
+        if(!menu.contains(e.target) && e.target !== hdr && e.target !== tile){ dismissClockMenu(); }
+      }
+      function dismissOnAny(){ dismissClockMenu(); }
+      function esc(e){ if (e.key === 'Escape') dismissClockMenu(); }
+      document.addEventListener('click', outside);
+      window.addEventListener('resize', dismissOnAny);
+      window.addEventListener('orientationchange', dismissOnAny);
+      window.addEventListener('scroll', dismissOnAny, { passive: true });
+      document.addEventListener('keydown', esc);
+      _hMenuCleanup = function(){
+        document.removeEventListener('click', outside);
+        window.removeEventListener('resize', dismissOnAny);
+        window.removeEventListener('orientationchange', dismissOnAny);
+        window.removeEventListener('scroll', dismissOnAny, { passive: true });
+        document.removeEventListener('keydown', esc);
+      };
     }, 50);
   }
 
@@ -43979,68 +44227,111 @@ window.saveAdjModal = async function() {
     }
   }
 
+  /* ── Insert: prefer the validating RPC; fall back to direct PostgREST so
+       the UI keeps working in environments where the migration hasn't been
+       applied yet. The RPC enforces transition rules and 5s dedupe. ───────── */
+  async function insertClockEvent(eventType, withinFence) {
+    // Try RPC first
+    try {
+      var row = await window.db.rpc('clock_event_insert', {
+        p_event_type: eventType,
+        p_within_geofence: !!withinFence
+      });
+      // RPC may return an object or array
+      if (Array.isArray(row)) row = row[0];
+      if (row && row.timestamp) return row;
+    } catch(rpcErr) {
+      // Fall through to raw insert on RPC errors that are NOT validation errors.
+      // Validation errors should propagate; we detect by message contains 'CLOCK_'.
+      var msg = (rpcErr && rpcErr.message) || '';
+      if (/CLOCK_/i.test(msg)) throw rpcErr;
+      if (window.DEBUG) console.warn('clock_event_insert RPC unavailable, falling back to direct insert:', msg);
+    }
+    var rows = await window.db.insert('clock_events', {
+      user_id: window.CURRENT_USER.id,
+      event_type: eventType,
+      within_geofence: !!withinFence
+    });
+    return Array.isArray(rows) ? rows[0] : rows;
+  }
+
   async function fireClockEvent(eventType) {
     if (!window.CURRENT_USER) return;
+    if (_hBusy) return;
+    _hBusy = true;
+    _hPending = eventType;
+    renderAll();
 
-    // Only enforce geofence on clock_in
-    if (eventType === 'clock_in') {
-      var btn = document.getElementById('header-clock-btn');
-      if(btn){ btn.textContent = 'Checking\u2026'; btn.disabled = true; }
-      var geo = await checkGeofence();
-      if(btn){ btn.disabled = false; }
-      if(!geo.allowed){
-        renderHeaderClockBtn();
-        if(geo.error){
-          window.toast && window.toast('You are outside the Geofence — please try again when you reach the facility.','error');
-        } else {
-          window.toast && window.toast('You are outside the Geofence — please try again when you reach the facility.','error');
-        }
-        return;
-      }
-      if(geo.unconfigured){
-        // Geofence not set up yet — warn admin, allow through
-        if(window.isPulseAdmin && window.isPulseAdmin(window.CURRENT_USER.role)){
-          window.toast && window.toast('Geofence not configured. Set it in Settings \u2192 Geofence.','info');
-        }
-      }
-    }
-
-    // Optimistic update
-    if (eventType === 'clock_in')         { _hClockState = 'clocked_in'; _hClockSince = new Date().toISOString(); }
-    else if (eventType === 'break_start') { _hClockState = 'on_break';   _hClockSince = new Date().toISOString(); }
-    else if (eventType === 'break_end')   { _hClockState = 'clocked_in'; _hClockSince = new Date().toISOString(); }
-    else                                  { _hClockState = 'clocked_out'; _hClockSince = null; }
-    renderHeaderClockBtn();
-    var labels = { clock_in:'Clocked in \u2713', clock_out:'Clocked out \u2713', break_start:'Break started \u2713', break_end:'Break ended \u2713' };
+    var geo;
     try {
+      if (eventType === 'clock_in') {
+        geo = await checkGeofence();
+        if (!geo.allowed) {
+          window.toast && window.toast('You are outside the Geofence — please try again when you reach the facility.','error');
+          return;   // finally clears pending + busy
+        }
+        if (geo.unconfigured) {
+          if (window.isPulseAdmin && window.isPulseAdmin(window.CURRENT_USER.role)) {
+            window.toast && window.toast('Geofence not configured. Set it in Settings \u2192 Geofence.','info');
+          }
+        }
+      }
+
       var withinFence = (typeof geo !== 'undefined') ? !!(geo.within) : false;
-      await window.db.insert('clock_events', { user_id: window.CURRENT_USER.id, event_type: eventType, within_geofence: withinFence });
+      var inserted = await insertClockEvent(eventType, withinFence);
+
+      // Pin state to the server-returned row so all surfaces show the exact
+      // server-side timestamp (avoids Date.now() drift).
+      if (eventType === 'clock_in')          { _hClockState = 'clocked_in'; }
+      else if (eventType === 'break_start')  { _hClockState = 'on_break';   }
+      else if (eventType === 'break_end')    { _hClockState = 'clocked_in'; }
+      else if (eventType === 'clock_out')    { _hClockState = 'clocked_out'; }
+      _hClockSince = (eventType === 'clock_out') ? null : (inserted && inserted.timestamp) || new Date().toISOString();
+
+      var labels = { clock_in:'Clocked in \u2713', clock_out:'Clocked out \u2713', break_start:'Break started \u2713', break_end:'Break ended \u2713' };
       window.toast && window.toast(labels[eventType]||'Done','success');
-      /* Refresh timesheet if the clock-in tab is currently visible */
+
+      // Refresh other surfaces
       try {
-        var ci=document.getElementById('people-clockin');
-        var pu=window.CURRENT_USER&&(window.CURRENT_USER.id);
-        var su=window._selAuth||window._sel;
-        if(ci&&ci.style.display!=='none'&&window.tsLoad&&(!su||su===pu)){
+        var ci = document.getElementById('people-clockin');
+        var pu = window.CURRENT_USER && window.CURRENT_USER.id;
+        var su = window._selAuth || window._sel;
+        if (ci && ci.style.display !== 'none' && window.tsLoad && (!su || su === pu)) {
           window.tsLoad();
         }
-      } catch(e){}
-      /* Refresh dashboard attendance + roster if on overview */
+        if (window.tsRefreshLive) window.tsRefreshLive();
+      } catch(_){}
       try {
         var ovPage = document.getElementById('page-overview');
         if (ovPage && ovPage.classList.contains('active')) {
           if (typeof window.loadOverviewAttendance === 'function') window.loadOverviewAttendance();
           if (typeof window.loadOverviewMyRoster   === 'function') window.loadOverviewMyRoster();
         }
-      } catch(e){}
-    } catch(e) {
-      await loadHeaderClockState();
-      window.toast && window.toast('Error: '+e.message,'error');
+      } catch(_){}
+    } catch(err) {
+      // On failure (incl. server-side validation) re-pin state from DB so the
+      // UI never shows a wrong optimistic value.
+      var em = (err && err.message) || 'Unknown error';
+      // Pretty-print the trigger / RPC error codes for the user
+      em = em.replace(/^DB \d+:\s*/, '')
+             .replace(/CLOCK_(\w+)/g, function(_, k){
+                if (k === 'INVALID_TRANSITION') return 'Action not valid from current state';
+                if (k === 'DEDUPE')             return 'Duplicate tap detected — please wait a moment';
+                if (k === 'NOT_AUTHENTICATED')  return 'Not signed in';
+                return k;
+             });
+      window.toast && window.toast('Error: ' + em, 'error');
+      try { await loadHeaderClockState(); } catch(_){}
+    } finally {
+      _hPending = null;
+      _hBusy = false;
+      renderAll();
     }
   }
 
   window.headerClockAction = async function() {
     if (!window.CURRENT_USER) return;
+    if (_hBusy) return;
     if (_hClockState === 'clocked_out') {
       fireClockEvent('clock_in');
     } else {
@@ -44050,9 +44341,9 @@ window.saveAdjModal = async function() {
 
   window.initHeaderClock = async function() {
     await loadHeaderClockState();
-    // Tick every 60s to update duration display on both header btn and quick-launch tile
+    // Tick every 30s to update duration display on both header btn and quick-launch tile
     if (_hTicker) clearInterval(_hTicker);
-    _hTicker = setInterval(function(){ renderHeaderClockBtn(); syncQlClockTile(); }, 60000);
+    _hTicker = setInterval(function(){ renderAll(); }, 30000);
   };
 
 })();
@@ -45463,12 +45754,19 @@ function buildRecs(evts,uid){
     .sort(function(a,b){return new Date(a.timestamp)-new Date(b.timestamp);})
     .forEach(function(e){
       var o=dubParts(e.timestamp),d=o.year+'-'+o.month+'-'+o.day;
-      if(!days[d])days[d]={ci:null,co:null,br:[]};
+      if(!days[d])days[d]={ci:null,co:null,br:[],extraCi:[],extraCo:[],synthetic:false};
       var r=days[d];
-      if(e.event_type==='clock_in'&&!r.ci)r.ci=e;
-      else if(e.event_type==='clock_out')r.co=e;
-      else if(e.event_type==='break_start')r.br.push({s:e,e:null});
-      else if(e.event_type==='break_end'&&r.br.length)r.br[r.br.length-1].e=e;
+      if(e.event_type==='clock_in'){
+        if(!r.ci) r.ci=e; else r.extraCi.push(e);
+      } else if(e.event_type==='clock_out'){
+        if(r.co) r.extraCo.push(r.co);
+        r.co=e;
+        if(e.synthetic) r.synthetic=true;
+      } else if(e.event_type==='break_start'){
+        r.br.push({s:e,e:null});
+      } else if(e.event_type==='break_end'&&r.br.length){
+        r.br[r.br.length-1].e=e;
+      }
     });
   return days;
 }
@@ -45696,7 +45994,8 @@ window.tsLoad=async function(){
     var tdIn=document.createElement('td');
     tdIn.style.cssText='padding:10px 12px;text-align:center;white-space:nowrap;';
     if(rec&&rec.ci){
-      tdIn.innerHTML='<span style="font-size:12px;font-weight:600;color:var(--green);">'+ft(rec.ci.timestamp)+'</span>';
+      var ciExtra = rec.extraCi && rec.extraCi.length ? ' <span title="'+rec.extraCi.length+' duplicate clock-in '+(rec.extraCi.length===1?'event':'events')+' detected" style="background:rgba(232,156,58,0.18);color:var(--amber);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:5px;letter-spacing:0.04em;">+'+rec.extraCi.length+'</span>' : '';
+      tdIn.innerHTML='<span style="font-size:12px;font-weight:600;color:var(--green);">'+ft(rec.ci.timestamp)+'</span>'+ciExtra;
       if(canEd){var m=mkbtns(rec.ci.id,d2,'clock_in');if(m)tdIn.appendChild(m);}
     } else if(canEd){
       var ciBtn=document.createElement('button');
@@ -45732,7 +46031,8 @@ window.tsLoad=async function(){
     var tdOut=document.createElement('td');
     tdOut.style.cssText='padding:10px 12px;text-align:center;white-space:nowrap;';
     if(rec&&rec.co){
-      tdOut.innerHTML='<span style="font-size:12px;font-weight:600;color:var(--muted);">'+ft(rec.co.timestamp)+'</span>';
+      var synthTag = rec.co.synthetic ? ' <span title="Auto-closed at end of day. Edit if the time is wrong." style="background:rgba(160,160,160,0.18);color:var(--muted);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:5px;letter-spacing:0.04em;">AUTO</span>' : '';
+      tdOut.innerHTML='<span style="font-size:12px;font-weight:600;color:var(--muted);">'+ft(rec.co.timestamp)+'</span>'+synthTag;
       if(canEd){var m=mkbtns(rec.co.id,d2,'clock_out');if(m)tdOut.appendChild(m);}
     } else if(rec&&rec.ci){
       /* Still in — show amber status + clock out shortcut for admins */
@@ -45931,8 +46231,10 @@ window.tsDelEvt=function(id,evType,dateStr,brIdx){
       try{
         var uid=_selAuth||_sel;
         if(evType==='clock_in'||evType==='clock_out'){
-          // Delete ALL events of this type on this day for this user (handles duplicates)
-          await del('clock_events?user_id=eq.'+uid+'&event_type=eq.'+evType+'&timestamp=gte.'+dubWallToIso(dateStr,'00:00')+'&timestamp=lte.'+dubWallToIso(dateStr,'23:59:59'));
+          // Delete ONLY the specific event by id - earlier behaviour wiped every
+          // clock_in/clock_out for the day in one go, which destroyed legitimate
+          // sibling rows whenever duplicates existed.
+          await del('clock_events?id=eq.'+id);
         } else if(evType==='break_start'&&typeof brIdx!=='undefined'){
           // Delete this break_start and its paired break_end if present
           var recs=buildRecs(_evts,uid);var rec=recs[dateStr];
@@ -45989,14 +46291,16 @@ async function loadLive(){
 }
 
 /* ── Init ── */
+window.tsRefreshLive=function(){ return loadLive(); };
 window.loadTimesheet=async function(){
   buildPanel();
   if(!_emps.length){
     var u=await get('app_users?order=display_name.asc&select=id,auth_user_id,display_name,email,role,status');
     var seen={};
     _emps=u.filter(function(x){if(x.role==='client'||seen[x.id]||(x.status&&x.status!=='active'))return false;seen[x.id]=true;return true;});
-    await loadLive();
   }
+  // Always refresh live status on tab open so dropdown dots are current
+  await loadLive();
   // Non-admin: auto-select self
   if(!isAdm()&&_emps.length&&!_sel){
     var me=window.CURRENT_USER;
