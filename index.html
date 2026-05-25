@@ -33723,7 +33723,8 @@ window.saveAdjModal = async function() {
               transfer_from:'Transferred out', transfer_to:'Transferred in',
               price_change:'Price updated', regauge:'Regauged',
               lpa_price:'Price updated',
-              bottling_deduction:'Bottling deduction'
+              bottling_deduction:'Bottling deduction',
+              measurement_variance:'Measurement variance'
             };
             var _defEgid = d.blend_event_group_id || null;
             html += sec('Liquid Operations History');
@@ -34822,6 +34823,18 @@ window.saveAdjModal = async function() {
         var inp = document.getElementById('lq-waste-reason');
         return inp ? inp.value.trim() : '';
       }
+      function getVarianceLitres() {
+        var inp = document.getElementById('lq-variance-litres');
+        return inp ? (parseFloat(inp.value) || 0) : 0;
+      }
+      function getVarianceReason() {
+        var inp = document.getElementById('lq-variance-reason');
+        return inp ? inp.value.trim() : '';
+      }
+      // Tolerance cap on |variance|: 1% of required, floored at 2 L. Tunable.
+      function getVarianceCap() {
+        return Math.max(2, reqLitres * 0.01);
+      }
 
       function updateBalance() {
         var totalDrawn = 0;
@@ -34832,16 +34845,36 @@ window.saveAdjModal = async function() {
           var drawnEl = document.getElementById('lq-drawn-' + idx);
           if (drawnEl) drawnEl.textContent = drawn.toFixed(1) + ' L';
         });
-        var waste    = getWasteLitres();
+        var waste     = getWasteLitres();
+        var variance  = getVarianceLitres();
+        var varCap    = getVarianceCap();
         // target = product required + any waste that must also come from containers.
+        // variance (signed) accounts for measurement inaccuracy in recorded container volumes:
+        //   positive = container actually held more than recorded
+        //   negative = container actually held less than recorded
         // When reqLitres is 0 (no BOM / no bottles entered) just require something was drawn.
-        var target   = reqLitres + waste;
-        var diff     = reqLitres > 0 ? Math.abs(totalDrawn - target) : 0;
-        var balanced = totalDrawn > 0 && (reqLitres === 0 || diff <= 0.5);
-        var wasteOk  = waste <= 0 || getWasteReason().length > 0;
+        var target       = reqLitres + waste;
+        var effective    = totalDrawn + variance;
+        var diff         = reqLitres > 0 ? Math.abs(effective - target) : 0;
+        var withinCap    = Math.abs(variance) <= varCap + 1e-6;
+        var balanced     = totalDrawn > 0 && (reqLitres === 0 || diff <= 0.5) && withinCap;
+        var wasteOk      = waste <= 0 || getWasteReason().length > 0;
+        var varianceUsed = Math.abs(variance) > 0.05;
+        var varianceOk   = !varianceUsed || getVarianceReason().length > 0;
 
         var wasteWrap = document.getElementById('lq-waste-reason-wrap');
         if (wasteWrap) wasteWrap.style.display = waste > 0 ? '' : 'none';
+
+        var varReasonWrap = document.getElementById('lq-variance-reason-wrap');
+        if (varReasonWrap) varReasonWrap.style.display = varianceUsed ? '' : 'none';
+
+        // Show autofill button only when there is a real (non-trivial) imbalance to close.
+        var autofillBtn = document.getElementById('lq-variance-autofill');
+        if (autofillBtn) {
+          var gap = target - totalDrawn;
+          autofillBtn.style.display = (reqLitres > 0 && Math.abs(gap) > 0.5) ? '' : 'none';
+          autofillBtn.dataset.suggest = gap.toFixed(1);
+        }
 
         var balEl = document.getElementById('lq-balance-display');
         if (balEl) {
@@ -34849,10 +34882,14 @@ window.saveAdjModal = async function() {
           var balanceLabel;
           if (reqLitres === 0) {
             balanceLabel = totalDrawn > 0 ? '&#10003; OK' : 'Enter drawn';
+          } else if (!withinCap) {
+            balanceLabel = 'Variance exceeds cap (&plusmn;' + varCap.toFixed(1) + ' L) &mdash; check container records';
           } else if (balanced) {
-            balanceLabel = '&#10003; OK';
+            balanceLabel = varianceUsed
+              ? '&#10003; OK (variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L applied)'
+              : '&#10003; OK';
           } else {
-            var short = target - totalDrawn;
+            var short = target - effective;
             if (short > 0.5 && waste > 0 && short <= waste + 0.5) {
               balanceLabel = 'Draw ' + short.toFixed(1) + ' L more from a container to cover waste';
             } else if (short > 0.5) {
@@ -34861,17 +34898,20 @@ window.saveAdjModal = async function() {
               balanceLabel = Math.abs(short).toFixed(1) + ' L over';
             }
           }
-          balEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">'
+          var varCol = varianceUsed ? 'var(--amber)' : 'var(--muted)';
+          var varTxt = varianceUsed ? (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L' : '0.0 L';
+          balEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">For Bottles</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—') + '</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Waste / Loss</div><div style="font-size:15px;font-weight:800;color:var(--amber);">' + waste.toFixed(1) + ' L</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Total Drawn</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + totalDrawn.toFixed(1) + ' L</div></div>'
-            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Balance</div><div style="font-size:13px;font-weight:800;color:' + col + ';">' + balanceLabel + '</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Variance</div><div style="font-size:15px;font-weight:800;color:' + varCol + ';">' + varTxt + '</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Balance</div><div style="font-size:12px;font-weight:800;color:' + col + ';">' + balanceLabel + '</div></div>'
             + '</div>';
         }
 
         var confirmBtn = document.getElementById('lq-dd-confirm');
         if (confirmBtn) {
-          var ok = balanced && wasteOk;
+          var ok = balanced && wasteOk && varianceOk;
           confirmBtn.disabled    = !ok;
           confirmBtn.style.opacity = ok ? '1' : '0.4';
           confirmBtn.style.cursor  = ok ? 'pointer' : 'not-allowed';
@@ -34930,6 +34970,23 @@ window.saveAdjModal = async function() {
         +   '</div>'
         + '</div>'
 
+        + '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
+        +   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px;flex-wrap:wrap;">'
+        +     '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">Measurement Variance (Optional)</div>'
+        +     '<button type="button" id="lq-variance-autofill" style="display:none;background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;padding:4px 10px;border-radius:3px;cursor:pointer;">Auto-fill from gap</button>'
+        +   '</div>'
+        +   '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">Use when a container\'s recorded litres differ from reality (e.g. IBC booked at 920.8 L actually held ~924 L). Positive = container held more than recorded; negative = held less.</div>'
+        +   '<div style="display:grid;grid-template-columns:160px 1fr;gap:12px;">'
+        +     '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Variance litres (&plusmn;)</label>'
+        +       '<input type="number" id="lq-variance-litres" step="0.1" value="0" oninput="window._lqUpdateBalance()" '
+        +       'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
+        +     '<div id="lq-variance-reason-wrap" style="display:none;">'
+        +       '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Reason <span style="color:var(--red);">*</span></label>'
+        +       '<input type="text" id="lq-variance-reason" placeholder="e.g. IBC measured higher than book value" oninput="window._lqUpdateBalance()" '
+        +       'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
+        +   '</div>'
+        + '</div>'
+
         + '<div id="lq-balance-display" style="margin-top:14px;padding:14px 16px;background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:5px;"></div>'
 
         + '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:22px;flex-wrap:wrap;">'
@@ -34953,6 +35010,19 @@ window.saveAdjModal = async function() {
       ov.querySelector('#lq-dd-close').onclick  = closeModal;
       ov.querySelector('#lq-dd-cancel').onclick = closeModal;
 
+      var autofillBtn = ov.querySelector('#lq-variance-autofill');
+      if (autofillBtn) {
+        autofillBtn.onclick = function() {
+          var inp = document.getElementById('lq-variance-litres');
+          if (!inp) return;
+          var suggest = parseFloat(autofillBtn.dataset.suggest || '0') || 0;
+          inp.value = suggest.toFixed(1);
+          updateBalance();
+          var reasonInp = document.getElementById('lq-variance-reason');
+          if (reasonInp) reasonInp.focus();
+        };
+      }
+
       ov.querySelector('#lq-dd-confirm').onclick = function() {
         var confirmBtn2 = ov.querySelector('#lq-dd-confirm');
         if (confirmBtn2 && confirmBtn2.disabled) return;
@@ -34962,7 +35032,8 @@ window.saveAdjModal = async function() {
             var drawn = Math.max(0, row.before - rem);
             return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv };
           }).filter(function(l){ return l.litreDrawn > 0.001 && alreadyDeductedIds.indexOf(l.containerId) < 0; }),
-          waste: { litres: getWasteLitres(), reason: getWasteReason() }
+          waste:    { litres: getWasteLitres(),    reason: getWasteReason() },
+          variance: { litres: getVarianceLitres(), reason: getVarianceReason() }
         };
         ov.remove();
         document.body.style.overflow = '';
@@ -35033,6 +35104,32 @@ window.saveAdjModal = async function() {
         'Warning: liquid deduction incomplete — failed for: ' + failures.join(', ') + '. Update these containers manually.',
         'error'
       );
+    }
+
+    // Audit-only: stock measurement variance (e.g. IBC actually held more than recorded).
+    // Container current_litres has already been set to operator-entered Remaining After above —
+    // the variance row is a separate, non-state-changing reconciliation record for traceability.
+    var varianceL = plan.variance ? parseFloat(plan.variance.litres || 0) : 0;
+    var varianceR = plan.variance ? (plan.variance.reason || '') : '';
+    if (Math.abs(varianceL) > 0.05 && plan.lines.length) {
+      var attrLine = plan.lines.reduce(function(a, b){ return b.litreDrawn > a.litreDrawn ? b : a; }, plan.lines[0]);
+      try {
+        await writeHistory({
+          container_id:      attrLine.containerId,
+          container_ref:     attrLine.reference,
+          event_type:        'measurement_variance',
+          event_group_id:    egid,
+          litres_changed:    varianceL,
+          abv_before:        parseFloat(attrLine.abv || 0),
+          notes:             (varianceL >= 0 ? '+' : '') + varianceL.toFixed(1)
+                              + 'L stock variance reconciled during bottling (job ' + jobId + '): '
+                              + varianceR,
+          performed_by_id:   pById,
+          performed_by_name: pByName
+        });
+      } catch(varErr) {
+        console.warn('Liquid variance history write failed (containers already updated):', varErr.message || varErr);
+      }
     }
   }
 
