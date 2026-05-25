@@ -7626,7 +7626,7 @@ window.copyInviteLink = function() {
       bank_account_name: gv('fl-bank-name'), bank_name: gv('fl-bank-bank'),
       iban: gv('fl-bank-iban'), bic_swift: gv('fl-bank-bic'),
       emergency_name_1: gv('fl-ec1-name'), emergency_relation_1: gv('fl-ec1-rel'), emergency_phone_1: gv('fl-ec1-phone'),
-      profile_complete: true, first_login_done: true,
+      first_login_done: true,
       reports_to: (window._INVITE_TOKEN && window._INVITE_TOKEN.reports_to_id) || null,
       updated_at: new Date().toISOString()
     };
@@ -7736,10 +7736,18 @@ window.copyInviteLink = function() {
           } catch(e) { /* auto-flip pass failed silently */ }
         }
 
-        // Fetch complete profiles so we can flag anyone with a pending setup
+        // Fetch HR profiles and derive completeness from actual data (not the
+        // profile_complete flag, which can be set before admin fills the
+        // Employment/Pay sections). Mirrors the rule used in saveHRTab.
         try {
-          var profileRows = await sbGet('hr_profiles?select=user_id,profile_complete');
-          _hrCompleteProfileIds = new Set(profileRows.filter(function(p){ return p.profile_complete; }).map(function(p){ return p.user_id; }));
+          var profileRows = await sbGet('hr_profiles?select=user_id,first_name,last_name,date_of_birth,email,mobile,pps_number,address_line1,job_title,employment_type,employment_start,salary_amount,salary_type,iban,bic_swift');
+          _hrCompleteProfileIds = new Set(profileRows.filter(function(p){
+            var personalDone   = p.first_name && p.last_name && p.date_of_birth && p.email && p.mobile && p.pps_number && p.address_line1;
+            var employmentDone = p.job_title && p.employment_type && p.employment_start;
+            var payDone        = p.salary_amount && p.salary_type;
+            var bankDone       = p.iban && p.bic_swift;
+            return personalDone && employmentDone && payDone && bankDone;
+          }).map(function(p){ return p.user_id; }));
         } catch(e) { _hrCompleteProfileIds = null; }
 
         _hrAllUsers      = active;
@@ -44037,8 +44045,10 @@ function lvRenderKPIs(){
   var empType=p.employment_type||null;
   var rawEntitlement=p.leave_entitlement!=null?parseFloat(p.leave_entitlement):null;
 
-  // Show awaiting message if manager hasn't set employment details yet
-  if(!empType || rawEntitlement===null){
+  // Show awaiting message if manager hasn't set employment details yet.
+  // employment_start is required: without it, accrual would silently default
+  // to Jan 1 and pro-rating would silently return full entitlement.
+  if(!empType || rawEntitlement===null || !p.employment_start){
     var eEl=document.getElementById('lv-kpi-ent');
     var uEl=document.getElementById('lv-kpi-used');
     var pEl=document.getElementById('lv-kpi-pend');
@@ -44064,9 +44074,12 @@ function lvRenderKPIs(){
   }
   var note=document.getElementById('lv-await-note'); if(note) note.remove();
 
-  // Pro-rate only if employee started DURING the current calendar year
+  // Pro-rate only if employee started DURING the current calendar year.
+  // If employment_start is missing we refuse to compute — returning the full
+  // entitlement here would silently mislead any caller that bypasses the
+  // guard above. Caller treats null as "cannot compute".
   function proRate(ent){
-    if(!p.employment_start) return ent;
+    if(!p.employment_start) return null;
     var yr=new Date().getFullYear();
     var joinDate=new Date(p.employment_start);
     if(joinDate.getFullYear() !== yr) return ent;
@@ -44081,6 +44094,23 @@ function lvRenderKPIs(){
 }
 
 function setKPIs(entitlement){
+  var eEl=document.getElementById('lv-kpi-ent');
+  var uEl=document.getElementById('lv-kpi-used');
+  var pEl=document.getElementById('lv-kpi-pend');
+  var rEl=document.getElementById('lv-kpi-rem');
+  var aEl=document.getElementById('lv-kpi-accrued');
+  if(!eEl){ setTimeout(function(){setKPIs(entitlement);},300); return; } // panel not visible yet, retry
+  // proRate returns null when employment_start is missing — refuse to display
+  // numbers we know to be wrong rather than silently treating them as Jan 1.
+  if(entitlement===null||entitlement===undefined){
+    var tip='Start Date not set in HR profile — cannot compute leave.';
+    eEl.textContent='—'; eEl.title=tip;
+    uEl.textContent='—'; uEl.title=tip;
+    pEl.textContent='—'; pEl.title=tip;
+    rEl.textContent='—'; rEl.title=tip;
+    if(aEl){ aEl.textContent='—'; aEl.title=tip; }
+    return;
+  }
   var used=0, pending=0;
   _lvRequests.forEach(function(r){
     if(r.status==='cancelled') return;
@@ -44090,30 +44120,27 @@ function setKPIs(entitlement){
     else if(r.status==='pending') pending+=days;
   });
   var rem=Math.max(0,entitlement-used-pending);
-  var eEl=document.getElementById('lv-kpi-ent');
-  var uEl=document.getElementById('lv-kpi-used');
-  var pEl=document.getElementById('lv-kpi-pend');
-  var rEl=document.getElementById('lv-kpi-rem');
-  if(!eEl){ setTimeout(function(){setKPIs(entitlement);},300); return; } // panel not visible yet, retry
-  eEl.textContent=entitlement;
-  uEl.textContent=used%1===0?used:used.toFixed(1);
-  pEl.textContent=pending%1===0?pending:pending.toFixed(1);
-  rEl.textContent=rem%1===0?rem:rem.toFixed(1);
-  var accrued=0;
-  if(_lvProfile){
+  eEl.textContent=entitlement; eEl.title='';
+  uEl.textContent=used%1===0?used:used.toFixed(1); uEl.title='';
+  pEl.textContent=pending%1===0?pending:pending.toFixed(1); pEl.title='';
+  rEl.textContent=rem%1===0?rem:rem.toFixed(1); rEl.title='';
+  var accrued=null;
+  if(_lvProfile && _lvProfile.employment_start){
     var aYr=new Date().getFullYear();
     var aToday=new Date(); aToday.setHours(0,0,0,0);
-    var aSoy=new Date(aYr,0,1);
     var aEoy=new Date(aYr,11,31);
-    var aAccrualStart=aSoy;
-    if(_lvProfile.employment_start){var asd=new Date(_lvProfile.employment_start);if(asd>aAccrualStart)aAccrualStart=asd;}
+    var aAccrualStart=new Date(aYr,0,1);
+    var asd=new Date(_lvProfile.employment_start);
+    if(asd>aAccrualStart) aAccrualStart=asd;
     var aElapsed=Math.max(0,(aToday-aAccrualStart)/864e5);
     // Period spans accrualStart → Dec 31; use entitlement proportional to that window
     var aPeriodDays=Math.max(1,(aEoy-aAccrualStart)/864e5);
     accrued=Math.round(entitlement*(aElapsed/aPeriodDays)*10)/10;
   }
-  var aEl=document.getElementById('lv-kpi-accrued');
-  if(aEl) aEl.textContent=accrued%1===0?accrued:accrued.toFixed(1);
+  if(aEl){
+    if(accrued===null){ aEl.textContent='—'; aEl.title='Start Date not set in HR profile — accrual cannot be computed.'; }
+    else { aEl.textContent=accrued%1===0?accrued:accrued.toFixed(1); aEl.title=''; }
+  }
 }
 
 /* ── Leave history ── */
@@ -44421,14 +44448,21 @@ window.mgmtLoadLeaveOverview = async function(){
       });
       var ent=parseFloat(p.leave_entitlement)||0;
       var rem=Math.max(0,ent-annUsed-annPend);
-      var mSoy=new Date(yr,0,1),mEoy=new Date(yr,11,31);
-      var mAs=mSoy;
-      if(p.employment_start){var msd=new Date(p.employment_start);if(msd>mAs)mAs=msd;}
-      var mToday=new Date();mToday.setHours(0,0,0,0);
-      var mPeriod=Math.max(1,(mEoy-mAs)/864e5);
-      var mEl=Math.min(mPeriod,Math.max(0,(mToday-mAs)/864e5));
-      var accrued=Math.round(ent*(mEl/mPeriod)*10)/10;
-      return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, annUsed:annUsed, annPend:annPend, rem:rem, accrued:accrued, catDays:catDays };
+      // Refuse to compute accrual when employment_start is missing — falling
+      // back to Jan 1 would show a plausible-but-wrong number for anyone who
+      // joined mid-year. null is rendered as "—" below with an explanatory tooltip.
+      var accrued=null;
+      if(p.employment_start){
+        var mEoy=new Date(yr,11,31);
+        var mAs=new Date(p.employment_start);
+        var mSoy=new Date(yr,0,1);
+        if(mAs<mSoy) mAs=mSoy;
+        var mToday=new Date();mToday.setHours(0,0,0,0);
+        var mPeriod=Math.max(1,(mEoy-mAs)/864e5);
+        var mEl=Math.min(mPeriod,Math.max(0,(mToday-mAs)/864e5));
+        accrued=Math.round(ent*(mEl/mPeriod)*10)/10;
+      }
+      return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, annUsed:annUsed, annPend:annPend, rem:rem, accrued:accrued, hasStart:!!p.employment_start, catDays:catDays };
     }).filter(Boolean);
     if(!rows.length){ el.innerHTML='<span style="color:var(--muted);">No leave entitlements configured yet.</span>'; return; }
     rows.sort(function(a,b){ return a.name.localeCompare(b.name); });
@@ -44461,7 +44495,7 @@ window.mgmtLoadLeaveOverview = async function(){
         +'<td style="text-align:center;padding:8px 6px;">'+fmt(r.annUsed)+'</td>'
         +'<td style="text-align:center;padding:8px 6px;color:var(--amber);">'+fmt(r.annPend)+'</td>'
         +'<td style="text-align:center;padding:8px 6px;font-weight:700;color:'+remColor(r.rem)+';">'+fmt(r.rem)+'</td>'
-        +'<td style="text-align:center;padding:8px 6px;color:var(--white);">'+fmt(r.accrued)+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;color:'+(r.hasStart?'var(--white)':'var(--amber)')+';" title="'+(r.hasStart?'':'Start Date not set in HR profile — accrual cannot be computed')+'">'+(r.hasStart?fmt(r.accrued):'\u2014')+'</td>'
         +visibleCats.map(function(c){ var d=r.catDays[c]||0; return '<td style="text-align:center;padding:8px 6px;color:'+(d>0?'var(--white)':'rgba(120,147,168,0.4)')+';">'+(d>0?fmt(d):'\u2014')+'</td>'; }).join('')
         +'</tr>';
     });
