@@ -45812,8 +45812,12 @@ function buildRecs(evts,uid){
         if(e.synthetic) r.synthetic=true;
       } else if(e.event_type==='break_start'){
         r.br.push({s:e,e:null});
-      } else if(e.event_type==='break_end'&&r.br.length){
-        r.br[r.br.length-1].e=e;
+      } else if(e.event_type==='break_end'){
+        // Attach to the most-recent open break_start. If there isn't one,
+        // surface the row as an orphan so a manager can see + delete it
+        // (previously these were silently dropped, hiding bad data).
+        if(r.br.length && !r.br[r.br.length-1].e) r.br[r.br.length-1].e=e;
+        else r.br.push({s:null,e:e,orphan:true});
       }
     });
   return days;
@@ -46076,11 +46080,19 @@ window.tsLoad=async function(){
         var row=document.createElement('div');
         row.style.cssText='display:flex;align-items:center;justify-content:center;gap:3px;'+(bi?'margin-top:3px;':'');
         var lbl=rec.br.length>1?'<span style="font-size:9px;color:var(--muted);margin-right:2px;">Br'+(bi+1)+'</span>':'';
-        if(br.e){
+        if(br.orphan){
+          // Orphan break_end with no matching break_start — show it so a
+          // manager can see + delete the broken row instead of having it
+          // silently disappear from the UI.
+          row.innerHTML=lbl
+            +'<span style="font-size:9px;font-weight:700;letter-spacing:0.04em;color:var(--amber);background:rgba(232,156,58,0.12);border:1px solid rgba(232,156,58,0.35);padding:2px 6px;border-radius:9px;" title="A break_end with no matching break_start. Delete it or pair it up via the day pencil.">ORPHAN END '+ft(br.e.timestamp)+'</span>';
+          if(canEd){var mo=mkbtns(br.e.id,d2,'break_end',bi);if(mo)row.appendChild(mo);}
+        } else if(br.e){
           row.innerHTML=lbl
             +'<span style="font-size:11px;color:var(--amber);">'+ft(br.s.timestamp)+'</span>'
             +'<span style="font-size:10px;color:var(--muted);">\u2013</span>'
             +'<span style="font-size:11px;color:var(--amber);">'+ft(br.e.timestamp)+'</span>';
+          if(canEd){var m=mkbtns(br.s.id,d2,'break_start',bi);if(m)row.appendChild(m);}
         } else {
           // Open break — show start time plus an inline "+ end" button so a
           // manager can close it directly without hunting for the day pencil.
@@ -46097,8 +46109,8 @@ window.tsLoad=async function(){
           } else {
             row.innerHTML+='<span style="font-size:9px;color:var(--amber);font-style:italic;"> \u2026</span>';
           }
+          if(canEd){var m2=mkbtns(br.s.id,d2,'break_start',bi);if(m2)row.appendChild(m2);}
         }
-        if(canEd){var m=mkbtns(br.s.id,d2,'break_start',bi);if(m)row.appendChild(m);}
         tdBr.appendChild(row);
       });
     } else {
@@ -46219,26 +46231,30 @@ function dayModal(d2){
       if(!date){window.toast&&window.toast('Date required','error');return;}
       if(!ci&&!co&&!b1s&&!b1e&&!b2s&&!b2e){window.toast&&window.toast('At least one time is required','error');return;}
       if(!rec){
-        // Fresh insert. Clock-in is optional (manager may be adding a
-        // forgotten clock-out, or closing a pre-existing open break by
-        // filling only b1e/b2e — the break_end naturally attaches to the
-        // most-recent unclosed break_start at buildRecs time).
+        // Fresh insert. Block creation of NEW orphan break_end rows — they
+        // become invisible in buildRecs after later edits and corrupt
+        // worked-hours math. Existing orphans (from past bugs) are still
+        // surfaced & repairable via the update-existing branch below.
+        if(!b1s&&b1e){window.toast&&window.toast('Cannot add a Break 1 end without a Break 1 start','error');return;}
+        if(!b2s&&b2e){window.toast&&window.toast('Cannot add a Break 2 end without a Break 2 start','error');return;}
         var rows=[];
         if(ci)rows.push({user_id:uid,event_type:'clock_in',timestamp:dubWallToIso(date,ci)});
         if(co)rows.push({user_id:uid,event_type:'clock_out',timestamp:dubWallToIso(date,co)});
         if(b1s)rows.push({user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,b1s)});
         if(b1s&&b1e)rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b1e)});
-        else if(b1e) rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b1e)});
         if(b2s)rows.push({user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,b2s)});
         if(b2s&&b2e)rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b2e)});
-        else if(b2e) rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b2e)});
         if(rows.length) await post('clock_events',rows);
       } else {
-        // update existing
-        if(rec.ci)await patch('clock_events?id=eq.'+rec.ci.id,{timestamp:dubWallToIso(date,ci)});
-        if(rec.co&&co)await patch('clock_events?id=eq.'+rec.co.id,{timestamp:dubWallToIso(date,co)});
-        else if(!rec.co&&co)await post('clock_events',[{user_id:uid,event_type:'clock_out',timestamp:dubWallToIso(date,co)}]);
-        else if(rec.co&&!co)await del('clock_events?id=eq.'+rec.co.id);
+        // update existing — explicit add/delete/edit per field so clearing
+        // a value deletes the row (instead of PATCHing it to 00:00 via the
+        // dubWallToIso empty-time fallback).
+        if(rec.ci && ci)        await patch('clock_events?id=eq.'+rec.ci.id,{timestamp:dubWallToIso(date,ci)});
+        else if(rec.ci && !ci)  await del('clock_events?id=eq.'+rec.ci.id);
+        else if(!rec.ci && ci)  await post('clock_events',[{user_id:uid,event_type:'clock_in',timestamp:dubWallToIso(date,ci)}]);
+        if(rec.co && co)        await patch('clock_events?id=eq.'+rec.co.id,{timestamp:dubWallToIso(date,co)});
+        else if(rec.co && !co)  await del('clock_events?id=eq.'+rec.co.id);
+        else if(!rec.co && co)  await post('clock_events',[{user_id:uid,event_type:'clock_out',timestamp:dubWallToIso(date,co)}]);
         await doBreak(uid,date,rec.br[0]||null,b1s,b1e);
         await doBreak(uid,date,rec.br[1]||null,b2s,b2e);
       }
