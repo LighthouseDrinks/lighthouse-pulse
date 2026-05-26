@@ -45671,6 +45671,36 @@ window.loadRoster=loadRoster;
 // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
 var _wo=0,_emps=[],_built=false,_sel=null,_selAuth=null,_selName='',_selRole='',_evts=[],_live={};
 
+// Resolve clock_events.edited_by (auth.users.id) to an app_users display_name.
+// _emps is loaded by buildEmps() and indexed by auth_user_id; this map is
+// rebuilt whenever _emps changes (lazily). Returns null when the editor is
+// unknown — caller decides how to render that.
+var _editorMap=null;
+function editorName(authUid){
+  if(!authUid)return null;
+  if(!_editorMap){
+    _editorMap={};
+    _emps.forEach(function(e){if(e&&e.auth_user_id)_editorMap[e.auth_user_id]=e.display_name||'Unknown';});
+  }
+  return _editorMap[authUid]||null;
+}
+// Pick the most recent edited_by / edited_at across every event in a rec
+// (ci, co, both break starts and ends — including the orphan synthesis path).
+// Returns {by, at} or null if no event in the day was ever edited.
+function recLatestEdit(rec){
+  if(!rec)return null;
+  var pool=[];
+  if(rec.ci)pool.push(rec.ci);
+  if(rec.co)pool.push(rec.co);
+  (rec.br||[]).forEach(function(b){if(b.s)pool.push(b.s);if(b.e)pool.push(b.e);});
+  var best=null;
+  pool.forEach(function(e){
+    if(!e||!e.edited_at)return;
+    if(!best||e.edited_at>best.edited_at)best={by:e.edited_by,at:e.edited_at};
+  });
+  return best;
+}
+
 function get(p)    { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
 function post(p,b) { return window.db.insert(p, b); }
 function patch(p,b){ var i=p.indexOf('?'); return window.db.update(i>=0?p.slice(0,i):p, i>=0?p.slice(i):'', b); }
@@ -46093,7 +46123,16 @@ window.tsLoad=async function(){
     /* Total cell */
     var tdTot=document.createElement('td');
     tdTot.style.cssText='padding:10px 16px;text-align:right;';
-    tdTot.innerHTML=wk>0?'<span style="font-size:12px;font-weight:700;color:var(--white);">'+fm(wk)+'</span>':'<span style="color:rgba(255,255,255,0.12);">\u2014</span>';
+    var totHtml=wk>0?'<span style="font-size:12px;font-weight:700;color:var(--white);">'+fm(wk)+'</span>':'<span style="color:rgba(255,255,255,0.12);">\u2014</span>';
+    // Show a small "edited" badge whenever any event for the day carries
+    // edited_at — so a manager glancing at a row can see it was hand-modified.
+    var ed=recLatestEdit(rec);
+    if(ed){
+      var who=editorName(ed.by);
+      var tip='Edited '+new Date(ed.at).toLocaleString('en-IE',{timeZone:TZ})+(who?' by '+who:'');
+      totHtml+='<div title="'+window.escapeHtml(tip)+'" style="font-size:9px;color:var(--muted);margin-top:3px;letter-spacing:0.04em;">\u270e edited'+(who?' \u00b7 '+window.escapeHtml(who):'')+'</div>';
+    }
+    tdTot.innerHTML=totHtml;
     tr.appendChild(tdTot);
 
     tbody.appendChild(tr);
@@ -46379,6 +46418,7 @@ window.loadTimesheet=async function(){
     var u=await get('app_users?order=display_name.asc&select=id,auth_user_id,display_name,email,role,status');
     var seen={};
     _emps=u.filter(function(x){if(x.role==='client'||seen[x.id]||(x.status&&x.status!=='active'))return false;seen[x.id]=true;return true;});
+    _editorMap=null; // rebuild on next editorName() call
   }
   // Always refresh live status on tab open so dropdown dots are current
   await loadLive();
