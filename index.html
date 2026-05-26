@@ -43994,9 +43994,7 @@ window.deriveClockState = function(events, opts) {
   var _hClockSince   = null;
   var _hPending      = null;   // 'clock_in' | 'break_start' | 'break_end' | 'clock_out' | null
   var _hBusy         = false;
-  var _hAnomalies    = 0;
   var _hStuck        = false;  // open session > 14h or from an earlier Dublin day
-  var _hOpenSession  = null;
   var _hTicker       = null;
   var _hMenuCleanup  = null;
 
@@ -44018,8 +44016,6 @@ window.deriveClockState = function(events, opts) {
       _hClockState   = derived.state;
       _hClockSince   = derived.since;
       _hStuck        = !!derived.stuck;
-      _hOpenSession  = derived.openSession || null;
-      _hAnomalies    = derived.anomalies ? derived.anomalies.length : 0;
       renderAll();
     } catch(e) { console.warn('Header clock state error:', e); }
   }
@@ -44039,58 +44035,8 @@ window.deriveClockState = function(events, opts) {
     } catch(_) { return ''; }
   }
 
-  /* ── Apply colours/labels to BOTH surfaces from the shared state ─────────── */
-  function renderAll() { renderHeaderBtn(); syncQlClockTile(); }
-
-  function colourFor(state, stuck) {
-    // A stuck open session (started yesterday or > 14h ago) always paints amber
-    // so the user/manager spot it. Live clocked_in / on_break use their normal colours.
-    if (stuck && (state === 'clocked_in' || state === 'on_break')) {
-      return { border: 'var(--amber)', text: 'var(--amber)', bg: 'rgba(232,156,58,0.10)' };
-    }
-    if (state === 'clocked_in')  return { border: 'var(--green)',  text: 'var(--green)',  bg: 'rgba(74,199,120,0.10)' };
-    if (state === 'on_break')    return { border: 'var(--amber)',  text: 'var(--amber)',  bg: 'rgba(232,156,58,0.10)' };
-    return                              { border: 'var(--muted)',  text: 'var(--muted)',  bg: 'rgba(255,255,255,0.06)' };
-  }
-
-  function renderHeaderBtn() {
-    var btn = document.getElementById('header-clock-btn');
-    if (!btn) return;
-    btn.style.transition = 'border-color .15s, color .15s, background-color .15s';
-    btn.style.touchAction = 'manipulation';
-
-    if (_hPending) {
-      btn.style.borderColor = 'var(--gold-dim)';
-      btn.style.color = 'var(--gold)';
-      btn.style.background = 'rgba(201,168,76,0.08)';
-      btn.style.pointerEvents = 'none';
-      btn.disabled = true;
-      btn.innerHTML = '<span class="hdrclk-spin">\u29D7</span> Checking\u2026';
-      btn.setAttribute('aria-label', 'Clock action in progress, please wait');
-      return;
-    }
-    btn.style.pointerEvents = '';
-    btn.disabled = false;
-
-    var c = colourFor(_hClockState, _hStuck);
-    btn.style.borderColor = c.border;
-    btn.style.color = c.text;
-    btn.style.background = '';
-
-    var stuckTag = _hStuck ? ' <span style="font-size:9px;font-weight:700;opacity:0.85;">(stuck)</span>' : '';
-
-    if (_hClockState === 'clocked_in') {
-      var sinceTxt = fmtSince(_hClockSince);
-      btn.innerHTML = '&#9654; In ' + (sinceTxt||'') + (_hClockSince ? ' &middot; ' + fmtDur(_hClockSince) : '') + stuckTag + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
-      btn.setAttribute('aria-label', (_hStuck ? 'Still clocked in from an earlier shift since ' : 'Clocked in since ') + (sinceTxt || 'unknown') + '. Tap to start break or clock out.');
-    } else if (_hClockState === 'on_break') {
-      btn.innerHTML = '&#9646; Break &middot; ' + fmtDur(_hClockSince) + stuckTag + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
-      btn.setAttribute('aria-label', (_hStuck ? 'Still on break from an earlier shift for ' : 'On break for ') + fmtDur(_hClockSince) + '. Tap to end break or clock out.');
-    } else {
-      btn.innerHTML = '&#9654; Clock In';
-      btn.setAttribute('aria-label', 'Clock in');
-    }
-  }
+  /* ── Apply colours/labels from the shared state to the dashboard tile ────── */
+  function renderAll() { syncQlClockTile(); }
 
   function syncQlClockTile() {
     var tile  = document.getElementById('ql-clock-in');
@@ -44154,11 +44100,9 @@ window.deriveClockState = function(events, opts) {
     var ex = document.getElementById('_clock-menu');
     if (ex) { dismissClockMenu(); return; }
 
-    var hdr  = document.getElementById('header-clock-btn');
     var tile = document.getElementById('ql-clock-in');
-    var anchor = (hdr && hdr.offsetParent) ? hdr : (tile && tile.offsetParent ? tile : null);
-    if (!anchor) return;
-    var rect = anchor.getBoundingClientRect();
+    if (!tile || !tile.offsetParent) return;
+    var rect = tile.getBoundingClientRect();
     var menu = document.createElement('div');
     menu.id = '_clock-menu';
     menu.style.cssText = 'position:fixed;z-index:1100;background:#0e1e2e;border:1px solid rgba(201,168,76,0.25);border-radius:6px;box-shadow:0 8px 32px rgba(0,0,0,0.6);min-width:180px;overflow:hidden;';
@@ -44192,7 +44136,7 @@ window.deriveClockState = function(events, opts) {
 
     document.body.appendChild(menu);
 
-    // Position: prefer below the anchor, fall back to above if it would clip.
+    // Position: prefer below the tile, fall back to above if it would clip.
     var menuRect = menu.getBoundingClientRect();
     var menuH = menuRect.height || (nextValid.length * 48);
     var menuW = menuRect.width  || 200;
@@ -44206,7 +44150,7 @@ window.deriveClockState = function(events, opts) {
     // Dismiss on outside click, scroll, resize, orientation change, or escape.
     setTimeout(function(){
       function outside(e){
-        if(!menu.contains(e.target) && e.target !== hdr && e.target !== tile){ dismissClockMenu(); }
+        if(!menu.contains(e.target) && e.target !== tile){ dismissClockMenu(); }
       }
       function dismissOnAny(){ dismissClockMenu(); }
       function esc(e){ if (e.key === 'Escape') dismissClockMenu(); }
@@ -46120,8 +46064,7 @@ window.tsLoad=async function(){
     var tdOut=document.createElement('td');
     tdOut.style.cssText='padding:10px 12px;text-align:center;white-space:nowrap;';
     if(rec&&rec.co){
-      var synthTag = rec.co.synthetic ? ' <span title="Auto-closed at end of day. Edit if the time is wrong." style="background:rgba(160,160,160,0.18);color:var(--muted);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:5px;letter-spacing:0.04em;">AUTO</span>' : '';
-      tdOut.innerHTML='<span style="font-size:12px;font-weight:600;color:var(--muted);">'+ft(rec.co.timestamp)+'</span>'+synthTag;
+      tdOut.innerHTML='<span style="font-size:12px;font-weight:600;color:var(--muted);">'+ft(rec.co.timestamp)+'</span>';
       if(canEd){var m=mkbtns(rec.co.id,d2,'clock_out');if(m)tdOut.appendChild(m);}
     } else if(rec&&rec.ci){
       /* Still in — show amber status + clock out shortcut for admins */
