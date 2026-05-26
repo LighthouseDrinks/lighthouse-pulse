@@ -13392,6 +13392,7 @@ window.loadBoms = async function initBoms() {
             <option value="1.35">Loch Flint 70cl (€1.35)</option>
             <option value="1.53">Loch Flint 100cl (€1.53)</option>
             <option value="0.67">Element Bottle Valiant 70cl (€0.67)</option>
+            <option value="0.85">Tennessee Eco Bottle Flint 70cl (€0.85)</option>
           </select>
           <div class="price-tag" id="bottle-price">—</div>
         </div>
@@ -24879,6 +24880,10 @@ window.loadLiquidProducts = async function() {
     // Check for containers needing retag
     var containers = await window.db.select('liquid_containers', '?archived=is.false&order=reference.asc&limit=5000').catch(function(){ return []; });
     var clients = await window.db.select('clients', '?order=name.asc&limit=500').catch(function(){ return []; });
+    // Expose for the Add/Edit modal and the table client-name column — both
+    // were previously hitting empty `window.CLIENTS`/`window._clients` caches
+    // when the user landed straight on the Inventory page.
+    window._lpClientsCache = clients;
     var activeNames = new Set(rows.filter(function(r){ return r.is_active !== false; }).map(function(r){ return r.name; }));
     var unmatched = containers.filter(function(c){ return c.spirit_type && !activeNames.has(c.spirit_type); });
     var retagWrap = document.getElementById('lp-retag-wrap');
@@ -24916,9 +24921,11 @@ function renderLiquidProducts(rows) {
     return;
   }
   var canEdit = window.canDo && window.canDo('liquid_products_edit');
-  // Build a clientId -> name map from the warm CLIENTS cache (fallback empty)
+  // Build a clientId -> name map. Prefer the cache populated by
+  // loadLiquidProducts (always fresh from the DB) and fall back to the
+  // warm CLIENTS globals only if it's not yet available.
   var clientMap = {};
-  (window.CLIENTS || window._clients || []).forEach(function(c){
+  (window._lpClientsCache || window.CLIENTS || window._clients || []).forEach(function(c){
     if (!c) return;
     clientMap[c.id] = c.company || c.name || c.id;
   });
@@ -24957,7 +24964,7 @@ function renderLiquidProducts(rows) {
   tbody.innerHTML = html;
 }
 
-window.openLPModal = function(editId) {
+window.openLPModal = async function(editId) {
   var modal = document.getElementById('lp-modal');
   var title = document.getElementById('lp-modal-title');
   var nameIn = document.getElementById('lp-name');
@@ -24970,9 +24977,27 @@ window.openLPModal = function(editId) {
   var oldNameIn = document.getElementById('lp-old-name');
   if (oldNameIn) oldNameIn.value = '';
 
-  // Populate client dropdown from warm cache (alphabetical, Lighthouse pinned first)
+  // Show modal immediately so it feels responsive; the client list fills in
+  // on the next tick if a live DB fetch is needed.
+  modal.style.display = 'flex';
+  setTimeout(function(){ nameIn.focus(); }, 80);
+
+  // Populate client dropdown. Try caches first, then fall back to a live DB
+  // fetch — `window.CLIENTS`/`window._clients` can race-end up empty when the
+  // user lands straight on the Inventory page, which previously left the
+  // select with only "Shared / Lighthouse".
   if (clientSel) {
-    var clients = (window.CLIENTS || window._clients || []).slice().filter(function(c) {
+    var source = (window._lpClientsCache && window._lpClientsCache.length) ? window._lpClientsCache
+               : (window.CLIENTS         && window.CLIENTS.length)         ? window.CLIENTS
+               : (window._clients        && window._clients.length)        ? window._clients
+               : null;
+    if (!source) {
+      try {
+        source = await window.db.select('clients', '?select=id,name,lifecycle_stage&order=name.asc&limit=1000');
+        if (source) window._lpClientsCache = source;
+      } catch(_) { source = []; }
+    }
+    var clients = (source || []).slice().filter(function(c) {
       if (!c) return false;
       var s = c.lifecycle_stage || 'client';
       return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
@@ -24998,8 +25023,6 @@ window.openLPModal = function(editId) {
       if (clientSel) clientSel.value = existing.client_id || '';
     }
   }
-  modal.style.display = 'flex';
-  setTimeout(function(){ nameIn.focus(); }, 80);
 };
 
 window.closeLPModal = function() {
