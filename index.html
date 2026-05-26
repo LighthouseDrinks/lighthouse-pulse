@@ -46266,11 +46266,19 @@ async function doBreak(uid,date,br,ns,ne){
     return;
   }
   if(!ns)return;
-  if(br){
-    if(br.s)await patch('clock_events?id=eq.'+br.s.id,{timestamp:dubWallToIso(date,ns)});
+  if(br && br.s){
+    // Normal paired or open break — edit in place.
+    await patch('clock_events?id=eq.'+br.s.id,{timestamp:dubWallToIso(date,ns)});
     if(br.e&&ne)await patch('clock_events?id=eq.'+br.e.id,{timestamp:dubWallToIso(date,ne)});
     else if(!br.e&&ne)await post('clock_events',[{user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,ne)}]);
     else if(br.e&&!ne)await del('clock_events?id=eq.'+br.e.id);
+  } else if(br && br.e){
+    // Orphan: a stray break_end with no matching break_start. The manager has
+    // typed in a start time to "adopt" it. Insert the new break_start; if a
+    // new end-time was also typed, patch the orphan to that. Otherwise
+    // leave the orphan in place and let buildRecs pair them up on reload.
+    await post('clock_events',[{user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,ns)}]);
+    if(ne) await patch('clock_events?id=eq.'+br.e.id,{timestamp:dubWallToIso(date,ne)});
   } else {
     var rows=[{user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,ns)}];
     if(ne)rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,ne)});
@@ -46382,13 +46390,43 @@ function tsModal(opts){
     +'<button id="_tsmOK" style="padding:7px 16px;background:'+(opts.danger?'var(--red)':'var(--gold)')+';border:none;border-radius:4px;color:'+(opts.danger?'#fff':'#0d1b2a')+';cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">'+opts.ok+'</button>'
     +'</div>';
   ov.appendChild(box);document.body.appendChild(ov);
-  document.getElementById('_tsmX').onclick=function(){ov.remove();};
-  document.getElementById('_tsmOK').onclick=function(){
-    var p=opts.cb();
-    if(p&&p.then)p.then(function(){ov.remove();}).catch(function(e){window.toast&&window.toast('Error: '+e.message,'error');ov.remove();});
-    else ov.remove();
+  var btnX=document.getElementById('_tsmX');
+  var btnOK=document.getElementById('_tsmOK');
+  var origOkLabel=btnOK.textContent;
+  var busy=false;
+  btnX.onclick=function(){if(busy)return;ov.remove();};
+  // Busy-lock the Save button: prevents a fast double-click / double-tap
+  // from firing the callback twice. Without this, a second click within
+  // ~5s lands an identical INSERT that the dedupe trigger rejects — the
+  // first save already succeeded but the user sees the rejection toast
+  // and assumes nothing worked, leading to retry loops.
+  btnOK.onclick=function(){
+    if(busy)return;
+    var p;
+    try{ p=opts.cb(); }catch(syncErr){
+      window.toast&&window.toast('Error: '+(syncErr&&syncErr.message||syncErr),'error');
+      ov.remove(); return;
+    }
+    if(p&&p.then){
+      busy=true;
+      btnOK.disabled=true;btnX.disabled=true;
+      btnOK.style.opacity='0.6';btnOK.style.cursor='wait';
+      btnOK.textContent='Saving\u2026';
+      p.then(function(){ov.remove();})
+       .catch(function(e){
+         window.toast&&window.toast('Error: '+(e&&e.message||e),'error');
+         // Keep the modal open so the manager can fix + retry; release the
+         // lock and restore the button.
+         busy=false;
+         btnOK.disabled=false;btnX.disabled=false;
+         btnOK.style.opacity='';btnOK.style.cursor='pointer';
+         btnOK.textContent=origOkLabel;
+       });
+    } else {
+      ov.remove();
+    }
   };
-  ov.onclick=function(e){if(e.target===ov)ov.remove();};
+  ov.onclick=function(e){if(e.target===ov && !busy)ov.remove();};
 }
 
 /* ── Live status ── */
