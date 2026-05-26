@@ -46067,7 +46067,11 @@ window.tsLoad=async function(){
             +'<span style="font-size:11px;color:var(--amber);">'+ft(br.s.timestamp)+'</span>'
             +'<span style="font-size:10px;color:var(--muted);">\u2013</span>'
             +'<span style="font-size:11px;color:var(--amber);">'+ft(br.e.timestamp)+'</span>';
-          if(canEd){var m=mkbtns(br.s.id,d2,'break_start',bi);if(m)row.appendChild(m);}
+          if(canEd){
+            var pairedEdit=(function(date,idx){return function(){window.tsEditBreak(date,idx);};})(d2,bi);
+            var m=mkbtns(br.s.id,d2,'break_start',bi,pairedEdit);
+            if(m)row.appendChild(m);
+          }
         } else {
           // Open break — show start time plus an inline "+ end" button so a
           // manager can close it directly without hunting for the day pencil.
@@ -46148,14 +46152,14 @@ window.tsLoad=async function(){
 };
 
 
-function mkbtns(id,dateStr,evType,brIdx){
+function mkbtns(id,dateStr,evType,brIdx,customEdit){
   if(!canEditTs()) return null;
   var span=document.createElement('span');
   span.style.cssText='display:inline-flex;gap:1px;vertical-align:middle;margin-left:3px;';
   var eBtn=document.createElement('button');
   eBtn.textContent='✎';eBtn.title='Edit';
   eBtn.style.cssText='background:rgba(255,255,255,0.07);border:none;border-radius:3px;cursor:pointer;color:var(--muted);font-size:10px;padding:2px 4px;';
-  eBtn.onclick=function(){window.tsEditEvt(id,dateStr);};
+  eBtn.onclick=customEdit||function(){window.tsEditEvt(id,dateStr);};
   var dBtn=document.createElement('button');
   dBtn.textContent='×';dBtn.title='Delete';
   dBtn.style.cssText='background:rgba(255,255,255,0.07);border:none;border-radius:3px;cursor:pointer;color:var(--muted);font-size:10px;padding:2px 4px;';
@@ -46339,6 +46343,50 @@ window.tsEditEvt=function(id,dateStr){
     cb:async function(){
       var v=document.getElementById('ts-t').value;if(!v)return;
       await patch('clock_events?id=eq.'+id,{timestamp:dubWallToIso(dateStr,v)});
+      window.toast&&window.toast('Saved','success');window.tsLoad();
+    }
+  });
+};
+
+// Paired-break edit: opens a two-time-input modal showing both the
+// break_start and break_end for the chosen break index on the given
+// date. Validates ordering before saving. Used by the breaks-cell
+// pencil when the break has both a start and an end — previously the
+// pencil routed through tsEditEvt which only allowed editing the
+// start time.
+window.tsEditBreak=function(dateStr,brIdx){
+  var uid=_selAuth||_sel;
+  var recs=buildRecs(_evts,uid);
+  var rec=recs[dateStr];
+  if(!rec||!rec.br[brIdx]||!rec.br[brIdx].s||!rec.br[brIdx].e){
+    // Shouldn't happen — the pencil is only wired for paired breaks.
+    // Fall back to the single-field editor on the start if we can.
+    if(rec&&rec.br[brIdx]&&rec.br[brIdx].s)return window.tsEditEvt(rec.br[brIdx].s.id,dateStr);
+    window.toast&&window.toast('Break not found','error');return;
+  }
+  var br=rec.br[brIdx];
+  var sv=tv(br.s), ev=tv(br.e);
+  var lbl=rec.br.length>1?' '+(brIdx+1):'';
+  tsModal({
+    title:'Edit break'+lbl,
+    body:'<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">Break'+lbl+' on '+dateStr+'</div>'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">'
+      +'<div><label style="font-size:10px;color:rgba(232,156,58,0.8);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:5px;">Start</label>'
+      +'<input type="time" id="ts-bs" value="'+sv+'" style="width:100%;padding:9px 12px;background:var(--navy-dark);border:1px solid rgba(232,156,58,0.3);border-radius:4px;color:var(--white);font-size:14px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;"></div>'
+      +'<div><label style="font-size:10px;color:rgba(232,156,58,0.8);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:5px;">End</label>'
+      +'<input type="time" id="ts-be" value="'+ev+'" style="width:100%;padding:9px 12px;background:var(--navy-dark);border:1px solid rgba(232,156,58,0.3);border-radius:4px;color:var(--white);font-size:14px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;"></div>'
+      +'</div>',
+    ok:'Save',
+    cb:async function(){
+      var ns=document.getElementById('ts-bs').value;
+      var ne=document.getElementById('ts-be').value;
+      if(!ns||!ne){window.toast&&window.toast('Both start and end are required','error');throw new Error('Missing time');}
+      if(ne<=ns){window.toast&&window.toast('Break end must be after break start','error');throw new Error('Invalid order');}
+      var patches=[];
+      if(ns!==sv) patches.push(patch('clock_events?id=eq.'+br.s.id,{timestamp:dubWallToIso(dateStr,ns)}));
+      if(ne!==ev) patches.push(patch('clock_events?id=eq.'+br.e.id,{timestamp:dubWallToIso(dateStr,ne)}));
+      if(!patches.length){window.toast&&window.toast('No changes','info');return;}
+      await Promise.all(patches);
       window.toast&&window.toast('Saved','success');window.tsLoad();
     }
   });
