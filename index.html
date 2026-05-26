@@ -44275,28 +44275,20 @@ window.deriveClockState = function(events, opts) {
        the UI keeps working in environments where the migration hasn't been
        applied yet. The RPC enforces transition rules and 5s dedupe. ───────── */
   async function insertClockEvent(eventType, withinFence) {
-    // Try RPC first
-    try {
-      var row = await window.db.rpc('clock_event_insert', {
-        p_event_type: eventType,
-        p_within_geofence: !!withinFence
-      });
-      // RPC may return an object or array
-      if (Array.isArray(row)) row = row[0];
-      if (row && row.timestamp) return row;
-    } catch(rpcErr) {
-      // Fall through to raw insert on RPC errors that are NOT validation errors.
-      // Validation errors should propagate; we detect by message contains 'CLOCK_'.
-      var msg = (rpcErr && rpcErr.message) || '';
-      if (/CLOCK_/i.test(msg)) throw rpcErr;
-      if (window.DEBUG) console.warn('clock_event_insert RPC unavailable, falling back to direct insert:', msg);
-    }
-    var rows = await window.db.insert('clock_events', {
-      user_id: window.CURRENT_USER.id,
-      event_type: eventType,
-      within_geofence: !!withinFence
+    // The RPC is the only authoritative insert path — it validates the state
+    // transition against unbounded event history and uses server now() for
+    // the timestamp. The previous silent fallback to a direct PostgREST insert
+    // when the RPC threw any non-CLOCK_ error (e.g. network glitch, RPC
+    // momentarily missing) would bypass that validation and let invalid
+    // sequences land in the DB. Now we let the error propagate; the caller's
+    // catch block translates known codes to friendly toasts and re-syncs
+    // state from the DB.
+    var row = await window.db.rpc('clock_event_insert', {
+      p_event_type: eventType,
+      p_within_geofence: !!withinFence
     });
-    return Array.isArray(rows) ? rows[0] : rows;
+    if (Array.isArray(row)) row = row[0];
+    return row;
   }
 
   async function fireClockEvent(eventType) {
