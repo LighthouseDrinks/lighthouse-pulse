@@ -248,9 +248,10 @@ Tabs: Roster, Clock In/Out, HR Profiles, Leave
 Clock event types: clock_in, clock_out, break_start, break_end
 Clock events are written via the clock_event_insert RPC which validates
 transitions server-side and rejects same-type events within 5s of each
-other. Events with synthetic=true were auto-closed by the nightly
-clock-autoclose Edge Function (forgotten shifts older than 12h). Admins
-can edit these via the timesheet; they show with an "AUTO" pill.
+other. Forgotten clock_outs are NEVER auto-closed — the dashboard shows
+the user a "still clocked in" banner and the user can clock out themselves
+or a manager can edit the timesheet (Settings > Timesheet, requires
+timesheet_edit permission).
 HR sub-tabs: personal, employment, pay, bank, emergency, docs
 Employment types: full_time, part_time, contractor
 Salary types: hourly, monthly, annual

@@ -37541,6 +37541,7 @@ window.saveAdjModal = async function() {
       return;
     }
     try {
+      // Dublin midnight today, expressed as an ISO timestamp.
       var _dubP = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Dublin',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
       var _dub = {};_dubP.forEach(function(x){if(x.type!=='literal')_dub[x.type]=x.value;});
       var _dubFromMs = Date.UTC(+_dub.year, +_dub.month-1, +_dub.day, 0, 0, 0);
@@ -37548,30 +37549,55 @@ window.saveAdjModal = async function() {
       var _o={};_dubFmt.forEach(function(x){if(x.type!=='literal')_o[x.type]=parseInt(x.value,10);});
       if(_o.hour===24)_o.hour=0;
       var _dubOff = Math.round((Date.UTC(_o.year,_o.month-1,_o.day,_o.hour,_o.minute,_o.second) - _dubFromMs)/60000);
-      var _dubFromIso = new Date(_dubFromMs - _dubOff*60000).toISOString();
-      // Pull a wider window (last 24h) so an overnight shift started before
-      // Dublin-midnight is still captured by the reducer.
-      var _lookback = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-      var _sinceIso = _lookback < _dubFromIso ? _lookback : _dubFromIso;
-      var rows = await supaGet('clock_events?user_id=eq.' + uid + '&timestamp=gte.' + _sinceIso + '&order=timestamp.asc');
-      if (!rows || !rows.length) {
+      var _dubMidnightIso = new Date(_dubFromMs - _dubOff*60000).toISOString();
+
+      // Session-aware window: query the last 48h once, run the reducer to see
+      // if there's an open session, and if so anchor the display to that
+      // session's start (so a shift that started yesterday isn't cropped into
+      // a list of "orphan" events). Otherwise anchor to Dublin midnight today.
+      var _wideSinceIso = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+      var allRows = await supaGet('clock_events?user_id=eq.' + uid + '&timestamp=gte.' + _wideSinceIso + '&order=timestamp.asc&limit=200');
+      if (!Array.isArray(allRows)) allRows = [];
+
+      var probe = window.deriveClockState(allRows, { stuckHours: 14 });
+      var startIso = (probe.openSession && probe.openSession.start && probe.openSession.start.timestamp) || _dubMidnightIso;
+      var rows = allRows.filter(function(r){ return r.timestamp >= startIso; });
+
+      if (!rows.length) {
         el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px 0;">You haven\'t clocked in today.</div>';
         return;
       }
 
-      var derived = window.deriveClockState(rows, { staleHoursForActive: 16 });
-      var TYPE_LABEL = { clock_in: 'Clocked in', clock_out: 'Clocked out', break_start: 'Break started', break_end: 'Break ended' };
+      var derived = window.deriveClockState(rows, { stuckHours: 14 });
+      var TYPE_LABEL  = { clock_in: 'Clocked in', clock_out: 'Clocked out', break_start: 'Break started', break_end: 'Break ended' };
       var TYPE_COLOUR = { clock_in: 'var(--green)', clock_out: 'var(--muted)', break_start: 'var(--amber)', break_end: '#5fbcd9' };
 
       function fmt(ts) { return new Date(ts).toLocaleTimeString('en-IE', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Dublin' }); }
+      function fmtDayShort(ts) {
+        try { return new Date(ts).toLocaleDateString('en-IE', { weekday:'short', day:'numeric', month:'short', timeZone:'Europe/Dublin' }); }
+        catch(_) { return ''; }
+      }
       function fmtMs(ms) { if (!ms || ms <= 0) return '0m'; var h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000); return h > 0 ? h+'h '+m+'m' : m+'m'; }
 
       var workMs  = derived.workMs;
       var breakMs = derived.breakMs;
       var netWorkMs = Math.max(0, workMs - breakMs);
 
-      var statusColour = derived.state === 'clocked_in' ? 'var(--green)' : derived.state === 'on_break' ? 'var(--amber)' : 'var(--muted)';
-      var statusLabel  = derived.state === 'clocked_in' ? '\u25CF Clocked in' : derived.state === 'on_break' ? '\u25CF On break' : '\u25CB Clocked out';
+      var stuck = !!derived.stuck;
+      var statusColour, statusLabel;
+      if (stuck && (derived.state === 'clocked_in' || derived.state === 'on_break')) {
+        statusColour = 'var(--amber)';
+        statusLabel  = derived.state === 'on_break' ? '\u26A0 Still on break' : '\u26A0 Still clocked in';
+      } else if (derived.state === 'clocked_in') {
+        statusColour = 'var(--green)';
+        statusLabel  = '\u25CF Clocked in';
+      } else if (derived.state === 'on_break') {
+        statusColour = 'var(--amber)';
+        statusLabel  = '\u25CF On break';
+      } else {
+        statusColour = 'var(--muted)';
+        statusLabel  = '\u25CB Clocked out';
+      }
 
       var html = '<div style="display:flex;gap:20px;margin-bottom:14px;flex-wrap:wrap;">'
         + '<div><div style="font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:3px;">Status</div>'
@@ -37584,45 +37610,25 @@ window.saveAdjModal = async function() {
       }
       html += '</div>';
 
-      // Banner if any anomalies (duplicate taps, orphans, etc.)
-      var anomalies = derived.anomalies || [];
-      if (anomalies.length) {
-        html += '<div style="background:rgba(232,156,58,0.10);border:1px solid rgba(232,156,58,0.30);border-radius:5px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:var(--amber);">'
-          + '<strong>\u26A0 ' + anomalies.length + ' duplicate or orphaned event' + (anomalies.length === 1 ? '' : 's') + ' detected.</strong> '
-          + 'Time totals above ignore these. Ask an admin to review your timesheet if the totals look wrong.'
+      // One clear banner when the session is stuck. No more "DUPLICATE / ORPHAN"
+      // pills cluttering the row — anomalies still exist in the reducer for
+      // managers/dev, but the user just sees an actionable prompt.
+      if (stuck && derived.openSession) {
+        var stuckTs = derived.openSession.start.timestamp;
+        html += '<div style="background:rgba(232,156,58,0.10);border:1px solid rgba(232,156,58,0.30);border-radius:5px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--amber);">'
+          + '<strong>\u26A0 You\'re still clocked in from ' + fmtDayShort(stuckTs) + ' at ' + fmt(stuckTs) + '.</strong><br>'
+          + '<span style="color:var(--white);font-weight:400;">If you forgot to clock out, tap Clock Out on the header button above — or ask a manager to fix your timesheet.</span>'
           + '</div>';
       }
 
-      // Dedupe consecutive same-type events for display: collapse {a, a} into
-      // {a, dup-count=1}. Anomaly ids let us mark each row.
-      var anomalyIdSet = {};
-      anomalies.forEach(function(a){ if (a && a.event && a.event.id) anomalyIdSet[a.event.id] = a.kind; });
-
-      var collapsed = [];
-      rows.forEach(function(r){
-        var last = collapsed[collapsed.length - 1];
-        if (last && last.event_type === r.event_type) {
-          last._dupCount = (last._dupCount || 0) + 1;
-          last._dupLastTs = r.timestamp;
-        } else {
-          collapsed.push(Object.assign({}, r));
-        }
-      });
-
+      // Plain event timeline. No collapse, no scary tags — one row per event.
       html += '<div style="border-top:1px solid var(--navy-border);padding-top:10px;">';
-      collapsed.forEach(function(r) {
+      rows.forEach(function(r) {
         var col = TYPE_COLOUR[r.event_type] || 'var(--muted)';
         var lbl = TYPE_LABEL[r.event_type]  || r.event_type;
-        var dupTag = '';
-        if (r._dupCount) {
-          dupTag = ' <span style="background:rgba(232,156,58,0.18);color:var(--amber);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:6px;letter-spacing:0.04em;">DUPLICATE \u00D7' + (r._dupCount + 1) + '</span>';
-        } else if (anomalyIdSet[r.id]) {
-          dupTag = ' <span style="background:rgba(232,156,58,0.18);color:var(--amber);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:6px;letter-spacing:0.04em;">' + (anomalyIdSet[r.id].toUpperCase().replace(/_/g,' ')) + '</span>';
-        }
-        var syntheticTag = r.synthetic ? ' <span style="background:rgba(160,160,160,0.18);color:var(--muted);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:6px;letter-spacing:0.04em;" title="Auto-closed at end of day">AUTO-CLOSED</span>' : '';
         html += '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid rgba(36,61,87,0.4);">'
           + '<span style="width:8px;height:8px;border-radius:50%;background:' + col + ';flex-shrink:0;"></span>'
-          + '<span style="font-size:11px;color:var(--white);font-weight:600;">' + lbl + dupTag + syntheticTag + '</span>'
+          + '<span style="font-size:11px;color:var(--white);font-weight:600;">' + lbl + '</span>'
           + '<span style="font-size:11px;color:var(--muted);margin-left:auto;">' + fmt(r.timestamp) + '</span>'
           + '</div>';
       });
@@ -43849,18 +43855,22 @@ window.saveAdjModal = async function() {
 <script>
 /* Shared reducer — single source of truth for every clock surface.
    Inputs:  events (array; will be sorted ascending) and opts
-              { staleHoursForActive: 16 } - any "open" event older than this
-              is treated as forgotten and the user is shown clocked_out.
+              { stuckHours: 14 } - an open session older than this is flagged
+              `stuck: true` for UI prompts, but state still truthfully reflects
+              the DB (no force-close — manager intervention only).
    Output:  { state, since, workMs, breakMs, sessions, anomalies,
-              nextValidEvents }
+              nextValidEvents, stuck, openSession }
    - state ∈ 'clocked_in' | 'on_break' | 'clocked_out'
    - since: ISO timestamp of the event that started the current state, or null
    - workMs / breakMs: net work and break time (sum across all sessions)
    - sessions: [{ start, end, breaks, durationMs, crossesMidnight }]
    - anomalies: [{ event, kind }]; kinds = duplicate_clock_in,
-       duplicate_break_start, duplicate_clock_out, duplicate_break_end,
-       orphan_break_end, orphan_clock_out
+       duplicate_break_start, orphan_break_start, orphan_break_end,
+       orphan_clock_out
    - nextValidEvents: which event types are valid right now (for menus)
+   - stuck: true if the current open session started > stuckHours ago OR on
+       an earlier Dublin calendar day. Informational only.
+   - openSession: the current unclosed session ref, or null
 
    Time-zone notes:
      All arithmetic is on UTC ms diffs (Date.getTime()), so overnight shifts
@@ -43868,7 +43878,9 @@ window.saveAdjModal = async function() {
 */
 window.deriveClockState = function(events, opts) {
   opts = opts || {};
-  var STALE_MS = (opts.staleHoursForActive || 16) * 3600 * 1000;
+  // "stuck" is informational only: a session that started > STUCK_HOURS ago
+  // OR on an earlier Dublin calendar day. Never force-closes the session.
+  var STUCK_HOURS_MS = (opts.stuckHours || 14) * 3600 * 1000;
   var list = (events || []).slice().sort(function(a, b){
     return new Date(a.timestamp) - new Date(b.timestamp);
   });
@@ -43882,21 +43894,14 @@ window.deriveClockState = function(events, opts) {
   var openBreakStart = null;
 
   function pushAnomaly(ev, kind) { anomalies.push({ event: ev, kind: kind }); }
-  function endOpenBreakIfAny(atIso) {
-    if (openBreakStart && openSession) {
-      var dur = new Date(atIso) - new Date(openBreakStart.timestamp);
-      if (dur > 0) breakMs += dur;
-      openSession.breaks.push({ s: openBreakStart, e: { timestamp: atIso, synthetic: true } });
-      openBreakStart = null;
-    }
-  }
 
   list.forEach(function(e){
     var t = e.event_type;
     if (t === 'clock_in') {
       if (openSession) {
-        // Duplicate clock_in (no clock_out between). Keep first session open;
-        // mark this as an anomaly. Do not start a new session.
+        // Duplicate clock_in (no clock_out between). Original session stays
+        // open as source of truth; this event is anomalous data only a
+        // manager can resolve.
         pushAnomaly(e, 'duplicate_clock_in');
         return;
       }
@@ -43922,9 +43927,13 @@ window.deriveClockState = function(events, opts) {
       state = 'clocked_in';
     } else if (t === 'clock_out') {
       if (!openSession) { pushAnomaly(e, 'orphan_clock_out'); return; }
-      endOpenBreakIfAny(e.timestamp);
+      if (openBreakStart) {
+        var dur = new Date(e.timestamp) - new Date(openBreakStart.timestamp);
+        if (dur > 0) breakMs += dur;
+        openSession.breaks.push({ s: openBreakStart, e: { timestamp: e.timestamp, synthetic_close: true } });
+        openBreakStart = null;
+      }
       var wDur = new Date(e.timestamp) - new Date(openSession.start.timestamp);
-      // breakMs already accounted for; subtract from gross to compute work
       openSession.end = e;
       openSession.durationMs = wDur;
       openSession.crossesMidnight = (function(){
@@ -43942,22 +43951,27 @@ window.deriveClockState = function(events, opts) {
     }
   });
 
-  // If still open at the end of the event list, count up to now and surface
+  // Open session at end of list: accrue elapsed time to *now*, never force-close.
+  // A "stuck" shift is flagged so the UI can prompt the user / manager, but the
+  // reducer's state still truthfully reflects the DB (clocked_in / on_break).
+  var stuck = false;
   if (openSession) {
     var now = Date.now();
     var startMs = new Date(openSession.start.timestamp).getTime();
-    if (now - startMs > STALE_MS) {
-      // Forgotten shift — treat as clocked_out for UI purposes, but flag it.
-      pushAnomaly(openSession.start, 'stale_open_session');
-      state = 'clocked_out'; sinceTs = null;
+    if (openBreakStart) {
+      var bDurNow = now - new Date(openBreakStart.timestamp).getTime();
+      if (bDurNow > 0) breakMs += bDurNow;
+    }
+    workMs += now - startMs;
+    if (now - startMs > STUCK_HOURS_MS) {
+      stuck = true;
     } else {
-      // Live session — accrue work to now (less any open break)
-      if (openBreakStart) {
-        var bDurNow = now - new Date(openBreakStart.timestamp).getTime();
-        if (bDurNow > 0) breakMs += bDurNow;
-      }
-      workMs += now - startMs;
-      // The reducer still reports state/since from the last event we processed
+      try {
+        var dubFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Dublin', year: 'numeric', month: '2-digit', day: '2-digit' });
+        if (dubFmt.format(new Date(openSession.start.timestamp)) !== dubFmt.format(new Date(now))) {
+          stuck = true;
+        }
+      } catch(_) {}
     }
   }
 
@@ -43973,7 +43987,9 @@ window.deriveClockState = function(events, opts) {
     breakMs: Math.max(0, breakMs),
     sessions: sessions,
     anomalies: anomalies,
-    nextValidEvents: nextValidEvents
+    nextValidEvents: nextValidEvents,
+    stuck: stuck,
+    openSession: openSession
   };
 };
 </script>
@@ -43983,13 +43999,15 @@ window.deriveClockState = function(events, opts) {
   'use strict';
 
   // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
-  var _hClockState = 'clocked_out';
-  var _hClockSince = null;
-  var _hPending    = null;   // 'clock_in' | 'break_start' | 'break_end' | 'clock_out' | null
-  var _hBusy       = false;
-  var _hAnomalies  = 0;
-  var _hTicker     = null;
-  var _hMenuCleanup = null;
+  var _hClockState   = 'clocked_out';
+  var _hClockSince   = null;
+  var _hPending      = null;   // 'clock_in' | 'break_start' | 'break_end' | 'clock_out' | null
+  var _hBusy         = false;
+  var _hAnomalies    = 0;
+  var _hStuck        = false;  // open session > 14h or from an earlier Dublin day
+  var _hOpenSession  = null;
+  var _hTicker       = null;
+  var _hMenuCleanup  = null;
 
   async function loadHeaderClockState() {
     if (!window.CURRENT_USER) return;
@@ -44004,10 +44022,12 @@ window.deriveClockState = function(events, opts) {
         + '&timestamp=gte.' + encodeURIComponent(sinceIso)
         + '&order=timestamp.asc&limit=200');
       if (!Array.isArray(rows)) rows = [];
-      var derived = window.deriveClockState(rows, { staleHoursForActive: 16 });
-      _hClockState = derived.state;
-      _hClockSince = derived.since;
-      _hAnomalies  = derived.anomalies ? derived.anomalies.length : 0;
+      var derived = window.deriveClockState(rows, { stuckHours: 14 });
+      _hClockState   = derived.state;
+      _hClockSince   = derived.since;
+      _hStuck        = !!derived.stuck;
+      _hOpenSession  = derived.openSession || null;
+      _hAnomalies    = derived.anomalies ? derived.anomalies.length : 0;
       renderAll();
     } catch(e) { console.warn('Header clock state error:', e); }
   }
@@ -44030,7 +44050,12 @@ window.deriveClockState = function(events, opts) {
   /* ── Apply colours/labels to BOTH surfaces from the shared state ─────────── */
   function renderAll() { renderHeaderBtn(); syncQlClockTile(); }
 
-  function colourFor(state) {
+  function colourFor(state, stuck) {
+    // A stuck open session (started yesterday or > 14h ago) always paints amber
+    // so the user/manager spot it. Live clocked_in / on_break use their normal colours.
+    if (stuck && (state === 'clocked_in' || state === 'on_break')) {
+      return { border: 'var(--amber)', text: 'var(--amber)', bg: 'rgba(232,156,58,0.10)' };
+    }
     if (state === 'clocked_in')  return { border: 'var(--green)',  text: 'var(--green)',  bg: 'rgba(74,199,120,0.10)' };
     if (state === 'on_break')    return { border: 'var(--amber)',  text: 'var(--amber)',  bg: 'rgba(232,156,58,0.10)' };
     return                              { border: 'var(--muted)',  text: 'var(--muted)',  bg: 'rgba(255,255,255,0.06)' };
@@ -44055,18 +44080,20 @@ window.deriveClockState = function(events, opts) {
     btn.style.pointerEvents = '';
     btn.disabled = false;
 
-    var c = colourFor(_hClockState);
+    var c = colourFor(_hClockState, _hStuck);
     btn.style.borderColor = c.border;
     btn.style.color = c.text;
     btn.style.background = '';
 
+    var stuckTag = _hStuck ? ' <span style="font-size:9px;font-weight:700;opacity:0.85;">(stuck)</span>' : '';
+
     if (_hClockState === 'clocked_in') {
       var sinceTxt = fmtSince(_hClockSince);
-      btn.innerHTML = '&#9654; In ' + (sinceTxt||'') + (_hClockSince ? ' &middot; ' + fmtDur(_hClockSince) : '') + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
-      btn.setAttribute('aria-label', 'Clocked in since ' + (sinceTxt || 'unknown') + '. Tap to start break or clock out.');
+      btn.innerHTML = '&#9654; In ' + (sinceTxt||'') + (_hClockSince ? ' &middot; ' + fmtDur(_hClockSince) : '') + stuckTag + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
+      btn.setAttribute('aria-label', (_hStuck ? 'Still clocked in from an earlier shift since ' : 'Clocked in since ') + (sinceTxt || 'unknown') + '. Tap to start break or clock out.');
     } else if (_hClockState === 'on_break') {
-      btn.innerHTML = '&#9646; Break &middot; ' + fmtDur(_hClockSince) + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
-      btn.setAttribute('aria-label', 'On break for ' + fmtDur(_hClockSince) + '. Tap to end break or clock out.');
+      btn.innerHTML = '&#9646; Break &middot; ' + fmtDur(_hClockSince) + stuckTag + ' <span style="opacity:0.5;font-size:9px;">\u25bc</span>';
+      btn.setAttribute('aria-label', (_hStuck ? 'Still on break from an earlier shift for ' : 'On break for ') + fmtDur(_hClockSince) + '. Tap to end break or clock out.');
     } else {
       btn.innerHTML = '&#9654; Clock In';
       btn.setAttribute('aria-label', 'Clock in');
@@ -44098,19 +44125,21 @@ window.deriveClockState = function(events, opts) {
 
     if (_hClockState === 'clocked_in') {
       var sinceTxt = fmtSince(_hClockSince);
-      tile.style.borderTopColor = 'var(--green)';
+      var clrTop = _hStuck ? 'var(--amber,#e89c3a)' : 'var(--green)';
+      var clrTxt = _hStuck ? 'var(--amber,#e89c3a)' : 'var(--green)';
+      tile.style.borderTopColor = clrTop;
       tile.style.borderColor    = 'var(--navy-border)';
-      if (icon)  icon.textContent  = '\u2705';
-      if (label) { label.textContent = 'Clocked In' + (sinceTxt ? ' \u00b7 ' + sinceTxt : ''); label.style.color = 'var(--green)'; }
-      if (sub)   sub.textContent   = fmtDur(_hClockSince) + ' \u2014 tap to clock out';
-      tile.setAttribute('aria-label', 'Clocked in since ' + (sinceTxt || 'unknown') + '. Tap to start break or clock out.');
+      if (icon)  icon.textContent  = _hStuck ? '\u26A0' : '\u2705';
+      if (label) { label.textContent = (_hStuck ? 'Still clocked in' : 'Clocked In') + (sinceTxt ? ' \u00b7 ' + sinceTxt : ''); label.style.color = clrTxt; }
+      if (sub)   sub.textContent   = (_hStuck ? 'Since earlier shift — tap to clock out' : (fmtDur(_hClockSince) + ' \u2014 tap to clock out'));
+      tile.setAttribute('aria-label', (_hStuck ? 'Still clocked in from an earlier shift since ' : 'Clocked in since ') + (sinceTxt || 'unknown') + '. Tap to start break or clock out.');
     } else if (_hClockState === 'on_break') {
       tile.style.borderTopColor = 'var(--amber,#e89c3a)';
       tile.style.borderColor    = 'var(--navy-border)';
       if (icon)  icon.textContent  = '\u2615';
-      if (label) { label.textContent = 'On Break'; label.style.color = 'var(--amber,#e89c3a)'; }
-      if (sub)   sub.textContent   = fmtDur(_hClockSince) + ' \u2014 tap to end break';
-      tile.setAttribute('aria-label', 'On break for ' + fmtDur(_hClockSince) + '. Tap to end break or clock out.');
+      if (label) { label.textContent = (_hStuck ? 'Still on Break' : 'On Break'); label.style.color = 'var(--amber,#e89c3a)'; }
+      if (sub)   sub.textContent   = (_hStuck ? 'Since earlier shift — tap to end break' : (fmtDur(_hClockSince) + ' \u2014 tap to end break'));
+      tile.setAttribute('aria-label', (_hStuck ? 'Still on break from an earlier shift for ' : 'On break for ') + fmtDur(_hClockSince) + '. Tap to end break or clock out.');
     } else {
       tile.style.borderTopColor = 'var(--green)';
       tile.style.borderColor    = 'var(--navy-border)';
@@ -44335,15 +44364,19 @@ window.deriveClockState = function(events, opts) {
       // On failure (incl. server-side validation) re-pin state from DB so the
       // UI never shows a wrong optimistic value.
       var em = (err && err.message) || 'Unknown error';
-      // Pretty-print the trigger / RPC error codes for the user
-      em = em.replace(/^DB \d+:\s*/, '')
-             .replace(/CLOCK_(\w+)/g, function(_, k){
-                if (k === 'INVALID_TRANSITION') return 'Action not valid from current state';
-                if (k === 'DEDUPE')             return 'Duplicate tap detected — please wait a moment';
-                if (k === 'NOT_AUTHENTICATED')  return 'Not signed in';
-                return k;
-             });
-      window.toast && window.toast('Error: ' + em, 'error');
+      // Translate RPC/trigger error codes into actionable user-facing text.
+      // The RPC raises CLOCK_STILL_CLOCKED_IN / STILL_ON_BREAK / NOT_CLOCKED_IN /
+      // NOT_ON_BREAK / DEDUPE / NOT_AUTHENTICATED / INVALID_TRANSITION.
+      var translated = em
+        .replace(/^DB \d+:\s*/, '')
+        .replace(/.*CLOCK_STILL_CLOCKED_IN.*/, "You're already clocked in. Tap Clock Out first, or ask a manager.")
+        .replace(/.*CLOCK_STILL_ON_BREAK.*/,   "You're on a break. End the break before clocking in or out again.")
+        .replace(/.*CLOCK_NOT_CLOCKED_IN.*/,   "You're not clocked in yet.")
+        .replace(/.*CLOCK_NOT_ON_BREAK.*/,     "You're not on a break.")
+        .replace(/.*CLOCK_DEDUPE.*/,           "Duplicate tap detected — please wait a moment.")
+        .replace(/.*CLOCK_NOT_AUTHENTICATED.*/, "Not signed in.")
+        .replace(/.*CLOCK_INVALID_TRANSITION.*/, "That action isn't valid right now.");
+      window.toast && window.toast('Error: ' + translated, 'error');
       try { await loadHeaderClockState(); } catch(_){}
     } finally {
       _hPending = null;
@@ -45975,7 +46008,7 @@ window.tsLoad=async function(){
     +'<div style="text-align:center;"><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Days</div><div style="font-size:14px;font-weight:700;color:var(--white);">'+totDays+'</div></div>'
     +'<div style="text-align:center;"><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">Hours</div><div style="font-size:14px;font-weight:700;color:var(--gold);">'+(totMs>0?fm(totMs):'\u2014')+'</div></div>'
     +'</div>'
-    +(canEd?'<button onclick="window.tsAddEntry()" class="btn btn-gold" style="font-size:11px;padding:6px 14px;">+ Add Break</button>':'');
+    +(canEd?'<button onclick="window.tsAddEntry()" class="btn btn-gold" style="font-size:11px;padding:6px 14px;" title="Add a clock in, clock out or break for any day">+ Add entry</button>':'');
   det.appendChild(tb);
 
   /* Table */
@@ -46003,13 +46036,25 @@ window.tsLoad=async function(){
     tdDay.style.cssText='padding:10px 16px;white-space:nowrap;';
     tdDay.innerHTML='<span style="font-size:12px;font-weight:700;color:'+(isToday?'var(--gold)':isWknd?'rgba(255,255,255,0.25)':'var(--white)')+';">'+DN[di]+'</span>'
       +' <span style="font-size:11px;color:var(--muted);">'+parseInt(dubParts(day).day,10)+'</span>';
-    if(canEd&&rec&&rec.ci){
+    // Always-on day-edit pencil for admins on any day that already has at
+    // least one event (rec exists), so days with stray events (orphan break,
+    // stray clock_out) are still reachable through the modal.
+    if(canEd&&rec){
       var editBtn=document.createElement('button');
       editBtn.textContent='\u270e';
       editBtn.title='Edit day';
       editBtn.style.cssText='background:rgba(255,255,255,0.06);border:none;border-radius:3px;cursor:pointer;color:var(--muted);font-size:10px;padding:2px 5px;margin-left:4px;';
       editBtn.onclick=(function(date){return function(){window.tsEditDay(date);};})(d2);
       tdDay.appendChild(editBtn);
+    }
+    // Subtle "No clock-in" pill on days that have events but no clock_in,
+    // so a saved break isn't invisible-looking when the Hours column is blank.
+    if(canEd&&rec&&!rec.ci){
+      var pill=document.createElement('span');
+      pill.style.cssText='background:rgba(232,156,58,0.18);color:var(--amber);font-size:9px;font-weight:700;padding:2px 6px;border-radius:9px;margin-left:5px;letter-spacing:0.04em;';
+      pill.title='This day has events but no clock-in. Click the pencil to add one.';
+      pill.textContent='NO CLOCK-IN';
+      tdDay.appendChild(pill);
     }
     tr.appendChild(tdDay);
 
@@ -46039,9 +46084,28 @@ window.tsLoad=async function(){
         var row=document.createElement('div');
         row.style.cssText='display:flex;align-items:center;justify-content:center;gap:3px;'+(bi?'margin-top:3px;':'');
         var lbl=rec.br.length>1?'<span style="font-size:9px;color:var(--muted);margin-right:2px;">Br'+(bi+1)+'</span>':'';
-        row.innerHTML=lbl
-          +'<span style="font-size:11px;color:var(--amber);">'+ft(br.s.timestamp)+'</span>'
-          +(br.e?'<span style="font-size:10px;color:var(--muted);">\u2013</span><span style="font-size:11px;color:var(--amber);">'+ft(br.e.timestamp)+'</span>':'<span style="font-size:9px;color:var(--amber);font-style:italic;"> \u2026</span>');
+        if(br.e){
+          row.innerHTML=lbl
+            +'<span style="font-size:11px;color:var(--amber);">'+ft(br.s.timestamp)+'</span>'
+            +'<span style="font-size:10px;color:var(--muted);">\u2013</span>'
+            +'<span style="font-size:11px;color:var(--amber);">'+ft(br.e.timestamp)+'</span>';
+        } else {
+          // Open break — show start time plus an inline "+ end" button so a
+          // manager can close it directly without hunting for the day pencil.
+          row.innerHTML=lbl
+            +'<span style="font-size:11px;color:var(--amber);">'+ft(br.s.timestamp)+'</span>'
+            +'<span style="font-size:10px;color:var(--muted);">\u2013</span>';
+          if(canEd){
+            var endBtn=document.createElement('button');
+            endBtn.textContent='+ end';
+            endBtn.title='End this break';
+            endBtn.style.cssText='background:rgba(95,188,217,0.12);border:1px solid rgba(95,188,217,0.35);border-radius:3px;cursor:pointer;color:#5fbcd9;font-size:10px;padding:2px 7px;font-family:Lato,sans-serif;';
+            endBtn.onclick=(function(id,date){return function(){window.tsQuickEndBreak(id,date);};})(br.s.id,d2);
+            row.appendChild(endBtn);
+          } else {
+            row.innerHTML+='<span style="font-size:9px;color:var(--amber);font-style:italic;"> \u2026</span>';
+          }
+        }
         if(canEd){var m=mkbtns(br.s.id,d2,'break_start',bi);if(m)row.appendChild(m);}
         tdBr.appendChild(row);
       });
@@ -46161,17 +46225,22 @@ function dayModal(d2){
       var b2s=document.getElementById('ts-b2s').value;
       var b2e=document.getElementById('ts-b2e').value;
       if(!date){window.toast&&window.toast('Date required','error');return;}
-      if(!ci&&!co&&!b1s&&!b2s){window.toast&&window.toast('At least one time is required','error');return;}
+      if(!ci&&!co&&!b1s&&!b1e&&!b2s&&!b2e){window.toast&&window.toast('At least one time is required','error');return;}
       if(!rec){
-        // fresh insert - clock-in optional (e.g. adding forgotten clock-out to existing day)
+        // Fresh insert. Clock-in is optional (manager may be adding a
+        // forgotten clock-out, or closing a pre-existing open break by
+        // filling only b1e/b2e — the break_end naturally attaches to the
+        // most-recent unclosed break_start at buildRecs time).
         var rows=[];
         if(ci)rows.push({user_id:uid,event_type:'clock_in',timestamp:dubWallToIso(date,ci)});
         if(co)rows.push({user_id:uid,event_type:'clock_out',timestamp:dubWallToIso(date,co)});
         if(b1s)rows.push({user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,b1s)});
         if(b1s&&b1e)rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b1e)});
+        else if(b1e) rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b1e)});
         if(b2s)rows.push({user_id:uid,event_type:'break_start',timestamp:dubWallToIso(date,b2s)});
         if(b2s&&b2e)rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b2e)});
-        await post('clock_events',rows);
+        else if(b2e) rows.push({user_id:uid,event_type:'break_end',timestamp:dubWallToIso(date,b2e)});
+        if(rows.length) await post('clock_events',rows);
       } else {
         // update existing
         if(rec.ci)await patch('clock_events?id=eq.'+rec.ci.id,{timestamp:dubWallToIso(date,ci)});
@@ -46207,6 +46276,26 @@ async function doBreak(uid,date,br,ns,ne){
 }
 
 window.tsAddEntry=function(){dayModal(null);};
+
+window.tsQuickEndBreak=function(brStartId,dateStr){
+  var ev=_evts.find(function(e){return e.id===brStartId;});
+  if(!ev){window.toast&&window.toast('Break not found','error');return;}
+  var startTxt=ft(ev.timestamp);
+  tsModal({
+    title:'End break \u2014 '+_selName,
+    body:'<div style="margin-bottom:4px;font-size:11px;color:var(--muted);">'+dateStr+' \u00b7 break started '+startTxt+'</div>'
+      +'<input type="time" id="ts-be" style="width:100%;padding:9px 12px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:4px;color:#5fbcd9;font-size:16px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">',
+    ok:'Save',
+    cb:async function(){
+      var v=document.getElementById('ts-be').value;
+      if(!v){window.toast&&window.toast('Please enter a time','error');return;}
+      var uid=_selAuth||_sel;
+      await post('clock_events',[{user_id:uid,event_type:'break_end',timestamp:dubWallToIso(dateStr,v)}]);
+      window.toast&&window.toast('Break ended \u2713','success');
+      window.tsLoad();
+    }
+  });
+};
 
 window.tsQuickAdd=function(dateStr,evType){
   var label=evType==='clock_in'?'Clock In':'Clock Out';
