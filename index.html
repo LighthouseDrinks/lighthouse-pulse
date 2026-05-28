@@ -3308,11 +3308,8 @@ window.deletePortalContact = async function(id, name) {
 // ── Storage helpers ────────────────────────────────────────────────────────────
 window._portalUploadFile = async function(file, bucket, subpath) {
   if (!file) throw new Error('No file');
-  var waited = 0;
-  while (!window._sb && waited < 3000) { await new Promise(function(r){setTimeout(r,200);}); waited+=200; }
-  var sess = window._sb && await window._sb.auth.getSession();
-  var token = sess && sess.data && sess.data.session && sess.data.session.access_token;
-  if (!token) throw new Error('Not authenticated');
+  var token = await window._freshAccessToken();
+  if (!token) { window._handleSessionExpired(); throw new Error('Your session has expired — please sign in again.'); }
   var SUPA = SUPA_URL;
   var apiKey = SUPA_KEY;
   var ext  = (file.name && file.name.split('.').pop() || 'bin').toLowerCase();
@@ -12409,11 +12406,8 @@ window.saveGIApproval = async function(bomId) {
   // Upload PDF to Supabase Storage if a file was selected
   if (file) {
     try {
-      var waited = 0;
-      while (!window._sb && waited < 3000) { await new Promise(function(r){setTimeout(r,200);}); waited+=200; }
-      var sess = window._sb && await window._sb.auth.getSession();
-      var token = sess && sess.data && sess.data.session && sess.data.session.access_token;
-      if (!token) throw new Error('Not authenticated');
+      var token = await window._freshAccessToken();
+      if (!token) { window._handleSessionExpired(); throw new Error('Your session has expired — please sign in again.'); }
       var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co';
       var apiKey   = (typeof SUPA_KEY !== 'undefined') ? SUPA_KEY : '';
       var path = 'bom-gi-docs/' + bomId + '-gi-approval.pdf';
@@ -12473,14 +12467,41 @@ window.BOMS          = BOMS;
 // Uploads any image file to the `label-photos` bucket and returns a public URL.
 // Works for both BOM master photos (subdir='bom') and job verification photos
 // (subdir='job/<jobId>'). Camera-capture and file-picker both land here.
+// ── Resilient auth helpers (shared by all storage uploads) ──────────────────
+// getSession() can return no token if the user's JWT lapsed (e.g. tab
+// backgrounded, auto-refresh missed). Reads silently fall back to the anon key,
+// hiding this — but storage uploads need a real user JWT. _freshAccessToken
+// transparently refreshes a stale session before giving up.
+window._freshAccessToken = async function() {
+  var waited = 0;
+  while (!window._sb && waited < 3000) { await new Promise(function(r){setTimeout(r,200);}); waited += 200; }
+  if (!window._sb) return null;
+  var sess = await window._sb.auth.getSession();
+  var token = sess && sess.data && sess.data.session && sess.data.session.access_token;
+  if (token) return token;
+  try {
+    var r = await window._sb.auth.refreshSession();
+    token = r && r.data && r.data.session && r.data.session.access_token;
+  } catch (e) {}
+  return token || null;
+};
+
+// Called when a session truly can't be recovered: clear stale state, tell the
+// user, and send them to the login screen.
+window._handleSessionExpired = function() {
+  window.toast && window.toast('Your session has expired — please sign in again.', 'error');
+  try {
+    var p = window._sb && window._sb.auth.signOut();
+    if (p && p.catch) p.catch(function(){});
+  } catch (e) {}
+  if (typeof showLogin === 'function') showLogin();
+};
+
 window._uploadLabelPhoto = async function(file, subdir) {
   if (!file) throw new Error('No file provided');
   if (!/^image\//.test(file.type)) throw new Error('Only image files are supported');
-  var waited = 0;
-  while (!window._sb && waited < 3000) { await new Promise(function(r){setTimeout(r,200);}); waited+=200; }
-  var sess = window._sb && await window._sb.auth.getSession();
-  var token = sess && sess.data && sess.data.session && sess.data.session.access_token;
-  if (!token) throw new Error('Not authenticated');
+  var token = await window._freshAccessToken();
+  if (!token) { window._handleSessionExpired(); throw new Error('Your session has expired — please sign in again.'); }
   var SUPA_URL = 'https://anhawgzgxoywophqbmji.supabase.co';
   var apiKey = (typeof SUPA_KEY !== 'undefined') ? SUPA_KEY : '';
   var ext = (file.name && file.name.split('.').pop()) || 'jpg';
@@ -28071,11 +28092,8 @@ window.saveNewBatch = async function() {
     var docketFile = document.getElementById('ab-docket') && document.getElementById('ab-docket').files[0];
     if (docketFile) {
       try {
-        var waited = 0;
-        while (!window._sb && waited < 3000) { await new Promise(function(r){setTimeout(r,200);}); waited+=200; }
-        var sess = window._sb && await window._sb.auth.getSession();
-        var token = sess && sess.data && sess.data.session && sess.data.session.access_token;
-        if (!token) throw new Error('Not authenticated');
+        var token = await window._freshAccessToken();
+        if (!token) { window._handleSessionExpired(); throw new Error('Your session has expired — please sign in again.'); }
         var ext = (docketFile.name && docketFile.name.split('.').pop() || 'pdf').toLowerCase();
         if (ext.length > 5) ext = 'pdf';
         var _cid = (sku && sku.client_id) ? sku.client_id : 'misc';
