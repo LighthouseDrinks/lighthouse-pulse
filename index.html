@@ -11788,10 +11788,12 @@ async function saveBomDraft() {
   if (draftBtn) { draftBtn.disabled = true; draftBtn.textContent = 'Saving…'; }
   try {
     if (editId) {
-      await window.db.update('boms', '?id=eq.' + editId, dbPayload);
       var idx = BOMS.findIndex(function(b){ return b.id === editId; });
+      var _oldName = (idx >= 0 && BOMS[idx]) ? (BOMS[idx].product || '') : '';
+      await window.db.update('boms', '?id=eq.' + editId, dbPayload);
       if (idx >= 0) Object.assign(BOMS[idx], localDraftBom(editId));
       window.BOMS = BOMS;
+      await _syncBomNameToLinkedJobs(editId, _oldName, product);
       window.toast && window.toast('Draft saved: ' + product, 'success');
     } else {
       dbPayload.id = 'BOM-' + clientId.replace('CLI-','') + '-' + Date.now().toString(36).toUpperCase();
@@ -11933,10 +11935,12 @@ async function saveBom() {
   try {
     var _savedBomId = editId;
     if (editId) {
-      await window.db.update('boms', '?id=eq.' + editId, dbPayload);
       var idx = BOMS.findIndex(function(b){ return b.id===editId; });
+      var _oldName = (idx >= 0 && BOMS[idx]) ? (BOMS[idx].product || '') : '';
+      await window.db.update('boms', '?id=eq.' + editId, dbPayload);
       if (idx>=0) Object.assign(BOMS[idx], localBom(editId));
       window.BOMS = BOMS;
+      await _syncBomNameToLinkedJobs(editId, _oldName, product);
     } else {
       dbPayload.id = 'BOM-'+clientId.replace('CLI-','')+'-'+Date.now().toString(36).toUpperCase();
       var saved = await window.db.insert('boms', dbPayload);
@@ -12178,6 +12182,44 @@ async function _propagateBomToActiveJobs(bomId) {
     }
   }
 
+  return summary;
+}
+
+// When a BOM is renamed, push the new product_name to every linked job that
+// still carries the BOM's previous name (jobs.product_name is snapshotted at
+// creation and otherwise never re-synced). Jobs whose name was manually
+// customised via the Edit Job modal are left untouched. Covers all stages.
+// Matching is done in JS and patches happen by id to avoid PostgREST
+// URL-encoding issues with names containing spaces/apostrophes.
+async function _syncBomNameToLinkedJobs(bomId, oldName, newName) {
+  var summary = { renamed: 0 };
+  oldName = (oldName == null ? '' : String(oldName)).trim();
+  newName = (newName == null ? '' : String(newName)).trim();
+  if (!bomId || !newName || oldName === newName) return summary;
+  try {
+    var jobs = await window.db.select('jobs', '?bom_id=eq.' + bomId + '&select=id,product_name');
+    if (!Array.isArray(jobs) || !jobs.length) return summary;
+    for (var i = 0; i < jobs.length; i++) {
+      var job = jobs[i];
+      if ((job.product_name || '').trim() !== oldName) continue; // preserve manual overrides
+      try {
+        await window.db.update('jobs', '?id=eq.' + job.id, { product_name: newName });
+        summary.renamed += 1;
+      } catch(e) { window.logError && window.logError('syncBomName: patch job', e); }
+    }
+  } catch(e) {
+    window.logError && window.logError('syncBomName: load jobs', e);
+    return summary;
+  }
+  // Refresh the Jobs view if it's currently visible so the rename shows live.
+  if (summary.renamed) {
+    try {
+      var jobsPage = document.getElementById('page-jobs');
+      if (jobsPage && jobsPage.classList.contains('active') && typeof window.loadJobs === 'function') {
+        window.loadJobs();
+      }
+    } catch(e) {}
+  }
   return summary;
 }
 
