@@ -33580,11 +33580,10 @@ window.saveAdjModal = async function() {
         var cont = _allConts.find(function(c){ return c.id === lc.id; });
         return s + parseFloat((cont && cont.current_litres) || lc.litres || 0);
       }, 0);
-      var _reqMet = _reqLitres > 0 && _linkedTotalLitres >= _reqLitres * 0.99;
 
-      // Dynamic dilution detection from actual linked container strength vs bottling
-      // target. Uses the authoritative stored LPA (effective ABV) so angel-share
-      // decayed casks reconcile correctly.
+      // Linked alcohol (effective ABV / stored LPA) — angel-share decayed casks
+      // reconcile correctly. Computed before _reqMet so the requirement is judged
+      // on alcohol, not raw litres (a cask-strength IBC yields more bottling litres).
       var _linkedWeightedLPA = _linkedConts.reduce(function(s, lc) {
         var cont = _allConts.find(function(c){ return c.id === lc.id; });
         if (!cont) return s;
@@ -33592,6 +33591,14 @@ window.saveAdjModal = async function() {
         if (lpa > 0) return s + lpa;
         return s + parseFloat(cont.current_litres || 0) * parseFloat(cont.abv || 0) / 100;
       }, 0);
+      // Bottling-strength litres the linked liquid will yield once diluted.
+      var _linkedYieldLitres = _bottlingAbv > 0 ? (_linkedWeightedLPA / (_bottlingAbv / 100)) : _linkedTotalLitres;
+      // Requirement is met on alcohol (LPA); fall back to raw litres only when no
+      // bottling ABV is known.
+      var _reqMet = _reqLPA > 0
+        ? _linkedWeightedLPA >= _reqLPA * 0.99
+        : (_reqLitres > 0 && _linkedTotalLitres >= _reqLitres * 0.99);
+
       var _linkedAvgAbv  = _linkedTotalLitres > 0 ? (_linkedWeightedLPA / _linkedTotalLitres * 100) : 0;
       var _dilutionNeeded = _bottlingAbv > 0 && _linkedAvgAbv > _bottlingAbv + LSO_ABV_TOL;
       var _dilWater = 0, _dilFinal = 0, _dilSrcNeeded = 0;
@@ -33723,17 +33730,21 @@ window.saveAdjModal = async function() {
 
       // ── Requirement panel ─────────────────────────────────────────────────
       if (_reqLitres > 0) {
-        var _reqPct = Math.min(100, Math.round(_linkedTotalLitres / _reqLitres * 100));
+        var _reqPct = _reqLPA > 0
+          ? Math.min(100, Math.round(_linkedWeightedLPA / _reqLPA * 100))
+          : Math.min(100, Math.round(_linkedTotalLitres / _reqLitres * 100));
         var _barCol = _reqMet ? 'var(--green)' : (_reqPct > 50 ? 'var(--amber)' : 'var(--red)');
+        var _linkedLabel = _bottlingAbv > 0 ? 'Linked So Far (yield @ ' + _bottlingAbv.toFixed(1) + '%)' : 'Linked So Far';
+        var _linkedSub = '<div class="lso-req-linked-sub" style="font-size:9px;color:var(--muted);margin-top:2px;">' + _linkedTotalLitres.toFixed(1) + ' L raw &#183; ' + _linkedWeightedLPA.toFixed(2) + ' LPA</div>';
         var _reqStatusTxt = _reqMet
           ? '<span style="color:var(--green);font-weight:700;">&#10003; Requirement met</span>'
-          : '<span style="color:var(--amber);font-weight:700;">&#9888; ' + _linkedTotalLitres.toFixed(1) + ' L linked of ' + _reqLitres.toFixed(1) + ' L required</span>';
+          : '<span style="color:var(--amber);font-weight:700;">&#9888; ' + _linkedYieldLitres.toFixed(1) + ' L yield of ' + _reqLitres.toFixed(1) + ' L required (' + _linkedWeightedLPA.toFixed(2) + ' of ' + _reqLPA.toFixed(2) + ' LPA)</span>';
         html += '<div style="background:rgba(59,130,246,0.07);border:1px solid rgba(59,130,246,0.2);border-radius:5px;padding:14px 18px;margin-bottom:14px;">'
           + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:#60a5fa;font-weight:700;margin-bottom:10px;">Liquid Requirement</div>'
           + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:10px;">'
           + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Litres Required</div><div style="font-size:18px;font-weight:700;color:var(--white);">' + _reqLitres.toFixed(1) + ' L</div></div>'
           + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">LPA Required</div><div style="font-size:18px;font-weight:700;color:var(--gold-light);">' + _reqLPA.toFixed(2) + '</div></div>'
-          + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Linked So Far</div><div class="lso-req-linked-val" style="font-size:18px;font-weight:700;color:' + _barCol + ';">' + _linkedTotalLitres.toFixed(1) + ' L</div></div>'
+          + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">' + _linkedLabel + '</div><div class="lso-req-linked-val" style="font-size:18px;font-weight:700;color:' + _barCol + ';">' + _linkedYieldLitres.toFixed(1) + ' L</div>' + _linkedSub + '</div>'
           + '</div>'
           + '<div style="height:6px;background:rgba(255,255,255,0.07);border-radius:3px;overflow:hidden;margin-bottom:8px;">'
           + '<div class="lso-req-bar-fill" style="height:100%;width:' + _reqPct + '%;background:' + _barCol + ';border-radius:3px;transition:width 0.4s ease;"></div></div>'
@@ -34702,39 +34713,56 @@ window.saveAdjModal = async function() {
     var allConts = window._lsoContainers || [];
 
     var _bottAbv = window._lsoBottlingAbv || 0;
+    var _tol = (typeof LSO_ABV_TOL !== 'undefined') ? LSO_ABV_TOL : 0.5;
+    var _eff = function(c){ return window._lsoEffAbv ? window._lsoEffAbv(c) : parseFloat((c && c.abv) || 0); };
     list.innerHTML = linked.map(function(lc, idx) {
       var cont = allConts.find(function(c){ return c.id === lc.id; });
-      var contAbv = parseFloat((cont && cont.abv) || lc.abv || 0);
       var contLitres = cont ? parseFloat(cont.current_litres||0) : parseFloat(lc.litres||0);
+      var effAbv = cont ? _eff(cont) : parseFloat(lc.abv || 0);
       var label = cont
-        ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + contLitres.toFixed(0) + 'L @ ' + (cont.abv||'?') + '%'
+        ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + contLitres.toFixed(0) + 'L @ ' + (effAbv > 0 ? effAbv.toFixed(1) : (cont.abv||'?')) + '%'
         : (lc.reference || lc.id);
       var _locked = !!window._lsoIsLocked;
-      // ABV badge — green if at/near bottling strength, amber if cask-strength
+      // Per-container badge vs BOM bottling ABV (effective ABV, shared tolerance) —
+      // identical to the initial render path.
       var abvBadge = '';
-      if (_bottAbv > 0 && contAbv > 0) {
-        if (contAbv > _bottAbv + 2) {
-          abvBadge = ' <span style="display:inline-block;font-size:10px;padding:1px 7px;border-radius:3px;background:rgba(201,168,76,0.15);color:var(--amber);border:1px solid rgba(201,168,76,0.4);margin-left:6px;font-weight:600;">&#9888; Cask strength ' + contAbv.toFixed(1) + '%</span>';
+      if (cont && _bottAbv > 0 && effAbv > 0) {
+        if (effAbv > _bottAbv + _tol) {
+          abvBadge = '<span style="font-size:10px;font-weight:700;color:var(--amber);background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Dilution required → ' + _bottAbv.toFixed(1) + '%</span>';
+        } else if (effAbv < _bottAbv - _tol) {
+          abvBadge = '<span style="font-size:10px;font-weight:700;color:var(--red);background:rgba(220,53,69,0.12);border:1px solid rgba(220,53,69,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Below bottling ABV</span>';
         } else {
-          abvBadge = ' <span style="display:inline-block;font-size:10px;padding:1px 7px;border-radius:3px;background:rgba(61,186,120,0.12);color:var(--green);border:1px solid rgba(61,186,120,0.3);margin-left:6px;font-weight:600;">&#10003; Bottling strength</span>';
+          abvBadge = '<span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Matches BOM</span>';
         }
       }
-      return '<div class="lso-linked-row" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
+      return '<div class="lso-linked-row" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
         + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + abvBadge + '</span>'
         + (!_locked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" title="Delink this container from the job" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:600;">&#10005; Delink</button>' : '')
         + '</div>';
     }).join('');
 
-    // Update requirement progress bar
+    // Update requirement progress — reconcile on alcohol (LPA), showing the
+    // bottling-strength litre yield, mirroring the initial render.
     var reqLitres = window._lsoReqLitres || 0;
+    var reqLPA    = reqLitres * (_bottAbv / 100);
     var totalLinked = linked.reduce(function(s, lc) {
       var cont = allConts.find(function(c){ return c.id === lc.id; });
       return s + parseFloat((cont && cont.current_litres) || lc.litres || 0);
     }, 0);
+    var linkedLPA = linked.reduce(function(s, lc) {
+      var cont = allConts.find(function(c){ return c.id === lc.id; });
+      if (!cont) return s + parseFloat(lc.lpa || 0);
+      var lpa = parseFloat(cont.current_lpa || 0);
+      if (lpa > 0) return s + lpa;
+      return s + parseFloat(cont.current_litres || 0) * parseFloat(cont.abv || 0) / 100;
+    }, 0);
+    var yieldLitres = _bottAbv > 0 ? (linkedLPA / (_bottAbv / 100)) : totalLinked;
 
     if (reqLitres > 0) {
-      var pct = Math.min(100, Math.round(totalLinked / reqLitres * 100));
-      var met = totalLinked >= reqLitres * 0.99;
+      var pct = reqLPA > 0
+        ? Math.min(100, Math.round(linkedLPA / reqLPA * 100))
+        : Math.min(100, Math.round(totalLinked / reqLitres * 100));
+      var met = reqLPA > 0 ? (linkedLPA >= reqLPA * 0.99) : (totalLinked >= reqLitres * 0.99);
       var barCol = met ? 'var(--green)' : (pct > 50 ? 'var(--amber)' : 'var(--red)');
       var barEl = document.querySelector('#jd-liquid-content .lso-req-bar-fill');
       if (barEl) { barEl.style.width = pct + '%'; barEl.style.background = barCol; }
@@ -34742,10 +34770,12 @@ window.saveAdjModal = async function() {
       if (statusEl) {
         statusEl.innerHTML = met
           ? '<span style="color:var(--green);font-weight:700;">&#10003; Requirement met</span>'
-          : '<span style="color:var(--amber);font-weight:700;">&#9888; ' + totalLinked.toFixed(1) + ' L linked of ' + reqLitres.toFixed(1) + ' L required</span>';
+          : '<span style="color:var(--amber);font-weight:700;">&#9888; ' + yieldLitres.toFixed(1) + ' L yield of ' + reqLitres.toFixed(1) + ' L required (' + linkedLPA.toFixed(2) + ' of ' + reqLPA.toFixed(2) + ' LPA)</span>';
       }
       var linkedCell = document.querySelector('#jd-liquid-content .lso-req-linked-val');
-      if (linkedCell) { linkedCell.textContent = totalLinked.toFixed(1) + ' L'; linkedCell.style.color = barCol; }
+      if (linkedCell) { linkedCell.textContent = yieldLitres.toFixed(1) + ' L'; linkedCell.style.color = barCol; }
+      var linkedSubEl = document.querySelector('#jd-liquid-content .lso-req-linked-sub');
+      if (linkedSubEl) { linkedSubEl.innerHTML = totalLinked.toFixed(1) + ' L raw &#183; ' + linkedLPA.toFixed(2) + ' LPA'; }
     }
 
     // Refresh selector to exclude already-linked
