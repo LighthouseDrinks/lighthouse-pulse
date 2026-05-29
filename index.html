@@ -33838,15 +33838,9 @@ window.saveAdjModal = async function() {
         html += cbRow('chill-done', 'Chill filtration complete', d.chill_filtration_done === 'yes');
       }
 
-      if (j && j.colouring) {
-        html += sec('Colouring');
-        html += frow('Actual caramel / colour added', inp('caramel-actual', d.colour_spec, 'e.g. 250 ml E150a'),
-          'Must be added after dilution');
-        html += frow('Actual colour recorded post-colouring (430nm)',
-          inp('colour-430nm', d.colour_actual_430nm, 'e.g. 1.42', 'number'),
-          'Measure at 430nm wavelength &mdash; required');
-        html += cbRow('colouring-done', 'Colouring complete', d.colouring_complete === 'yes');
-      }
+      // Colouring is captured at job completion (in the Liquid Stock Deduction
+      // popup), not here — the sign-off stays simple. The "Liquid ready" button
+      // implies colouring (if required) will be recorded at close.
 
       // Sign-off is driven by the "Liquid preparation" row button at the top.
       // This block only carries the optional "liquid not tracked" waiver.
@@ -34035,7 +34029,6 @@ window.saveAdjModal = async function() {
     var _firstLinkedId = (window._lsoAllLinkedConts && window._lsoAllLinkedConts[0]) ? window._lsoAllLinkedConts[0].id : ((document.getElementById('lso-linked-container-id')||{}).value || null);
 
     var _chillDoneEl  = document.getElementById('lso-chill-done');
-    var _colDoneEl    = document.getElementById('lso-colouring-done');
     var _notTrackedEl = document.getElementById('lso-not-tracked');
     var _notTrackedNoteEl = document.getElementById('lso-not-tracked-note-wrap');
     var _notTracked   = _notTrackedEl && _notTrackedEl.checked;
@@ -34051,9 +34044,9 @@ window.saveAdjModal = async function() {
       // (or not required when at bottling strength).
       dilution_complete:       'yes',
       chill_filtration_done:   _chillDoneEl ? (_chillDoneEl.checked ? 'yes' : 'no') : null,
-      colour_spec:             j.colouring ? gv('caramel-actual')||null : null,
-      colour_actual_430nm:     j.colouring ? parseFloat(gv('colour-430nm'))||null : null,
-      colouring_complete:      _colDoneEl   ? (_colDoneEl.checked   ? 'yes' : 'no') : null,
+      // Colouring (caramel + 430nm) is captured/persisted at job completion in
+      // the Liquid Stock Deduction popup — not written here so the sign-off
+      // never overwrites those values.
       signed_by:               signedBy,
       signed_at:               new Date().toISOString(),
       liquid_excluded:         _notTracked || false,
@@ -34844,23 +34837,20 @@ window.saveAdjModal = async function() {
 
     if (!btn) return;
 
-    // Outstanding BOM-required works that must be confirmed before sign-off
+    // Outstanding BOM-required works that must be confirmed before sign-off.
+    // Colouring is no longer captured here — it is recorded at job completion.
     var outstanding = [];
     var chillEl = document.getElementById('lso-chill-done');
     if (chillEl && !chillEl.checked) outstanding.push('chill filtration');
-    var colDoneEl = document.getElementById('lso-colouring-done');
-    if (colDoneEl && !colDoneEl.checked) outstanding.push('colouring');
-    var col430El = document.getElementById('lso-colour-430nm');
-    if (col430El && !(col430El.value && col430El.value.trim())) outstanding.push('colour reading (430nm)');
 
-    // Label + base eligibility from strength / tracking state
+    // Label + base eligibility from strength / tracking state. The linked path
+    // is uniformly "Liquid ready" — pressing it asserts the liquid (incl. any
+    // dilution / chill / colouring) is ready; numbers are reconciled at close.
     var label, eligible;
     if (notTracked) {
       label = 'Sign off (liquid not tracked)'; eligible = true;
     } else if (!linked.length) {
       label = 'Link liquid first'; eligible = false;
-    } else if (hasAbove) {
-      label = 'Dilution done'; eligible = true;
     } else {
       label = 'Liquid ready'; eligible = true;
     }
@@ -34974,7 +34964,7 @@ window.saveAdjModal = async function() {
     // Fetch sign-off linked containers
     var signoffRows;
     try {
-      signoffRows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=linked_containers_json,linked_container_id,liquid_excluded&limit=1');
+      signoffRows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=linked_containers_json,linked_container_id,liquid_excluded,colour_spec,colour_actual_430nm&limit=1');
     } catch(e) {
       window.toast && window.toast('Could not load liquid sign-off: ' + e.message, 'error');
       return false;
@@ -35027,12 +35017,14 @@ window.saveAdjModal = async function() {
     var reqLitres   = 0;
     var bomVolCl    = 0;
     var bottlingAbv = 0;
+    var _bomColourSpec = null;
     try {
       if (job.bom_id) {
-        var bomR2 = await supaGet('boms?id=eq.' + job.bom_id + '&select=volume_cl,bottling_abv,abv&limit=1');
+        var bomR2 = await supaGet('boms?id=eq.' + job.bom_id + '&select=volume_cl,bottling_abv,abv,colour_spec&limit=1');
         if (bomR2 && bomR2[0]) {
           bomVolCl    = parseFloat(bomR2[0].volume_cl || 0);
           bottlingAbv = parseFloat(bomR2[0].bottling_abv || bomR2[0].abv || 0);
+          _bomColourSpec = bomR2[0].colour_spec || null;
         }
       }
       if (actualBottles && bomVolCl) reqLitres = (actualBottles * bomVolCl) / 100;
@@ -35041,6 +35033,13 @@ window.saveAdjModal = async function() {
     var _measuredAbv = parseFloat(job.abv_actual || 0);
     if (_measuredAbv > 0) bottlingAbv = _measuredAbv;
     var reqLPA = (reqLitres > 0 && bottlingAbv > 0) ? (reqLitres * bottlingAbv / 100) : 0;
+
+    // Colouring is captured here at completion (moved out of the sign-off).
+    // Prefill caramel spec from a prior sign-off value, else the BOM spec; and
+    // the 430nm reading from any prior sign-off value.
+    var _soRow0          = (signoffRows && signoffRows[0]) || {};
+    var _colourPrefillSpec = _soRow0.colour_spec || _bomColourSpec || '';
+    var _colour430Prefill  = (_soRow0.colour_actual_430nm != null) ? _soRow0.colour_actual_430nm : '';
 
     // Fetch live container data (fallback where snapshot is absent)
     var contIds  = linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
@@ -35141,6 +35140,15 @@ window.saveAdjModal = async function() {
       function getWaterAdded() {
         var inp = document.getElementById('lq-water-added');
         return inp ? Math.max(0, parseFloat(inp.value) || 0) : 0;
+      }
+      // Colouring (captured here at completion when the BOM requires it)
+      function getColourSpec() {
+        var inp = document.getElementById('lq-colour-spec');
+        return inp ? (inp.value || '').trim() : '';
+      }
+      function getColour430() {
+        var inp = document.getElementById('lq-colour-430nm');
+        return inp ? (inp.value || '').trim() : '';
       }
       // ── Leftover handling (Phase 3) ──────────────────────────────────────
       function getLeftoverStrength(idx) {
@@ -35295,13 +35303,19 @@ window.saveAdjModal = async function() {
           return !(getLeftoverLoc(idx) === 'move' && !getLeftoverDest(idx));
         });
 
+        // Colouring: when the BOM requires it, the 430nm reading must be entered
+        // before the job can be completed (mirrors the old sign-off "required").
+        var colourOk = !job.colouring || getColour430().length > 0;
+
         var confirmBtn = document.getElementById('lq-dd-confirm');
         if (confirmBtn) {
-          var ok = balanced && wasteOk && varianceOk && leftoverOk;
+          var ok = balanced && wasteOk && varianceOk && leftoverOk && colourOk;
           confirmBtn.disabled    = !ok;
           confirmBtn.style.opacity = ok ? '1' : '0.4';
           confirmBtn.style.cursor  = ok ? 'pointer' : 'not-allowed';
-          confirmBtn.title = leftoverOk ? '' : 'Select a destination vessel for the leftover marked "Move to another vessel".';
+          confirmBtn.title = !leftoverOk
+            ? 'Select a destination vessel for the leftover marked "Move to another vessel".'
+            : (!colourOk ? 'Enter the post-colouring 430nm reading.' : '');
         }
       }
 
@@ -35414,6 +35428,21 @@ window.saveAdjModal = async function() {
         +   '</div>'
         + '</div>'
 
+        + (job.colouring
+            ? '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
+              + '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Colouring</div>'
+              + '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">Caramel / colour is added after dilution. Record what was added and the post-colouring 430nm reading.</div>'
+              + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
+              +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Caramel / colour added</label>'
+              +     '<input type="text" id="lq-colour-spec" value="' + esc(String(_colourPrefillSpec)) + '" placeholder="e.g. 250 ml E150a" '
+              +     'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
+              +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Post-colouring 430nm <span style="color:var(--red);">*</span></label>'
+              +     '<input type="number" id="lq-colour-430nm" step="0.01" value="' + esc(String(_colour430Prefill)) + '" placeholder="e.g. 1.42" oninput="window._lqUpdateBalance()" '
+              +     'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
+              + '</div>'
+              + '</div>'
+            : '')
+
         + '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
         +   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px;flex-wrap:wrap;">'
         +     '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">Measurement Variance (Optional)</div>'
@@ -35485,6 +35514,10 @@ window.saveAdjModal = async function() {
           waterAdded: getWaterAdded(),
           reqLPA:     reqLPA,
           bottlingAbv: bottlingAbv,
+          // Colouring captured at completion (only when the BOM requires it).
+          colour: job.colouring
+            ? { spec: getColourSpec() || null, abs430: getColour430() ? (parseFloat(getColour430()) || null) : null }
+            : null,
           // Leftover actions that need work beyond the default (kept in same
           // container at original strength, already handled by the main loop).
           leftover: contRows.map(function(row, idx) {
@@ -35654,6 +35687,12 @@ window.saveAdjModal = async function() {
       if (leftoverSummary.cbw) _soPatch.leftover_cbw = leftoverSummary.cbw;
     }
     if (window._lsoDilutionMode) _soPatch.dilution_scope = window._lsoDilutionMode;
+    // Colouring captured in the completion popup (moved out of the sign-off).
+    if (plan.colour) {
+      if (plan.colour.spec   != null) _soPatch.colour_spec         = plan.colour.spec;
+      if (plan.colour.abs430 != null) _soPatch.colour_actual_430nm = plan.colour.abs430;
+      _soPatch.colouring_complete = 'yes';
+    }
     if (Object.keys(_soPatch).length) {
       try {
         await window.db.update('job_liquid_signoff', '?job_id=eq.' + jobId, _soPatch);
