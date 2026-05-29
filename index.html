@@ -33467,6 +33467,23 @@ window.saveAdjModal = async function() {
     setTimeout(function(){ win.print(); }, 500);
   };
 
+  // ── LIQUID SIGN-OFF reconciliation helpers ─────────────────────────────────
+  // Single ABV tolerance for "matches bottling ABV" decisions and balance checks
+  // (replaces the old mix of +0.1 / +0.2 / +2 thresholds).
+  var LSO_ABV_TOL = 0.5;
+  // Effective ABV: alcohol-accurate strength derived from the authoritative
+  // stored LPA balance (current_lpa). Casks store full litres + angel-share
+  // decayed LPA, so nominal `abv` over-states their strength — always prefer
+  // current_lpa / current_litres so draws and dilution maths reconcile.
+  function _lsoEffAbv(cont) {
+    if (!cont) return 0;
+    var lit = parseFloat(cont.current_litres || 0);
+    var lpa = parseFloat(cont.current_lpa || 0);
+    if (lit > 0 && lpa > 0) return lpa / lit * 100;
+    return parseFloat(cont.abv || 0);
+  }
+  window._lsoEffAbv = _lsoEffAbv;
+
   // ── LIQUID SIGN-OFF (5.02.02) ──────────────────────────────────────────────
   async function loadLiquidTab(jobId) {
     var el = document.getElementById('jd-liquid-content');
@@ -33565,13 +33582,18 @@ window.saveAdjModal = async function() {
       }, 0);
       var _reqMet = _reqLitres > 0 && _linkedTotalLitres >= _reqLitres * 0.99;
 
-      // Dynamic dilution detection from actual linked container ABVs vs bottling target
+      // Dynamic dilution detection from actual linked container strength vs bottling
+      // target. Uses the authoritative stored LPA (effective ABV) so angel-share
+      // decayed casks reconcile correctly.
       var _linkedWeightedLPA = _linkedConts.reduce(function(s, lc) {
         var cont = _allConts.find(function(c){ return c.id === lc.id; });
-        return s + parseFloat((cont && cont.current_litres) || 0) * parseFloat((cont && cont.abv) || 0) / 100;
+        if (!cont) return s;
+        var lpa = parseFloat(cont.current_lpa || 0);
+        if (lpa > 0) return s + lpa;
+        return s + parseFloat(cont.current_litres || 0) * parseFloat(cont.abv || 0) / 100;
       }, 0);
       var _linkedAvgAbv  = _linkedTotalLitres > 0 ? (_linkedWeightedLPA / _linkedTotalLitres * 100) : 0;
-      var _dilutionNeeded = _bottlingAbv > 0 && _linkedAvgAbv > _bottlingAbv + 0.2;
+      var _dilutionNeeded = _bottlingAbv > 0 && _linkedAvgAbv > _bottlingAbv + LSO_ABV_TOL;
       var _dilWater = 0, _dilFinal = 0, _dilSrcNeeded = 0;
       var _dilAllWater = 0, _dilAllFinal = 0;
       if (_dilutionNeeded) {
@@ -33644,12 +33666,12 @@ window.saveAdjModal = async function() {
         _prepColour  = 'var(--muted)';
       } else if (_bottlingAbv > 0 && _linkedConts.some(function(lc) {
           var c = _allConts.find(function(x){ return x.id === lc.id; });
-          return parseFloat((c && c.abv) || lc.abv || 0) > _bottlingAbv + 2;
+          return _lsoEffAbv(c) > _bottlingAbv + LSO_ABV_TOL;
         })) {
-        _prepStatus  = '&#9888; Pending — some containers still at cask strength';
+        _prepStatus  = '&#9432; Above bottling strength — dilution planned (see Work Order, reconciled at close)';
         _prepColour  = 'var(--amber)';
       } else {
-        _prepStatus  = '&#10003; Ready — containers linked at bottling strength';
+        _prepStatus  = '&#10003; Ready — containers at bottling strength';
         _prepColour  = 'var(--green)';
       }
       html += frow('Liquid preparation', '<span id="lso-dil-required-val" style="font-size:13px;font-weight:600;color:' + _prepColour + ';">' + _prepStatus + '</span>');
@@ -33684,10 +33706,11 @@ window.saveAdjModal = async function() {
       if (!isLocked) {
         var _step1BotAbv = _bottlingAbv > 0 ? _bottlingAbv.toFixed(1) + '%' : 'bottling ABV';
         html += '<div style="background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:5px;padding:14px 16px;margin-bottom:14px;">'
-          + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:#60a5fa;font-weight:700;margin-bottom:8px;">Step 1 — Prepare Bottling-Strength Liquid</div>'
+          + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:#60a5fa;font-weight:700;margin-bottom:8px;">Step 1 — Link Liquid (Any Strength)</div>'
           + '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">'
-          + 'If your containers are already at bottling strength (<strong style="color:var(--white);">' + _step1BotAbv + '</strong>), skip to Step 2 and link them directly. '
-          + 'If you need to dilute cask-strength liquid first, use the Liquid tab.'
+          + 'Link the source container(s) for this job at <strong style="color:var(--white);">any strength</strong> — including cask strength. '
+          + 'If liquid is above bottling strength (<strong style="color:var(--white);">' + _step1BotAbv + '</strong>), the dilution is planned on the printed Work Order and reconciled in LPA when you close the job (water is added at completion). '
+          + 'You can still use the Liquid tab for ad-hoc blending/dilution if needed.'
           + '</div>'
           + '<button onclick="window.lsoOpenLiquidTab(\'' + jobId + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:12px;padding:7px 16px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">&#9658; Open Liquid Tab for This Job</button>'
           + '</div>';
@@ -33695,7 +33718,7 @@ window.saveAdjModal = async function() {
 
       // ── Step 2: Link containers ────────────────────────────────────────────
       if (!isLocked) {
-        html += '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">Step 2 — Link Bottling-Strength Containers</div>';
+        html += '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">Step 2 — Linked Containers</div>';
       }
 
       // ── Requirement panel ─────────────────────────────────────────────────
@@ -33723,11 +33746,23 @@ window.saveAdjModal = async function() {
       _linkedConts.forEach(function(lc, idx) {
         var cont = _allConts.find(function(c){ return c.id === lc.id; });
         var _ll = cont && parseFloat(cont.current_litres||0) > 0 ? parseFloat(cont.current_litres).toFixed(0) + 'L' : 'no liquid tracked';
+        var _effAbv = _lsoEffAbv(cont);
         var label = cont
-          ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + _ll + ' @ ' + (cont.abv||'?') + '%'
+          ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + _ll + ' @ ' + (_effAbv > 0 ? _effAbv.toFixed(1) : (cont.abv||'?')) + '%'
           : lc.id;
-        html += '<div class="lso-linked-row" data-idx="' + idx + '" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
-          + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + '</span>'
+        // Per-container strength vs BOM bottling ABV (effective ABV, shared tolerance)
+        var _badge = '';
+        if (cont && _bottlingAbv > 0 && _effAbv > 0) {
+          if (_effAbv > _bottlingAbv + LSO_ABV_TOL) {
+            _badge = '<span style="font-size:10px;font-weight:700;color:var(--amber);background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Dilution required → ' + _bottlingAbv.toFixed(1) + '%</span>';
+          } else if (_effAbv < _bottlingAbv - LSO_ABV_TOL) {
+            _badge = '<span style="font-size:10px;font-weight:700;color:var(--red);background:rgba(220,53,69,0.12);border:1px solid rgba(220,53,69,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Below bottling ABV</span>';
+          } else {
+            _badge = '<span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Matches BOM</span>';
+          }
+        }
+        html += '<div class="lso-linked-row" data-idx="' + idx + '" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
+          + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + _badge + '</span>'
           + (!isLocked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" title="Delink this container from the job" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:600;">&#10005; Delink</button>' : '')
           + '</div>';
       });
@@ -33736,7 +33771,7 @@ window.saveAdjModal = async function() {
       if (!isLocked) {
         // Container selector for adding more
         var _alreadyLinkedIds = _linkedConts.map(function(lc){ return lc.id; });
-        var _conOptH = '<option value="">— Select a bottling-strength container —</option>'
+        var _conOptH = '<option value="">— Select a container (any strength) —</option>'
           + _activeConts.filter(function(c){ return _alreadyLinkedIds.indexOf(c.id) === -1; }).map(function(c){
               var _lbl_litres = parseFloat(c.current_litres||0) > 0 ? parseFloat(c.current_litres).toFixed(0) + 'L' : 'no liquid tracked';
               var lbl = c.reference + ' [' + (c.type==='ibc'?'IBC':c.type) + '] — ' + (c.spirit_type||'—') + ' — ' + _lbl_litres + ' @ ' + (c.abv||'?') + '%' + (c.cbw_rotation?' · '+c.cbw_rotation:'');
@@ -33935,29 +33970,26 @@ window.saveAdjModal = async function() {
           var bypassEl = document.getElementById('lso-not-tracked');
           var bypass   = bypassEl && bypassEl.checked;
 
-          // Hard block: any linked container at cask strength blocks sign-off
-          // (waived when "not tracked" is ticked — no containers to worry about)
+          // Cask/above-bottling strength is allowed: dilution is planned on the
+          // Work Order and reconciled in LPA at job close (water added at
+          // completion). We surface it as an informational hint, not a hard block.
           var bottAbv   = window._lsoBottlingAbv || 0;
           var linked    = window._lsoAllLinkedConts || [];
           var allConts2 = window._lsoContainers || [];
-          var caskBlock = !bypass && bottAbv > 0 && linked.some(function(lc) {
+          var aboveBott = !bypass && bottAbv > 0 && linked.some(function(lc) {
             var c = allConts2.find(function(x){ return x.id === lc.id; });
-            var abvVal = parseFloat((c && c.abv) || lc.abv || 0);
-            return abvVal > bottAbv + 2;
+            return (window._lsoEffAbv ? window._lsoEffAbv(c) : parseFloat((c && c.abv) || lc.abv || 0)) > bottAbv + 0.5;
           });
 
-          var ready = hasName && !caskBlock;
+          var ready = hasName;
           signBtn.disabled = !ready;
           signBtn.style.background = ready ? 'var(--gold)' : 'var(--navy-border)';
           signBtn.style.color = ready ? 'var(--navy-dark)' : 'var(--muted)';
           signBtn.style.cursor = ready ? 'pointer' : 'not-allowed';
-          if (caskBlock) {
-            signBtn.textContent = '⚠ Dilute containers first';
-            signBtn.title = 'One or more linked containers are at cask strength. Dilute to bottling ABV before signing off.';
-          } else {
-            signBtn.textContent = ready ? 'Sign Off ✓' : 'Sign Off';
-            signBtn.title = '';
-          }
+          signBtn.textContent = ready ? 'Sign Off ✓' : 'Sign Off';
+          signBtn.title = aboveBott
+            ? 'Linked liquid is above bottling strength — dilution will be reconciled when the job is closed.'
+            : '';
         }
         var nameInp = document.getElementById('lso-signed-by');
         if (nameInp) nameInp.addEventListener('input', checkSignReady);
@@ -34107,8 +34139,10 @@ window.saveAdjModal = async function() {
 
     // ── Calculations ──────────────────────────────────────────────────────────
     var reqLitres   = parseFloat(j.liquid_litres || 0);
-    // reqAbv = bottling target ABV (post-dilution), not the container ABV
-    var reqAbv      = parseFloat((bom && bom.bottling_abv) || j.abv_in || 0);
+    // reqAbv = bottling target ABV (post-dilution), not the container/source ABV.
+    // Fall back to the BOM label ABV — never to j.abv_in, which is the SOURCE
+    // strength and would wrongly suppress the dilution plan.
+    var reqAbv      = parseFloat((bom && (bom.bottling_abv || bom.abv)) || 0);
     // Calculate from bottle_target + BOM volume if liquid_litres not set
     if (!reqLitres && j.bottle_target && bom && bom.volume_cl) {
       reqLitres = (j.bottle_target * parseFloat(bom.volume_cl)) / 100;
@@ -34160,9 +34194,13 @@ window.saveAdjModal = async function() {
 
     // Determine dilution dynamically from actual linked container ABVs vs bottling ABV.
     // Never trust j.dilution — it was set at job-creation before liquid was assigned.
-    var _contWeightedLPA    = linkedContainers.reduce(function(s,c){ return s + parseFloat(c.current_litres||0)*parseFloat(c.abv||0)/100; }, 0);
+    var _contWeightedLPA    = linkedContainers.reduce(function(s,c){
+      var lpa = parseFloat(c.current_lpa||0);
+      if (lpa > 0) return s + lpa;
+      return s + parseFloat(c.current_litres||0)*parseFloat(c.abv||0)/100;
+    }, 0);
     var _contWeightedAvgAbv = totalLinkedLitres > 0 ? (_contWeightedLPA / totalLinkedLitres * 100) : 0;
-    var dilution = reqAbv > 0 && _contWeightedAvgAbv > reqAbv + 0.2;
+    var dilution = reqAbv > 0 && _contWeightedAvgAbv > reqAbv + (typeof LSO_ABV_TOL!=='undefined'?LSO_ABV_TOL:0.5);
 
     // Read dilution scope — from DOM radio (if sign-off tab is open) or from stored window var
     var _dilMode = 'requirement';
@@ -34889,45 +34927,90 @@ window.saveAdjModal = async function() {
       console.warn('Liquid double-deduction guard query failed — showing modal:', e.message);
     }
 
-    // Resolve required litres from actual bottles produced
-    var reqLitres = 0;
-    var bomVolCl  = 0;
+    // Resolve required litres + bottling ABV from BOM and actual bottles produced.
+    // reqLPA is the alcohol that ends up in the finished bottles — it is the
+    // INVARIANT we reconcile against, because water added on the floor changes
+    // litres but never alcohol. This makes the close-out correct whether the
+    // linked liquid was at bottling strength or still at cask strength.
+    var reqLitres   = 0;
+    var bomVolCl    = 0;
+    var bottlingAbv = 0;
     try {
       if (job.bom_id) {
-        var bomR2 = await supaGet('boms?id=eq.' + job.bom_id + '&select=volume_cl&limit=1');
-        if (bomR2 && bomR2[0]) bomVolCl = parseFloat(bomR2[0].volume_cl || 0);
+        var bomR2 = await supaGet('boms?id=eq.' + job.bom_id + '&select=volume_cl,bottling_abv,abv&limit=1');
+        if (bomR2 && bomR2[0]) {
+          bomVolCl    = parseFloat(bomR2[0].volume_cl || 0);
+          bottlingAbv = parseFloat(bomR2[0].bottling_abv || bomR2[0].abv || 0);
+        }
       }
       if (actualBottles && bomVolCl) reqLitres = (actualBottles * bomVolCl) / 100;
     } catch(e) {}
+    // Prefer a measured bottling ABV when the job carries one; else BOM spec.
+    var _measuredAbv = parseFloat(job.abv_actual || 0);
+    if (_measuredAbv > 0) bottlingAbv = _measuredAbv;
+    var reqLPA = (reqLitres > 0 && bottlingAbv > 0) ? (reqLitres * bottlingAbv / 100) : 0;
 
     // Fetch live container data (fallback where snapshot is absent)
     var contIds  = linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
     var liveConts = [];
     try {
-      if (contIds.length) liveConts = await supaGet('liquid_containers?id=in.(' + contIds.join(',') + ')&select=id,reference,current_litres,abv');
+      if (contIds.length) liveConts = await supaGet('liquid_containers?id=in.(' + contIds.join(',') + ')&select=id,reference,current_litres,current_lpa,abv,client_id,fill_date');
     } catch(e) {}
 
-    // Build rows — prefer snapshotted litres/abv recorded at link time
-    // Exclude containers already fully deducted in a previous (partial) attempt
+    // Candidate destination vessels for relocating leftover (Phase 3). Any
+    // non-cask, non-archived vessel; the source container itself is excluded per row.
+    var destConts = [];
+    try {
+      destConts = await supaGet('liquid_containers?select=id,reference,type,current_litres,current_lpa,abv,client_id,fill_date,capacity_litres&type=neq.cask&archived=is.false&order=type.asc,reference.asc');
+    } catch(e) { /* non-critical */ }
+
+    // Build rows — prefer snapshotted litres/lpa recorded at link time.
+    // effAbv = stored LPA / litres (alcohol-accurate strength): casks store full
+    // litres + angel-share-decayed LPA, so nominal abv over-states them. Excluded
+    // containers already fully deducted in a previous (partial) attempt.
     var contRows = linkedConts.map(function(lc) {
       var live   = liveConts.find(function(c){ return c.id === lc.id; });
       var ref    = lc.reference || (live && live.reference) || lc.id.slice(0,8)+'…';
       var before = lc.litres != null ? parseFloat(lc.litres) : parseFloat((live && live.current_litres) || 0);
-      var abv    = lc.abv   != null ? parseFloat(lc.abv)    : parseFloat((live && live.abv) || 0);
-      return { id: lc.id, reference: ref, before: before, abv: abv };
+      var lpaB   = lc.lpa != null && parseFloat(lc.lpa) > 0 ? parseFloat(lc.lpa) : parseFloat((live && live.current_lpa) || 0);
+      var nomAbv = lc.abv != null ? parseFloat(lc.abv) : parseFloat((live && live.abv) || 0);
+      var effAbv = (before > 0 && lpaB > 0) ? (lpaB / before * 100) : nomAbv;
+      return { id: lc.id, reference: ref, before: before, abv: effAbv,
+               lpaBefore: lpaB > 0 ? lpaB : (before * effAbv / 100),
+               clientId: (live && live.client_id) || null,
+               fillDate: (live && live.fill_date) || null };
     }).filter(function(row){ return alreadyDeductedIds.indexOf(row.id) < 0; });
 
     // If every container was already deducted (clean full run), skip the modal
     if (!contRows.length && alreadyDeductedIds.length > 0) return [];
 
-    // FIFO pre-fill: allocate required litres across containers in order
-    var toAllocate = reqLitres;
+    // FIFO pre-fill — allocate required ALCOHOL (LPA) across containers in the
+    // deterministic linked order. For each container we draw enough source litres
+    // (at its effective ABV) to contribute its share of reqLPA. When no reqLPA is
+    // known (no BOM/bottles) fall back to litres-based allocation.
     var fifoRemaining = [];
-    for (var fi = 0; fi < contRows.length; fi++) {
-      if (toAllocate <= 0) { fifoRemaining.push(Math.round(contRows[fi].before * 10) / 10); continue; }
-      var _draw = Math.min(contRows[fi].before, toAllocate);
-      toAllocate -= _draw;
-      fifoRemaining.push(Math.max(0, Math.round((contRows[fi].before - _draw) * 10) / 10));
+    if (reqLPA > 0) {
+      var lpaToAllocate = reqLPA;
+      for (var fi = 0; fi < contRows.length; fi++) {
+        var _r = contRows[fi];
+        var availLPA = _r.lpaBefore;
+        if (lpaToAllocate <= 0 || availLPA <= 0 || _r.abv <= 0) {
+          fifoRemaining.push(Math.round(_r.before * 10) / 10);
+          continue;
+        }
+        var drawLPA   = Math.min(availLPA, lpaToAllocate);
+        lpaToAllocate -= drawLPA;
+        var drawLitres = drawLPA / (_r.abv / 100);
+        fifoRemaining.push(Math.max(0, Math.round((_r.before - drawLitres) * 10) / 10));
+      }
+    } else {
+      var toAllocate = reqLitres;
+      for (var fj = 0; fj < contRows.length; fj++) {
+        if (toAllocate <= 0) { fifoRemaining.push(Math.round(contRows[fj].before * 10) / 10); continue; }
+        var _draw = Math.min(contRows[fj].before, toAllocate);
+        toAllocate -= _draw;
+        fifoRemaining.push(Math.max(0, Math.round((contRows[fj].before - _draw) * 10) / 10));
+      }
     }
 
     return new Promise(function(resolve) {
@@ -34962,104 +35045,192 @@ window.saveAdjModal = async function() {
       function getVarianceCap() {
         return Math.max(2, reqLitres * 0.01);
       }
+      var _waterTouched = false;
+      function getWaterAdded() {
+        var inp = document.getElementById('lq-water-added');
+        return inp ? Math.max(0, parseFloat(inp.value) || 0) : 0;
+      }
+      // ── Leftover handling (Phase 3) ──────────────────────────────────────
+      function getLeftoverStrength(idx) {
+        var r = document.querySelector('input[name="lq-lo-strength-' + idx + '"]:checked');
+        return r ? r.value : 'original';
+      }
+      function getLeftoverLoc(idx) {
+        var r = document.querySelector('input[name="lq-lo-loc-' + idx + '"]:checked');
+        return r ? r.value : 'same';
+      }
+      function getLeftoverDest(idx) {
+        var s = document.getElementById('lq-lo-dest-' + idx);
+        return s ? (s.value || '') : '';
+      }
+      function getLeftoverCbw(idx) {
+        var i = document.getElementById('lq-lo-cbw-' + idx);
+        return i ? (i.value || '').trim() : '';
+      }
 
+      // Reconciliation is anchored on LPA (litres of pure alcohol), the invariant
+      // that water addition on the floor cannot change. Litres are tracked too for
+      // a sanity readout, but the pass/fail gate is the alcohol balance. When
+      // effective ABV == bottling ABV (a bottling-strength linked job) this reduces
+      // exactly to the old litres balance, so legacy jobs behave identically.
       function updateBalance() {
-        var totalDrawn = 0;
+        var totalDrawn = 0, totalDrawnLPA = 0;
         contRows.forEach(function(row, idx) {
           var rem   = getRemaining(idx);
           var drawn = Math.max(0, row.before - rem);
-          totalDrawn += drawn;
+          totalDrawn    += drawn;
+          totalDrawnLPA += drawn * (row.abv / 100);
           var drawnEl = document.getElementById('lq-drawn-' + idx);
           if (drawnEl) drawnEl.textContent = drawn.toFixed(1) + ' L';
+          var lpaEl = document.getElementById('lq-drawnlpa-' + idx);
+          if (lpaEl) lpaEl.textContent = (drawn * (row.abv / 100)).toFixed(2);
         });
         var waste     = getWasteLitres();
         var variance  = getVarianceLitres();
         var varCap    = getVarianceCap();
-        // target = product required + any waste that must also come from containers.
-        // variance (signed) accounts for measurement inaccuracy in recorded container volumes:
-        //   positive = container actually held more than recorded
-        //   negative = container actually held less than recorded
-        // When reqLitres is 0 (no BOM / no bottles entered) just require something was drawn.
-        var target       = reqLitres + waste;
-        var effective    = totalDrawn + variance;
-        var diff         = reqLitres > 0 ? Math.abs(effective - target) : 0;
-        var withinCap    = Math.abs(variance) <= varCap + 1e-6;
-        var balanced     = totalDrawn > 0 && (reqLitres === 0 || diff <= 0.5) && withinCap;
+        var avgDrawnAbv = totalDrawn > 0 ? (totalDrawnLPA / totalDrawn * 100) : (bottlingAbv || 0);
+        var withinCap = Math.abs(variance) <= varCap + 1e-6;
         var wasteOk      = waste <= 0 || getWasteReason().length > 0;
         var varianceUsed = Math.abs(variance) > 0.05;
         var varianceOk   = !varianceUsed || getVarianceReason().length > 0;
 
-        var wasteWrap = document.getElementById('lq-waste-reason-wrap');
-        if (wasteWrap) wasteWrap.style.display = waste > 0 ? '' : 'none';
+        // Leftover handling: refresh live leftover litres, toggle the move-to-vessel
+        // selector, and total any extra water needed if leftover is being brought to
+        // bottling strength (water = leftover × (effAbv/bottlingAbv − 1)).
+        var leftoverConvWater = 0;
+        contRows.forEach(function(row, idx) {
+          var rem = getRemaining(idx);
+          var loLit = document.getElementById('lq-leftover-litres-' + idx);
+          if (loLit) loLit.textContent = rem.toFixed(1);
+          var destWrap = document.getElementById('lq-lo-dest-wrap-' + idx);
+          if (destWrap) destWrap.style.display = (getLeftoverLoc(idx) === 'move' && rem > 0.05) ? '' : 'none';
+          if (getLeftoverStrength(idx) === 'bottling' && bottlingAbv > 0 && row.abv > bottlingAbv && rem > 0.05) {
+            leftoverConvWater += rem * (row.abv / bottlingAbv - 1);
+          }
+        });
 
-        var varReasonWrap = document.getElementById('lq-variance-reason-wrap');
-        if (varReasonWrap) varReasonWrap.style.display = varianceUsed ? '' : 'none';
+        // Default water to add = finished litres made (req + waste) minus the source
+        // litres drawn, PLUS any water to bring leftover up to bottling strength.
+        var bottlingBatchWater = (reqLitres > 0)
+          ? Math.max(0, (reqLitres + waste) - (totalDrawn + variance))
+          : 0;
+        var suggestedWater = bottlingBatchWater + leftoverConvWater;
+        var waterInp = document.getElementById('lq-water-added');
+        if (waterInp && !_waterTouched) waterInp.value = suggestedWater.toFixed(1);
+        var waterAdded = getWaterAdded();
 
-        // Show autofill button only when there is a real (non-trivial) imbalance to close.
-        var autofillBtn = document.getElementById('lq-variance-autofill');
-        if (autofillBtn) {
-          var gap = target - totalDrawn;
-          autofillBtn.style.display = (reqLitres > 0 && Math.abs(gap) > 0.5) ? '' : 'none';
-          autofillBtn.dataset.suggest = gap.toFixed(1);
-        }
-
-        var balEl = document.getElementById('lq-balance-display');
-        if (balEl) {
-          var col = balanced ? 'var(--green)' : 'var(--red)';
-          var balanceLabel;
-          if (reqLitres === 0) {
-            balanceLabel = totalDrawn > 0 ? '&#10003; OK' : 'Enter drawn';
-          } else if (!withinCap) {
+        var balanced, balanceLabel, col;
+        var wasteLPA = waste * ((bottlingAbv || avgDrawnAbv) / 100);
+        if (reqLPA > 0) {
+          // Alcohol balance: drawn alcohol (± variance, valued at drawn strength)
+          // must equal the alcohol in the finished bottles plus any wasted finished liquid.
+          var targetLPA    = reqLPA + wasteLPA;
+          var effectiveLPA = totalDrawnLPA + variance * (avgDrawnAbv / 100);
+          var diffLPA      = Math.abs(effectiveLPA - targetLPA);
+          var finTol       = Math.max(0.5, contRows.length * 0.15);
+          var tolLPA       = finTol * ((bottlingAbv || avgDrawnAbv || 1) / 100);
+          balanced = totalDrawnLPA > 0 && diffLPA <= tolLPA && withinCap;
+          col = balanced ? 'var(--green)' : 'var(--red)';
+          var shortLPA = targetLPA - effectiveLPA;
+          var shortFin = (bottlingAbv > 0) ? shortLPA / (bottlingAbv / 100) : shortLPA;
+          if (!withinCap) {
             balanceLabel = 'Variance exceeds cap (&plusmn;' + varCap.toFixed(1) + ' L) &mdash; check container records';
           } else if (balanced) {
             balanceLabel = varianceUsed
               ? '&#10003; OK (variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L applied)'
               : '&#10003; OK';
+          } else if (shortLPA > 0) {
+            balanceLabel = shortFin.toFixed(1) + ' L (' + shortLPA.toFixed(2) + ' LPA) short — draw more';
+          } else {
+            balanceLabel = Math.abs(shortFin).toFixed(1) + ' L (' + Math.abs(shortLPA).toFixed(2) + ' LPA) over';
+          }
+        } else {
+          // No BOM/bottles → fall back to a pure litres balance.
+          var target    = reqLitres + waste;
+          var effective = totalDrawn + variance;
+          var diff      = reqLitres > 0 ? Math.abs(effective - target) : 0;
+          balanced = totalDrawn > 0 && (reqLitres === 0 || diff <= 0.5) && withinCap;
+          col = balanced ? 'var(--green)' : 'var(--red)';
+          if (reqLitres === 0) {
+            balanceLabel = totalDrawn > 0 ? '&#10003; OK' : 'Enter drawn';
+          } else if (!withinCap) {
+            balanceLabel = 'Variance exceeds cap (&plusmn;' + varCap.toFixed(1) + ' L) &mdash; check container records';
+          } else if (balanced) {
+            balanceLabel = '&#10003; OK';
           } else {
             var short = target - effective;
-            if (short > 0.5 && waste > 0 && short <= waste + 0.5) {
-              balanceLabel = 'Draw ' + short.toFixed(1) + ' L more from a container to cover waste';
-            } else if (short > 0.5) {
-              balanceLabel = short.toFixed(1) + ' L short';
-            } else {
-              balanceLabel = Math.abs(short).toFixed(1) + ' L over';
-            }
+            balanceLabel = short > 0 ? short.toFixed(1) + ' L short' : Math.abs(short).toFixed(1) + ' L over';
           }
+        }
+
+        var wasteWrap = document.getElementById('lq-waste-reason-wrap');
+        if (wasteWrap) wasteWrap.style.display = waste > 0 ? '' : 'none';
+        var varReasonWrap = document.getElementById('lq-variance-reason-wrap');
+        if (varReasonWrap) varReasonWrap.style.display = varianceUsed ? '' : 'none';
+
+        // Autofill closes the alcohol gap by adjusting variance (source litres).
+        var autofillBtn = document.getElementById('lq-variance-autofill');
+        if (autofillBtn) {
+          var gapLitres;
+          if (reqLPA > 0) {
+            var gapLPA = (reqLPA + wasteLPA) - totalDrawnLPA;
+            gapLitres = (avgDrawnAbv > 0) ? gapLPA / (avgDrawnAbv / 100) : 0;
+          } else {
+            gapLitres = (reqLitres + waste) - totalDrawn;
+          }
+          autofillBtn.style.display = (reqLitres > 0 && Math.abs(gapLitres) > 0.5) ? '' : 'none';
+          autofillBtn.dataset.suggest = gapLitres.toFixed(1);
+        }
+
+        var balEl = document.getElementById('lq-balance-display');
+        if (balEl) {
           var varCol = varianceUsed ? 'var(--amber)' : 'var(--muted)';
           var varTxt = varianceUsed ? (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L' : '0.0 L';
           balEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">'
-            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">For Bottles</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—') + '</div></div>'
-            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Waste / Loss</div><div style="font-size:15px;font-weight:800;color:var(--amber);">' + waste.toFixed(1) + ' L</div></div>'
-            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Total Drawn</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + totalDrawn.toFixed(1) + ' L</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Required LPA</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + (reqLPA > 0 ? reqLPA.toFixed(2) : '—') + '</div><div style="font-size:9px;color:var(--muted);">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '%' : '') + '</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Alcohol Drawn</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + totalDrawnLPA.toFixed(2) + '</div><div style="font-size:9px;color:var(--muted);">LPA</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Source Drawn</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + totalDrawn.toFixed(1) + ' L</div><div style="font-size:9px;color:var(--muted);">+ ' + waterAdded.toFixed(1) + ' L water</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Variance</div><div style="font-size:15px;font-weight:800;color:' + varCol + ';">' + varTxt + '</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Balance</div><div style="font-size:12px;font-weight:800;color:' + col + ';">' + balanceLabel + '</div></div>'
             + '</div>';
         }
 
+        // Leftover validation: if "move to another vessel" is chosen for a
+        // container that has leftover, a destination must be selected.
+        var leftoverOk = contRows.every(function(row, idx) {
+          var rem = getRemaining(idx);
+          if (rem <= 0.05) return true;
+          return !(getLeftoverLoc(idx) === 'move' && !getLeftoverDest(idx));
+        });
+
         var confirmBtn = document.getElementById('lq-dd-confirm');
         if (confirmBtn) {
-          var ok = balanced && wasteOk && varianceOk;
+          var ok = balanced && wasteOk && varianceOk && leftoverOk;
           confirmBtn.disabled    = !ok;
           confirmBtn.style.opacity = ok ? '1' : '0.4';
           confirmBtn.style.cursor  = ok ? 'pointer' : 'not-allowed';
+          confirmBtn.title = leftoverOk ? '' : 'Select a destination vessel for the leftover marked "Move to another vessel".';
         }
       }
 
       var rowsHtml = contRows.map(function(row, idx) {
+        var _drawn0 = Math.max(0, row.before - fifoRemaining[idx]);
         return '<tr style="border-bottom:1px solid var(--navy-border);">'
-          + '<td style="padding:10px 8px;font-size:12px;font-weight:700;color:var(--white);">' + esc(row.reference) + '<br><span style="font-size:10px;font-weight:400;color:var(--muted);">' + row.abv.toFixed(1) + '% ABV</span></td>'
+          + '<td style="padding:10px 8px;font-size:12px;font-weight:700;color:var(--white);">' + esc(row.reference) + '<br><span style="font-size:10px;font-weight:400;color:var(--muted);">' + row.abv.toFixed(1) + '% ABV (effective)</span></td>'
           + '<td style="padding:10px 8px;text-align:right;font-size:12px;color:var(--muted);">' + row.before.toFixed(1) + ' L</td>'
           + '<td style="padding:6px 8px;text-align:center;">'
           +   '<input type="number" id="lq-remaining-' + idx + '" min="0" max="' + row.before.toFixed(1) + '" step="0.1" value="' + fifoRemaining[idx].toFixed(1) + '" '
           +   'oninput="window._lqUpdateBalance()" '
           +   'style="width:90px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:5px 8px;font-size:12px;border-radius:3px;text-align:right;">'
           + '</td>'
-          + '<td style="padding:10px 8px;text-align:right;font-size:12px;font-weight:700;color:var(--amber);" id="lq-drawn-' + idx + '">' + Math.max(0, row.before - fifoRemaining[idx]).toFixed(1) + ' L</td>'
+          + '<td style="padding:10px 8px;text-align:right;font-size:12px;font-weight:700;color:var(--amber);" id="lq-drawn-' + idx + '">' + _drawn0.toFixed(1) + ' L</td>'
+          + '<td style="padding:10px 8px;text-align:right;font-size:12px;font-weight:700;color:var(--gold-light);"><span id="lq-drawnlpa-' + idx + '">' + (_drawn0 * (row.abv / 100)).toFixed(2) + '</span></td>'
           + '</tr>';
       }).join('');
 
       var reqDisp = reqLitres > 0
-        ? actualBottles.toLocaleString() + ' bottles &times; ' + bomVolCl + ' cl = <strong style="color:var(--white);">' + reqLitres.toFixed(1) + ' L required</strong>'
+        ? actualBottles.toLocaleString() + ' bottles &times; ' + bomVolCl + ' cl = <strong style="color:var(--white);">' + reqLitres.toFixed(1) + ' L</strong> @ <strong style="color:var(--white);">' + bottlingAbv.toFixed(1) + '%</strong> = <strong style="color:var(--gold-light);">' + reqLPA.toFixed(2) + ' LPA required</strong>'
+          + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Enter the litres <strong>left in each container</strong> after the run. Reconciliation is on alcohol (LPA) — water added to reach bottling strength is recorded below.</div>'
         : 'Required volume not calculated &mdash; adjust remaining values to match actual drawn.';
 
       var partialBanner = alreadyDeductedIds.length
@@ -35068,7 +35239,48 @@ window.saveAdjModal = async function() {
           + '</div>'
         : '';
 
-      ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px 28px 22px;width:min(680px,100%);margin:auto;">'
+      // ── Leftover handling section (Phase 3) ──────────────────────────────
+      var _destTypeLbl = { ibc:'IBC', blue_drum:'Blue Drum', tank:'Tank', tanker:'Tanker' };
+      var _destOpts = function(excludeId) {
+        return '<option value="">— Select a vessel —</option>'
+          + destConts.filter(function(d){ return d.id !== excludeId; }).map(function(d){
+              var t = _destTypeLbl[d.type] || d.type;
+              var l = parseFloat(d.current_litres || 0);
+              return '<option value="' + d.id + '">' + esc(d.reference) + ' [' + t + ']' + (l > 0 ? ' — ' + l.toFixed(0) + 'L' : ' — empty') + '</option>';
+            }).join('');
+      };
+      var _selStyle = 'width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;';
+      var leftoverHtml = '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
+        + '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Leftover Handling</div>'
+        + '<div style="font-size:10px;color:var(--muted);margin-bottom:10px;line-height:1.4;">What stays in each container after the run. Default: kept in the same container at its original strength (preserves age &amp; value). Override only if leftover was diluted to bottling strength or moved to another vessel.</div>'
+        + contRows.map(function(row, idx) {
+            var clientBadge = row.clientId
+              ? '<span style="font-size:9px;font-weight:700;color:var(--amber);background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.4);border-radius:3px;padding:1px 6px;margin-left:6px;">CLIENT-OWNED</span>'
+              : '';
+            var canDilute = bottlingAbv > 0 && row.abv > bottlingAbv + 0.5;
+            var strengthRadios = canDilute
+              ? '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px;">'
+                + '<label style="font-size:11px;color:var(--white);display:flex;gap:6px;align-items:center;cursor:pointer;"><input type="radio" name="lq-lo-strength-' + idx + '" value="original" checked onchange="window._lqUpdateBalance()"> Keep at original strength (' + row.abv.toFixed(1) + '%)</label>'
+                + '<label style="font-size:11px;color:var(--white);display:flex;gap:6px;align-items:center;cursor:pointer;"><input type="radio" name="lq-lo-strength-' + idx + '" value="bottling" onchange="window._lqUpdateBalance()"> Bring to bottling (' + bottlingAbv.toFixed(1) + '%)</label>'
+                + '</div>'
+              : '';
+            var locRadios = '<div style="display:flex;gap:16px;flex-wrap:wrap;">'
+              + '<label style="font-size:11px;color:var(--white);display:flex;gap:6px;align-items:center;cursor:pointer;"><input type="radio" name="lq-lo-loc-' + idx + '" value="same" checked onchange="window._lqUpdateBalance()"> Stay in ' + esc(row.reference) + '</label>'
+              + '<label style="font-size:11px;color:var(--white);display:flex;gap:6px;align-items:center;cursor:pointer;"><input type="radio" name="lq-lo-loc-' + idx + '" value="move" onchange="window._lqUpdateBalance()"> Move to another vessel</label>'
+              + '</div>';
+            var destWrap = '<div id="lq-lo-dest-wrap-' + idx + '" style="display:none;margin-top:8px;">'
+              + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">'
+              + '<select id="lq-lo-dest-' + idx + '" onchange="window._lqUpdateBalance()" style="' + _selStyle + '">' + _destOpts(row.id) + '</select>'
+              + '<input type="text" id="lq-lo-cbw-' + idx + '" placeholder="CBW rotation (optional)" style="' + _selStyle + '">'
+              + '</div></div>';
+            return '<div style="border:1px solid var(--navy-border);border-radius:4px;padding:10px 12px;margin-bottom:8px;">'
+              + '<div style="font-size:11px;font-weight:700;color:var(--white);margin-bottom:8px;">' + esc(row.reference) + ' — leftover <span id="lq-leftover-litres-' + idx + '">' + fifoRemaining[idx].toFixed(1) + '</span> L' + clientBadge + '</div>'
+              + strengthRadios + locRadios + destWrap
+              + '</div>';
+          }).join('')
+        + '</div>';
+
+      ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px 28px 22px;width:min(740px,100%);margin:auto;">'
         + '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;">'
         +   '<div><div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Complete Job</div>'
         +     '<div style="font-size:16px;font-weight:800;color:var(--white);">Liquid Stock Deduction</div></div>'
@@ -35082,6 +35294,7 @@ window.saveAdjModal = async function() {
         +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Before Job</th>'
         +   '<th style="text-align:center;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Remaining After</th>'
         +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Drawn</th>'
+        +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Drawn LPA</th>'
         + '</tr></thead><tbody>' + rowsHtml + '</tbody></table>'
 
         + '<div style="margin-top:16px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
@@ -35094,6 +35307,18 @@ window.saveAdjModal = async function() {
         +       '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Reason <span style="color:var(--red);">*</span></label>'
         +       '<input type="text" id="lq-waste-reason" placeholder="e.g. overfill, line loss, sample…" oninput="window._lqUpdateBalance()" '
         +       'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
+        +   '</div>'
+        + '</div>'
+
+        + '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
+        +   '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Water Added at Completion</div>'
+        +   '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">RO water added to bring the drawn liquid down to bottling strength. Defaults to (finished litres &minus; source drawn); adjust to the actual amount added. Water changes litres only, never alcohol (LPA), so it does not affect the balance above.</div>'
+        +   '<div style="display:grid;grid-template-columns:160px 1fr;gap:12px;align-items:center;">'
+        +     '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Water added (L)</label>'
+        +       '<input type="number" id="lq-water-added" min="0" step="0.1" value="0" '
+        +       'oninput="window._lqWaterTouched();window._lqUpdateBalance()" '
+        +       'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
+        +     '<div style="font-size:10px;color:var(--muted);">Auto-filled from the dilution maths — edit if the floor added a different amount.</div>'
         +   '</div>'
         + '</div>'
 
@@ -35114,6 +35339,8 @@ window.saveAdjModal = async function() {
         +   '</div>'
         + '</div>'
 
+        + leftoverHtml
+
         + '<div id="lq-balance-display" style="margin-top:14px;padding:14px 16px;background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:5px;"></div>'
 
         + '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:22px;flex-wrap:wrap;">'
@@ -35125,12 +35352,14 @@ window.saveAdjModal = async function() {
       document.body.style.overflow = 'hidden';
 
       window._lqUpdateBalance = function() { updateBalance(); };
+      window._lqWaterTouched  = function() { _waterTouched = true; };
       updateBalance();
 
       function closeModal() {
         ov.remove();
         document.body.style.overflow = '';
         delete window._lqUpdateBalance;
+        delete window._lqWaterTouched;
         resolve(false);
       }
 
@@ -35157,14 +35386,36 @@ window.saveAdjModal = async function() {
           lines: contRows.map(function(row, idx) {
             var rem   = getRemaining(idx);
             var drawn = Math.max(0, row.before - rem);
-            return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv };
+            return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv, lpaBefore: row.lpaBefore, clientId: row.clientId };
           }).filter(function(l){ return l.litreDrawn > 0.001 && alreadyDeductedIds.indexOf(l.containerId) < 0; }),
-          waste:    { litres: getWasteLitres(),    reason: getWasteReason() },
-          variance: { litres: getVarianceLitres(), reason: getVarianceReason() }
+          waste:      { litres: getWasteLitres(),    reason: getWasteReason() },
+          variance:   { litres: getVarianceLitres(), reason: getVarianceReason() },
+          waterAdded: getWaterAdded(),
+          reqLPA:     reqLPA,
+          bottlingAbv: bottlingAbv,
+          // Leftover actions that need work beyond the default (kept in same
+          // container at original strength, already handled by the main loop).
+          leftover: contRows.map(function(row, idx) {
+            var rem = getRemaining(idx);
+            return {
+              containerId: row.id,
+              reference:   row.reference,
+              litres:      rem,
+              abv:         row.abv,
+              lpa:         rem * (row.abv / 100),
+              clientId:    row.clientId,
+              fillDate:    row.fillDate,
+              strength:    getLeftoverStrength(idx),
+              location:    getLeftoverLoc(idx),
+              destId:      getLeftoverLoc(idx) === 'move' ? getLeftoverDest(idx) : '',
+              cbw:         getLeftoverCbw(idx)
+            };
+          }).filter(function(lo){ return lo.litres > 0.05 && (lo.strength === 'bottling' || (lo.location === 'move' && lo.destId)); })
         };
         ov.remove();
         document.body.style.overflow = '';
         delete window._lqUpdateBalance;
+        delete window._lqWaterTouched;
         resolve(plan);
       };
     });
@@ -35258,6 +35509,160 @@ window.saveAdjModal = async function() {
         console.warn('Liquid variance history write failed (containers already updated):', varErr.message || varErr);
       }
     }
+
+    // ── Leftover reconciliation (Phase 3) ───────────────────────────────────
+    // The main loop already left each source container at its leftover litres /
+    // original strength (the safe default). Here we apply any explicit override:
+    // bring leftover to bottling strength and/or move it into another vessel.
+    var leftoverActions = (plan.leftover || []).filter(function(lo){
+      return lo && lo.litres > 0.05 && (lo.strength === 'bottling' || (lo.location === 'move' && lo.destId));
+    });
+    var leftoverSummary = null;
+    if (leftoverActions.length) {
+      // Client-owned consent gate: converting strength or relocating client liquid
+      // changes the client's asset — confirm once before touching any of it.
+      var clientTouched = leftoverActions.some(function(lo){ return lo.clientId; });
+      var proceed = true;
+      if (clientTouched && window.lpConfirm) {
+        proceed = await window.lpConfirm(
+          'Some leftover liquid being brought to bottling strength or moved is CLIENT-OWNED. This changes the client\u2019s asset (strength and/or location). Proceed?',
+          { title: 'Client-owned liquid', confirmLabel: 'Yes, proceed', cancelLabel: 'Leave as-is' }
+        );
+      }
+      if (proceed) {
+        for (var lo2 = 0; lo2 < leftoverActions.length; lo2++) {
+          try {
+            await _applyLeftoverAction(leftoverActions[lo2], jobId, egid, pById, pByName, parseFloat(plan.bottlingAbv || 0));
+          } catch(loErr) {
+            console.warn('Leftover action failed for ' + leftoverActions[lo2].reference + ':', loErr && loErr.message);
+            window.toast && window.toast('Leftover update failed for ' + leftoverActions[lo2].reference + ' — adjust manually.', 'error');
+          }
+        }
+        var primaryLo = leftoverActions.reduce(function(a, b){ return b.litres > a.litres ? b : a; }, leftoverActions[0]);
+        leftoverSummary = {
+          strength:    primaryLo.strength,
+          containerId: (primaryLo.location === 'move' && primaryLo.destId) ? primaryLo.destId : primaryLo.containerId,
+          cbw:         primaryLo.cbw || null
+        };
+      } else {
+        window.toast && window.toast('Client-owned leftover left unchanged (kept at original strength in its container).', 'info');
+      }
+    }
+
+    // ── Close-out reconciliation persist (Phase 2/3) ────────────────────────
+    // Persist water added + leftover outcome + scope to the sign-off. Guarded:
+    // if the dilution-reconcile migration has not been applied the columns are
+    // missing and the PATCH is skipped without affecting the completed deduction.
+    var waterAdded = plan.waterAdded != null ? parseFloat(plan.waterAdded) : null;
+    var _soPatch = {};
+    if (waterAdded != null && !isNaN(waterAdded)) _soPatch.water_added = waterAdded;
+    if (leftoverSummary) {
+      _soPatch.leftover_strength     = leftoverSummary.strength;
+      _soPatch.leftover_container_id = leftoverSummary.containerId;
+      if (leftoverSummary.cbw) _soPatch.leftover_cbw = leftoverSummary.cbw;
+    }
+    if (window._lsoDilutionMode) _soPatch.dilution_scope = window._lsoDilutionMode;
+    if (Object.keys(_soPatch).length) {
+      try {
+        await window.db.update('job_liquid_signoff', '?job_id=eq.' + jobId, _soPatch);
+      } catch(woErr) {
+        console.warn('Close-out reconciliation persist skipped (columns may be missing — run dilution-reconcile migration):', woErr && woErr.message);
+      }
+    }
+    // Non-critical: record the bottling-batch dilution water as a history note.
+    if (waterAdded > 0.05 && plan.lines.length) {
+      var wLine = plan.lines.reduce(function(a, b){ return b.litreDrawn > a.litreDrawn ? b : a; }, plan.lines[0]);
+      try {
+        await writeHistory({
+          container_id:      wLine.containerId,
+          container_ref:     wLine.reference,
+          event_type:        'dilution_water',
+          event_group_id:    egid,
+          notes:             waterAdded.toFixed(1) + 'L RO water added at completion to reach bottling strength (job ' + jobId + ')',
+          performed_by_id:   pById,
+          performed_by_name: pByName
+        });
+      } catch(wHistErr) { /* non-critical */ }
+    }
+  }
+
+  // Apply one leftover reconciliation action at job close (Phase 3). The main
+  // deduction loop has already set the SOURCE container to its leftover litres at
+  // original strength; here we optionally dilute that leftover to bottling
+  // strength and/or move it into another vessel (carrying the fill date forward
+  // to preserve the age statement when the destination was empty).
+  async function _applyLeftoverAction(lo, jobId, egid, pById, pByName, bottlingAbv) {
+    var srcId  = lo.containerId;
+    var loLpa  = parseFloat(lo.lpa || 0);
+    var loLit  = parseFloat(lo.litres || 0);
+    var loAbv  = parseFloat(lo.abv || 0);
+    var toBott = lo.strength === 'bottling' && bottlingAbv > 0 && loAbv > bottlingAbv;
+    var moving = lo.location === 'move' && lo.destId;
+
+    // Resulting strength/volume of the leftover after optional dilution. Alcohol
+    // (LPA) is invariant to the added water.
+    var outAbv = toBott ? bottlingAbv : loAbv;
+    var outLit = (toBott && bottlingAbv > 0) ? (loLpa / (bottlingAbv / 100)) : loLit;
+    var outLpa = loLpa;
+
+    if (!moving) {
+      // Stay in source container; strength changes to bottling.
+      var upd = {
+        current_litres: Math.round(outLit * 1e4) / 1e4,
+        current_lpa:    Math.round(outLpa * 1e4) / 1e4,
+        abv:            Math.round(outAbv * 100) / 100,
+        status:         outLit <= 0 ? 'empty' : 'partially_full'
+      };
+      if (lo.cbw) upd.cbw_rotation = lo.cbw;
+      await window.db.update('liquid_containers', '?id=eq.' + srcId, upd);
+      await writeHistory({
+        container_id: srcId, container_ref: lo.reference, event_type: 'dilution', event_group_id: egid,
+        litres_before: loLit, litres_after: outLit, lpa_before: loLpa, lpa_after: outLpa,
+        abv_before: loAbv, abv_after: outAbv,
+        notes: 'Leftover brought to bottling strength at close (' + loAbv.toFixed(1) + '% → ' + outAbv.toFixed(1) + '%, +' + Math.max(0, outLit - loLit).toFixed(1) + 'L water) (job ' + jobId + ')',
+        performed_by_id: pById, performed_by_name: pByName
+      });
+      return;
+    }
+
+    // Moving leftover into another vessel (optionally also diluted to bottling).
+    var dRows = [];
+    try { dRows = await supaGet('liquid_containers?id=eq.' + lo.destId + '&select=id,reference,current_litres,current_lpa,abv,fill_date'); } catch(e) {}
+    var d    = (dRows && dRows[0]) || {};
+    var dLit = parseFloat(d.current_litres || 0);
+    var dLpa = parseFloat(d.current_lpa || 0);
+    var newDLit = dLit + outLit;
+    var newDLpa = dLpa + outLpa;
+    var newDAbv = newDLit > 0 ? (newDLpa / newDLit * 100) : outAbv;
+
+    // Empty the source (all leftover moved out).
+    await window.db.update('liquid_containers', '?id=eq.' + srcId, { current_litres: 0, current_lpa: 0, status: 'empty' });
+
+    var destUpd = {
+      current_litres: Math.round(newDLit * 1e4) / 1e4,
+      current_lpa:    Math.round(newDLpa * 1e4) / 1e4,
+      abv:            Math.round(newDAbv * 100) / 100,
+      status:         newDLit > 0 ? 'partially_full' : 'empty'
+    };
+    // Carry the cask fill date forward to preserve the age statement when the
+    // destination was previously empty.
+    if (dLit <= 0.001 && lo.fillDate) destUpd.fill_date = lo.fillDate;
+    if (lo.cbw) destUpd.cbw_rotation = lo.cbw;
+    await window.db.update('liquid_containers', '?id=eq.' + lo.destId, destUpd);
+
+    var moveNote = 'Leftover moved from ' + lo.reference + ' to ' + (d.reference || lo.destId)
+      + (toBott ? ' (diluted to bottling ' + outAbv.toFixed(1) + '%)' : ' (at ' + outAbv.toFixed(1) + '%)')
+      + (lo.cbw ? ' · CBW ' + lo.cbw : '') + ' (job ' + jobId + ')';
+    await writeHistory({
+      container_id: srcId, container_ref: lo.reference, event_type: 'transfer_from', event_group_id: egid,
+      litres_before: loLit, litres_after: 0, lpa_before: loLpa, lpa_after: 0, abv_before: loAbv,
+      notes: moveNote, performed_by_id: pById, performed_by_name: pByName
+    });
+    await writeHistory({
+      container_id: lo.destId, container_ref: d.reference || lo.destId, event_type: 'transfer_to', event_group_id: egid,
+      litres_before: dLit, litres_after: newDLit, lpa_before: dLpa, lpa_after: newDLpa, abv_after: newDAbv,
+      notes: moveNote, performed_by_id: pById, performed_by_name: pByName
+    });
   }
 
   window.lsoGoToBlending = function(jobId) {
