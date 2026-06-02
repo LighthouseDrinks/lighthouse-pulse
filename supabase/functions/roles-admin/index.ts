@@ -123,13 +123,14 @@ Deno.serve(async (req: Request) => {
     // Resolve the caller's role via app_users → roles, and require
     // is_pulse_admin. We deliberately re-check on every request even
     // though RLS would also reject non-admins (defence in depth, and
-    // cleaner error messages than a 403 with no body).
+    // cleaner error messages than a 403 with no body). Also require
+    // status='active' so terminated admins can't call this function.
     const { data: appUser } = await adminClient
       .from('app_users')
-      .select('id, role')
+      .select('id, role, status')
       .eq('auth_user_id', user.id)
       .single();
-    if (!appUser) return err('Forbidden', 403);
+    if (!appUser || appUser.status !== 'active') return err('Forbidden', 403);
 
     const { data: callerRole } = await adminClient
       .from('roles')

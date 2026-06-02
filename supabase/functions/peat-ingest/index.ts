@@ -46,15 +46,18 @@ Deno.serve(async (req: Request) => {
     const { data: { user }, error: authErr } = await userClient.auth.getUser();
     if (authErr || !user) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
 
-    // Check role via app_users table
+    // Check role via app_users table. Defence-in-depth: also block
+    // terminated / pending-termination accounts so a stale Supabase
+    // session can't continue calling this function after the user is
+    // removed in the Workforce panel.
     const adminClient = createClient(supabaseUrl, serviceKey);
     const { data: appUser } = await adminClient
       .from('app_users')
-      .select('role')
+      .select('role, status')
       .eq('auth_user_id', user.id)
       .single();
 
-    if (!appUser || appUser.role === 'client') {
+    if (!appUser || appUser.role === 'client' || appUser.status !== 'active') {
       return new Response('Forbidden — staff only', { status: 403, headers: corsHeaders });
     }
 

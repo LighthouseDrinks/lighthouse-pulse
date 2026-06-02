@@ -13,8 +13,10 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const CREDS_ROLES   = ['managing_director', 'operations_director', 'financial_controller'];
-const FINANCE_ROLES = [...CREDS_ROLES, 'business_analyst', 'ecommerce_manager'];
+// Role policy is read from the `roles` table at request time — no
+// hardcoded list. has_finance_access gates the whole function;
+// has_finance_creds gates save_credentials and the OAuth callback
+// (which writes refresh tokens). See supabase/migrations/roles_table.sql.
 
 const XERO_TOKEN_URL  = 'https://identity.xero.com/connect/token';
 const XERO_REVOKE_URL = 'https://identity.xero.com/connect/revocation';
@@ -203,17 +205,28 @@ Deno.serve(async (req: Request) => {
     const { data: { user }, error: authErr } = await userClient.auth.getUser();
     if (authErr || !user) return err('Unauthorized', 401);
 
-    // Load role from app_users
+    // Load role from app_users + role policy from the roles table.
+    // has_finance_access gates the whole function; has_finance_creds
+    // gates the actions that write Xero credentials/tokens. We also
+    // require status='active' so terminated employees can't call this
+    // with a stale session token.
     const adminClient = createClient(supabaseUrl, serviceKey);
     const { data: appUser } = await adminClient
       .from('app_users')
-      .select('id, role')
+      .select('id, role, status')
       .eq('auth_user_id', user.id)
       .single();
+    if (!appUser || appUser.status !== 'active') return err('Forbidden — finance roles only', 403);
 
-    if (!appUser || !FINANCE_ROLES.includes(appUser.role)) {
+    const { data: roleRow } = await adminClient
+      .from('roles')
+      .select('has_finance_access, has_finance_creds')
+      .eq('key', appUser.role)
+      .maybeSingle();
+    if (!roleRow?.has_finance_access) {
       return err('Forbidden — finance roles only', 403);
     }
+    const hasCreds = !!roleRow.has_finance_creds;
 
     const role    = appUser.role as string;
     const userId  = appUser.id as string;
@@ -228,7 +241,7 @@ Deno.serve(async (req: Request) => {
 
     // ── save_credentials ────────────────────────────────────────────────────
     if (action === 'save_credentials') {
-      if (!CREDS_ROLES.includes(role)) return err('Forbidden', 403);
+      if (!hasCreds) return err('Forbidden', 403);
       const updates: { key: string; value: string }[] = [];
       if (body.client_id    && typeof body.client_id    === 'string') updates.push({ key: 'xero_client_id',     value: body.client_id.trim()     });
       if (body.client_secret && typeof body.client_secret === 'string') updates.push({ key: 'xero_client_secret', value: body.client_secret.trim() });
@@ -260,7 +273,11 @@ Deno.serve(async (req: Request) => {
 
     // ── callback ─────────────────────────────────────────────────────────────
     if (action === 'callback') {
-      if (role === 'ecommerce_manager') return err('Forbidden', 403);
+      // The OAuth callback writes refresh_token + tenant_id to app_settings,
+      // so it requires has_finance_creds (not just has_finance_access).
+      // ecommerce_manager has finance_access for the Stores tab but no
+      // finance_creds — preserves the old explicit ecommerce_manager block.
+      if (!hasCreds) return err('Forbidden', 403);
       const code        = body.code         as string;
       const redirectUri = body.redirect_uri as string;
       if (!code || !redirectUri) return err('Missing code or redirect_uri', 400);
@@ -845,7 +862,8 @@ Deno.serve(async (req: Request) => {
         const params = `where=${where}&Statuses=SUBMITTED&summaryOnly=true&page=1`;
         const { status, data } = await withSlot(() => xeroGet('/api.xro/2.0/Invoices', acc, ten, params));
         if (status !== 200) return { count: 0, total: 0, error: `SUBMITTED summary returned ${status}` };
-        const list = ((data?.Invoices ?? []) as InvoiceSummary[]);
+        const invoicePayload = data as { Invoices?: InvoiceSummary[] };
+        const list = invoicePayload.Invoices ?? [];
         let count = 0, total = 0;
         for (const inv of list) {
           const due = parseNum(inv.AmountDue);
@@ -1064,10 +1082,9 @@ Deno.serve(async (req: Request) => {
     }
 
     // ── overview_top_customer ─────────────────────────────────────────────────
-    // Slow, paginated fetch of all customer invoices issued YTD, aggregated by
-    // contact to find the customer who's billed the most this year. Runs as a
-    // SEPARATE action so the main overview_metrics call returns instantly and
-    // the UI can render with last-known cached value while this catches up.
+    // Slow, paginated fetch of all customer invoices YTD, aggregated by contact
+    // to find the customer who's actually been billed the most this year. Runs
+    // as a SEPARATE action so overview_metrics can still render quickly.
     // Hard-capped at 200 pages (20,000 invoices) to prevent runaway.
     if (action === 'overview_top_customer') {
       const { clientId, clientSecret } = await getXeroCreds(adminClient);
@@ -1083,15 +1100,19 @@ Deno.serve(async (req: Request) => {
 
       type ContactRef = { ContactID?: string; Name?: string };
       type InvoiceSummary = { Type?: string; Status?: string; Contact?: ContactRef; Total?: number; Date?: string };
+      type RankedCustomer = { contact_id: string; name: string; total: number; invoice_count: number };
 
       const MAX_PAGES = 200;
       const where = encodeURIComponent(`Type=="ACCREC" AND Date >= DateTime(${year},01,01)`);
+      const ISSUED_STATUSES = new Set(['AUTHORISED', 'PAID']);
       const totalsByContact = new Map<string, { name: string; total: number; invoice_count: number }>();
+      const statusCounts: Record<string, number> = {};
       let pagesFetched = 0;
       let invoicesSeen = 0;
+      let invoicesIncluded = 0;
       let capped = false;
       let error: string | null = null;
-      let grossTotal = 0;
+      let rankedInvoiceTotal = 0;
 
       for (let page = 1; page <= MAX_PAGES; page++) {
         const params = `where=${where}&summaryOnly=true&page=${page}`;
@@ -1101,16 +1122,20 @@ Deno.serve(async (req: Request) => {
           error = `Page ${page} returned ${status}: ${JSON.stringify(data).slice(0, 200)}`;
           break;
         }
-        const list = ((data?.Invoices ?? []) as InvoiceSummary[]);
+        const topCustomerPayload = data as { Invoices?: InvoiceSummary[] };
+        const list = topCustomerPayload.Invoices ?? [];
         invoicesSeen += list.length;
         for (const inv of list) {
-          if (inv.Status === 'VOIDED' || inv.Status === 'DELETED') continue;
+          const statusName = String(inv.Status || 'UNKNOWN').toUpperCase();
+          statusCounts[statusName] = (statusCounts[statusName] || 0) + 1;
+          if (!ISSUED_STATUSES.has(statusName)) continue;
           const total = typeof inv.Total === 'number' ? inv.Total : Number(inv.Total) || 0;
           if (!isFinite(total) || total <= 0) continue;
           const cid  = inv.Contact?.ContactID;
           const name = (inv.Contact?.Name ?? '').trim();
           if (!cid) continue;
-          grossTotal += total;
+          invoicesIncluded += 1;
+          rankedInvoiceTotal += total;
           const existing = totalsByContact.get(cid);
           if (existing) {
             existing.total += total;
@@ -1126,26 +1151,47 @@ Deno.serve(async (req: Request) => {
 
       const ranked = Array.from(totalsByContact.entries())
         .map(([contact_id, v]) => ({ contact_id, name: v.name, total: Math.round(v.total * 100) / 100, invoice_count: v.invoice_count }))
-        .sort((a, b) => b.total - a.total);
+        .sort((a: RankedCustomer, b: RankedCustomer) => {
+          const totalDiff = b.total - a.total;
+          if (totalDiff !== 0) return totalDiff;
+          const countDiff = b.invoice_count - a.invoice_count;
+          if (countDiff !== 0) return countDiff;
+          const nameDiff = a.name.localeCompare(b.name);
+          if (nameDiff !== 0) return nameDiff;
+          return a.contact_id.localeCompare(b.contact_id);
+        });
 
       const fetch_ms = Date.now() - tStart;
+      const invoiceBasis = 'ACCREC invoices dated from Jan 1 with status AUTHORISED or PAID';
 
       console.log('[xero-oauth] overview_top_customer:', JSON.stringify({
         pages_fetched: pagesFetched,
         invoices_seen: invoicesSeen,
+        invoices_included: invoicesIncluded,
         contacts:      totalsByContact.size,
+        ranked_invoice_total: Math.round(rankedInvoiceTotal * 100) / 100,
+        status_counts: statusCounts,
         capped, fetch_ms, error,
         top:           ranked[0] ?? null,
       }).slice(0, 1000));
 
       return json({
-        top_customer:         ranked[0] ?? null,
-        ytd_revenue_estimate: Math.round(grossTotal * 100) / 100,
-        top_5_for_diag:       ranked.slice(0, 5),
+        top_customer:               ranked[0] ?? null,
+        ranked_invoice_total:       Math.round(rankedInvoiceTotal * 100) / 100,
+        ytd_revenue_estimate:       Math.round(rankedInvoiceTotal * 100) / 100, // backwards-compatible alias
+        top_5_for_diag:             ranked.slice(0, 5),
+        invoice_basis:              invoiceBasis,
+        issued_statuses_included:   Array.from(ISSUED_STATUSES),
+        incomplete:                 capped || !!error,
         meta: {
           pages_fetched: pagesFetched,
           invoices_seen: invoicesSeen,
+          invoices_included: invoicesIncluded,
           contacts:      totalsByContact.size,
+          ranked_invoice_total: Math.round(rankedInvoiceTotal * 100) / 100,
+          invoice_basis: invoiceBasis,
+          statuses_included: Array.from(ISSUED_STATUSES),
+          status_counts: statusCounts,
           capped,
           fetch_ms,
           error,
@@ -1207,7 +1253,7 @@ Deno.serve(async (req: Request) => {
     // as-billed snapshot to job_invoice_lines + jobs.xero_invoice_id.
     //
     // Safety stack (read top-to-bottom):
-    //   1. Role gate (FINANCE_ROLES only — covered by the handler-level gate)
+    //   1. Role gate (has_finance_access only — covered by the handler-level gate)
     //   2. SELECT ... FOR UPDATE on jobs.xero_invoice_id — early-returns
     //      { already_pushed: true } if a prior push already succeeded. Kills
     //      both retry-after-orphan and double-click race in one shot.

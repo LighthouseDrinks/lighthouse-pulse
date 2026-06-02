@@ -6950,6 +6950,7 @@ window.copyInviteLink = function() {
       <div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;" id="sp-sku-id">SKU</div>
       <div style="font-size:20px;font-weight:700;color:var(--white);font-family:Merriweather,serif;" id="sp-sku-desc">—</div>
       <div style="font-size:12px;color:var(--muted);margin-top:4px;" id="sp-sku-meta">—</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px;" id="sp-sku-audit"></div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;flex-wrap:wrap;">
       <button onclick="if(window.canDo&&window.canDo('drygoods_edit')){window.openAddBatchModal();}else{window.lpAlert('You do not have permission to add deliveries.');}" class="btn btn-gold">+ Add Delivery</button>
@@ -7011,6 +7012,12 @@ window.copyInviteLink = function() {
     <div style="font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-top:28px;margin-bottom:12px;font-weight:700;">Stock History</div>
     <div id="sp-history">
       <div style="color:var(--muted);font-size:13px;text-align:center;padding:24px;">Loading history…</div>
+    </div>
+
+    <!-- SKU change history (audit: created / edited / deactivated) -->
+    <div style="font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-top:28px;margin-bottom:12px;font-weight:700;">SKU Change History</div>
+    <div id="sp-sku-changelog">
+      <div style="color:var(--muted);font-size:13px;text-align:center;padding:24px;">Loading…</div>
     </div>
 
     <!-- Associated BOMs -->
@@ -11295,10 +11302,10 @@ async function viewBom(bomId) {
     var allIds = SKU_FIELDS.map(function(p){ return b[p[0]]; }).filter(Boolean);
     var unique = allIds.filter(function(v,i,a){ return a.indexOf(v)===i; });
     try {
-      var skuRows = await window.db.select('dry_goods_skus', '?id=in.(' + unique.join(',') + ')&select=id,description');
+      var skuRows = await window.db.select('dry_goods_skus', '?id=in.(' + unique.join(',') + ')&select=id,description,volume,abv,region');
       if (Array.isArray(skuRows)) {
         var descMap = {};
-        skuRows.forEach(function(r){ descMap[r.id] = r.description || r.id; });
+        skuRows.forEach(function(r){ descMap[r.id] = window.skuDisplayName(r) || r.id; });
         SKU_FIELDS.forEach(function(p){ if (b[p[0]] && descMap[b[p[0]]]) b[p[1]] = descMap[b[p[0]]]; });
       }
     } catch(e) { console.warn('viewBom desc resolve failed:', e.message); }
@@ -11524,10 +11531,10 @@ window.printBom = async function(bomId) {
     var ids2 = SKU_FIELDS.map(function(p){ return b[p[0]]; }).filter(Boolean);
     var unique2 = ids2.filter(function(v,i,a){ return a.indexOf(v)===i; });
     try {
-      var rows2 = await window.db.select('dry_goods_skus', '?id=in.(' + unique2.join(',') + ')&select=id,description');
+      var rows2 = await window.db.select('dry_goods_skus', '?id=in.(' + unique2.join(',') + ')&select=id,description,volume,abv,region');
       if (Array.isArray(rows2)) {
         var map2 = {};
-        rows2.forEach(function(r){ map2[r.id] = r.description || r.id; });
+        rows2.forEach(function(r){ map2[r.id] = window.skuDisplayName(r) || r.id; });
         SKU_FIELDS.forEach(function(p){ if (b[p[0]] && map2[b[p[0]]]) b[p[1]] = map2[b[p[0]]]; });
       }
     } catch(e) { console.warn('printBom desc resolve failed:', e.message); }
@@ -27295,6 +27302,15 @@ window.openSKUPanel = async function(skuId) {
     sku.unit_of_measure ? sku.unit_of_measure : ''
   ].filter(Boolean).join(' · ');
 
+  // Who added this SKU (created_by/created_at are stamped on creation).
+  var spAudit = document.getElementById('sp-sku-audit');
+  if (spAudit) {
+    spAudit.innerHTML = sku.created_by
+      ? 'Added by <span style="color:var(--text);">' + window.escapeHtml(sku.created_by) + '</span>'
+          + (sku.created_at ? ' on ' + fmtDate(sku.created_at) : '')
+      : '';
+  }
+
   // Label details (volume / region / barcode)
   var labelDetails = document.getElementById('sp-label-details');
   var hasLabelData = sku.volume || sku.abv || sku.region || sku.barcode;
@@ -27439,6 +27455,57 @@ window.openSKUPanel = async function(skuId) {
     batchEl.innerHTML = '<div style="color:var(--red);padding:16px;">Error loading: ' + e.message + '</div>';
   }
 
+  // ── SKU change history (created / edited / deactivated) ────────────────────
+  var clEl = document.getElementById('sp-sku-changelog');
+  if (clEl) {
+    try {
+      var changelog = await supaFetch('dry_goods_skus_history', '?sku_id=eq.' + skuId + '&order=created_at.desc&limit=100');
+      if (!changelog.length) {
+        clEl.innerHTML = '<div style="color:var(--muted);font-size:13px;text-align:center;padding:24px;">No change history recorded.</div>';
+      } else {
+        var ACT_LABEL = { created:'Created', edited:'Edited', deactivated:'Deactivated', reactivated:'Reactivated', deleted:'Deleted' };
+        var ACT_COL   = { created:'var(--green)', edited:'var(--blue,#4a9edd)', deactivated:'var(--red)', reactivated:'var(--green)', deleted:'var(--red)' };
+        var FIELD_LABEL = {
+          description:'Description', category_id:'Category', client_id:'Client', supplier_id:'Supplier',
+          location:'Location', unit_of_measure:'Unit', reorder_point:'Reorder point', notes:'Notes',
+          volume:'Volume', abv:'ABV', region:'Region', barcode:'Barcode', is_active:'Active'
+        };
+        var fmtVal = function(v) {
+          if (v === null || v === undefined || v === '') return '<em style="color:var(--muted);">empty</em>';
+          return window.escapeHtml(String(v));
+        };
+        clEl.innerHTML = changelog.map(function(h) {
+          var when = h.created_at ? new Date(h.created_at).toLocaleString('en-IE', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '—';
+          var diffHtml = '';
+          if (h.changes && typeof h.changes === 'object') {
+            var keys = Object.keys(h.changes);
+            if (keys.length) {
+              diffHtml = '<div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">'
+                + keys.map(function(k) {
+                    var c = h.changes[k] || {};
+                    return '<div style="font-size:11px;color:var(--muted);">'
+                      + '<span style="color:var(--text);">' + (FIELD_LABEL[k] || window.escapeHtml(k)) + ':</span> '
+                      + fmtVal(c.from) + ' <span style="color:var(--muted);">&rarr;</span> ' + fmtVal(c.to)
+                      + '</div>';
+                  }).join('')
+                + '</div>';
+            }
+          }
+          return '<div style="background:var(--navy-card);border:1px solid var(--navy-border);border-left:3px solid ' + (ACT_COL[h.action] || 'var(--muted)') + ';border-radius:6px;padding:12px 14px;margin-bottom:8px;">'
+            + '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;">'
+            + '<span style="font-size:13px;font-weight:700;color:' + (ACT_COL[h.action] || 'var(--white)') + ';">' + (ACT_LABEL[h.action] || window.escapeHtml(h.action || '—')) + '</span>'
+            + '<span style="font-size:11px;color:var(--muted);">' + when + '</span></div>'
+            + '<div style="font-size:11px;color:var(--muted);margin-top:3px;">by <span style="color:var(--text);">' + window.escapeHtml(h.actor || 'Unknown') + '</span>'
+            + (h.note ? ' &middot; ' + window.escapeHtml(h.note) : '') + '</div>'
+            + diffHtml
+            + '</div>';
+        }).join('');
+      }
+    } catch(e) {
+      clEl.innerHTML = '<div style="color:var(--red);font-size:13px;padding:16px;">Could not load change history: ' + window.escapeHtml(e.message || String(e)) + '</div>';
+    }
+  }
+
   // Associated BOMs — scan window.BOMS for any that reference this SKU's description
   var bomsEl = document.getElementById('sp-boms');
   if (bomsEl) {
@@ -27510,6 +27577,8 @@ window.deleteSKU = async function(skuId) {
   try {
     // Soft delete — mark as inactive rather than hard delete to preserve history
     await supaMutate('PATCH', 'dry_goods_skus', '?id=eq.' + skuId, { is_active: false });
+
+    await window._skuRecordHistory(skuId, 'deactivated', null, 'Soft-deleted (marked inactive)');
 
     // Remove from local array and re-render
     _skus = _skus.filter(function(s){ return s.id !== skuId; });
@@ -27940,6 +28009,7 @@ window.saveEditSKU = async function() {
 
   try {
     var esIsLabel = esLabelWrap && esLabelWrap.style.display !== 'none';
+    var _oldSku = (typeof _skus !== 'undefined' && _skus.find) ? _skus.find(function(s){ return s.id === skuId; }) : null;
     var payload = {
       description:     gv('es-description'),
       category_id:     parseInt(gv('es-category')),
@@ -27957,6 +28027,11 @@ window.saveEditSKU = async function() {
     };
 
     await supaMutate('PATCH', 'dry_goods_skus', '?id=eq.'+skuId, payload);
+
+    var _changes = window._skuDiff(_oldSku, payload);
+    if (Object.keys(_changes).length) {
+      await window._skuRecordHistory(skuId, 'edited', _changes, null);
+    }
 
     window.toast('SKU '+skuId+' updated.', 'success');
     window.closeEditSKUModal();
@@ -28047,6 +28122,39 @@ window.saveEditBatch = async function() {
   }
 };
 
+// Append one immutable audit row for a SKU lifecycle action. Writes
+// via the logged-in session, mirroring _bomRecordHistory(). Failures
+// are swallowed so they never block the underlying save.
+window._skuRecordHistory = async function(skuId, action, changes, note) {
+  try {
+    var actor = (window.CURRENT_USER && (window.CURRENT_USER.email || window.CURRENT_USER.display_name)) || null;
+    await supaMutate('POST', 'dry_goods_skus_history', '', {
+      sku_id:  skuId,
+      action:  action,
+      actor:   actor,
+      changes: (changes && Object.keys(changes).length) ? changes : null,
+      note:    note || null
+    });
+  } catch(e) {
+    if (window.logError) window.logError('_skuRecordHistory:' + action, e);
+  }
+};
+
+// Field-level diff between an existing SKU row and an edit payload.
+// Returns { field: { from, to } } for changed keys only.
+window._skuDiff = function(oldSku, payload) {
+  var changes = {};
+  oldSku = oldSku || {};
+  Object.keys(payload).forEach(function(k) {
+    var oldV = oldSku[k] == null ? null : oldSku[k];
+    var newV = payload[k] == null ? null : payload[k];
+    if (String(oldV) !== String(newV)) {
+      changes[k] = { from: oldSku[k] == null ? null : oldSku[k], to: payload[k] == null ? null : payload[k] };
+    }
+  });
+  return changes;
+};
+
 window.saveNewSKU = async function() {
   if (!(window.canDo && window.canDo('drygoods_edit'))) { window.toast && window.toast('You do not have permission to create SKUs.', 'error'); return; }
   var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
@@ -28104,6 +28212,8 @@ window.saveNewSKU = async function() {
     var res = await supaMutate('POST', 'dry_goods_skus', '', payload);
     var saved = res[0];
     if (!saved) throw new Error('No record returned. Check Supabase config.');
+
+    await window._skuRecordHistory(newId, 'created', null, null);
 
     window.toast('SKU '+newId+' created.', 'success');
     window.closeNewSKUModal();
@@ -53855,8 +53965,16 @@ if (typeof _origOpenDD === 'function') {
 var TZ='Europe/Dublin';
 var _attMonday=null;        // Monday (YYYY-MM-DD) of the week being viewed
 var _attInit=false;         // date-input listener attached once
+var _attData=null;          // cache of the last render (for send / approve handlers)
+var ATT_TOLERANCE_MS=15*60000;          // clock-vs-roster slack before flagging
+var ATT_BREAK_REQUIRED_MS=6*60*60000;   // shift length above which a break is expected
+var TIMECARD_FN_URL='https://anhawgzgxoywophqbmji.supabase.co/functions/v1/timecard';
+var TIMECARD_PAGE='https://pulse.lighthousedrinks.com/timecard.html';
 
 function get(p){ var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
+function post(p,b){ return window.db.insert(p,b); }
+function patch(p,b){ var i=p.indexOf('?'); return window.db.update(i>=0?p.slice(0,i):p, i>=0?p.slice(i):'', b); }
+function del(p){ var i=p.indexOf('?'); return window.db.delete(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
 function esc(s){ return window.escapeHtml ? window.escapeHtml(s) : (s==null?'':String(s)); }
 
 function dubOffsetMin(utcMs){
@@ -53935,6 +54053,19 @@ function shiftMs(st,et){
   if(e<s)e+=1440; // overnight shift safety
   return Math.max(0,(e-s)*60000);
 }
+// Reasons a day needs the employee to fix their clock entries. Mirrors the
+// flag logic in the timecard edge function — keep the two in sync. A 1-2 min
+// early/late stays within ATT_TOLERANCE_MS and is never flagged.
+function dayIssues(rec,rosterMs,isPast){
+  var issues=[];
+  var hasCi=!!(rec&&rec.ci), hasCo=!!(rec&&rec.co);
+  var onSite=grossMs(rec), brk=breakMs(rec);
+  if(rosterMs>0 && !hasCi) issues.push('No clock-in recorded');
+  if(hasCi && !hasCo && isPast) issues.push('No clock-out recorded');
+  if(onSite>ATT_BREAK_REQUIRED_MS && brk===0) issues.push('No break recorded');
+  if(hasCi && hasCo && rosterMs>0 && Math.abs(onSite-rosterMs)>ATT_TOLERANCE_MS) issues.push('Hours don\u2019t match the rostered shift');
+  return issues;
+}
 
 window.attendancePrevWeek=function(){ _attMonday=addDaysYmd(_attMonday||mondayOf(todayYmd()),-7); window.loadAttendanceReport(); };
 window.attendanceNextWeek=function(){ _attMonday=addDaysYmd(_attMonday||mondayOf(todayYmd()),7); window.loadAttendanceReport(); };
@@ -53963,11 +54094,17 @@ window.loadAttendanceReport=async function(){
   var weekYmds=[];for(var i=0;i<7;i++)weekYmds.push(addDaysYmd(monday,i));
 
   try{
-    var emps=await get('app_users?select=id,auth_user_id,display_name,role,status&order=display_name.asc');
+    var emps=await get('app_users?select=id,auth_user_id,display_name,email,role,status&order=display_name.asc');
     emps=(emps||[]).filter(function(e){return e.role!=='client';});
 
     var evts=await get('clock_events?timestamp=gte.'+encodeURIComponent(startIso)+'&timestamp=lt.'+encodeURIComponent(endIso)+'&order=timestamp.asc&limit=5000');
     var shifts=await get('roster_shifts?shift_date=gte.'+monday+'&shift_date=lte.'+sunday+'&limit=2000');
+    // Timecard correction requests for this week (for status + approvals).
+    var requests=[];
+    try{ requests=await get('timecard_requests?week_start=eq.'+monday+'&order=created_at.desc&limit=500')||[]; }
+    catch(reqErr){ window.logError&&window.logError('timecard_requests load',reqErr); }
+    var reqByAuth={};   // latest request per employee (auth uid)
+    requests.forEach(function(r){ if(!reqByAuth[r.user_id]) reqByAuth[r.user_id]=r; });
 
     // Roster minutes by app_users.id + day
     var rosterMap={};
@@ -54002,11 +54139,17 @@ window.loadAttendanceReport=async function(){
       return;
     }
 
+    var todayKey=todayYmd();
+    var empByAuth={}, empById={};
+    emps.forEach(function(e){ if(e.auth_user_id)empByAuth[e.auth_user_id]=e; empById[e.id]=e; });
+    var flagsByAuth={};   // auth uid -> [{date,label,issues}]
+
     var gWorked=0,gGross=0,gRoster=0;
     var bodyHtml='';
     rows.forEach(function(e){
       var recs=e.auth_user_id?buildRecs(evts,e.auth_user_id):{};
       var empWorked=0,empGross=0,empRoster=0;
+      var empFlagDays=[];
       var dayRows='';
       weekYmds.forEach(function(ymd){
         var rec=recs[ymd];
@@ -54017,6 +54160,10 @@ window.loadAttendanceReport=async function(){
         var brMs=breakMs(rec);
         var open=hasClock&&!rec.co;
         empWorked+=wMs; empGross+=gMs; empRoster+=rosterMs;
+
+        var issues=dayIssues(rec,rosterMs,ymd<todayKey);
+        if(issues.length) empFlagDays.push({date:ymd,label:dayLabel(ymd),issues:issues});
+        var flagMark=issues.length?' <span title="'+esc(issues.join('; '))+'" style="color:var(--gold);">&#9873;</span>':'';
 
         var ciTxt=hasClock?esc(ft(rec.ci.timestamp)):'<span style="color:var(--muted);">—</span>';
         var coTxt=rec&&rec.co?esc(ft(rec.co.timestamp)):(open?'<span style="color:var(--gold);">open</span>':'<span style="color:var(--muted);">—</span>');
@@ -54040,7 +54187,7 @@ window.loadAttendanceReport=async function(){
         }
 
         dayRows+='<tr>'
-          +'<td style="white-space:nowrap;">'+dayLabel(ymd)+'</td>'
+          +'<td style="white-space:nowrap;">'+dayLabel(ymd)+flagMark+'</td>'
           +'<td>'+ciTxt+'</td>'
           +'<td>'+coTxt+'</td>'
           +'<td>'+brTxt+'</td>'
@@ -54050,17 +54197,48 @@ window.loadAttendanceReport=async function(){
           +'</tr>';
       });
       gWorked+=empWorked; gGross+=empGross; gRoster+=empRoster;
+      if(e.auth_user_id) flagsByAuth[e.auth_user_id]=empFlagDays;
 
       var empVar=empGross-empRoster;
       var empVarColor=(empRoster<=0)?'var(--muted)':((Math.abs(empVar)<=30*60000)?'var(--green)':'var(--red)');
       var empVarTxt=empRoster>0?fmSigned(empVar):'—';
 
+      // Status pill + correction-request controls.
+      var flagN=empFlagDays.length;
+      var pill=flagN
+        ? '<span style="background:rgba(201,168,76,0.15);color:var(--gold);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:3px 8px;border-radius:10px;">Needs attention &middot; '+flagN+'</span>'
+        : '<span style="background:rgba(61,186,120,0.12);color:var(--green);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;padding:3px 8px;border-radius:10px;">Clean</span>';
+
+      var reqRow=reqByAuth[e.auth_user_id];
+      var reqLine='';
+      if(reqRow){
+        var rd=reqRow.created_at?new Date(reqRow.created_at).toLocaleDateString('en-IE',{day:'numeric',month:'short'}):'';
+        if(reqRow.status==='sent')      reqLine='<span style="color:var(--muted);font-size:11px;">Link sent '+esc(rd)+', awaiting reply</span>';
+        else if(reqRow.status==='submitted') reqLine='<span style="color:var(--gold);font-size:11px;font-weight:700;">Correction submitted — review below</span>';
+        else if(reqRow.status==='approved') reqLine='<span style="color:var(--green);font-size:11px;">Correction approved '+esc(reqRow.reviewed_at?new Date(reqRow.reviewed_at).toLocaleDateString('en-IE',{day:'numeric',month:'short'}):'')+'</span>';
+        else if(reqRow.status==='rejected') reqLine='<span style="color:var(--muted);font-size:11px;">Last correction rejected</span>';
+      }
+
+      var canSend=!!(e.email && e.auth_user_id);
+      var sendTitle = !e.auth_user_id ? 'No clock account for this employee'
+                     : !e.email ? 'No email address on file'
+                     : (flagN? 'Email this employee a link to fix '+flagN+' day'+(flagN===1?'':'s')
+                             : 'Nothing to fix — send anyway if you want');
+      var btnLabel=(reqRow&&(reqRow.status==='sent'||reqRow.status==='submitted'))?'Resend link':'Send timecard link';
+      var sendBtn='<button onclick="window.attendanceSendLink(\''+esc(e.auth_user_id||'')+'\')" title="'+esc(sendTitle)+'"'
+        +(canSend?'':' disabled')
+        +' style="font-size:11px;padding:6px 12px;border-radius:4px;cursor:'+(canSend?'pointer':'not-allowed')+';font-family:Lato,sans-serif;border:1px solid '+(flagN&&canSend?'var(--gold)':'var(--navy-border)')+';background:'+(flagN&&canSend?'rgba(201,168,76,0.12)':'transparent')+';color:'+(canSend?(flagN?'var(--gold)':'var(--muted)'):'var(--navy-border)')+';">&#9993; '+btnLabel+'</button>';
+
       bodyHtml+='<div style="margin-bottom:22px;background:var(--navy-card,var(--navy-dark));border:1px solid var(--navy-border);border-radius:6px;overflow:hidden;">'
         +'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:12px 16px;border-bottom:1px solid var(--navy-border);">'
-          +'<div><span style="font-weight:700;font-size:14px;">'+esc(e.display_name||e.email||e.id)+'</span>'
+          +'<div><span style="font-weight:700;font-size:14px;">'+esc(e.display_name||e.email||e.id)+'</span> '+pill
           +(e.role?' <span style="color:var(--muted);font-size:11px;">'+esc((e.role||'').replace(/_/g,' '))+'</span>':'')
-          +(e.status&&e.status!=='active'?' <span style="color:var(--red);font-size:10px;text-transform:uppercase;">'+esc(e.status.replace(/_/g,' '))+'</span>':'')+'</div>'
-          +'<div style="font-size:12px;color:var(--text);">Worked <b>'+fm(empWorked)+'</b> &nbsp;·&nbsp; On site <b>'+fm(empGross)+'</b> &nbsp;·&nbsp; Rostered <b>'+fm(empRoster)+'</b> &nbsp;·&nbsp; Variance <b style="color:'+empVarColor+';">'+empVarTxt+'</b></div>'
+          +(e.status&&e.status!=='active'?' <span style="color:var(--red);font-size:10px;text-transform:uppercase;">'+esc(e.status.replace(/_/g,' '))+'</span>':'')
+          +(reqLine?'<div style="margin-top:3px;">'+reqLine+'</div>':'')+'</div>'
+          +'<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">'
+            +'<div style="font-size:12px;color:var(--text);">Worked <b>'+fm(empWorked)+'</b> &nbsp;·&nbsp; On site <b>'+fm(empGross)+'</b> &nbsp;·&nbsp; Rostered <b>'+fm(empRoster)+'</b> &nbsp;·&nbsp; Variance <b style="color:'+empVarColor+';">'+empVarTxt+'</b></div>'
+            +sendBtn
+          +'</div>'
         +'</div>'
         +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr>'
           +'<th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break</th><th style="text-align:left;">Worked</th><th style="text-align:left;">Rostered</th><th style="text-align:left;">Variance</th>'
@@ -54078,11 +54256,154 @@ window.loadAttendanceReport=async function(){
       +'<div><span style="color:var(--muted);">Variance</span> &nbsp;<b style="color:'+gVarColor+';">'+(gRoster>0?fmSigned(gVar):'—')+'</b></div>'
       +'</div>';
 
-    contentEl.innerHTML=summary+bodyHtml;
+    _attData={ monday:monday, weekYmds:weekYmds, byAuth:empByAuth, byId:empById, flagsByAuth:flagsByAuth };
+
+    var pendingHtml=buildPendingHtml(requests,empByAuth);
+    contentEl.innerHTML=summary+pendingHtml+bodyHtml;
   }catch(err){
     var msg=(err&&err.message)||String(err);
     contentEl.innerHTML='<div style="color:var(--red);font-size:12px;padding:24px 0;text-align:center;">Could not load attendance: '+esc(msg)+'</div>';
     window.logError&&window.logError('loadAttendanceReport',err);
+  }
+};
+
+// ── Pending corrections (employee-submitted, awaiting manager approval) ──
+function buildPendingHtml(requests,empByAuth){
+  var pend=(requests||[]).filter(function(r){return r.status==='submitted';});
+  if(!pend.length) return '';
+  var html='<div style="margin-bottom:22px;border:1px solid var(--gold);border-radius:6px;overflow:hidden;">'
+    +'<div style="padding:12px 16px;background:rgba(201,168,76,0.1);border-bottom:1px solid var(--gold);font-weight:700;font-size:13px;color:var(--gold);">&#9873; Pending timecard corrections ('+pend.length+') — review and approve</div>'
+    +'<div style="padding:12px 16px;">';
+  pend.forEach(function(r){
+    var emp=empByAuth[r.user_id];
+    var name=esc((emp&&emp.display_name)||r.employee_name||'Employee');
+    var days=(r.submitted_payload&&r.submitted_payload.days)||[];
+    var rowsHtml='';
+    days.forEach(function(d){
+      var brk=(d.breaks||[]).map(function(b){return esc((b.start||'—')+'–'+(b.end||'—'));}).join(', ')||'<span style="color:var(--muted);">none</span>';
+      rowsHtml+='<tr><td style="white-space:nowrap;">'+esc(dayLabel(d.date))+'</td>'
+        +'<td>'+esc(d.clockIn||'—')+'</td><td>'+esc(d.clockOut||'—')+'</td><td>'+brk+'</td></tr>';
+    });
+    var subAt=r.submitted_at?new Date(r.submitted_at).toLocaleString('en-IE',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'';
+    html+='<div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--navy-border);">'
+      +'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">'
+        +'<div><b style="font-size:13px;">'+name+'</b> <span style="color:var(--muted);font-size:11px;">submitted '+esc(subAt)+'</span></div>'
+        +'<div style="display:flex;gap:8px;">'
+          +'<button onclick="window.attendanceApprove(\''+esc(r.id)+'\',this)" class="btn btn-gold" style="font-size:11px;padding:6px 14px;">Approve &amp; apply</button>'
+          +'<button onclick="window.attendanceReject(\''+esc(r.id)+'\',this)" style="font-size:11px;padding:6px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;background:transparent;border:1px solid var(--navy-border);color:var(--muted);">Reject</button>'
+        +'</div>'
+      +'</div>'
+      +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr><th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break(s)</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
+    +'</div>';
+  });
+  html+='</div></div>';
+  return html;
+}
+
+// ── Send a correction magic link to an employee ──
+window.attendanceSendLink=async function(authUid){
+  if(!_attData)return;
+  var emp=_attData.byAuth[authUid];
+  if(!emp){ window.toast&&window.toast('Employee not found — reload the report.','error'); return; }
+  if(!emp.email){ window.toast&&window.toast('No email address on file for '+(emp.display_name||'this employee')+'.','error'); return; }
+  var flagDays=_attData.flagsByAuth[authUid]||[];
+  if(!window._resendKey){ window.toast&&window.toast('No email key set (Settings → System).','error'); return; }
+  var name=emp.display_name||emp.email;
+  if(!window.confirm('Send '+name+' a link to fill in their hours for '+(flagDays.length||'this')+' day'+(flagDays.length===1?'':'s')+'?')) return;
+  try{
+    var token=(window.crypto&&window.crypto.randomUUID?window.crypto.randomUUID():(Date.now().toString(36)+Math.random().toString(36).slice(2)))+Math.random().toString(36).slice(2);
+    // Supersede any earlier open request for this employee+week.
+    try{ await patch('timecard_requests?user_id=eq.'+authUid+'&week_start=eq.'+_attData.monday+'&status=in.(sent,submitted)',{status:'expired'}); }
+    catch(supErr){ window.logError&&window.logError('timecard supersede',supErr); }
+    var expires=new Date(Date.now()+10*24*60*60000).toISOString();
+    await post('timecard_requests',{
+      token:token, user_id:authUid, app_user_id:emp.id, employee_name:name,
+      week_start:_attData.monday, flagged:{days:flagDays}, status:'sent',
+      created_by:(window.CURRENT_USER&&window.CURRENT_USER.id)||null, expires_at:expires
+    });
+    var link=TIMECARD_PAGE+'?token='+encodeURIComponent(token);
+    var managerEmail=(window.CURRENT_USER&&window.CURRENT_USER.email)||undefined;
+    await window.sendEmail({ to:[emp.email], replyTo:managerEmail, subject:'Your hours for '+rangeLabel(_attData.monday)+' — quick check', html:buildCorrectionEmail(name,flagDays,link) });
+    window.toast&&window.toast('Timecard link sent to '+name,'success');
+    window.loadAttendanceReport();
+  }catch(e){
+    window.toast&&window.toast('Could not send: '+((e&&e.message)||'error'),'error');
+    window.logError&&window.logError('attendanceSendLink',e);
+  }
+};
+
+function buildCorrectionEmail(name,flagDays,link){
+  var issuesHtml='';
+  (flagDays||[]).forEach(function(d){
+    issuesHtml+='<li style="margin-bottom:4px;"><strong>'+esc(d.label)+'</strong> — '+esc((d.issues||[]).join('; '))+'</li>';
+  });
+  if(!issuesHtml) issuesHtml='<li>A couple of clock entries need confirming.</li>';
+  return '<div style="font-family:sans-serif;max-width:540px;margin:0 auto;padding:32px 24px;background:#f9f9f9;">'
+    +'<div style="background:#0d1b2a;padding:24px;border-radius:8px;text-align:center;margin-bottom:24px;">'
+    +'<h1 style="color:#c9a84c;font-size:20px;margin:0;">Lighthouse Drinks</h1>'
+    +'<p style="color:#7a93a8;font-size:12px;margin:4px 0 0;">Timesheet check</p></div>'
+    +'<h2 style="color:#0d1b2a;font-size:18px;">Hi '+esc(name)+',</h2>'
+    +'<p style="color:#333;line-height:1.6;">We\u2019re tidying up last week\u2019s hours and a few of your clock entries need a quick look:</p>'
+    +'<ul style="color:#333;line-height:1.6;">'+issuesHtml+'</ul>'
+    +'<p style="color:#333;line-height:1.6;">Tap below to pop in your actual times — it takes a minute, and your manager will confirm them.</p>'
+    +'<div style="text-align:center;margin:28px 0;">'
+    +'<a href="'+link+'" style="background:#c9a84c;color:#0d1b2a;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:700;font-size:15px;">Fill in my hours</a></div>'
+    +'<p style="color:#888;font-size:12px;text-align:center;line-height:1.5;">Please remember to clock in and out (and for your breaks) each day — that way you won\u2019t get these emails. This link expires in 10 days.</p></div>';
+}
+
+// ── Approve a submitted correction: write corrected rows to clock_events ──
+window.attendanceApprove=async function(reqId,btn){
+  if(btn){ btn.disabled=true; btn.textContent='Applying…'; }
+  try{
+    var rows=await get('timecard_requests?id=eq.'+reqId+'&limit=1');
+    var r=rows&&rows[0];
+    if(!r){ window.toast&&window.toast('Request not found.','error'); window.loadAttendanceReport(); return; }
+    if(r.status!=='submitted'){ window.toast&&window.toast('Already processed.','error'); window.loadAttendanceReport(); return; }
+    var authUid=r.user_id;
+    var days=(r.submitted_payload&&r.submitted_payload.days)||[];
+    var meId=(window.CURRENT_USER&&window.CURRENT_USER.id)||null;
+
+    for(var i=0;i<days.length;i++){
+      var d=days[i];
+      if(!d.date) continue;
+      var dayStart=dubWallToIso(d.date,'00:00');
+      var dayEnd=dubWallToIso(addDaysYmd(d.date,1),'00:00');
+      // Replace this Dublin day's events with the corrected set.
+      await del('clock_events?user_id=eq.'+authUid+'&timestamp=gte.'+encodeURIComponent(dayStart)+'&timestamp=lt.'+encodeURIComponent(dayEnd));
+      var inserts=[];
+      if(d.clockIn) inserts.push({type:'clock_in',t:d.clockIn});
+      (d.breaks||[]).forEach(function(b){
+        if(b.start) inserts.push({type:'break_start',t:b.start});
+        if(b.end)   inserts.push({type:'break_end',t:b.end});
+      });
+      if(d.clockOut) inserts.push({type:'clock_out',t:d.clockOut});
+      // Insert sequentially in chronological order (sorted by time).
+      inserts.sort(function(a,b){return a.t.localeCompare(b.t);});
+      for(var j=0;j<inserts.length;j++){
+        await post('clock_events',{ user_id:authUid, event_type:inserts[j].type, timestamp:dubWallToIso(d.date,inserts[j].t), synthetic:true, edited_by:meId });
+      }
+    }
+    await patch('timecard_requests?id=eq.'+reqId,{status:'approved',reviewed_by:meId,reviewed_at:new Date().toISOString()});
+    window.toast&&window.toast('Correction applied','success');
+    window.loadAttendanceReport();
+  }catch(e){
+    window.toast&&window.toast('Could not apply: '+((e&&e.message)||'error'),'error');
+    window.logError&&window.logError('attendanceApprove',e);
+    if(btn){ btn.disabled=false; btn.textContent='Approve & apply'; }
+  }
+};
+
+window.attendanceReject=async function(reqId,btn){
+  if(!window.confirm('Reject this correction? The submitted times will be discarded.')) return;
+  if(btn) btn.disabled=true;
+  try{
+    var meId=(window.CURRENT_USER&&window.CURRENT_USER.id)||null;
+    await patch('timecard_requests?id=eq.'+reqId,{status:'rejected',reviewed_by:meId,reviewed_at:new Date().toISOString()});
+    window.toast&&window.toast('Correction rejected','success');
+    window.loadAttendanceReport();
+  }catch(e){
+    window.toast&&window.toast('Could not reject: '+((e&&e.message)||'error'),'error');
+    if(btn) btn.disabled=false;
   }
 };
 })();

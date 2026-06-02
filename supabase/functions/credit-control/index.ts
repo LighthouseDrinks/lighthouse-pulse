@@ -18,10 +18,8 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const FINANCE_ROLES = [
-  'managing_director', 'operations_director', 'financial_controller',
-  'business_analyst', 'ecommerce_manager',
-];
+// Role policy is read from the `roles` table at request time
+// (has_finance_access). See supabase/migrations/roles_table.sql.
 
 const RESEND_URL = 'https://api.resend.com/emails';
 
@@ -66,13 +64,21 @@ Deno.serve(async (req: Request) => {
     if (authErr || !user) return err('Unauthorized', 401);
 
     const adminClient = createClient(supabaseUrl, serviceKey);
+    // Defence-in-depth: require status=active so terminated users with a
+    // valid session can't call this finance endpoint.
     const { data: appUser } = await adminClient
       .from('app_users')
-      .select('id, role')
+      .select('id, role, status')
       .eq('auth_user_id', user.id)
       .single();
+    if (!appUser || appUser.status !== 'active') return err('Forbidden — finance roles only', 403);
 
-    if (!appUser || !FINANCE_ROLES.includes(appUser.role)) {
+    const { data: roleRow } = await adminClient
+      .from('roles')
+      .select('has_finance_access')
+      .eq('key', appUser.role)
+      .maybeSingle();
+    if (!roleRow?.has_finance_access) {
       return err('Forbidden — finance roles only', 403);
     }
     const userId = appUser.id as string;
