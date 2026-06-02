@@ -3655,6 +3655,13 @@ window._openRevisionRequestModal = function(bomId, productName) {
         request_notes: notes,
         status:       'pending'
       });
+      // Log the request in the BOM approval history timeline.
+      try {
+        await window._bomRecordHistory && window._bomRecordHistory(
+          bomId, 'revision_requested', 'approved', 'approved',
+          u.display_name || u.full_name || u.email || 'Client'
+        );
+      } catch(_he) {}
       // Email staff
       try {
         if (window._lhNotifyEmails && window._emailTpl && window._emailTpl.bomRevisionRequestStaff) {
@@ -11979,6 +11986,7 @@ async function _bomRecordHistory(bomId, action, fromStatus, toStatus, actor, rev
     await window.db.insert('bom_history', row);
   } catch(e) {
     console.warn('[BOM history] write failed:', e.message);
+    try { window.logError && window.logError('BOM history write failed (' + action + ')', e.message); } catch(_) {}
   }
 }
 
@@ -12500,6 +12508,14 @@ window.deleteBom     = deleteBom;
 window.printBom      = printBom;
 window.renderBoms    = renderBoms;
 window.BOMS          = BOMS;
+// Exported so the Approvals page and client portal (separate script
+// blocks) can drive the BOM workflow. These helpers are closure-local
+// to this IIFE; without exporting them the Approvals-page edit-request
+// flows call undefined symbols and silently fail.
+window._bomRecordHistory   = _bomRecordHistory;
+window._bomPatch           = _bomPatch;
+window._bomGetSignedOffJob = _bomGetSignedOffJob;
+window._bomWorkflowUser    = _bomWorkflowUser;
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Label photo upload + rendering (shared by BOM modal + Job Quality tab)
@@ -20598,15 +20614,15 @@ window._approveEditRequest = async function(reqId) {
 window.returnBomToDraftSilent = async function(bomId, actor) {
   var bom = BOMS && BOMS.find(function(b){ return b.id === bomId; });
   try {
-    var _signedOffJob = await _bomGetSignedOffJob(bomId);
+    var _signedOffJob = await window._bomGetSignedOffJob(bomId);
     if (_signedOffJob) {
       window.toast && window.toast(
         'Warning: BOM ' + bomId + ' is signed off on job ' + _signedOffJob.id + ' which is still in progress.',
         'warn'
       );
     }
-    await _bomPatch(bomId, { bom_status: 'draft', locked_by: null, approval_requested_at: null, edit_requested_by: null });
-    await _bomRecordHistory(bomId, 'returned_to_draft', bom ? bom.status : 'approved', 'draft', actor || 'Lighthouse');
+    await window._bomPatch(bomId, { bom_status: 'draft', locked_by: null, approval_requested_at: null, edit_requested_by: null });
+    await window._bomRecordHistory(bomId, 'returned_to_draft', bom ? bom.status : 'approved', 'draft', actor || 'Lighthouse');
   } catch(e) { console.warn('returnBomToDraftSilent failed:', e.message); }
 };
 
@@ -21315,7 +21331,7 @@ window.approveJobSubmission = async function(id, opts) {
 
     // Initialise BOM-derived components for the job. Supply Chain + Liquid
     // sign-off tasks are no longer auto-fired here — the manager fires them
-    // from the job's Tasks tab via "Assign Tasks" when ready.
+    // Supply chain / liquid sign-offs are done in their tabs; staff notified via My Tasks on demand.
     try { window.initJobOnCreate && await window.initJobOnCreate(newJobId); }
     catch(tErr) { window.logError && window.logError('initJobOnCreate', tErr); }
 
@@ -29853,7 +29869,7 @@ window.saveAdjModal = async function() {
 
   // ── Job-creation init: populate component rows from BOM ──────────────────────
   // Supply Chain + Liquid Sign-Off tasks are NOT auto-fired here. Managers fire
-  // them later from the job's Tasks tab via the "Assign Tasks" button.
+  // Supply chain / liquid sign-offs use their tabs; managers notify staff via My Tasks on demand.
   async function initJobOnCreate(jobId) {
     try { await window.initComponentsFromBOM(jobId, true); }
     catch(e) { window.logError('initComponentsFromBOM', e); }
@@ -30046,7 +30062,7 @@ window.saveAdjModal = async function() {
       } else if (j.stage === 'active') {
         advBtn.textContent = 'Complete Job →';
         advBtn.style.display = '';
-        stageInfo.textContent = 'Requires: Liquid sign-off · Supply chain sign-off · Production checks (on-line + off-line) · Weights & Measures · Results tab filled.';
+        stageInfo.textContent = 'Requires: Liquid sign-off (Liquid tab) · Supply chain sign-off (Supply Chain tab) · Production checks (on-line + off-line) · Weights & Measures · Results tab filled.';
       }
       holdBtn.style.display   = '';
       cancelBtn.style.display = isExec ? '' : 'none';
@@ -30151,79 +30167,18 @@ window.saveAdjModal = async function() {
     var el = document.getElementById('jd-overview-content');
     if (!el) return;
     try {
-      var tasks = await supaGet('job_tasks?job_id=eq.' + jobId + '&order=created_at.asc');
-      tasks = tasks.filter(function(t){ return t.task_type !== 'weights_measures'; });
-      var currentUserId = window.CURRENT_USER ? window.CURRENT_USER.id : null;
-      var STATUS_STYLE_T = {
-        pending:   'background:rgba(232,156,58,0.15);color:var(--amber);',
-        accepted:  'background:rgba(74,158,221,0.15);color:var(--blue);',
-        completed: 'background:rgba(61,186,120,0.15);color:var(--green);'
-      };
-
-      var taskDiv = document.createElement('div');
-      taskDiv.style.marginTop = '24px';
-
-      var taskHeader = document.createElement('div');
-      taskHeader.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;';
-      taskHeader.innerHTML = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);">Tasks</div>';
-      var reassignBtn = document.createElement('button');
-      reassignBtn.textContent = 'Assign Tasks';
-      reassignBtn.style.cssText = 'background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;';
-      reassignBtn.onclick = function(){ window.openReassignTasks(jobId); };
-      taskHeader.appendChild(reassignBtn);
-      taskDiv.appendChild(taskHeader);
-
-      if (!tasks.length) {
-        taskDiv.innerHTML += '<div style="color:var(--muted);font-size:12px;line-height:1.5;">No tasks yet. Click <strong style="color:var(--white);">Assign Tasks</strong> above to fire Supply Chain and Liquid sign-offs when you\u2019re ready.</div>';
-      } else {
-        tasks.forEach(function(t) {
-          var ts = STATUS_STYLE_T[t.status]||STATUS_STYLE_T.pending;
-          // Show action buttons only to the assigned user
-          var isAssignedToMe = currentUserId && t.assigned_to === currentUserId;
-
-          var row = document.createElement('div');
-          row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--navy-border);gap:8px;';
-
-          var assignedName = t.assigned_to ? (_staffMap[t.assigned_to] || t.assigned_to.substring(0,8)) : 'Unassigned';
-          var assignedColor = t.assigned_to ? 'var(--white)' : 'var(--red)';
-
-          row.innerHTML = '<div style="flex:1;">'
-            + '<div style="font-size:13px;color:var(--white);">' + taskTitle(t) + '</div>'
-            + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">'
-            + window.roleLabel(t.assigned_role)
-            + (t.due_date ? ' · Due ' + t.due_date : '')
-            + '</div></div>'
-            + '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">'
-            + '<span style="font-size:11px;color:' + assignedColor + ';margin-right:4px;">' + assignedName + '</span>'
-            + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:3px 8px;border-radius:3px;' + ts + '">' + t.status + '</span>'
-            + '</div>';
-
-          // Add action buttons via DOM — only for assigned user
-          if (isAssignedToMe) {
-            var btnWrap = row.querySelector('div:last-child');
-            if (t.status === 'pending') {
-              var ab = document.createElement('button');
-              ab.textContent = 'Accept';
-              ab.style.cssText = 'font-size:10px;background:transparent;border:1px solid var(--blue);color:var(--blue);padding:3px 8px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;';
-              ab.onclick = function(){ window.acceptTask(t.id); };
-              btnWrap.insertBefore(ab, btnWrap.firstChild);
-            } else if (t.status === 'accepted') {
-              var cb = document.createElement('button');
-              cb.textContent = 'Complete';
-              cb.style.cssText = 'font-size:10px;background:transparent;border:1px solid var(--green);color:var(--green);padding:3px 8px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;';
-              cb.onclick = function(){ window.completeTask(t.id); };
-              btnWrap.insertBefore(cb, btnWrap.firstChild);
-            }
-          }
-
-          taskDiv.appendChild(row);
-        });
-      }
-
-      // Remove any previously rendered task sections
       var old = el.querySelectorAll('div[data-task-section]');
       old.forEach(function(d){ d.remove(); });
-      taskDiv.setAttribute('data-task-section','1');
+      var taskDiv = document.createElement('div');
+      taskDiv.setAttribute('data-task-section', '1');
+      taskDiv.style.marginTop = '24px';
+      taskDiv.innerHTML = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">Sign-offs</div>'
+        + '<div style="font-size:12px;color:var(--muted);line-height:1.6;">'
+        + '<strong style="color:var(--white);">BOM</strong> — <a href="javascript:void(0)" onclick="var tb=document.querySelector(\'.jd-tab[data-tab=tasks]\');if(tb)window.showJobTab(\'tasks\',tb);" style="color:var(--gold);">Tasks tab</a> (client confirmation). '
+        + '<strong style="color:var(--white);">Supply chain</strong> — Supply Chain tab. '
+        + '<strong style="color:var(--white);">Liquid</strong> — Liquid tab. '
+        + 'Use <strong style="color:var(--white);">My Tasks</strong> to notify staff on demand.'
+        + '</div>';
       el.appendChild(taskDiv);
     } catch(e) { window.logError('render task section', e); }
   }
@@ -30417,94 +30372,15 @@ window.saveAdjModal = async function() {
     setTimeout(function(){ window._renderBomVerification && window._renderBomVerification(jobId); }, 150);
   }
 
-  // Standalone Tasks tab
+  // Tasks tab — BOM client confirmation only (supply chain / liquid sign-offs use their tabs + My Tasks)
   async function loadTasksTab(jobId) {
     var el = document.getElementById('jd-tasks-content');
     if (!el) return;
-    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px 0;">Loading…</div>';
     try {
-      var tasks = await supaGet('job_tasks?job_id=eq.' + jobId + '&order=created_at.asc');
-      tasks = tasks.filter(function(t){ return t.task_type !== 'weights_measures'; });
-      var currentUserId = window.CURRENT_USER ? window.CURRENT_USER.id : null;
-      // Build a fresh name map so assigned names always display correctly
-      var _localNameMap = Object.assign({}, _staffMap);
-      try {
-        var staffRows = await supaGet('app_users?select=auth_user_id,display_name&order=display_name.asc');
-        staffRows.forEach(function(u){ if (u.auth_user_id) _localNameMap[u.auth_user_id] = u.display_name || u.auth_user_id.substring(0,8); });
-      } catch(e) { /* non-critical */ }
-      var STATUS_STYLE_T = {
-        pending:   'background:rgba(232,156,58,0.15);color:var(--amber);',
-        accepted:  'background:rgba(74,158,221,0.15);color:var(--blue);',
-        completed: 'background:rgba(61,186,120,0.15);color:var(--green);'
-      };
-
-      el.innerHTML = '';
-      var tasksHdr = document.createElement('div');
-      tasksHdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;';
-      tasksHdr.innerHTML = '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;">Tasks</div>';
-      var rBtn = document.createElement('button');
-      rBtn.textContent = 'Assign Tasks';
-      rBtn.style.cssText = 'background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;padding:4px 10px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;';
-      rBtn.onclick = function(){ window.openReassignTasks(jobId); };
-      tasksHdr.appendChild(rBtn);
-      el.appendChild(tasksHdr);
-
-      if (!tasks.length) {
-        el.innerHTML += '<div style="color:var(--muted);font-size:12px;line-height:1.5;">No tasks yet. Click <strong style="color:var(--white);">Assign Tasks</strong> above to fire Supply Chain and Liquid sign-offs when you\u2019re ready.</div>';
-      } else {
-      // Column header row
-      var colHdr = document.createElement('div');
-      colHdr.style.cssText = 'display:grid;grid-template-columns:1fr 160px 160px 100px;gap:12px;padding:0 0 8px 0;border-bottom:2px solid var(--navy-border);margin-bottom:4px;';
-      colHdr.innerHTML = ['Task','Role','Assigned To','Status'].map(function(h){
-        return '<div style="font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);">' + h + '</div>';
-      }).join('');
-      el.appendChild(colHdr);
-
-      tasks.forEach(function(t) {
-        var ts = STATUS_STYLE_T[t.status] || STATUS_STYLE_T.pending;
-        var isAssignedToMe = currentUserId && t.assigned_to === currentUserId;
-        var _resolvedName = t.assigned_to ? _localNameMap[t.assigned_to] : null;
-        var assignedName = _resolvedName || 'Not Assigned';
-        var assignedColor = _resolvedName ? 'var(--white)' : 'rgba(255,255,255,0.35)';
-        var roleLabel = window.roleLabel(t.assigned_role);
-
-        var row = document.createElement('div');
-        row.style.cssText = 'display:grid;grid-template-columns:1fr 160px 160px 100px;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--navy-border);';
-        row.innerHTML = '<div>'
-          + '<div style="font-size:13px;color:var(--white);font-weight:600;">' + taskTitle(t) + '</div>'
-          + (t.due_date ? '<div style="font-size:10px;color:var(--muted);margin-top:2px;">Due ' + t.due_date + '</div>' : '')
-          + '</div>'
-          + '<div style="font-size:12px;color:var(--muted);">' + (roleLabel || '—') + '</div>'
-          + '<div style="font-size:12px;font-weight:600;color:' + assignedColor + ';">' + assignedName + '</div>'
-          + '<div style="display:flex;flex-direction:column;align-items:flex-start;gap:5px;">'
-          + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:3px 10px;border-radius:3px;' + ts + '">' + t.status + '</span>'
-          + '</div>';
-
-        if (isAssignedToMe) {
-          var statusCell = row.querySelector('div:last-child');
-          if (t.status === 'pending') {
-            var ab = document.createElement('button');
-            ab.textContent = 'Accept';
-            ab.style.cssText = 'font-size:10px;background:transparent;border:1px solid var(--blue);color:var(--blue);padding:3px 9px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;white-space:nowrap;';
-            ab.onclick = function(){ window.acceptTask(t.id); };
-            statusCell.appendChild(ab);
-          } else if (t.status === 'accepted') {
-            var cb = document.createElement('button');
-            cb.textContent = 'Complete';
-            cb.style.cssText = 'font-size:10px;background:transparent;border:1px solid var(--green);color:var(--green);padding:3px 9px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;white-space:nowrap;';
-            (function(task) {
-              cb.onclick = async function(){
-                var ok = await window.checkTaskDocDone(task);
-                if (ok) window.completeTask(task.id);
-              };
-            })(t);
-            statusCell.appendChild(cb);
-          }
-        }
-        el.appendChild(row);
-      });
-      }
-
+      el.innerHTML = '<div style="font-size:12px;color:var(--muted);line-height:1.6;padding:0 0 4px 0;">'
+        + 'Send the BOM to the client for confirmation below. Supply chain and liquid sign-offs are done in their tabs; use '
+        + '<strong style="color:var(--white);">My Tasks</strong> to notify staff when needed.'
+        + '</div>';
     } catch(e) { el.innerHTML = '<div style="color:var(--red);">Error: ' + e.message + '</div>'; }
     finally { _showBomVerifPanel(jobId); }
   }
@@ -30595,22 +30471,23 @@ window.saveAdjModal = async function() {
         }
       }
 
-      // 2a. Task sign-offs
-      var tasks2 = await supaGet('job_tasks?job_id=eq.' + _currentJobId + '&select=task_type,status,title');
-      var taskMap = {};
-      tasks2.forEach(function(t){ taskMap[t.task_type] = t; });
-
+      // 2a. Tab sign-offs (not job_tasks — staff are notified via My Tasks on demand)
       var taskBlocking = [];
-      if (!taskMap['liquid_signoff']) {
-        taskBlocking.push({ label: 'Liquid Sign Off', hint: 'Not fired yet — click Assign Tasks in the Tasks tab to fire this task.' });
-      } else if (taskMap['liquid_signoff'].status !== 'completed') {
-        taskBlocking.push({ label: 'Liquid Sign Off', hint: 'Must be signed off in the Liquid tab.' });
-      }
-      if (!taskMap['components']) {
-        taskBlocking.push({ label: 'Supply Chain Sign Off', hint: 'Not fired yet — click Assign Tasks in the Tasks tab to fire this task.' });
-      } else if (taskMap['components'].status !== 'completed') {
-        taskBlocking.push({ label: 'Supply Chain Sign Off', hint: 'Coordinator must confirm all items ordered.' });
-      }
+      try {
+        var prepRows = await supaGet('job_drygoods_prep?job_id=eq.' + _currentJobId + '&limit=1');
+        var prep = prepRows && prepRows[0];
+        if (!prep || !prep.signed_by_coordinator) {
+          taskBlocking.push({ label: 'Supply Chain Sign Off', hint: 'Coordinator must sign off the Supply Chain tab.' });
+        }
+      } catch(e) { console.warn('Supply chain sign-off gate failed:', e); }
+
+      try {
+        var lsoRows = await supaGet('job_liquid_signoff?job_id=eq.' + _currentJobId + '&limit=1');
+        var lso = lsoRows && lsoRows[0];
+        if (!lso || (!lso.signed_by && !lso.blend_event_group_id && !lso.liquid_excluded)) {
+          taskBlocking.push({ label: 'Liquid Sign Off', hint: 'Complete the liquid sign-off in the Liquid tab.' });
+        }
+      } catch(e) { console.warn('Liquid sign-off gate failed:', e); }
 
       // 2a-bis. Production checks — require at least one on-line AND one off-line round
       try {
