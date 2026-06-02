@@ -2078,6 +2078,11 @@ async function showDashboard(user) {
   var _sbFinBtn = document.getElementById('sbnav-finance');
   if (_sbFinBtn) _sbFinBtn.style.display = (FINANCE_NAV_ROLES.indexOf(user.role) >= 0) ? 'flex' : 'none';
 
+  // Attendance report tab — managers who can read clock data (timesheet_edit;
+  // canDo also returns true for execs). Mirrors the clock_events RLS policy.
+  var _attTab = document.getElementById('reports-tab-attendance');
+  if (_attTab) _attTab.style.display = (window.canDo && window.canDo('timesheet_edit')) ? '' : 'none';
+
   // Header sign-out button — all staff (non-client)
   var hdrSignoutBtn = document.getElementById('header-signout-btn');
   if (hdrSignoutBtn && user.role !== 'client') hdrSignoutBtn.style.display = '';
@@ -19967,6 +19972,7 @@ window.loadBoms = async function initBoms() {
     <button class="inv-tab active" onclick="showReportsTab('lpa-recon',this)">LPA Reconciliation</button>
     <button class="inv-tab" onclick="showReportsTab('cbw-log',this)">CBW Bottling Log</button>
     <button class="inv-tab" onclick="showReportsTab('production',this)">Production</button>
+    <button class="inv-tab" id="reports-tab-attendance" style="display:none;" onclick="showReportsTab('attendance',this)">Attendance</button>
     <button class="inv-tab" onclick="showReportsTab('financial',this)">Financial</button>
     <button class="inv-tab" onclick="showReportsTab('compliance',this)">Compliance</button>
   </div>
@@ -20025,6 +20031,30 @@ window.loadBoms = async function initBoms() {
     </div>
     <div id="prod-report-content">
       <div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Select filters and click Run Report to view bottling reports.</div>
+    </div>
+  </div>
+
+  <!-- Attendance (weekly clock vs roster) -->
+  <div id="reports-attendance" class="reports-panel" style="display:none;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+      <div style="font-size:13px;color:var(--text);">
+        Weekly attendance — clock in / out, breaks and hours worked per employee, compared against rostered hours.
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Rostered hours = scheduled shift length (start to end); breaks are not included in the rostered figure.</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button onclick="window.attendancePrevWeek&&window.attendancePrevWeek()" class="btn btn-outline" style="font-size:12px;padding:7px 12px;">&#8249; Prev</button>
+        <button onclick="window.attendanceThisWeek&&window.attendanceThisWeek()" class="btn btn-outline" style="font-size:12px;padding:7px 12px;">This Week</button>
+        <button onclick="window.attendanceNextWeek&&window.attendanceNextWeek()" class="btn btn-outline" style="font-size:12px;padding:7px 12px;">Next &#8250;</button>
+        <input type="date" id="attendance-week-of" title="Jump to the week containing this date" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">
+        <select id="attendance-emp" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;min-width:150px;">
+          <option value="">All Employees</option>
+        </select>
+        <button onclick="window.loadAttendanceReport()" class="btn btn-gold" style="font-size:12px;padding:7px 16px;">Run Report</button>
+      </div>
+    </div>
+    <div id="attendance-week-label" style="font-size:13px;font-weight:700;color:var(--gold);margin-bottom:14px;"></div>
+    <div id="attendance-content">
+      <div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Select a week and click Run Report to view attendance.</div>
     </div>
   </div>
 
@@ -20192,6 +20222,10 @@ window.loadBoms = async function initBoms() {
     if (tab === 'production') {
       window._initProdReportClientFilter && window._initProdReportClientFilter();
       window.loadProductionReport && window.loadProductionReport();
+    }
+    // Attendance — default to current week and run
+    if (tab === 'attendance') {
+      window.loadAttendanceReport && window.loadAttendanceReport();
     }
   }
   window.showReportsTab = showReportsTab;
@@ -53778,6 +53812,237 @@ if (typeof _origOpenDD === 'function') {
     </div>
   </div>
 </div>
+
+<!-- ══ WEEKLY ATTENDANCE REPORT ══════════════════════════════════════════════ -->
+<script>
+(function(){
+'use strict';
+// Self-contained: clock data is event-sourced in clock_events keyed by auth.users.id;
+// roster_shifts is keyed by app_users.id. app_users bridges the two id systems.
+// Dublin-TZ helpers and the buildRecs/wkMs reducer mirror the timesheet panel.
+var TZ='Europe/Dublin';
+var _attMonday=null;        // Monday (YYYY-MM-DD) of the week being viewed
+var _attInit=false;         // date-input listener attached once
+
+function get(p){ var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
+function esc(s){ return window.escapeHtml ? window.escapeHtml(s) : (s==null?'':String(s)); }
+
+function dubOffsetMin(utcMs){
+  var p=new Intl.DateTimeFormat('en-GB',{timeZone:TZ,hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(utcMs));
+  var o={};p.forEach(function(x){if(x.type!=='literal')o[x.type]=parseInt(x.value,10);});
+  if(o.hour===24)o.hour=0;
+  var asUtc=Date.UTC(o.year,o.month-1,o.day,o.hour,o.minute,o.second);
+  return Math.round((asUtc-utcMs)/60000);
+}
+function dubWallToIso(dateStr,timeStr){
+  var p=dateStr.split('-'),t=(timeStr||'00:00').split(':');
+  var asIfUtc=Date.UTC(+p[0],+p[1]-1,+p[2],(+t[0])||0,(+t[1])||0,(+t[2])||0);
+  var off=dubOffsetMin(asIfUtc);
+  return new Date(asIfUtc-off*60000).toISOString();
+}
+function dubParts(ts){
+  var d=ts instanceof Date?ts:new Date(ts);
+  var p=new Intl.DateTimeFormat('en-GB',{timeZone:TZ,hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).formatToParts(d);
+  var o={};p.forEach(function(x){if(x.type!=='literal')o[x.type]=x.value;});
+  if(o.hour==='24')o.hour='00';
+  return o;
+}
+function addDaysYmd(ymd,n){var p=ymd.split('-'),d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));d.setUTCDate(d.getUTCDate()+n);return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0');}
+function todayYmd(){var o=dubParts(new Date());return o.year+'-'+o.month+'-'+o.day;}
+function mondayOf(ymd){var p=ymd.split('-');var dw=new Date(Date.UTC(+p[0],+p[1]-1,+p[2])).getUTCDay();return addDaysYmd(ymd,-(dw===0?6:dw-1));}
+function ft(ts){if(!ts)return'';return new Date(ts).toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit',timeZone:TZ});}
+function fm(ms){if(!ms||ms<=0)return'0h 0m';var h=Math.floor(ms/3600000),m=Math.floor((ms%3600000)/60000);return h+'h '+m+'m';}
+function fmSigned(ms){var a=Math.abs(ms);var t=fm(a);return (ms<0?'−':'+')+t;}
+var _MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+var _DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+function dayLabel(ymd){var p=ymd.split('-');var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));return _DOW[d.getUTCDay()]+' '+(+p[2])+' '+_MON[+p[1]-1];}
+function rangeLabel(monday){var sun=addDaysYmd(monday,6);var ps=sun.split('-');return dayLabel(monday)+' – '+dayLabel(sun)+' '+ps[0];}
+
+// Reduce clock_events for one user into per-Dublin-day sessions.
+function buildRecs(evts,uid){
+  var days={};
+  evts.filter(function(e){return e.user_id===uid;})
+    .sort(function(a,b){return new Date(a.timestamp)-new Date(b.timestamp);})
+    .forEach(function(e){
+      var o=dubParts(e.timestamp),d=o.year+'-'+o.month+'-'+o.day;
+      if(!days[d])days[d]={ci:null,co:null,br:[]};
+      var r=days[d];
+      if(e.event_type==='clock_in'){ if(!r.ci) r.ci=e; }
+      else if(e.event_type==='clock_out'){ r.co=e; }
+      else if(e.event_type==='break_start'){ r.br.push({s:e,e:null}); }
+      else if(e.event_type==='break_end'){
+        if(r.br.length && !r.br[r.br.length-1].e) r.br[r.br.length-1].e=e;
+        else r.br.push({s:null,e:e});
+      }
+    });
+  return days;
+}
+function breakMs(rec){
+  if(!rec)return 0;
+  var t=0;
+  rec.br.forEach(function(b){ if(!b.s)return; var be=b.e?new Date(b.e.timestamp):new Date(); t+=Math.max(0,be-new Date(b.s.timestamp)); });
+  return t;
+}
+function workedMs(rec){
+  if(!rec||!rec.ci)return 0;
+  var end=rec.co?new Date(rec.co.timestamp):new Date();
+  return Math.max(0,(end-new Date(rec.ci.timestamp))-breakMs(rec));
+}
+function shiftMs(st,et){
+  if(!st||!et)return 0;
+  var a=st.split(':'),b=et.split(':');
+  var s=(+a[0])*60+(+a[1]||0), e=(+b[0])*60+(+b[1]||0);
+  if(e<s)e+=1440; // overnight shift safety
+  return Math.max(0,(e-s)*60000);
+}
+
+window.attendancePrevWeek=function(){ _attMonday=addDaysYmd(_attMonday||mondayOf(todayYmd()),-7); window.loadAttendanceReport(); };
+window.attendanceNextWeek=function(){ _attMonday=addDaysYmd(_attMonday||mondayOf(todayYmd()),7); window.loadAttendanceReport(); };
+window.attendanceThisWeek=function(){ _attMonday=mondayOf(todayYmd()); window.loadAttendanceReport(); };
+
+window.loadAttendanceReport=async function(){
+  var contentEl=document.getElementById('attendance-content');
+  if(!contentEl)return;
+  if(!_attMonday)_attMonday=mondayOf(todayYmd());
+
+  // Attach the "week of" date-picker listener once.
+  var dateEl=document.getElementById('attendance-week-of');
+  if(dateEl && !_attInit){
+    _attInit=true;
+    dateEl.addEventListener('change',function(){ if(dateEl.value){ _attMonday=mondayOf(dateEl.value); window.loadAttendanceReport(); } });
+  }
+  if(dateEl) dateEl.value=_attMonday;
+  var labelEl=document.getElementById('attendance-week-label');
+  if(labelEl) labelEl.textContent='Week of '+rangeLabel(_attMonday);
+
+  contentEl.innerHTML='<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Loading…</div>';
+
+  var monday=_attMonday, sunday=addDaysYmd(monday,6);
+  var startIso=dubWallToIso(monday,'00:00');
+  var endIso=dubWallToIso(addDaysYmd(monday,7),'00:00');
+  var weekYmds=[];for(var i=0;i<7;i++)weekYmds.push(addDaysYmd(monday,i));
+
+  try{
+    var emps=await get('app_users?select=id,auth_user_id,display_name,role,status&order=display_name.asc');
+    emps=(emps||[]).filter(function(e){return e.role!=='client';});
+
+    var evts=await get('clock_events?timestamp=gte.'+encodeURIComponent(startIso)+'&timestamp=lt.'+encodeURIComponent(endIso)+'&order=timestamp.asc&limit=5000');
+    var shifts=await get('roster_shifts?shift_date=gte.'+monday+'&shift_date=lte.'+sunday+'&limit=2000');
+
+    // Roster minutes by app_users.id + day
+    var rosterMap={};
+    (shifts||[]).forEach(function(s){
+      var k=s.user_id+'|'+s.shift_date;
+      rosterMap[k]=(rosterMap[k]||0)+shiftMs(s.start_time,s.end_time);
+    });
+    // Which app_users.id appear in roster (to include non-active staff who were rostered/worked)
+    var clockUserIds={};(evts||[]).forEach(function(e){clockUserIds[e.user_id]=true;});
+
+    // Populate employee filter (preserve current selection)
+    var sel=document.getElementById('attendance-emp');
+    var selVal=sel?sel.value:'';
+    if(sel){
+      var opts='<option value="">All Employees</option>';
+      emps.forEach(function(e){ opts+='<option value="'+esc(e.id)+'">'+esc(e.display_name||e.email||e.id)+'</option>'; });
+      sel.innerHTML=opts;
+      sel.value=selVal;
+    }
+
+    // Decide which employees to render: active, or had a clock punch / roster this week.
+    var rows=emps.filter(function(e){
+      if(selVal) return e.id===selVal;
+      if(e.status==='active') return true;
+      if(e.auth_user_id && clockUserIds[e.auth_user_id]) return true;
+      for(var d=0;d<weekYmds.length;d++){ if(rosterMap[e.id+'|'+weekYmds[d]]) return true; }
+      return false;
+    });
+
+    if(!rows.length){
+      contentEl.innerHTML='<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">No employees with attendance or roster in this week.</div>';
+      return;
+    }
+
+    var gWorked=0,gRoster=0;
+    var bodyHtml='';
+    rows.forEach(function(e){
+      var recs=e.auth_user_id?buildRecs(evts,e.auth_user_id):{};
+      var empWorked=0,empRoster=0;
+      var dayRows='';
+      weekYmds.forEach(function(ymd){
+        var rec=recs[ymd];
+        var rosterMs=rosterMap[e.id+'|'+ymd]||0;
+        var hasClock=!!(rec&&rec.ci);
+        var wMs=workedMs(rec);
+        var brMs=breakMs(rec);
+        var open=hasClock&&!rec.co;
+        empWorked+=wMs; empRoster+=rosterMs;
+
+        var ciTxt=hasClock?esc(ft(rec.ci.timestamp)):'<span style="color:var(--muted);">—</span>';
+        var coTxt=rec&&rec.co?esc(ft(rec.co.timestamp)):(open?'<span style="color:var(--gold);">open</span>':'<span style="color:var(--muted);">—</span>');
+        var brTxt=brMs>0?fm(brMs):'<span style="color:var(--muted);">—</span>';
+
+        var workTxt;
+        if(hasClock){ workTxt=fm(wMs)+(open?' <span style="color:var(--gold);font-size:10px;">(open)</span>':''); }
+        else if(rosterMs>0){ workTxt='<span style="color:var(--red);">Absent</span>'; }
+        else { workTxt='<span style="color:var(--muted);">—</span>'; }
+
+        var rosTxt=rosterMs>0?fm(rosterMs):'<span style="color:var(--muted);">—</span>';
+
+        // Variance only meaningful when there is a roster to compare against.
+        var varTxt='—',varColor='var(--muted)';
+        if(rosterMs>0){
+          var v=wMs-rosterMs;
+          varColor=(Math.abs(v)<=30*60000)?'var(--green)':'var(--red)';
+          varTxt=fmSigned(v);
+        }
+
+        dayRows+='<tr>'
+          +'<td style="white-space:nowrap;">'+dayLabel(ymd)+'</td>'
+          +'<td>'+ciTxt+'</td>'
+          +'<td>'+coTxt+'</td>'
+          +'<td>'+brTxt+'</td>'
+          +'<td style="font-weight:700;">'+workTxt+'</td>'
+          +'<td>'+rosTxt+'</td>'
+          +'<td style="font-weight:700;color:'+varColor+';">'+varTxt+'</td>'
+          +'</tr>';
+      });
+      gWorked+=empWorked; gRoster+=empRoster;
+
+      var empVar=empWorked-empRoster;
+      var empVarColor=(empRoster<=0)?'var(--muted)':((Math.abs(empVar)<=30*60000)?'var(--green)':'var(--red)');
+      var empVarTxt=empRoster>0?fmSigned(empVar):'—';
+
+      bodyHtml+='<div style="margin-bottom:22px;background:var(--navy-card,var(--navy-dark));border:1px solid var(--navy-border);border-radius:6px;overflow:hidden;">'
+        +'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:12px 16px;border-bottom:1px solid var(--navy-border);">'
+          +'<div><span style="font-weight:700;font-size:14px;">'+esc(e.display_name||e.email||e.id)+'</span>'
+          +(e.role?' <span style="color:var(--muted);font-size:11px;">'+esc((e.role||'').replace(/_/g,' '))+'</span>':'')
+          +(e.status&&e.status!=='active'?' <span style="color:var(--red);font-size:10px;text-transform:uppercase;">'+esc(e.status.replace(/_/g,' '))+'</span>':'')+'</div>'
+          +'<div style="font-size:12px;color:var(--text);">Worked <b>'+fm(empWorked)+'</b> &nbsp;·&nbsp; Rostered <b>'+fm(empRoster)+'</b> &nbsp;·&nbsp; Variance <b style="color:'+empVarColor+';">'+empVarTxt+'</b></div>'
+        +'</div>'
+        +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr>'
+          +'<th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break</th><th style="text-align:left;">Worked</th><th style="text-align:left;">Rostered</th><th style="text-align:left;">Variance</th>'
+        +'</tr></thead><tbody>'+dayRows+'</tbody></table>'
+      +'</div>';
+    });
+
+    var gVar=gWorked-gRoster;
+    var gVarColor=(gRoster<=0)?'var(--muted)':((Math.abs(gVar)<=30*60000)?'var(--green)':'var(--red)');
+    var summary='<div style="display:flex;gap:20px;flex-wrap:wrap;padding:14px 16px;margin-bottom:18px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;font-size:13px;">'
+      +'<div><span style="color:var(--muted);">Employees</span> &nbsp;<b>'+rows.length+'</b></div>'
+      +'<div><span style="color:var(--muted);">Total Worked</span> &nbsp;<b>'+fm(gWorked)+'</b></div>'
+      +'<div><span style="color:var(--muted);">Total Rostered</span> &nbsp;<b>'+fm(gRoster)+'</b></div>'
+      +'<div><span style="color:var(--muted);">Variance</span> &nbsp;<b style="color:'+gVarColor+';">'+(gRoster>0?fmSigned(gVar):'—')+'</b></div>'
+      +'</div>';
+
+    contentEl.innerHTML=summary+bodyHtml;
+  }catch(err){
+    var msg=(err&&err.message)||String(err);
+    contentEl.innerHTML='<div style="color:var(--red);font-size:12px;padding:24px 0;text-align:center;">Could not load attendance: '+esc(msg)+'</div>';
+    window.logError&&window.logError('loadAttendanceReport',err);
+  }
+};
+})();
+</script>
 
 </body>
 </html>
