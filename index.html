@@ -53966,8 +53966,8 @@ var TZ='Europe/Dublin';
 var _attMonday=null;        // Monday (YYYY-MM-DD) of the week being viewed
 var _attInit=false;         // date-input listener attached once
 var _attData=null;          // cache of the last render (for send / approve handlers)
-var ATT_TOLERANCE_MS=15*60000;          // clock-vs-roster slack before flagging
-var ATT_BREAK_REQUIRED_MS=6*60*60000;   // shift length above which a break is expected
+var ATT_TOLERANCE_MS=10*60000;          // clock-vs-roster slack before flagging / colouring (10 min)
+var ATT_BREAK_REQUIRED_MS=4.5*60*60000; // shift length above which a break is expected (4.5 h legal max)
 var TIMECARD_FN_URL='https://anhawgzgxoywophqbmji.supabase.co/functions/v1/timecard';
 var TIMECARD_PAGE='https://pulse.lighthousedrinks.com/timecard.html';
 
@@ -54096,7 +54096,8 @@ window.loadAttendanceReport=async function(){
 
   try{
     var emps=await get('app_users?select=id,auth_user_id,display_name,email,role,status&order=display_name.asc');
-    emps=(emps||[]).filter(function(e){return e.role!=='client';});
+    // Exclude clients and the kiosk "Plant Display" account (a shared login that never clocks in/out).
+    emps=(emps||[]).filter(function(e){return e.role!=='client' && (e.display_name||'').trim().toLowerCase()!=='plant display';});
 
     var evts=await get('clock_events?timestamp=gte.'+encodeURIComponent(startIso)+'&timestamp=lt.'+encodeURIComponent(endIso)+'&order=timestamp.asc&limit=5000');
     var shifts=await get('roster_shifts?shift_date=gte.'+monday+'&shift_date=lte.'+sunday+'&limit=2000');
@@ -54183,7 +54184,7 @@ window.loadAttendanceReport=async function(){
         var varTxt='—',varColor='var(--muted)';
         if(rosterMs>0){
           var v=gMs-rosterMs;
-          varColor=(Math.abs(v)<=30*60000)?'var(--green)':'var(--red)';
+          varColor=(Math.abs(v)<=ATT_TOLERANCE_MS)?'var(--green)':'var(--red)';
           varTxt=fmSigned(v);
         }
 
@@ -54201,7 +54202,7 @@ window.loadAttendanceReport=async function(){
       if(e.auth_user_id) flagsByAuth[e.auth_user_id]=empFlagDays;
 
       var empVar=empGross-empRoster;
-      var empVarColor=(empRoster<=0)?'var(--muted)':((Math.abs(empVar)<=30*60000)?'var(--green)':'var(--red)');
+      var empVarColor=(empRoster<=0)?'var(--muted)':((Math.abs(empVar)<=ATT_TOLERANCE_MS)?'var(--green)':'var(--red)');
       var empVarTxt=empRoster>0?fmSigned(empVar):'—';
 
       // Status pill + correction-request controls.
@@ -54282,8 +54283,11 @@ function buildPendingHtml(requests,empByAuth){
     var rowsHtml='';
     days.forEach(function(d){
       var brk=(d.breaks||[]).map(function(b){return esc((b.start||'—')+'–'+(b.end||'—'));}).join(', ')||'<span style="color:var(--muted);">none</span>';
+      var reason=(d.reason||'').trim();
+      var reasonTxt=reason?'<span style="color:var(--text);">'+esc(reason)+'</span>':'<span style="color:var(--muted);">—</span>';
       rowsHtml+='<tr><td style="white-space:nowrap;">'+esc(dayLabel(d.date))+'</td>'
-        +'<td>'+esc(d.clockIn||'—')+'</td><td>'+esc(d.clockOut||'—')+'</td><td>'+brk+'</td></tr>';
+        +'<td>'+esc(d.clockIn||'—')+'</td><td>'+esc(d.clockOut||'—')+'</td><td>'+brk+'</td>'
+        +'<td style="max-width:280px;white-space:normal;font-style:italic;">'+reasonTxt+'</td></tr>';
     });
     var subAt=r.submitted_at?new Date(r.submitted_at).toLocaleString('en-IE',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'';
     html+='<div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--navy-border);">'
@@ -54294,7 +54298,7 @@ function buildPendingHtml(requests,empByAuth){
           +'<button onclick="window.attendanceReject(\''+esc(r.id)+'\',this)" style="font-size:11px;padding:6px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;background:transparent;border:1px solid var(--navy-border);color:var(--muted);">Reject</button>'
         +'</div>'
       +'</div>'
-      +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr><th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break(s)</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
+      +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr><th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break(s)</th><th style="text-align:left;">Reason</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
     +'</div>';
   });
   html+='</div></div>';
@@ -54310,7 +54314,14 @@ window.attendanceSendLink=async function(authUid){
   var flagDays=_attData.flagsByAuth[authUid]||[];
   if(!window._resendKey){ window.toast&&window.toast('No email key set (Settings → System).','error'); return; }
   var name=emp.display_name||emp.email;
-  if(!window.confirm('Send '+name+' a link to fill in their hours for '+(flagDays.length||'this')+' day'+(flagDays.length===1?'':'s')+'?')) return;
+  var dayList=(flagDays||[]).map(function(d){return '• '+d.label+' — '+((d.issues||[]).join('; ')||'needs confirming');}).join('\n');
+  var confirmMsg=name+' will get a friendly email with a private link to fill in their actual times.\n\n'
+    +(flagDays.length?('Days flagged for '+rangeLabel(_attData.monday)+':\n'+dayList):'No days are currently flagged — they\u2019ll just be asked to confirm the week.')
+    +'\n\nYou\u2019ll review and approve whatever they submit before it changes any clock records.';
+  var ok=window.lpConfirm
+    ? await window.lpConfirm(confirmMsg,{title:'Send timecard link',confirmLabel:'\u2709 Send link',cancelLabel:'Not now'})
+    : window.confirm('Send '+name+' a link to fill in their hours for '+(flagDays.length||'this')+' day'+(flagDays.length===1?'':'s')+'?');
+  if(!ok) return;
   try{
     var token=(window.crypto&&window.crypto.randomUUID?window.crypto.randomUUID():(Date.now().toString(36)+Math.random().toString(36).slice(2)))+Math.random().toString(36).slice(2);
     // Supersede any earlier open request for this employee+week.
