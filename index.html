@@ -20039,7 +20039,7 @@ window.loadBoms = async function initBoms() {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
       <div style="font-size:13px;color:var(--text);">
         Weekly attendance — clock in / out, breaks and hours worked per employee, compared against rostered hours.
-        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Rostered hours = scheduled shift length (start to end); breaks are not included in the rostered figure.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">Variance compares time on site (clock-in to clock-out, breaks included) against the rostered shift window (start to end), since both span the break. Worked = on site minus breaks.</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <button onclick="window.attendancePrevWeek&&window.attendancePrevWeek()" class="btn btn-outline" style="font-size:12px;padding:7px 12px;">&#8249; Prev</button>
@@ -53920,6 +53920,14 @@ function workedMs(rec){
   var end=rec.co?new Date(rec.co.timestamp):new Date();
   return Math.max(0,(end-new Date(rec.ci.timestamp))-breakMs(rec));
 }
+// On-site time = clock-in to clock-out (breaks NOT subtracted). This equals
+// Worked + Break and is what we compare against the rostered shift window,
+// because the rostered window (start_time→end_time) also spans the break.
+function grossMs(rec){
+  if(!rec||!rec.ci)return 0;
+  var end=rec.co?new Date(rec.co.timestamp):new Date();
+  return Math.max(0,end-new Date(rec.ci.timestamp));
+}
 function shiftMs(st,et){
   if(!st||!et)return 0;
   var a=st.split(':'),b=et.split(':');
@@ -53994,20 +54002,21 @@ window.loadAttendanceReport=async function(){
       return;
     }
 
-    var gWorked=0,gRoster=0;
+    var gWorked=0,gGross=0,gRoster=0;
     var bodyHtml='';
     rows.forEach(function(e){
       var recs=e.auth_user_id?buildRecs(evts,e.auth_user_id):{};
-      var empWorked=0,empRoster=0;
+      var empWorked=0,empGross=0,empRoster=0;
       var dayRows='';
       weekYmds.forEach(function(ymd){
         var rec=recs[ymd];
         var rosterMs=rosterMap[e.id+'|'+ymd]||0;
         var hasClock=!!(rec&&rec.ci);
         var wMs=workedMs(rec);
+        var gMs=grossMs(rec);
         var brMs=breakMs(rec);
         var open=hasClock&&!rec.co;
-        empWorked+=wMs; empRoster+=rosterMs;
+        empWorked+=wMs; empGross+=gMs; empRoster+=rosterMs;
 
         var ciTxt=hasClock?esc(ft(rec.ci.timestamp)):'<span style="color:var(--muted);">—</span>';
         var coTxt=rec&&rec.co?esc(ft(rec.co.timestamp)):(open?'<span style="color:var(--gold);">open</span>':'<span style="color:var(--muted);">—</span>');
@@ -54020,10 +54029,12 @@ window.loadAttendanceReport=async function(){
 
         var rosTxt=rosterMs>0?fm(rosterMs):'<span style="color:var(--muted);">—</span>';
 
-        // Variance only meaningful when there is a roster to compare against.
+        // Variance compares time on site (clock-in to clock-out, breaks included)
+        // against the rostered shift window — both span the break. Only meaningful
+        // when there is a roster to compare against.
         var varTxt='—',varColor='var(--muted)';
         if(rosterMs>0){
-          var v=wMs-rosterMs;
+          var v=gMs-rosterMs;
           varColor=(Math.abs(v)<=30*60000)?'var(--green)':'var(--red)';
           varTxt=fmSigned(v);
         }
@@ -54038,9 +54049,9 @@ window.loadAttendanceReport=async function(){
           +'<td style="font-weight:700;color:'+varColor+';">'+varTxt+'</td>'
           +'</tr>';
       });
-      gWorked+=empWorked; gRoster+=empRoster;
+      gWorked+=empWorked; gGross+=empGross; gRoster+=empRoster;
 
-      var empVar=empWorked-empRoster;
+      var empVar=empGross-empRoster;
       var empVarColor=(empRoster<=0)?'var(--muted)':((Math.abs(empVar)<=30*60000)?'var(--green)':'var(--red)');
       var empVarTxt=empRoster>0?fmSigned(empVar):'—';
 
@@ -54049,7 +54060,7 @@ window.loadAttendanceReport=async function(){
           +'<div><span style="font-weight:700;font-size:14px;">'+esc(e.display_name||e.email||e.id)+'</span>'
           +(e.role?' <span style="color:var(--muted);font-size:11px;">'+esc((e.role||'').replace(/_/g,' '))+'</span>':'')
           +(e.status&&e.status!=='active'?' <span style="color:var(--red);font-size:10px;text-transform:uppercase;">'+esc(e.status.replace(/_/g,' '))+'</span>':'')+'</div>'
-          +'<div style="font-size:12px;color:var(--text);">Worked <b>'+fm(empWorked)+'</b> &nbsp;·&nbsp; Rostered <b>'+fm(empRoster)+'</b> &nbsp;·&nbsp; Variance <b style="color:'+empVarColor+';">'+empVarTxt+'</b></div>'
+          +'<div style="font-size:12px;color:var(--text);">Worked <b>'+fm(empWorked)+'</b> &nbsp;·&nbsp; On site <b>'+fm(empGross)+'</b> &nbsp;·&nbsp; Rostered <b>'+fm(empRoster)+'</b> &nbsp;·&nbsp; Variance <b style="color:'+empVarColor+';">'+empVarTxt+'</b></div>'
         +'</div>'
         +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr>'
           +'<th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break</th><th style="text-align:left;">Worked</th><th style="text-align:left;">Rostered</th><th style="text-align:left;">Variance</th>'
@@ -54057,11 +54068,12 @@ window.loadAttendanceReport=async function(){
       +'</div>';
     });
 
-    var gVar=gWorked-gRoster;
+    var gVar=gGross-gRoster;
     var gVarColor=(gRoster<=0)?'var(--muted)':((Math.abs(gVar)<=30*60000)?'var(--green)':'var(--red)');
     var summary='<div style="display:flex;gap:20px;flex-wrap:wrap;padding:14px 16px;margin-bottom:18px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;font-size:13px;">'
       +'<div><span style="color:var(--muted);">Employees</span> &nbsp;<b>'+rows.length+'</b></div>'
       +'<div><span style="color:var(--muted);">Total Worked</span> &nbsp;<b>'+fm(gWorked)+'</b></div>'
+      +'<div><span style="color:var(--muted);">Total On Site</span> &nbsp;<b>'+fm(gGross)+'</b></div>'
       +'<div><span style="color:var(--muted);">Total Rostered</span> &nbsp;<b>'+fm(gRoster)+'</b></div>'
       +'<div><span style="color:var(--muted);">Variance</span> &nbsp;<b style="color:'+gVarColor+';">'+(gRoster>0?fmSigned(gVar):'—')+'</b></div>'
       +'</div>';
