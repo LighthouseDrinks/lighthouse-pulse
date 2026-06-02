@@ -12097,8 +12097,8 @@ async function _propagateBomToActiveJobs(bomId) {
   if (bomSkuIds.length) {
     try {
       var skuRows = await window.db.select('dry_goods_skus',
-        '?id=in.(' + bomSkuIds.join(',') + ')&select=id,description');
-      (skuRows || []).forEach(function(r){ descMap[r.id] = r.description; });
+        '?id=in.(' + bomSkuIds.join(',') + ')&select=id,description,volume,abv,region');
+      (skuRows || []).forEach(function(r){ descMap[r.id] = window.skuDisplayName(r); });
     } catch(e) { window.logError && window.logError('propagate: load SKU descriptions', e); }
     try {
       var batchRows = await window.db.select('dry_goods_batches',
@@ -27704,6 +27704,23 @@ window.skuDisplayName = function(sku) {
   return extras ? base + ' — ' + extras : base;
 };
 
+// ── SKU display-name lookup map ───────────────────────────────────────────────
+// Fetches live description/volume/abv/region for a set of SKU ids and returns a
+// { skuId: "Name — 700ml · 40% · EU/ROW" } map. Used everywhere a label/SKU is
+// shown so the naming convention (volume · ABV · region) always appears, even
+// when the stored item_name pre-dates this convention.
+window.fetchSkuNameMap = async function(skuIds) {
+  var map = {};
+  var ids = (skuIds || []).filter(Boolean);
+  ids = ids.filter(function(v, i, a) { return a.indexOf(v) === i; });
+  if (!ids.length) return map;
+  try {
+    var rows = await window.db.select('dry_goods_skus', '?id=in.(' + ids.join(',') + ')&select=id,description,volume,abv,region');
+    (rows || []).forEach(function(s) { map[s.id] = window.skuDisplayName(s); });
+  } catch (e) { console.warn('fetchSkuNameMap failed:', e && e.message); }
+  return map;
+};
+
 // ── BOM display name helper ───────────────────────────────────────────────────
 // Builds the human-readable BOM label used everywhere a BOM name is shown.
 // Handles both in-memory BOMS shape (product/volume) and raw DB rows (product_name/volume_cl).
@@ -30640,6 +30657,9 @@ window.saveAdjModal = async function() {
 
     // Fetch current stock totals per SKU
     var skuIds = dryComps.map(function(c){ return c.sku_id; });
+    // Resolve full display names (description — volume · ABV · region) so labels are identifiable
+    var nameMap = await window.fetchSkuNameMap(skuIds);
+    dryComps.forEach(function(c){ c._displayName = nameMap[c.sku_id] || c.item_name || c.sku_id || ''; });
     var stockMap = {}; // skuId -> total quantity_remaining
     var batchMap = {}; // skuId -> array of {id, qty, ref, date, received} ordered oldest first (FIFO)
     try {
@@ -30716,7 +30736,7 @@ window.saveAdjModal = async function() {
             : r.noStock
               ? '<div style="font-size:10px;color:#ffa000;margin-top:2px;">&#9888; No stock record — will be skipped</div>'
               : '';
-          var camBtn = '<button class="dg-scan-btn" data-sku="' + esc(c.sku_id) + '" data-name="' + esc(c.item_name || c.sku_id) + '" title="Scan batch QR code" style="background:none;border:none;cursor:pointer;padding:2px 5px;color:var(--gold);font-size:15px;opacity:0.85;vertical-align:middle;flex-shrink:0;">&#128247;</button>';
+          var camBtn = '<button class="dg-scan-btn" data-sku="' + esc(c.sku_id) + '" data-name="' + esc(c._displayName || c.item_name || c.sku_id) + '" title="Scan batch QR code" style="background:none;border:none;cursor:pointer;padding:2px 5px;color:var(--gold);font-size:15px;opacity:0.85;vertical-align:middle;flex-shrink:0;">&#128247;</button>';
           var batchChip = pinned
             ? '<div style="display:inline-flex;align-items:center;gap:4px;margin-top:5px;padding:3px 8px;background:rgba(212,175,55,0.12);border:1px solid rgba(212,175,55,0.35);border-radius:12px;font-size:10px;color:var(--gold);">'
               + '&#9679; ' + esc(pinned.ref) + (pinned.date ? ' &middot; ' + pinned.date : '')
@@ -30726,7 +30746,7 @@ window.saveAdjModal = async function() {
           return '<tr style="border-bottom:1px solid var(--navy-border);">'
             + '<td id="dg-comp-' + c.sku_id + '" style="padding:9px 8px 6px;' + rowBg + 'font-size:12px;color:var(--white);font-weight:600;">'
             +   '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">'
-            +     '<span>' + esc(c.item_name || c.sku_id) + '</span>'
+            +     '<span>' + esc(c._displayName || c.item_name || c.sku_id) + '</span>'
             +     camBtn
             +   '</div>'
             +   '<div>' + batchChip + '<span id="dg-warn-' + c.sku_id + '">' + warn + '</span></div>'
@@ -31489,7 +31509,7 @@ window.saveAdjModal = async function() {
 
       // Fetch stock, unit costs, and location per SKU
       var skuIds = comps.filter(function(c){return c.sku_id;}).map(function(c){return c.sku_id;});
-      var stockMap = {}, locationMap = {}, latestCostMap = {};
+      var stockMap = {}, locationMap = {}, latestCostMap = {}, nameMap = {};
       if (skuIds.length) {
         try {
           var batchRows = await supaGet('dry_goods_batches?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,quantity_remaining,unit_cost&order=delivery_date.desc');
@@ -31502,8 +31522,11 @@ window.saveAdjModal = async function() {
           });
         } catch(e) { console.warn('Stock fetch failed:', e); }
         try {
-          var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,location');
-          skuRows.forEach(function(r){ if (r.location) locationMap[r.id] = r.location; });
+          var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,location,description,volume,abv,region');
+          skuRows.forEach(function(r){
+            if (r.location) locationMap[r.id] = r.location;
+            nameMap[r.id] = window.skuDisplayName(r);
+          });
         } catch(e) { console.warn('Location fetch failed:', e); }
 
         // Backfill unit_price on any component that is missing it
@@ -31517,8 +31540,12 @@ window.saveAdjModal = async function() {
           } catch(e) { console.warn('Backfill price failed for', bc.id, e); }
         }
       }
-      // Attach location to each comp so printPickingList can read it
-      comps.forEach(function(c){ c._location = locationMap[c.sku_id] || ''; });
+      // Attach location + resolved display name to each comp so printPickingList can read them.
+      // _displayName carries the naming convention (description — volume · ABV · region).
+      comps.forEach(function(c){
+        c._location = locationMap[c.sku_id] || '';
+        c._displayName = (c.sku_id && nameMap[c.sku_id]) || c.item_name || c.sku_id || '';
+      });
 
       // Check for existing sign-off
       var compSignoff = null;
@@ -31581,7 +31608,7 @@ window.saveAdjModal = async function() {
           // col 0: SKU
           '<td style="padding:7px 10px 7px 0;font-size:11px;font-family:monospace;color:var(--muted);white-space:nowrap;">' + esc(c.sku_id||'—') + '</td>'
           // col 1: Item
-          + '<td style="padding:7px 10px 7px 0;font-size:12px;' + (isExcluded ? 'text-decoration:line-through;' : '') + '">' + esc(c.item_name||c.sku_id||'—') + '</td>'
+          + '<td style="padding:7px 10px 7px 0;font-size:12px;' + (isExcluded ? 'text-decoration:line-through;' : '') + '">' + esc(c._displayName||c.item_name||c.sku_id||'—') + '</td>'
           // col 2: Required
           + '<td style="padding:7px 6px;text-align:right;font-size:12px;">' + (reqQty ? reqQty.toLocaleString() : '—') + '</td>'
           // col 3: On-site qty
@@ -31747,7 +31774,7 @@ window.saveAdjModal = async function() {
       var cellStyle = excl ? 'style="text-decoration:line-through;color:#999;"' : '';
       return '<tr' + (excl ? ' style="color:#999;"' : '') + '>'
         + '<td ' + cellStyle + '>' + esc(c.sku_id||'—') + '</td>'
-        + '<td ' + cellStyle + '>' + esc(c.item_name||c.sku_id||'—') + (excl ? ' <em style="font-size:10px;text-decoration:none;">(N/A)</em>' : '') + '</td>'
+        + '<td ' + cellStyle + '>' + esc(c._displayName||c.item_name||c.sku_id||'—') + (excl ? ' <em style="font-size:10px;text-decoration:none;">(N/A)</em>' : '') + '</td>'
         + '<td style="text-align:center;' + (excl ? 'color:#999;' : '') + '">' + esc(c._location||'—') + '</td>'
         + '<td style="text-align:right;' + (excl ? 'text-decoration:line-through;color:#999;' : '') + '">' + (c.qty_required ? c.qty_required.toLocaleString() : '—') + '</td>'
         + '<td style="text-align:center;">' + (excl ? '<span style="font-size:10px;color:#bbb;">N/A</span>' : '<span style="display:inline-block;width:20px;height:20px;border:1.5px solid #999;"></span>') + '</td>'
@@ -31911,8 +31938,8 @@ window.saveAdjModal = async function() {
       var priceMap = {};
       if (skuIds.length) {
         try {
-          var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,description');
-          skuRows.forEach(function(r){ descMap[r.id] = r.description; });
+          var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,description,volume,abv,region');
+          skuRows.forEach(function(r){ descMap[r.id] = window.skuDisplayName(r); });
         } catch(e) { window.logError('load SKU descriptions', e); }
 
         // Pull the most recent batch per SKU to get the latest unit cost
@@ -33052,7 +33079,7 @@ window.saveAdjModal = async function() {
           + '</tr></thead><tbody>';
         dgItems.forEach(function(item) {
           var skuObj   = skuDetails[item.sku_id] || {};
-          var desc     = _e(item.item_name || skuObj.description || item.sku_id || '—');
+          var desc     = _e((skuObj && skuObj.id ? window.skuDisplayName(skuObj) : null) || item.item_name || item.sku_id || '—');
           var reqd     = item.qty_required != null ? Number(item.qty_required).toLocaleString() : '—';
           var picked   = item.qty_picked   != null ? Number(item.qty_picked).toLocaleString()   : '—';
           var variance = (item.qty_required != null && item.qty_picked != null)
@@ -33199,8 +33226,8 @@ window.saveAdjModal = async function() {
       var dgSkuIds = dgItems.map(function(i){ return i.sku_id; }).filter(Boolean);
       if (dgSkuIds.length) {
         try {
-          var skuR = await supaGet('dry_goods_skus?id=in.(' + dgSkuIds.join(',') + ')&select=id,description');
-          skuR.forEach(function(s){ skuNames[s.id] = s.description || s.id; });
+          var skuR = await supaGet('dry_goods_skus?id=in.(' + dgSkuIds.join(',') + ')&select=id,description,volume,abv,region');
+          skuR.forEach(function(s){ skuNames[s.id] = window.skuDisplayName(s) || s.id; });
         } catch(e2){}
       }
 
@@ -33243,7 +33270,7 @@ window.saveAdjModal = async function() {
           + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Variance</th>'
           + '</tr></thead><tbody>';
         dgItems.forEach(function(item) {
-          var desc     = item.item_name || skuNames[item.sku_id] || item.sku_id || '—';
+          var desc     = skuNames[item.sku_id] || item.item_name || item.sku_id || '—';
           var variance = (item.qty_required != null && item.qty_picked != null)
                           ? (Number(item.qty_picked) - Number(item.qty_required)) : null;
           var varStr   = variance != null ? ((variance > 0 ? '+' : '') + Number(variance).toLocaleString()) : '—';
@@ -36293,6 +36320,8 @@ window.saveAdjModal = async function() {
       var preps = await supaGet('job_drygoods_prep?job_id=eq.' + jobId + '&limit=1');
       var d = preps[0] || {};
       var items = d.id ? await supaGet('job_drygoods_prep_items?prep_id=eq.' + d.id + '&order=created_at.asc') : [];
+      // Resolve full display names (description — volume · ABV · region) for each item's SKU
+      var dgpNameMap = await window.fetchSkuNameMap(items.map(function(it){ return it.sku_id; }));
 
       // Bay banner — tells warehouse WHERE to kit (or that they should wait).
       var bayBanner = '';
@@ -36341,7 +36370,7 @@ window.saveAdjModal = async function() {
         items.forEach(function(item) {
           html += '<tr>'
             + '<td style="font-size:11px;color:var(--muted);">' + (item.it_number||'—') + '</td>'
-            + '<td style="font-weight:600;">' + (item.item_name||'—') + '</td>'
+            + '<td style="font-weight:600;">' + ((item.sku_id && dgpNameMap[item.sku_id]) || item.item_name || '—') + '</td>'
             + '<td style="text-align:center;" id="dgp-sc-cell-' + item.id + '"><input type="checkbox" data-item="' + item.id + '" class="dgp-sc-cb"' + (item.stock_checked?' checked':'') + '></td>'
             + '<td>' + (item.qty_required||'—') + '</td>'
             + '<td><input type="number" class="dgp-picked" data-item="' + item.id + '" value="' + (item.qty_picked||'') + '" placeholder="0" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:4px 8px;font-size:11px;width:80px;border-radius:3px;"></td>'
@@ -36446,6 +36475,9 @@ window.saveAdjModal = async function() {
         { col: 'tube_lid_sku_id',     label: 'Tube Lid' },
         { col: 'tin_sku_id',          label: 'Tin' }
       ];
+      // Resolve full display names (description — volume · ABV · region) for every SKU on the BOM
+      var dgSkuIds = DG_SKU_FIELDS.map(function(f){ return bomRow[f.col]; }).filter(Boolean);
+      var dgNameMap = await window.fetchSkuNameMap(dgSkuIds);
       var inserted = 0;
       for (var i = 0; i < DG_SKU_FIELDS.length; i++) {
         var f = DG_SKU_FIELDS[i];
@@ -36454,7 +36486,7 @@ window.saveAdjModal = async function() {
         await supaMut('POST','job_drygoods_prep_items','',{
           prep_id: pid, job_id: jobId,
           sku_id: skuId,
-          item_name: f.label,
+          item_name: dgNameMap[skuId] || f.label,
           qty_required: null
         });
         inserted++;
