@@ -54083,6 +54083,7 @@ function clockVsRoster(rec,sMin,eMin){
   var netMin = (effOut-effIn)-(e-sMin);
   return {
     lateMs:lateMin*60000, earlyInMs:earlyInMin*60000, leftEarlyMs:leftEarlyMin*60000, overMs:overMin*60000,
+    effGrossMs:(effOut-effIn)*60000,        // on-site with grace-window edges snapped to roster
     netMs:netMin*60000, bad:(lateMin>0||leftEarlyMin>0||overMin>0), hasVar:(lateMin>0||earlyInMin>0||leftEarlyMin>0||overMin>0)
   };
 }
@@ -54205,11 +54206,11 @@ window.loadAttendanceReport=async function(){
     emps.forEach(function(e){ if(e.auth_user_id)empByAuth[e.auth_user_id]=e; empById[e.id]=e; });
     var flagsByAuth={};   // auth uid -> [{date,label,issues}]
 
-    var gWorked=0,gGross=0,gRoster=0,gNetMs=0,gBad=false,gHasVar=false,gCmp=0;
+    var gWorked=0,gGross=0,gRoster=0,gNetMs=0,gBad=false,gHasVar=false,gCmp=0,gOnsiteEff=0;
     var bodyHtml='';
     rows.forEach(function(e){
       var recs=e.auth_user_id?buildRecs(evts,e.auth_user_id):{};
-      var empWorked=0,empGross=0,empRoster=0;
+      var empWorked=0,empGross=0,empRoster=0,empOnsiteEff=0;
       var empNetMs=0,empBad=false,empHasVar=false,empCmp=0;
       var empFlagDays=[],empLeaveDays=0;
       var dayRows='';
@@ -54253,6 +54254,9 @@ window.loadAttendanceReport=async function(){
         // roster and both punches present.
         var varTxt='<span style="color:var(--muted);">—</span>',varColor='var(--muted)';
         var cv=clockVsRoster(rec,sMin,eMin);
+        // Effective on-site: snap to roster when both punches are in grace, else
+        // actual span. Falls back to raw gross when we can't compare.
+        empOnsiteEff += cv ? cv.effGrossMs : gMs;
         if(cv){
           empCmp++; empNetMs+=cv.netMs; if(cv.bad)empBad=true; if(cv.hasVar)empHasVar=true;
           var parts=[];
@@ -54277,7 +54281,7 @@ window.loadAttendanceReport=async function(){
           +'<td style="font-weight:700;color:'+varColor+';">'+varTxt+'</td>'
           +'</tr>';
       });
-      gWorked+=empWorked; gGross+=empGross; gRoster+=empRoster;
+      gWorked+=empWorked; gGross+=empGross; gRoster+=empRoster; gOnsiteEff+=empOnsiteEff;
       gNetMs+=empNetMs; gCmp+=empCmp; if(empBad)gBad=true; if(empHasVar)gHasVar=true;
 
       // A fully-blank week (active employee, no clock activity, and nothing
@@ -54331,7 +54335,7 @@ window.loadAttendanceReport=async function(){
           +(blankLine?'<div style="margin-top:4px;">'+blankLine+'</div>':'')
           +(reqLine?'<div style="margin-top:4px;">'+reqLine+'</div>':'')+'</div>'
           +'<div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px;">'
-            +'<div style="font-size:12px;color:var(--text);white-space:nowrap;">Worked <b>'+fm(empWorked)+'</b> &nbsp;·&nbsp; On site <b>'+fm(empGross)+'</b> &nbsp;·&nbsp; Rostered <b>'+fm(empRoster)+'</b> &nbsp;·&nbsp; Variance <b style="color:'+empVarColor+';">'+empVarTxt+'</b></div>'
+            +'<div style="font-size:12px;color:var(--text);white-space:nowrap;">Worked <b>'+fm(empWorked)+'</b> &nbsp;·&nbsp; <span title="Counts rostered time when clock-in/out are within 10 min; actual time otherwise.">On site <b>'+fm(empOnsiteEff)+'</b></span> &nbsp;·&nbsp; Rostered <b>'+fm(empRoster)+'</b> &nbsp;·&nbsp; Variance <b style="color:'+empVarColor+';">'+empVarTxt+'</b></div>'
             +sendBtn
           +'</div>'
         +'</div>'
@@ -54344,7 +54348,7 @@ window.loadAttendanceReport=async function(){
           +'<td style="border-top:2px solid var(--navy-border);"></td>'
           +'<td style="border-top:2px solid var(--navy-border);">'+fm(empGross-empWorked)+'</td>'
           +'<td style="border-top:2px solid var(--navy-border);">'+fm(empWorked)+'</td>'
-          +'<td style="border-top:2px solid var(--navy-border);">'+fm(empGross)+'</td>'
+          +'<td style="border-top:2px solid var(--navy-border);" title="Counts rostered time when clock-in/out are within 10 min; actual time otherwise.">'+fm(empOnsiteEff)+'</td>'
           +'<td style="border-top:2px solid var(--navy-border);">'+fm(empRoster)+'</td>'
           +'<td style="border-top:2px solid var(--navy-border);color:'+empVarColor+';">'+empVarTxt+'</td>'
         +'</tr></tfoot></table>'
@@ -54356,7 +54360,7 @@ window.loadAttendanceReport=async function(){
     var summary='<div style="display:flex;gap:20px;flex-wrap:wrap;padding:14px 16px;margin-bottom:18px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;font-size:13px;">'
       +'<div><span style="color:var(--muted);">Employees</span> &nbsp;<b>'+rows.length+'</b></div>'
       +'<div><span style="color:var(--muted);">Total Worked</span> &nbsp;<b>'+fm(gWorked)+'</b></div>'
-      +'<div><span style="color:var(--muted);">Total On Site</span> &nbsp;<b>'+fm(gGross)+'</b></div>'
+      +'<div title="Counts rostered time when clock-in/out are within 10 min; actual time otherwise."><span style="color:var(--muted);">Total On Site</span> &nbsp;<b>'+fm(gOnsiteEff)+'</b></div>'
       +'<div><span style="color:var(--muted);">Total Rostered</span> &nbsp;<b>'+fm(gRoster)+'</b></div>'
       +'<div><span style="color:var(--muted);">Variance</span> &nbsp;<b style="color:'+gVarColor+';">'+gVarTxt+'</b></div>'
       +'</div>';
