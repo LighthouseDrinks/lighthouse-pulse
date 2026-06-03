@@ -32613,7 +32613,7 @@ window.saveAdjModal = async function() {
 
   window.saveResults = async function(jobId) {
     var _canSaveResults = window.isExec()
-      || (window.canDo && (window.canDo('jobs_advance') || window.canDo('jobs_signoff_quality')));
+      || (window.canDo && (window.canDo('jobs_advance') || window.canDo('jobs_signoff_quality') || window.canDo('production_control')));
     if (!_canSaveResults) { window.toast && window.toast('You do not have permission to save production results.', 'error'); return; }
     var gv = function(id) {
       var e = document.getElementById('res-'+id);
@@ -54055,17 +54055,46 @@ function shiftMs(st,et){
   if(e<s)e+=1440; // overnight shift safety
   return Math.max(0,(e-s)*60000);
 }
+function hhmmToMin(t){ if(!t)return null; var a=String(t).split(':'); return (parseInt(a[0],10)||0)*60+(parseInt(a[1],10)||0); }
+function dubMinOfDay(ts){ var o=dubParts(ts); return (parseInt(o.hour,10)||0)*60+(parseInt(o.minute,10)||0); }
+// Directional comparison of clock-in/out against the rostered window, with a
+// 10-min grace on the outer edges only (ATT_TOLERANCE_MS): arriving up to 10 min
+// before start, or leaving up to 10 min after finish, reads as on-time. Clocking
+// in after start is Late; leaving before finish is Left-early; arriving >10 min
+// early or leaving >10 min late shows the full deviation (Early / Over).
+// Returns null when we can't compare (missing punch or no rostered times).
+function clockVsRoster(rec,sMin,eMin){
+  if(!rec||!rec.ci||!rec.co||sMin==null||eMin==null) return null;
+  var win=ATT_TOLERANCE_MS/60000;            // grace window in minutes
+  var ci=dubMinOfDay(rec.ci.timestamp), co=dubMinOfDay(rec.co.timestamp);
+  if(co<ci) co+=1440;                        // overnight clock safety
+  var e=eMin; if(e<sMin) e+=1440;            // overnight roster safety
+  var lateMin     = ci>sMin        ? (ci-sMin) : 0;
+  var earlyInMin  = ci<(sMin-win)  ? (sMin-ci) : 0;   // full, back to scheduled start
+  var leftEarlyMin= co<e           ? (e-co)    : 0;
+  var overMin     = co>(e+win)     ? (co-e)    : 0;   // full, from scheduled finish
+  var effIn  = (ci>=sMin-win && ci<=sMin) ? sMin : ci;
+  var effOut = (co>=e && co<=e+win)       ? e    : co;
+  var netMin = (effOut-effIn)-(e-sMin);
+  return {
+    lateMs:lateMin*60000, earlyInMs:earlyInMin*60000, leftEarlyMs:leftEarlyMin*60000, overMs:overMin*60000,
+    netMs:netMin*60000, bad:(lateMin>0||leftEarlyMin>0), hasVar:(lateMin>0||earlyInMin>0||leftEarlyMin>0||overMin>0)
+  };
+}
 // Reasons a day needs the employee to fix their clock entries. Mirrors the
-// flag logic in the timecard edge function — keep the two in sync. A 1-2 min
-// early/late stays within ATT_TOLERANCE_MS and is never flagged.
-function dayIssues(rec,rosterMs,isPast){
+// flag logic in the timecard edge function — keep the two in sync.
+function dayIssues(rec,rosterMs,isPast,sMin,eMin){
   var issues=[];
   var hasCi=!!(rec&&rec.ci), hasCo=!!(rec&&rec.co);
   var onSite=grossMs(rec), brk=breakMs(rec);
   if(rosterMs>0 && !hasCi) issues.push('No clock-in recorded');
   if(hasCi && !hasCo && isPast) issues.push('No clock-out recorded');
   if(onSite>ATT_BREAK_REQUIRED_MS && brk===0) issues.push('No break recorded');
-  if(hasCi && hasCo && rosterMs>0 && Math.abs(onSite-rosterMs)>ATT_TOLERANCE_MS) issues.push('Hours don\u2019t match the rostered shift');
+  var cv=clockVsRoster(rec,sMin,eMin);
+  if(cv){
+    if(cv.lateMs>0)      issues.push('Clocked in late');
+    if(cv.leftEarlyMs>0) issues.push('Left before rostered finish');
+  }
   return issues;
 }
 
@@ -54109,11 +54138,18 @@ window.loadAttendanceReport=async function(){
     var reqByAuth={};   // latest request per employee (auth uid)
     requests.forEach(function(r){ if(!reqByAuth[r.user_id]) reqByAuth[r.user_id]=r; });
 
-    // Roster minutes by app_users.id + day
+    // Roster minutes by app_users.id + day, plus the day's start/end envelope
+    // (earliest start, latest end) for the directional variance comparison.
     var rosterMap={};
+    var rosterTimesMap={};
     (shifts||[]).forEach(function(s){
       var k=s.user_id+'|'+s.shift_date;
       rosterMap[k]=(rosterMap[k]||0)+shiftMs(s.start_time,s.end_time);
+      var sm=hhmmToMin(s.start_time), em=hhmmToMin(s.end_time);
+      if(sm==null||em==null) return;
+      var cur=rosterTimesMap[k];
+      if(!cur) rosterTimesMap[k]={startMin:sm,endMin:em};
+      else { cur.startMin=Math.min(cur.startMin,sm); cur.endMin=Math.max(cur.endMin,em); }
     });
     // Which app_users.id appear in roster (to include non-active staff who were rostered/worked)
     var clockUserIds={};(evts||[]).forEach(function(e){clockUserIds[e.user_id]=true;});
@@ -54147,16 +54183,19 @@ window.loadAttendanceReport=async function(){
     emps.forEach(function(e){ if(e.auth_user_id)empByAuth[e.auth_user_id]=e; empById[e.id]=e; });
     var flagsByAuth={};   // auth uid -> [{date,label,issues}]
 
-    var gWorked=0,gGross=0,gRoster=0;
+    var gWorked=0,gGross=0,gRoster=0,gNetMs=0,gBad=false,gHasVar=false,gCmp=0;
     var bodyHtml='';
     rows.forEach(function(e){
       var recs=e.auth_user_id?buildRecs(evts,e.auth_user_id):{};
       var empWorked=0,empGross=0,empRoster=0;
+      var empNetMs=0,empBad=false,empHasVar=false,empCmp=0;
       var empFlagDays=[];
       var dayRows='';
       weekYmds.forEach(function(ymd){
         var rec=recs[ymd];
         var rosterMs=rosterMap[e.id+'|'+ymd]||0;
+        var rt=rosterTimesMap[e.id+'|'+ymd];
+        var sMin=rt?rt.startMin:null, eMin=rt?rt.endMin:null;
         var hasClock=!!(rec&&rec.ci);
         var wMs=workedMs(rec);
         var gMs=grossMs(rec);
@@ -54164,7 +54203,7 @@ window.loadAttendanceReport=async function(){
         var open=hasClock&&!rec.co;
         empWorked+=wMs; empGross+=gMs; empRoster+=rosterMs;
 
-        var issues=dayIssues(rec,rosterMs,ymd<todayKey);
+        var issues=dayIssues(rec,rosterMs,ymd<todayKey,sMin,eMin);
         if(issues.length) empFlagDays.push({date:ymd,label:dayLabel(ymd),issues:issues});
         var flagMark=issues.length?' <span title="'+esc(issues.join('; '))+'" style="color:var(--gold);">&#9873;</span>':'';
 
@@ -54179,14 +54218,22 @@ window.loadAttendanceReport=async function(){
 
         var rosTxt=rosterMs>0?fm(rosterMs):'<span style="color:var(--muted);">—</span>';
 
-        // Variance compares time on site (clock-in to clock-out, breaks included)
-        // against the rostered shift window — both span the break. Only meaningful
-        // when there is a roster to compare against.
-        var varTxt='—',varColor='var(--muted)';
-        if(rosterMs>0){
-          var v=gMs-rosterMs;
-          varColor=(Math.abs(v)<=ATT_TOLERANCE_MS)?'var(--green)':'var(--red)';
-          varTxt=fmSigned(v);
+        // Directional variance: clock-in vs rostered start, clock-out vs finish,
+        // each with a 10-min grace on the outer edge. Only meaningful with a
+        // roster and both punches present.
+        var varTxt='<span style="color:var(--muted);">—</span>',varColor='var(--muted)';
+        var cv=clockVsRoster(rec,sMin,eMin);
+        if(cv){
+          empCmp++; empNetMs+=cv.netMs; if(cv.bad)empBad=true; if(cv.hasVar)empHasVar=true;
+          var parts=[];
+          if(cv.lateMs>0)      parts.push('Late '+fm(cv.lateMs));
+          if(cv.earlyInMs>0)   parts.push('Early '+fm(cv.earlyInMs));
+          if(cv.leftEarlyMs>0) parts.push('Left early '+fm(cv.leftEarlyMs));
+          if(cv.overMs>0)      parts.push('Over '+fm(cv.overMs));
+          varColor=cv.bad?'var(--red)':(cv.hasVar?'var(--amber)':'var(--green)');
+          varTxt=parts.length
+            ? fmSigned(cv.netMs)+' <span style="color:var(--muted);font-weight:400;">'+parts.join(' &middot; ')+'</span>'
+            : 'On time';
         }
 
         dayRows+='<tr>'
@@ -54200,6 +54247,7 @@ window.loadAttendanceReport=async function(){
           +'</tr>';
       });
       gWorked+=empWorked; gGross+=empGross; gRoster+=empRoster;
+      gNetMs+=empNetMs; gCmp+=empCmp; if(empBad)gBad=true; if(empHasVar)gHasVar=true;
 
       // A fully-blank week (active employee, no clock activity, and nothing
       // roster-flagged) most likely means forgotten punches all week — treat it
@@ -54210,9 +54258,8 @@ window.loadAttendanceReport=async function(){
         ? [{date:monday,label:'This week',issues:['No clock activity recorded all week']}]
         : empFlagDays;
 
-      var empVar=empGross-empRoster;
-      var empVarColor=(empRoster<=0)?'var(--muted)':((Math.abs(empVar)<=ATT_TOLERANCE_MS)?'var(--green)':'var(--red)');
-      var empVarTxt=empRoster>0?fmSigned(empVar):'—';
+      var empVarColor=(empCmp===0)?'var(--muted)':(empHasVar?(empBad?'var(--red)':'var(--amber)'):'var(--green)');
+      var empVarTxt=(empCmp===0)?'—':(empHasVar?fmSigned(empNetMs):'On time');
 
       // Status pill + correction-request controls.
       var flagN=empFlagDays.length;
@@ -54262,14 +54309,14 @@ window.loadAttendanceReport=async function(){
       +'</div>';
     });
 
-    var gVar=gGross-gRoster;
-    var gVarColor=(gRoster<=0)?'var(--muted)':((Math.abs(gVar)<=30*60000)?'var(--green)':'var(--red)');
+    var gVarColor=(gCmp===0)?'var(--muted)':(gHasVar?(gBad?'var(--red)':'var(--amber)'):'var(--green)');
+    var gVarTxt=(gCmp===0)?'—':(gHasVar?fmSigned(gNetMs):'On time');
     var summary='<div style="display:flex;gap:20px;flex-wrap:wrap;padding:14px 16px;margin-bottom:18px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;font-size:13px;">'
       +'<div><span style="color:var(--muted);">Employees</span> &nbsp;<b>'+rows.length+'</b></div>'
       +'<div><span style="color:var(--muted);">Total Worked</span> &nbsp;<b>'+fm(gWorked)+'</b></div>'
       +'<div><span style="color:var(--muted);">Total On Site</span> &nbsp;<b>'+fm(gGross)+'</b></div>'
       +'<div><span style="color:var(--muted);">Total Rostered</span> &nbsp;<b>'+fm(gRoster)+'</b></div>'
-      +'<div><span style="color:var(--muted);">Variance</span> &nbsp;<b style="color:'+gVarColor+';">'+(gRoster>0?fmSigned(gVar):'—')+'</b></div>'
+      +'<div><span style="color:var(--muted);">Variance</span> &nbsp;<b style="color:'+gVarColor+';">'+gVarTxt+'</b></div>'
       +'</div>';
 
     _attData={ monday:monday, weekYmds:weekYmds, byAuth:empByAuth, byId:empById, flagsByAuth:flagsByAuth };
