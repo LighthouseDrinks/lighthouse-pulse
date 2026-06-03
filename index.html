@@ -54366,6 +54366,18 @@ window.loadAttendanceReport=async function(){
 function buildPendingHtml(requests,empByAuth){
   var pend=(requests||[]).filter(function(r){return r.status==='submitted';});
   if(!pend.length) return '';
+  // Net worked = (clock out − clock in) − sum(breaks); null for incomplete days.
+  function hmToMin(s){ if(!/^\d{1,2}:\d{2}$/.test(s||'')) return null; var a=s.split(':'); return (+a[0])*60+(+a[1]); }
+  function netMin(ci,co,breaks){
+    var s=hmToMin(ci), e=hmToMin(co);
+    if(s==null||e==null) return null;
+    if(e<s) e+=1440;
+    var brk=0;
+    (breaks||[]).forEach(function(b){ var bs=hmToMin(b.start), be=hmToMin(b.end);
+      if(bs==null||be==null) return; if(be<bs) be+=1440; brk+=Math.max(0,be-bs); });
+    return Math.max(0,(e-s)-brk);
+  }
+  function fmMin(m){ if(m==null) return '<span style="color:var(--muted);">—</span>'; var h=Math.floor(m/60); return (h?h+'h ':'')+(m%60)+'m'; }
   var html='<div style="margin-bottom:22px;border:1px solid var(--gold);border-radius:6px;overflow:hidden;">'
     +'<div style="padding:12px 16px;background:rgba(201,168,76,0.1);border-bottom:1px solid var(--gold);font-weight:700;font-size:13px;color:var(--gold);">&#9873; Pending timecard corrections ('+pend.length+') — review and approve</div>'
     +'<div style="padding:12px 16px;">';
@@ -54373,25 +54385,29 @@ function buildPendingHtml(requests,empByAuth){
     var emp=empByAuth[r.user_id];
     var name=esc((emp&&emp.display_name)||r.employee_name||'Employee');
     var days=(r.submitted_payload&&r.submitted_payload.days)||[];
-    var rowsHtml='';
+    var rowsHtml='', empTotal=0, empAny=false;
     days.forEach(function(d){
       var brk=(d.breaks||[]).map(function(b){return esc((b.start||'—')+'–'+(b.end||'—'));}).join(', ')||'<span style="color:var(--muted);">none</span>';
       var reason=(d.reason||'').trim();
       var reasonTxt=reason?'<span style="color:var(--text);">'+esc(reason)+'</span>':'<span style="color:var(--muted);">—</span>';
+      var nm=netMin(d.clockIn,d.clockOut,d.breaks);
+      if(nm!=null){ empTotal+=nm; empAny=true; }
       rowsHtml+='<tr><td style="white-space:nowrap;">'+esc(dayLabel(d.date))+'</td>'
         +'<td>'+esc(d.clockIn||'—')+'</td><td>'+esc(d.clockOut||'—')+'</td><td>'+brk+'</td>'
+        +'<td style="font-weight:700;">'+fmMin(nm)+'</td>'
         +'<td style="max-width:280px;white-space:normal;font-style:italic;">'+reasonTxt+'</td></tr>';
     });
     var subAt=r.submitted_at?new Date(r.submitted_at).toLocaleString('en-IE',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'';
     html+='<div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--navy-border);">'
       +'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">'
-        +'<div><b style="font-size:13px;">'+name+'</b> <span style="color:var(--muted);font-size:11px;">submitted '+esc(subAt)+'</span></div>'
+        +'<div><b style="font-size:13px;">'+name+'</b> <span style="color:var(--muted);font-size:11px;">submitted '+esc(subAt)+'</span>'
+          +(empAny?' &middot; <span style="font-size:11px;color:var(--text);">Week total <b style="color:var(--gold);">'+fmMin(empTotal)+'</b></span>':'')+'</div>'
         +'<div style="display:flex;gap:8px;">'
           +'<button onclick="window.attendanceApprove(\''+esc(r.id)+'\',this)" class="btn btn-gold" style="font-size:11px;padding:6px 14px;">Approve &amp; apply</button>'
           +'<button onclick="window.attendanceReject(\''+esc(r.id)+'\',this)" style="font-size:11px;padding:6px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;background:transparent;border:1px solid var(--navy-border);color:var(--muted);">Reject</button>'
         +'</div>'
       +'</div>'
-      +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr><th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break(s)</th><th style="text-align:left;">Reason</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
+      +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr><th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break(s)</th><th style="text-align:left;">Total</th><th style="text-align:left;">Reason</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
     +'</div>';
   });
   html+='</div></div>';
