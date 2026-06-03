@@ -46144,8 +46144,14 @@ window.lvCalRender=async function(yr,mo){
 (function(){
 'use strict';
 // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
-var _wo=0,_roster={},_emps=[],_leaveMap={},_pt=null;
+var _wo=0,_roster={},_emps=[],_leaveMap={},_pt=null,_shiftTemplates=[];
 var DN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+// Deterministic colour per shift name (hash -> hue) so every named shift gets
+// its own stable colour across the grid and the publish summary.
+function shiftHue(name){ var s=String(name||''),h=0; for(var i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))>>>0; } return h%360; }
+function shiftColour(name){ return 'hsl('+shiftHue(name)+',58%,62%)'; }
+function shiftBg(name){ return 'hsla('+shiftHue(name)+',58%,55%,0.14)'; }
+function shiftBd(name){ return 'hsla('+shiftHue(name)+',58%,60%,0.4)'; }
 // Visual style per leave_category for the Roster grid cells.
 // Short labels keep the cell readable at the ~88px column width.
 var _ROSTER_LV_STYLE={
@@ -46184,9 +46190,11 @@ async function loadRoster(){
   var lbl=document.getElementById('roster-week-label');
   if(lbl) lbl.textContent=days[0].toLocaleDateString('en-IE',{day:'numeric',month:'short'})+' \u2013 '+days[6].toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'});
   if(!_emps.length){var u=await get('app_users?status=eq.active&order=display_name.asc&select=id,auth_user_id,display_name,role');_emps=u.filter(function(x){return x.role!=='client' && (x.display_name||'').trim().toLowerCase()!=='plant display';});}
+  try{ _shiftTemplates=await get('shift_templates?active=eq.true&order=name.asc')||[]; }
+  catch(stErr){ _shiftTemplates=[]; window.logError&&window.logError('load shift_templates',stErr); }
   var sh=await get('roster_shifts?week_start=eq.'+ws+'&order=shift_date.asc');
   _roster={};
-  sh.forEach(function(s){_roster[rk(s.user_id,s.shift_date)]={id:s.id,sn:s.shift_name,st:s.start_time,et:s.end_time,pub:s.published};});
+  sh.forEach(function(s){_roster[rk(s.user_id,s.shift_date)]={id:s.id,sn:s.shift_name,st:s.start_time,et:s.end_time,bm:s.break_minutes||0,pub:s.published};});
   var lv=await get('leave_requests?status=eq.approved&start_date=lte.'+we+'&end_date=gte.'+ws+'&select=user_id,start_date,end_date,leave_category,leave_type');
   _leaveMap={};
   lv.forEach(function(l){var c=new Date(l.start_date),e=new Date(l.end_date),cat=l.leave_category||'annual',half=l.leave_type==='half_day';while(c<=e){var day=c.getDay();if(day!==0&&day!==6){_leaveMap[rk(l.user_id,ds(c))]={cat:cat,half:half};}c.setDate(c.getDate()+1);}});
@@ -46200,7 +46208,7 @@ function renderRoster(){
 
   // Check if this week is already published
   var isPublished=Object.values(_roster).some(function(s){return s.pub;});
-  ['roster-copy-btn','roster-clear-btn'].forEach(function(id){
+  ['roster-manage-shifts-btn','roster-copy-btn','roster-clear-btn'].forEach(function(id){
     var btn=document.getElementById(id);
     if(btn){
       btn.disabled=!canEdit;
@@ -46241,7 +46249,7 @@ function renderRoster(){
       var cs='padding:6px;border-bottom:1px solid var(--navy-border);border-left:1px solid rgba(36,61,87,0.5);text-align:center;';
       var eId=window.escapeHtml(emp.id), eD2=window.escapeHtml(d2);
       if(isL){var _lvSt=_ROSTER_LV_STYLE[isL.cat]||_ROSTER_LV_STYLE.other;var _lvLbl=isL.half?_lvSt.lbl+'<br>(\u00bd DAY)':_lvSt.lbl;var _lvFull=isL.half?_lvSt.full+' (Half Day)':_lvSt.full;h+='<td style="'+cs+'"><div title="'+window.escapeHtml(_lvFull)+'" style="background:'+_lvSt.bg+';border:1px solid '+_lvSt.bd+';border-radius:4px;padding:5px 4px;font-size:9px;font-weight:700;color:'+_lvSt.fg+';">'+_lvLbl+'</div></td>';}
-      else if(sh){var iD=sh.sn==='Day Shift',iE=sh.sn==='Evening Shift';var bg=iD?'rgba(201,168,76,0.15)':iE?'rgba(74,158,221,0.12)':'rgba(255,255,255,0.06)';var bc=iD?'rgba(201,168,76,0.4)':iE?'rgba(74,158,221,0.3)':'var(--navy-border)';var tl=(sh.st||'').slice(0,5)+'\u2013'+(sh.et||'').slice(0,5);h+='<td style="'+cs+'"><div data-uid="'+eId+'" data-date="'+eD2+'" '+(canEdit&&!isPast?'data-action="openShift"':'')+' style="background:'+bg+';border:1px solid '+bc+';border-radius:4px;padding:5px 4px;cursor:'+(canEdit&&!isPast?'pointer':'default')+'"><div style="font-size:9px;font-weight:700;color:var(--white);">'+window.escapeHtml(sh.sn.replace(' Shift',''))+'</div><div style="font-size:9px;color:var(--muted);">'+tl+'</div></div></td>';}
+      else if(sh){var bg=shiftBg(sh.sn),bc=shiftBd(sh.sn);var tl=(sh.st||'').slice(0,5)+'\u2013'+(sh.et||'').slice(0,5);var bkl=(sh.bm>0)?' \u00b7 '+sh.bm+'m brk':'';h+='<td style="'+cs+'"><div data-uid="'+eId+'" data-date="'+eD2+'" '+(canEdit&&!isPast?'data-action="openShift"':'')+' title="'+window.escapeHtml((sh.sn||'')+' '+tl+(sh.bm>0?' ('+sh.bm+' min break)':''))+'" style="background:'+bg+';border:1px solid '+bc+';border-radius:4px;padding:5px 4px;cursor:'+(canEdit&&!isPast?'pointer':'default')+'"><div style="font-size:9px;font-weight:700;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+window.escapeHtml(sh.sn.replace(' Shift',''))+'</div><div style="font-size:9px;color:var(--muted);">'+tl+bkl+'</div></div></td>';}
       else{h+='<td style="'+cs+'">'+(canEdit&&!isPast?'<div data-uid="'+eId+'" data-date="'+eD2+'" data-action="openShift" style="height:36px;border:1px dashed rgba(255,255,255,0.08);border-radius:4px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><span style="font-size:16px;color:rgba(255,255,255,0.15)">+</span></div>':'<div style="height:36px;"></div>')+'</td>';}
     });
     h+='</tr>';
@@ -46270,29 +46278,146 @@ window.openShiftPicker=function(el,uid,d2){
   document.getElementById('shift-picker-overlay').style.display='block';
   document.getElementById('shift-custom-row').style.display='none';
   document.getElementById('shift-custom-save').style.display='none';
+  // Render the saved-shift library (dynamic — the list can change).
+  var opt=document.getElementById('shift-picker-options');
+  if(opt){
+    if(!_shiftTemplates.length){
+      opt.innerHTML='<div style="font-size:11px;color:var(--muted);padding:4px 2px;">No saved shifts yet — add some via <b>Manage Shifts</b>, or use a one-off custom below.</div>';
+    } else {
+      opt.innerHTML=_shiftTemplates.map(function(t){
+        var tl=(t.start_time||'').slice(0,5)+'\u2013'+(t.end_time||'').slice(0,5);
+        var bk=(t.break_minutes>0)?' &middot; '+t.break_minutes+'m brk':'';
+        return '<button onclick="window.rosterPickTemplate(\''+t.id+'\')" style="background:'+shiftBg(t.name)+';border:1px solid '+shiftBd(t.name)+';color:var(--white);padding:8px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:Lato,sans-serif;text-align:left;font-weight:600;">'+window.escapeHtml(t.name)+' <span style="color:var(--muted);font-size:10px;font-weight:400;">'+tl+bk+'</span></button>';
+      }).join('');
+    }
+  }
 };
 window.closeShiftPicker=function(){document.getElementById('shift-picker').style.display='none';document.getElementById('shift-picker-overlay').style.display='none';_pt=null;};
+
+// ── Manage Shifts (named shift template library) ─────────────────────────────
+var _msEdit=null;
+window.openManageShifts=async function(){
+  if(!canEditRoster()){denyRosterEdit();return;}
+  try{ _shiftTemplates=await get('shift_templates?active=eq.true&order=name.asc')||[]; }
+  catch(e){ window.toast&&window.toast('Could not load shifts: '+e.message,'error'); return; }
+  _msEdit=null;
+  var ov=document.getElementById('manage-shifts-overlay');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='manage-shifts-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(5,12,20,0.85);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px;';
+    ov.onclick=function(e){if(e.target===ov)window.closeManageShifts();};
+    document.body.appendChild(ov);
+  }
+  ov.style.display='flex';
+  _renderManageShifts();
+};
+window.closeManageShifts=function(){var ov=document.getElementById('manage-shifts-overlay');if(ov)ov.style.display='none';_msEdit=null;};
+function _renderManageShifts(){
+  var ov=document.getElementById('manage-shifts-overlay');if(!ov)return;
+  var rows=_shiftTemplates.length?_shiftTemplates.map(function(t){
+    var tl=(t.start_time||'').slice(0,5)+'\u2013'+(t.end_time||'').slice(0,5);
+    return '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid '+shiftBd(t.name)+';background:'+shiftBg(t.name)+';border-radius:5px;margin-bottom:6px;">'
+      +'<span style="width:10px;height:10px;border-radius:50%;background:'+shiftColour(t.name)+';flex:none;"></span>'
+      +'<div style="flex:1;min-width:0;"><div style="font-size:12px;font-weight:700;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+window.escapeHtml(t.name)+'</div>'
+      +'<div style="font-size:10px;color:var(--muted);">'+tl+' &middot; '+(t.break_minutes||0)+' min break</div></div>'
+      +'<button onclick="window.manageShiftEdit(\''+t.id+'\')" class="btn btn-outline" style="font-size:10px;padding:4px 10px;">Edit</button>'
+      +'<button onclick="window.manageShiftDelete(\''+t.id+'\')" class="btn btn-outline" style="font-size:10px;padding:4px 10px;color:var(--red);border-color:rgba(224,93,93,0.4);">Delete</button>'
+      +'</div>';
+  }).join(''):'<div style="font-size:12px;color:var(--muted);padding:6px 2px 12px;">No saved shifts yet. Add your first one below.</div>';
+  var ed=_msEdit||{name:'',start_time:'09:00',end_time:'17:00',break_minutes:0};
+  ov.innerHTML='<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:24px;max-width:440px;width:100%;max-height:85vh;overflow-y:auto;">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;"><div style="font-size:14px;font-weight:700;color:var(--white);">Manage Shifts</div><button onclick="window.closeManageShifts()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;line-height:1;">&times;</button></div>'
+    +'<div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:14px;">Define reusable shifts with their break. The break is subtracted from both rostered and actual hours so the attendance report compares like for like.</div>'
+    +rows
+    +'<div style="border-top:1px solid var(--navy-border);margin-top:14px;padding-top:14px;">'
+      +'<div style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">'+(_msEdit?'Edit shift':'Add shift')+'</div>'
+      +'<input type="text" id="ms-name" placeholder="Shift name (e.g. Production Day)" value="'+window.escapeHtml(ed.name||'')+'" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px;border-radius:4px;font-size:12px;width:100%;margin-bottom:8px;">'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">'
+        +'<div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:2px;">Start</label><input type="time" id="ms-start" value="'+(ed.start_time||'').slice(0,5)+'" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px;border-radius:4px;font-size:12px;width:100%;"></div>'
+        +'<div><label style="font-size:10px;color:var(--muted);display:block;margin-bottom:2px;">End</label><input type="time" id="ms-end" value="'+(ed.end_time||'').slice(0,5)+'" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px;border-radius:4px;font-size:12px;width:100%;"></div>'
+      +'</div>'
+      +'<label style="font-size:10px;color:var(--muted);display:block;margin-bottom:2px;">Break (minutes)</label><input type="number" id="ms-break" min="0" step="5" value="'+(ed.break_minutes||0)+'" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px;border-radius:4px;font-size:12px;width:100%;margin-bottom:12px;">'
+      +'<div style="display:flex;gap:8px;justify-content:flex-end;">'
+        +(_msEdit?'<button onclick="window.manageShiftCancelEdit()" class="btn btn-outline" style="font-size:11px;padding:7px 16px;">Cancel</button>':'')
+        +'<button onclick="window.manageShiftSave()" class="btn btn-gold" style="font-size:11px;padding:7px 20px;">'+(_msEdit?'Save changes':'Add shift')+'</button>'
+      +'</div>'
+    +'</div></div>';
+}
+window.manageShiftEdit=function(id){_msEdit=_shiftTemplates.find(function(t){return t.id===id;})||null;_renderManageShifts();};
+window.manageShiftCancelEdit=function(){_msEdit=null;_renderManageShifts();};
+window.manageShiftSave=async function(){
+  if(!canEditRoster()){denyRosterEdit();return;}
+  var name=(document.getElementById('ms-name').value||'').trim();
+  var st=document.getElementById('ms-start').value,et=document.getElementById('ms-end').value;
+  var br=parseInt(document.getElementById('ms-break').value,10)||0;
+  if(!name){window.toast&&window.toast('Enter a shift name','error');return;}
+  if(!st||!et){window.toast&&window.toast('Enter start and end times','error');return;}
+  try{
+    if(_msEdit&&_msEdit.id){
+      await patch('shift_templates','?id=eq.'+_msEdit.id,{name:name,start_time:st,end_time:et,break_minutes:br});
+    } else {
+      await post('shift_templates',{name:name,start_time:st,end_time:et,break_minutes:br,active:true,created_by:window.CURRENT_USER&&(window.CURRENT_USER.app_user_id||window.CURRENT_USER.id)});
+    }
+    _shiftTemplates=await get('shift_templates?active=eq.true&order=name.asc')||[];
+    _msEdit=null;_renderManageShifts();
+    window.toast&&window.toast('Shift saved','success');
+  }catch(e){window.toast&&window.toast('Error: '+e.message,'error');}
+};
+window.manageShiftDelete=async function(id){
+  if(!canEditRoster()){denyRosterEdit();return;}
+  var t=_shiftTemplates.find(function(x){return x.id===id;});
+  var ok=await new Promise(function(resolve){
+    var ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;background:rgba(5,12,20,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+    ov.innerHTML='<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--red);border-radius:8px;padding:26px;max-width:360px;width:100%;">'
+      +'<div style="font-size:14px;font-weight:700;color:var(--white);margin-bottom:10px;">Delete shift</div>'
+      +'<div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:22px;">Remove "'+window.escapeHtml(t?t.name:'this shift')+'" from the library? Shifts already assigned on rosters keep their saved times and break.</div>'
+      +'<div style="display:flex;gap:10px;justify-content:flex-end;"><button id="_msX" style="padding:8px 16px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;">Cancel</button><button id="_msOK" style="padding:8px 16px;background:var(--red);border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:12px;font-weight:700;">Delete</button></div></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('#_msX').onclick=function(){ov.remove();resolve(false);};
+    ov.querySelector('#_msOK').onclick=function(){ov.remove();resolve(true);};
+    ov.onclick=function(e){if(e.target===ov){ov.remove();resolve(false);}};
+  });
+  if(!ok)return;
+  try{
+    await patch('shift_templates','?id=eq.'+id,{active:false});
+    _shiftTemplates=await get('shift_templates?active=eq.true&order=name.asc')||[];
+    if(_msEdit&&_msEdit.id===id)_msEdit=null;
+    _renderManageShifts();
+    window.toast&&window.toast('Shift removed','success');
+  }catch(e){window.toast&&window.toast('Error: '+e.message,'error');}
+};
 window.rosterSetShift=async function(type){
   if(!canEditRoster()){denyRosterEdit();return;}
   if(!_pt) return;
-  if(type==='custom'){document.getElementById('shift-custom-row').style.display='grid';document.getElementById('shift-custom-save').style.display='block';return;}
+  if(type==='custom'){document.getElementById('shift-custom-row').style.display='block';document.getElementById('shift-custom-save').style.display='block';return;}
   if(type==='off'){await rmShift(_pt.userId,_pt.dateStr);window.closeShiftPicker();return;}
-  var s={day:{n:'Day Shift',s:'07:00',e:'15:45'},evening:{n:'Evening Shift',s:'17:00',e:'21:00'}}[type];
-  await svShift(_pt.userId,_pt.dateStr,s.n,s.s,s.e);window.closeShiftPicker();
+};
+window.rosterPickTemplate=async function(id){
+  if(!canEditRoster()){denyRosterEdit();return;}
+  if(!_pt) return;
+  var t=_shiftTemplates.find(function(x){return x.id===id;});
+  if(!t){window.toast&&window.toast('Shift not found — reopen the picker.','error');return;}
+  await svShift(_pt.userId,_pt.dateStr,t.name,(t.start_time||'').slice(0,5),(t.end_time||'').slice(0,5),t.break_minutes||0);
+  window.closeShiftPicker();
 };
 window.rosterSaveCustom=async function(){
   if(!canEditRoster()){denyRosterEdit();return;}
   if(!_pt) return;
+  var nm=(document.getElementById('shift-custom-name').value||'').trim()||'Custom';
   var s=document.getElementById('shift-custom-start').value,e=document.getElementById('shift-custom-end').value;
+  var br=parseInt(document.getElementById('shift-custom-break').value,10)||0;
   if(!s||!e){window.toast&&window.toast('Enter times','error');return;}
-  await svShift(_pt.userId,_pt.dateStr,'Custom',s,e);window.closeShiftPicker();
+  await svShift(_pt.userId,_pt.dateStr,nm,s,e,br);window.closeShiftPicker();
 };
-async function svShift(uid,d2,nm,st,et){
+async function svShift(uid,d2,nm,st,et,br){
   if(!canEditRoster()){denyRosterEdit();return;}
+  br=br||0;
   var ws=ds(wdays(_wo)[0]),key=rk(uid,d2),ex=_roster[key];
   try{
-    if(ex&&ex.id){await patch('roster_shifts','?id=eq.'+ex.id,{shift_name:nm,start_time:st,end_time:et});ex.sn=nm;ex.st=st;ex.et=et;}
-    else{var r=await post('roster_shifts',{user_id:uid,shift_date:d2,shift_name:nm,start_time:st,end_time:et,week_start:ws,published:false,created_by:window.CURRENT_USER&&(window.CURRENT_USER.app_user_id||window.CURRENT_USER.id)});var rc=Array.isArray(r)?r[0]:r;_roster[key]={id:rc.id,sn:nm,st:st,et:et,pub:false};}
+    if(ex&&ex.id){await patch('roster_shifts','?id=eq.'+ex.id,{shift_name:nm,start_time:st,end_time:et,break_minutes:br});ex.sn=nm;ex.st=st;ex.et=et;ex.bm=br;}
+    else{var r=await post('roster_shifts',{user_id:uid,shift_date:d2,shift_name:nm,start_time:st,end_time:et,break_minutes:br,week_start:ws,published:false,created_by:window.CURRENT_USER&&(window.CURRENT_USER.app_user_id||window.CURRENT_USER.id)});var rc=Array.isArray(r)?r[0]:r;_roster[key]={id:rc.id,sn:nm,st:st,et:et,bm:br,pub:false};}
     renderRoster();
   }catch(e){window.toast&&window.toast('Error: '+e.message,'error');}
 }
@@ -46306,7 +46431,7 @@ window.rosterCopyLastWeek=async function(){
   var ls=await get('roster_shifts?week_start=eq.'+ds(ld[0]));
   if(!ls.length){window.toast&&window.toast('No shifts last week','error');return;}
   var cnt=0;
-  for(var i=0;i<ls.length;i++){var s=ls[i];var di=ld.findIndex(function(d){return ds(d)===s.shift_date;});if(di<0) continue;var nd=ds(td[di]),nk=rk(s.user_id,nd);if(!_roster[nk]&&!_leaveMap[nk]){try{var r=await post('roster_shifts',{user_id:s.user_id,shift_date:nd,shift_name:s.shift_name,start_time:s.start_time,end_time:s.end_time,week_start:ws,published:false,created_by:window.CURRENT_USER&&(window.CURRENT_USER.app_user_id||window.CURRENT_USER.id)});var rc=Array.isArray(r)?r[0]:r;_roster[nk]={id:rc.id,sn:s.shift_name,st:s.start_time,et:s.end_time,pub:false};cnt++;}catch(e){ window.logError('copy roster shift', e); }}}
+  for(var i=0;i<ls.length;i++){var s=ls[i];var di=ld.findIndex(function(d){return ds(d)===s.shift_date;});if(di<0) continue;var nd=ds(td[di]),nk=rk(s.user_id,nd);if(!_roster[nk]&&!_leaveMap[nk]){try{var r=await post('roster_shifts',{user_id:s.user_id,shift_date:nd,shift_name:s.shift_name,start_time:s.start_time,end_time:s.end_time,break_minutes:s.break_minutes||0,week_start:ws,published:false,created_by:window.CURRENT_USER&&(window.CURRENT_USER.app_user_id||window.CURRENT_USER.id)});var rc=Array.isArray(r)?r[0]:r;_roster[nk]={id:rc.id,sn:s.shift_name,st:s.start_time,et:s.end_time,bm:s.break_minutes||0,pub:false};cnt++;}catch(e){ window.logError('copy roster shift', e); }}}
   renderRoster();window.toast&&window.toast('Copied '+cnt+' shifts','success');
 };
 window.rosterClearWeek=async function(){
@@ -46444,11 +46569,11 @@ window.rosterPublish=async function(){
           +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#7a93a8;">Approved</td>'
           +'</tr>';
       }
-      var col=s.sh.sn==='Day Shift'?'#c9a84c':s.sh.sn==='Evening Shift'?'#4a9edd':'#7a93a8';
+      var col=shiftColour(s.sh.sn);
       return '<tr>'
         +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#c0cfe0;">'+dn+'</td>'
         +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;font-weight:700;color:'+col+';">'+s.sh.sn+'</td>'
-        +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#7a93a8;">'+(s.sh.st||'').slice(0,5)+' – '+(s.sh.et||'').slice(0,5)+'</td>'
+        +'<td style="padding:10px 14px;border-bottom:1px solid #1e3a5a;color:#7a93a8;">'+(s.sh.st||'').slice(0,5)+' – '+(s.sh.et||'').slice(0,5)+((s.sh.bm>0)?' &middot; '+s.sh.bm+' min break':'')+'</td>'
         +'</tr>';
     }).join('');
     var html=
@@ -46493,6 +46618,7 @@ function buildRosterPanel(){
     +'<button onclick="window.rosterNext()" class="btn btn-outline" style="font-size:11px;padding:6px 12px;">&rarr;</button>'
     +'</div>'
     +'<div style="display:flex;gap:8px;flex-wrap:wrap;">'
+    +'<button id="roster-manage-shifts-btn" onclick="window.openManageShifts()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#9881; Manage Shifts</button>'
     +'<button id="roster-copy-btn" onclick="window.rosterCopyLastWeek()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#9112; Copy Last Week</button>'
     +'<button id="roster-clear-btn" onclick="window.rosterClearWeek()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;color:var(--muted);">Clear Week</button>'
     +'<button id="roster-publish-btn" onclick="window.rosterPublish()" class="btn btn-gold" style="font-size:11px;padding:6px 18px;">&#9993; Publish</button>'
@@ -46502,10 +46628,13 @@ function buildRosterPanel(){
     +'<div id="shift-picker" style="display:none;position:fixed;z-index:600;background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:6px;padding:16px;min-width:220px;box-shadow:0 8px 32px rgba(0,0,0,0.5);">'
     +'<div id="shift-picker-label" style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:12px;font-weight:700;">Assign Shift</div>'
     +'<div style="display:grid;gap:6px;">'
-    +'<button onclick="window.rosterSetShift(\'day\')" style="background:rgba(201,168,76,0.12);border:1px solid var(--gold-dim);color:var(--white);padding:8px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:Lato,sans-serif;text-align:left;font-weight:600;">&#9728; Day Shift <span style="color:var(--muted);font-size:10px;font-weight:400;">07:00\u201315:45</span></button>'
-    +'<button onclick="window.rosterSetShift(\'evening\')" style="background:rgba(74,158,221,0.1);border:1px solid rgba(74,158,221,0.3);color:var(--white);padding:8px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:Lato,sans-serif;text-align:left;font-weight:600;">&#9790; Evening Shift <span style="color:var(--muted);font-size:10px;font-weight:400;">17:00\u201321:00</span></button>'
-    +'<button onclick="window.rosterSetShift(\'custom\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--white);padding:8px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:Lato,sans-serif;text-align:left;">&#9998; Custom...</button>'
-    +'<div id="shift-custom-row" style="display:none;grid-template-columns:1fr 1fr;gap:6px;"><input type="time" id="shift-custom-start" value="07:00" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px;border-radius:4px;font-size:12px;"><input type="time" id="shift-custom-end" value="15:45" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px;border-radius:4px;font-size:12px;"></div>'
+    +'<div id="shift-picker-options" style="display:grid;gap:6px;"></div>'
+    +'<button onclick="window.rosterSetShift(\'custom\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--white);padding:8px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:Lato,sans-serif;text-align:left;">&#9998; One-off custom\u2026</button>'
+    +'<div id="shift-custom-row" style="display:none;gap:6px;">'
+      +'<input type="text" id="shift-custom-name" placeholder="Shift name (e.g. Cover)" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px;border-radius:4px;font-size:12px;width:100%;margin-bottom:6px;">'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;"><input type="time" id="shift-custom-start" value="09:00" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px;border-radius:4px;font-size:12px;"><input type="time" id="shift-custom-end" value="17:00" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px;border-radius:4px;font-size:12px;"></div>'
+      +'<label style="display:block;font-size:10px;color:var(--muted);margin:6px 0 2px;">Break (minutes)</label><input type="number" id="shift-custom-break" value="0" min="0" step="5" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px;border-radius:4px;font-size:12px;width:100%;">'
+    +'</div>'
     +'<div id="shift-custom-save" style="display:none;"><button onclick="window.rosterSaveCustom()" class="btn btn-gold" style="width:100%;font-size:11px;padding:7px;">Save</button></div>'
     +'<button onclick="window.rosterSetShift(\'off\')" style="background:transparent;border:1px solid rgba(224,93,93,0.3);color:var(--muted);padding:8px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:Lato,sans-serif;text-align:left;">&#10005; Remove Shift</button>'
     +'</div>'
@@ -53985,7 +54114,6 @@ var _attMonday=null;        // Monday (YYYY-MM-DD) of the week being viewed
 var _attInit=false;         // date-input listener attached once
 var _attData=null;          // cache of the last render (for send / approve handlers)
 var ATT_TOLERANCE_MS=10*60000;          // clock-vs-roster slack before flagging / colouring (10 min)
-var ATT_BREAK_REQUIRED_MS=4.5*60*60000; // shift length above which a break is expected (4.5 h legal max)
 var TIMECARD_FN_URL='https://anhawgzgxoywophqbmji.supabase.co/functions/v1/timecard';
 var TIMECARD_PAGE='https://pulse.lighthousedrinks.com/timecard.html';
 
@@ -54046,20 +54174,9 @@ function buildRecs(evts,uid){
     });
   return days;
 }
-function breakMs(rec){
-  if(!rec)return 0;
-  var t=0;
-  rec.br.forEach(function(b){ if(!b.s)return; var be=b.e?new Date(b.e.timestamp):new Date(); t+=Math.max(0,be-new Date(b.s.timestamp)); });
-  return t;
-}
-function workedMs(rec){
-  if(!rec||!rec.ci)return 0;
-  var end=rec.co?new Date(rec.co.timestamp):new Date();
-  return Math.max(0,(end-new Date(rec.ci.timestamp))-breakMs(rec));
-}
-// On-site time = clock-in to clock-out (breaks NOT subtracted). This equals
-// Worked + Break and is what we compare against the rostered shift window,
-// because the rostered window (start_time→end_time) also spans the break.
+// On-site time = clock-in to clock-out (the literal punch span). Breaks are no
+// longer tracked from the clock; the entitled break baked into the rostered
+// shift is what gets subtracted from both worked and rostered hours.
 function grossMs(rec){
   if(!rec||!rec.ci)return 0;
   var end=rec.co?new Date(rec.co.timestamp):new Date();
@@ -54106,10 +54223,8 @@ function dayIssues(rec,rosterMs,isPast,sMin,eMin,isLeave){
   // A day on approved leave is expected — never flag it for attention.
   if(isLeave && !(rec&&rec.ci)) return issues;
   var hasCi=!!(rec&&rec.ci), hasCo=!!(rec&&rec.co);
-  var onSite=grossMs(rec), brk=breakMs(rec);
   if(rosterMs>0 && !hasCi && isPast) issues.push('No clock-in recorded');
   if(hasCi && !hasCo && isPast) issues.push('No clock-out recorded');
-  if(onSite>ATT_BREAK_REQUIRED_MS && brk===0) issues.push('No break recorded');
   var cv=clockVsRoster(rec,sMin,eMin);
   if(cv){
     if(cv.lateMs>0)      issues.push('Clocked in late');
@@ -54162,10 +54277,12 @@ window.loadAttendanceReport=async function(){
     // Roster minutes by app_users.id + day, plus the day's start/end envelope
     // (earliest start, latest end) for the directional variance comparison.
     var rosterMap={};
+    var rosterBreakMap={};   // entitled break (ms) baked into the rostered shift(s)
     var rosterTimesMap={};
     (shifts||[]).forEach(function(s){
       var k=s.user_id+'|'+s.shift_date;
       rosterMap[k]=(rosterMap[k]||0)+shiftMs(s.start_time,s.end_time);
+      rosterBreakMap[k]=(rosterBreakMap[k]||0)+((s.break_minutes||0)*60000);
       var sm=hhmmToMin(s.start_time), em=hhmmToMin(s.end_time);
       if(sm==null||em==null) return;
       var cur=rosterTimesMap[k];
@@ -54222,7 +54339,7 @@ window.loadAttendanceReport=async function(){
     var bodyHtml='';
     rows.forEach(function(e){
       var recs=e.auth_user_id?buildRecs(evts,e.auth_user_id):{};
-      var empWorked=0,empGross=0,empRoster=0,empOnsiteEff=0;
+      var empWorked=0,empGross=0,empRoster=0,empOnsiteEff=0,empBreak=0;
       var empNetMs=0,empBad=false,empHasVar=false,empCmp=0;
       var empFlagDays=[],empLeaveDays=0;
       var dayRows='';
@@ -54232,11 +54349,9 @@ window.loadAttendanceReport=async function(){
         var rt=rosterTimesMap[e.id+'|'+ymd];
         var sMin=rt?rt.startMin:null, eMin=rt?rt.endMin:null;
         var hasClock=!!(rec&&rec.ci);
-        var wMs=workedMs(rec);
-        var gMs=grossMs(rec);
-        var brMs=breakMs(rec);
+        var gMs=grossMs(rec);                              // raw on-site (literal clock-in→out)
+        var brk=rosterBreakMap[e.id+'|'+ymd]||0;           // entitled break baked into the roster
         var open=hasClock&&!rec.co;
-        empWorked+=wMs; empGross+=gMs; empRoster+=rosterMs;
 
         var isPast=ymd<todayKey;
         var leave=leaveMap[e.id+'|'+ymd];
@@ -54245,30 +54360,35 @@ window.loadAttendanceReport=async function(){
         if(issues.length) empFlagDays.push({date:ymd,label:dayLabel(ymd),issues:issues});
         var flagMark=issues.length?' <span title="'+esc(issues.join('; '))+'" style="color:var(--gold);">&#9873;</span>':'';
 
+        // Directional variance + grace-snapped on-site (snaps to roster window
+        // when both punches sit within the 10-min grace, else literal span).
+        var cv=clockVsRoster(rec,sMin,eMin);
+        var effOnsite = cv ? cv.effGrossMs : gMs;
+        // Like-for-like net hours: subtract the entitled break from both sides.
+        var workedNet = hasClock ? Math.max(0, effOnsite - brk) : 0;
+        var rosterNet = Math.max(0, rosterMs - brk);
+        empWorked+=workedNet; empGross+=gMs; empRoster+=rosterNet; empBreak+=brk;
+        empOnsiteEff += effOnsite;
+
         var ciTxt=hasClock?esc(ft(rec.ci.timestamp)):'<span style="color:var(--muted);">—</span>';
         var coTxt=rec&&rec.co?esc(ft(rec.co.timestamp)):(open?'<span style="color:var(--gold);">open</span>':'<span style="color:var(--muted);">—</span>');
-        var brTxt=brMs>0?fm(brMs):'<span style="color:var(--muted);">—</span>';
+        // Break = the entitled break from the rostered shift (no longer tracked from the clock).
+        var brTxt=brk>0?fm(brk):'<span style="color:var(--muted);">—</span>';
 
         var workTxt;
-        if(hasClock){ workTxt=fm(wMs)+(open?' <span style="color:var(--gold);font-size:10px;">(open)</span>':''); }
+        if(hasClock){ workTxt=fm(workedNet)+(open?' <span style="color:var(--gold);font-size:10px;">(open)</span>':''); }
         else if(leave){ workTxt='<span style="color:#5aa9e6;" title="'+esc(titleCase((leave.cat||'annual').replace(/_/g,' '))+' leave')+'">On leave'+(leave.half?' <span style="color:var(--muted);font-size:10px;">(½ day)</span>':'')+'</span>'; }
         else if(rosterMs>0 && isPast){ workTxt='<span style="color:var(--red);">Absent</span>'; }
         else { workTxt='<span style="color:var(--muted);">—</span>'; }
 
-        // On site = clock-in to clock-out (Worked + Break). Purely informational,
-        // sits next to Rostered for an at-a-glance comparison.
+        // On site = literal clock-in to clock-out. Purely informational, sits
+        // next to Rostered for an at-a-glance comparison.
         var onsiteTxt=hasClock?(fm(gMs)+(open?' <span style="color:var(--gold);font-size:10px;">(open)</span>':'')):'<span style="color:var(--muted);">—</span>';
 
-        var rosTxt=rosterMs>0?fm(rosterMs):'<span style="color:var(--muted);">—</span>';
+        // Rostered = shift window minus the entitled break.
+        var rosTxt=rosterMs>0?fm(rosterNet):'<span style="color:var(--muted);">—</span>';
 
-        // Directional variance: clock-in vs rostered start, clock-out vs finish,
-        // each with a 10-min grace on the outer edge. Only meaningful with a
-        // roster and both punches present.
         var varTxt='<span style="color:var(--muted);">—</span>',varColor='var(--muted)';
-        var cv=clockVsRoster(rec,sMin,eMin);
-        // Effective on-site: snap to roster when both punches are in grace, else
-        // actual span. Falls back to raw gross when we can't compare.
-        empOnsiteEff += cv ? cv.effGrossMs : gMs;
         if(cv){
           empCmp++; empNetMs+=cv.netMs; if(cv.bad)empBad=true; if(cv.hasVar)empHasVar=true;
           var parts=[];
@@ -54358,7 +54478,7 @@ window.loadAttendanceReport=async function(){
           +'<td style="border-top:2px solid var(--navy-border);">Total</td>'
           +'<td style="border-top:2px solid var(--navy-border);"></td>'
           +'<td style="border-top:2px solid var(--navy-border);"></td>'
-          +'<td style="border-top:2px solid var(--navy-border);">'+fm(empGross-empWorked)+'</td>'
+          +'<td style="border-top:2px solid var(--navy-border);">'+fm(empBreak)+'</td>'
           +'<td style="border-top:2px solid var(--navy-border);">'+fm(empWorked)+'</td>'
           +'<td style="border-top:2px solid var(--navy-border);" title="Counts rostered time when clock-in/out are within 10 min; actual time otherwise.">'+fm(empOnsiteEff)+'</td>'
           +'<td style="border-top:2px solid var(--navy-border);">'+fm(empRoster)+'</td>'
@@ -54392,16 +54512,14 @@ window.loadAttendanceReport=async function(){
 function buildPendingHtml(requests,empByAuth){
   var pend=(requests||[]).filter(function(r){return r.status==='submitted';});
   if(!pend.length) return '';
-  // Net worked = (clock out − clock in) − sum(breaks); null for incomplete days.
+  // On-site = clock out − clock in; null for incomplete days. Breaks are no
+  // longer collected — the entitled break lives on the roster.
   function hmToMin(s){ if(!/^\d{1,2}:\d{2}$/.test(s||'')) return null; var a=s.split(':'); return (+a[0])*60+(+a[1]); }
-  function netMin(ci,co,breaks){
+  function netMin(ci,co){
     var s=hmToMin(ci), e=hmToMin(co);
     if(s==null||e==null) return null;
     if(e<s) e+=1440;
-    var brk=0;
-    (breaks||[]).forEach(function(b){ var bs=hmToMin(b.start), be=hmToMin(b.end);
-      if(bs==null||be==null) return; if(be<bs) be+=1440; brk+=Math.max(0,be-bs); });
-    return Math.max(0,(e-s)-brk);
+    return Math.max(0,(e-s));
   }
   function fmMin(m){ if(m==null) return '<span style="color:var(--muted);">—</span>'; var h=Math.floor(m/60); return (h?h+'h ':'')+(m%60)+'m'; }
   var html='<div style="margin-bottom:22px;border:1px solid var(--gold);border-radius:6px;overflow:hidden;">'
@@ -54413,13 +54531,12 @@ function buildPendingHtml(requests,empByAuth){
     var days=(r.submitted_payload&&r.submitted_payload.days)||[];
     var rowsHtml='', empTotal=0, empAny=false;
     days.forEach(function(d){
-      var brk=(d.breaks||[]).map(function(b){return esc((b.start||'—')+'–'+(b.end||'—'));}).join(', ')||'<span style="color:var(--muted);">none</span>';
       var reason=(d.reason||'').trim();
       var reasonTxt=reason?'<span style="color:var(--text);">'+esc(reason)+'</span>':'<span style="color:var(--muted);">—</span>';
-      var nm=netMin(d.clockIn,d.clockOut,d.breaks);
+      var nm=netMin(d.clockIn,d.clockOut);
       if(nm!=null){ empTotal+=nm; empAny=true; }
       rowsHtml+='<tr><td style="white-space:nowrap;">'+esc(dayLabel(d.date))+'</td>'
-        +'<td>'+esc(d.clockIn||'—')+'</td><td>'+esc(d.clockOut||'—')+'</td><td>'+brk+'</td>'
+        +'<td>'+esc(d.clockIn||'—')+'</td><td>'+esc(d.clockOut||'—')+'</td>'
         +'<td style="font-weight:700;">'+fmMin(nm)+'</td>'
         +'<td style="max-width:280px;white-space:normal;font-style:italic;">'+reasonTxt+'</td></tr>';
     });
@@ -54433,7 +54550,7 @@ function buildPendingHtml(requests,empByAuth){
           +'<button onclick="window.attendanceReject(\''+esc(r.id)+'\',this)" style="font-size:11px;padding:6px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;background:transparent;border:1px solid var(--navy-border);color:var(--muted);">Reject</button>'
         +'</div>'
       +'</div>'
-      +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr><th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">Break(s)</th><th style="text-align:left;">Total</th><th style="text-align:left;">Reason</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
+      +'<table class="data-table" style="width:100%;font-size:12px;"><thead><tr><th style="text-align:left;">Day</th><th style="text-align:left;">Clock In</th><th style="text-align:left;">Clock Out</th><th style="text-align:left;">On site</th><th style="text-align:left;">Reason</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
     +'</div>';
   });
   html+='</div></div>';
@@ -54495,7 +54612,7 @@ function buildCorrectionEmail(name,flagDays,link){
     +'<p style="color:#333;line-height:1.6;">Tap below to pop in your actual times — it takes a minute, and your manager will confirm them.</p>'
     +'<div style="text-align:center;margin:28px 0;">'
     +'<a href="'+link+'" style="background:#c9a84c;color:#0d1b2a;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:700;font-size:15px;">Fill in my hours</a></div>'
-    +'<p style="color:#888;font-size:12px;text-align:center;line-height:1.5;">Please remember to clock in and out (and for your breaks) each day — that way you won\u2019t get these emails. This link expires in 10 days.</p></div>';
+    +'<p style="color:#888;font-size:12px;text-align:center;line-height:1.5;">Please remember to clock in and out each day — that way you won\u2019t get these emails. This link expires in 10 days.</p></div>';
 }
 
 // ── Approve a submitted correction: write corrected rows to clock_events ──
@@ -54519,10 +54636,6 @@ window.attendanceApprove=async function(reqId,btn){
       await del('clock_events?user_id=eq.'+authUid+'&timestamp=gte.'+encodeURIComponent(dayStart)+'&timestamp=lt.'+encodeURIComponent(dayEnd));
       var inserts=[];
       if(d.clockIn) inserts.push({type:'clock_in',t:d.clockIn});
-      (d.breaks||[]).forEach(function(b){
-        if(b.start) inserts.push({type:'break_start',t:b.start});
-        if(b.end)   inserts.push({type:'break_end',t:b.end});
-      });
       if(d.clockOut) inserts.push({type:'clock_out',t:d.clockOut});
       // Insert sequentially in chronological order (sorted by time).
       inserts.sort(function(a,b){return a.t.localeCompare(b.t);});
