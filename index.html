@@ -54088,8 +54088,10 @@ function clockVsRoster(rec,sMin,eMin){
 }
 // Reasons a day needs the employee to fix their clock entries. Mirrors the
 // flag logic in the timecard edge function — keep the two in sync.
-function dayIssues(rec,rosterMs,isPast,sMin,eMin){
+function dayIssues(rec,rosterMs,isPast,sMin,eMin,isLeave){
   var issues=[];
+  // A day on approved leave is expected — never flag it for attention.
+  if(isLeave && !(rec&&rec.ci)) return issues;
   var hasCi=!!(rec&&rec.ci), hasCo=!!(rec&&rec.co);
   var onSite=grossMs(rec), brk=breakMs(rec);
   if(rosterMs>0 && !hasCi && isPast) issues.push('No clock-in recorded');
@@ -54157,6 +54159,20 @@ window.loadAttendanceReport=async function(){
       if(!cur) rosterTimesMap[k]={startMin:sm,endMin:em};
       else { cur.startMin=Math.min(cur.startMin,sm); cur.endMin=Math.max(cur.endMin,em); }
     });
+    // Approved leave overlapping this week, keyed by app_users.id|ymd. Lets us
+    // show "On leave" instead of "Absent"/blank so a missing clock-in is
+    // self-explanatory. Table may not exist on older projects — fail soft.
+    var leaveMap={};
+    try{
+      var leaves=await get('leave_requests?status=eq.approved&start_date=lte.'+sunday+'&end_date=gte.'+monday+'&select=user_id,start_date,end_date,leave_category,leave_type')||[];
+      leaves.forEach(function(l){
+        var cat=l.leave_category||'annual', half=l.leave_type==='half_day', end=l.end_date||l.start_date;
+        weekYmds.forEach(function(ymd){
+          if(ymd>=l.start_date && ymd<=end) leaveMap[l.user_id+'|'+ymd]={cat:cat,half:half};
+        });
+      });
+    }catch(lvErr){ window.logError&&window.logError('attendance leave load',lvErr); }
+
     // Which app_users.id appear in roster (to include non-active staff who were rostered/worked)
     var clockUserIds={};(evts||[]).forEach(function(e){clockUserIds[e.user_id]=true;});
 
@@ -54195,7 +54211,7 @@ window.loadAttendanceReport=async function(){
       var recs=e.auth_user_id?buildRecs(evts,e.auth_user_id):{};
       var empWorked=0,empGross=0,empRoster=0;
       var empNetMs=0,empBad=false,empHasVar=false,empCmp=0;
-      var empFlagDays=[];
+      var empFlagDays=[],empLeaveDays=0;
       var dayRows='';
       weekYmds.forEach(function(ymd){
         var rec=recs[ymd];
@@ -54210,7 +54226,9 @@ window.loadAttendanceReport=async function(){
         empWorked+=wMs; empGross+=gMs; empRoster+=rosterMs;
 
         var isPast=ymd<todayKey;
-        var issues=dayIssues(rec,rosterMs,isPast,sMin,eMin);
+        var leave=leaveMap[e.id+'|'+ymd];
+        if(leave && !hasClock) empLeaveDays++;
+        var issues=dayIssues(rec,rosterMs,isPast,sMin,eMin,!!leave);
         if(issues.length) empFlagDays.push({date:ymd,label:dayLabel(ymd),issues:issues});
         var flagMark=issues.length?' <span title="'+esc(issues.join('; '))+'" style="color:var(--gold);">&#9873;</span>':'';
 
@@ -54220,6 +54238,7 @@ window.loadAttendanceReport=async function(){
 
         var workTxt;
         if(hasClock){ workTxt=fm(wMs)+(open?' <span style="color:var(--gold);font-size:10px;">(open)</span>':''); }
+        else if(leave){ workTxt='<span style="color:#5aa9e6;" title="'+esc(titleCase((leave.cat||'annual').replace(/_/g,' '))+' leave')+'">On leave'+(leave.half?' <span style="color:var(--muted);font-size:10px;">(½ day)</span>':'')+'</span>'; }
         else if(rosterMs>0 && isPast){ workTxt='<span style="color:var(--red);">Absent</span>'; }
         else { workTxt='<span style="color:var(--muted);">—</span>'; }
 
@@ -54265,7 +54284,8 @@ window.loadAttendanceReport=async function(){
       // roster-flagged) most likely means forgotten punches all week — treat it
       // as needs-attention so the manager can chase it.
       var hadAnyActivity=!!(e.auth_user_id && clockUserIds[e.auth_user_id]);
-      var blankWeek=e.status==='active' && empFlagDays.length===0 && !hadAnyActivity;
+      // Someone on leave this week isn't a "forgot to clock in all week" case.
+      var blankWeek=e.status==='active' && empFlagDays.length===0 && !hadAnyActivity && empLeaveDays===0;
       if(e.auth_user_id) flagsByAuth[e.auth_user_id]=blankWeek
         ? [{date:monday,label:'This week',issues:['No clock activity recorded all week']}]
         : empFlagDays;
