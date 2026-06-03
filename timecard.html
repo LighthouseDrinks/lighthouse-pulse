@@ -37,6 +37,10 @@
   .break-row .field{flex:1;margin-bottom:0;}
   .rm{background:transparent;border:1px solid var(--navy-border);color:var(--muted);border-radius:6px;padding:10px 12px;cursor:pointer;font-size:13px;}
   .addbreak{background:transparent;border:1px dashed var(--navy-border);color:var(--gold);border-radius:6px;padding:8px 12px;cursor:pointer;font-size:12px;font-family:Lato,sans-serif;}
+  .day-total{margin-top:14px;padding-top:12px;border-top:1px solid var(--navy-border);font-size:13px;color:var(--muted);}
+  .day-total .dt-val{color:var(--white);font-weight:700;}
+  .weektotal{display:flex;justify-content:space-between;align-items:center;background:var(--navy-card);border:1px solid var(--gold);border-radius:8px;padding:14px 16px;margin:0 0 16px;font-size:14px;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;}
+  .weektotal b{color:var(--gold);font-size:19px;letter-spacing:0;}
   .submit{width:100%;background:var(--gold);color:var(--navy);border:none;padding:16px;font-size:16px;font-weight:700;border-radius:8px;cursor:pointer;font-family:Lato,sans-serif;margin-top:8px;}
   .submit:disabled{opacity:0.6;cursor:default;}
   .note{font-size:12px;color:var(--muted);text-align:center;margin-top:16px;line-height:1.5;}
@@ -62,6 +66,20 @@
   var DATA=null;
 
   function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+
+  // Net worked = (clock out − clock in) − sum(breaks). Returns null for an
+  // incomplete day so it shows "—" and is left out of the week total.
+  function hmToMin(s){ if(!/^\d{1,2}:\d{2}$/.test(s||'')) return null; var a=s.split(':'); return (+a[0])*60+(+a[1]); }
+  function netMin(ci,co,breaks){
+    var s=hmToMin(ci), e=hmToMin(co);
+    if(s==null||e==null) return null;
+    if(e<s) e+=1440;
+    var brk=0;
+    (breaks||[]).forEach(function(b){ var bs=hmToMin(b.start), be=hmToMin(b.end);
+      if(bs==null||be==null) return; if(be<bs) be+=1440; brk+=Math.max(0,be-bs); });
+    return Math.max(0,(e-s)-brk);
+  }
+  function fmMin(m){ if(m==null) return '—'; var h=Math.floor(m/60); return (h?h+'h ':'')+(m%60)+'m'; }
 
   function state(icon,cls,msg){
     root.innerHTML='<div class="state"><div class="icon '+cls+'">'+icon+'</div><div>'+esc(msg)+'</div></div>';
@@ -111,9 +129,11 @@
         +'<button type="button" class="addbreak" data-idx="'+idx+'">+ Add a break</button>'
         +'<div class="field" style="margin-top:14px;margin-bottom:0;"><label>Reason <span class="opt">(so your manager knows what happened)</span></label>'
           +'<textarea class="reason" rows="2" placeholder="e.g. Forgot to clock out, phone died, started early to cover a delivery…">'+esc(d.reason||'')+'</textarea></div>'
+        +'<div class="day-total">Worked (after breaks): <span class="dt-val">—</span></div>'
       +'</div>';
     });
-    h+='<button type="button" class="submit" id="submitBtn">Submit my hours</button>'
+    h+='<div class="weektotal">Week total <b id="weekTotal">—</b></div>'
+      +'<button type="button" class="submit" id="submitBtn">Submit my hours</button>'
       +'<p class="note">Remember to clock in and out (and for your breaks) each day so you don\u2019t get these emails. Your manager confirms everything before it counts.</p>';
     root.innerHTML=h;
 
@@ -122,9 +142,31 @@
         var breaks=btn.previousElementSibling; // .breaks
         var tmp=document.createElement('div'); tmp.innerHTML=breakRowHtml();
         breaks.appendChild(tmp.firstChild);
+        recalc();
       });
     });
     document.getElementById('submitBtn').addEventListener('click',submit);
+    // Live totals: recompute on any time change, and after add/remove break.
+    root.addEventListener('input',recalc);
+    root.addEventListener('click',function(ev){ if(ev.target&&ev.target.classList.contains('rm')) setTimeout(recalc,0); });
+    recalc();
+  }
+
+  // Recompute each day's worked total and the week total from the live inputs.
+  function recalc(){
+    var weekEl=document.getElementById('weekTotal');
+    var total=0, any=false;
+    Array.prototype.forEach.call(document.querySelectorAll('.day'),function(el){
+      var breaks=[];
+      Array.prototype.forEach.call(el.querySelectorAll('.break-row'),function(br){
+        breaks.push({start:br.querySelector('.b-start').value, end:br.querySelector('.b-end').value});
+      });
+      var m=netMin(el.querySelector('.ci').value, el.querySelector('.co').value, breaks);
+      var valEl=el.querySelector('.dt-val');
+      if(valEl) valEl.textContent=fmMin(m);
+      if(m!=null){ total+=m; any=true; }
+    });
+    if(weekEl) weekEl.textContent=any?fmMin(total):'—';
   }
 
   async function submit(){
