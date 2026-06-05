@@ -42256,20 +42256,29 @@ window.saveAdjModal = async function() {
     });
     var srcConts = srcIds.map(function(id){ return _bl.find(function(c){ return c.id === id; }); })
       .filter(function(c){ return c && excludeIds.indexOf(c.id) < 0; });
-    if (srcConts.length) {
+    var _dlOp = (document.getElementById('dl-operation')||{}).value || 'dilution';
+    // Blend: a partially-drawn source keeps its leftover at the ORIGINAL product name, so it
+    // must NOT receive the new blend. Only fully-drawn (emptied) sources can be reused.
+    // Dilution: same product weaker, so in-place reuse is always allowed.
+    var reuseConts = srcConts.filter(function(c){
+      if (_dlOp !== 'blend') return true;
+      var nominal = parseFloat(c.capacity_litres||0);
+      if (nominal <= 0) return true; // bulk/uncapped vessel
+      return (parseFloat(c.current_litres||0) - _dlDrawnFromContainer(c.id)) <= 0.01;
+    });
+    if (reuseConts.length) {
       html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Reuse a source container ────</option>';
-      srcConts.forEach(function(c) {
-        // Net-aware label: the draw empties the vessel first, so show room to the ceiling.
-        var tLbl  = (typeof _TYPE_LABELS !== 'undefined' && _TYPE_LABELS[c.type]) || (c.type || '—');
-        var ref   = c.vessel_id || c.reference;
-        var cur   = parseFloat(c.current_litres||0);
-        var drawn = _dlDrawnFromContainer(c.id);
-        var ceil  = window._fillCeiling(c.capacity_litres);
-        var effCur = cur - drawn;
+      reuseConts.forEach(function(c) {
+        var tLbl   = (typeof _TYPE_LABELS !== 'undefined' && _TYPE_LABELS[c.type]) || (c.type || '—');
+        var ref    = c.vessel_id || c.reference;
+        var cur    = parseFloat(c.current_litres||0);
+        var drawn  = _dlDrawnFromContainer(c.id);
+        var nominal = parseFloat(c.capacity_litres||0);
+        var effCur = cur - drawn; // what stays in the vessel after the draw
         var roomTxt;
-        if (ceil === Infinity)        roomTxt = 'reuse in-place';
-        else if (effCur <= 0.01)      roomTxt = 'empties, holds up to ' + ceil.toFixed(0) + 'L';
-        else                          roomTxt = (ceil - effCur).toFixed(0) + 'L free after draw';
+        if (nominal <= 0)         roomTxt = 'reuse in-place';
+        else if (effCur <= 0.01)  roomTxt = 'drawn empty · ' + nominal.toFixed(0) + 'L capacity';
+        else                      roomTxt = effCur.toFixed(0) + 'L stays · ' + Math.max(0, nominal - effCur).toFixed(0) + 'L room';
         var lbl = ref + '  [' + tLbl + ']  ' + roomTxt;
         html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(lbl) + '</option>';
       });
@@ -42336,7 +42345,7 @@ window.saveAdjModal = async function() {
       + '</div>'
       + '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;">'
       + '<div id="dl-savail-' + idx + '" style="font-size:11px;padding:6px 10px;background:rgba(0,0,0,0.25);border:1px solid var(--navy-border);border-radius:3px;color:var(--muted);">Available: —</div>'
-      + '<input type="number" id="dl-sl-' + idx + '" placeholder="Litres to take" min="0" step="0.1" oninput="window.calcDilutePreview()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;width:100%;box-sizing:border-box;">'
+      + '<input type="number" id="dl-sl-' + idx + '" placeholder="Litres to take" min="0" step="0.1" oninput="window._dlOnSrcLitres()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;width:100%;box-sizing:border-box;">'
       + '<span id="dl-slpa-' + idx + '" style="font-size:11px;color:var(--gold);white-space:nowrap;min-width:60px;text-align:right;">— LPA</span>'
       + '</div>';
     wrap.appendChild(row);
@@ -42434,6 +42443,18 @@ window.saveAdjModal = async function() {
   window._dlOnWaterInput = function() {
     _dlSyncDests();
     window.calcDilutePreview();
+  };
+
+  // Source "litres to take" edit: the draw changes how much stays in each vessel, which
+  // changes destination eligibility (blend) and labels — so rebuild the dest dropdowns.
+  window._dlOnSrcLitres = function() {
+    _refreshDLSelects();
+    if ((document.getElementById('dl-target-abv')||{}).value) {
+      window.calcDLWaterFromTargetABV(); // re-syncs dests + re-previews internally
+    } else {
+      _dlSyncDests();
+      window.calcDilutePreview();
+    }
   };
 
   // Litres being drawn FROM a container across all source rows (for in-place net capacity).
@@ -43702,6 +43723,22 @@ window.saveAdjModal = async function() {
         var c = _bl.find(function(x){ return x.id === d.cont.id; }) || d.cont;
         var n = _ensureNet(c); n.addL += d.litres; n.addLPA += d.litres * lpaPerLitre;
       });
+
+      // Blend integrity: the new blend cannot be returned to a source that still holds a
+      // leftover of its ORIGINAL product (that would relabel the leftover to the blend name).
+      if (isBlend) {
+        var _blendBad = [];
+        Object.keys(netMap).forEach(function(id){
+          var n = netMap[id];
+          if (n.addL > 0.01 && n.deductL > 0.01 && (parseFloat(n.cont.current_litres||0) - n.deductL) > 0.01) {
+            _blendBad.push(n.cont.reference);
+          }
+        });
+        if (_blendBad.length) {
+          window.toast && window.toast('Blend output can\'t go back into a partially-used source (its leftover keeps its original product): ' + _blendBad.join(', ') + '. Send the blend to an empty/free or new vessel.', 'error');
+          return;
+        }
+      }
 
       // Net capacity check (accounts for liquid removed before refilling the same vessel)
       var _capBad = [];
