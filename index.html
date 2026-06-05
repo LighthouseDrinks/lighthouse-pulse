@@ -29051,6 +29051,7 @@ window.saveAdjModal = async function() {
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_tasks' },          _refresh)
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_drygoods_prep' },  _refresh)
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_liquid_signoff' }, _refresh)
+      .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_bom_approvals' },  _refresh)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'jobs' },               _refresh)
       .subscribe();
   })();
@@ -31968,6 +31969,13 @@ window.saveAdjModal = async function() {
         if (tasks.length) await supaMut('PATCH','job_tasks','?id=eq.'+tasks[0].id,{status:'completed',completed_at:new Date().toISOString()});
       } catch(e) { window.logError('complete components task', e); }
       window.toast && window.toast('Supply Chain signed off.','success');
+      // Optimistic: flip the pill green immediately for the acting user so the
+      // jobs table / overview dots don't wait for the realtime round-trip.
+      try {
+        if (typeof _scDone === 'object') _scDone[jobId] = true;
+        if (typeof renderJobsTable === 'function') renderJobsTable();
+        if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
+      } catch(e) { /* non-fatal: realtime/refresh will reconcile */ }
       await window.autoCompleteTask(jobId, 'components');
       loadComponentsTab(jobId);
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
@@ -34111,6 +34119,13 @@ window.saveAdjModal = async function() {
         await supaMut('POST', 'job_liquid_signoff', '', payload);
       }
       window.toast && window.toast('Liquid sign-off saved and locked.', 'success');
+      // Optimistic: flip the Liquid pill green immediately for the acting user
+      // so the jobs table / overview dots don't wait for the realtime round-trip.
+      try {
+        if (typeof _lsDone === 'object') _lsDone[jobId] = true;
+        if (typeof renderJobsTable === 'function') renderJobsTable();
+        if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
+      } catch(e) { /* non-fatal: realtime/refresh will reconcile */ }
       await window.autoCompleteTask(jobId, 'liquid_signoff');
       loadLiquidTab(jobId);
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
@@ -39118,13 +39133,22 @@ window.saveAdjModal = async function() {
 
     // Realtime subscription — only subscribe once
     if (!_schedRtChannel && window._sb) {
+      // Refresh the schedule (and its Gates column) on job changes or on any
+      // sign-off change. Sign-offs live in their own tables and never touch
+      // `jobs`, so without these handlers the Gates pills stayed stale until a
+      // manual refresh.
+      function _schedRtRefresh() {
+        if (_schedSuppressRt) return;
+        clearTimeout(_schedRtDebounce);
+        _schedRtDebounce = setTimeout(function() { loadSchedule(); }, 300);
+      }
       _schedRtChannel = window._sb
         .channel('schedule_jobs')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, function() {
-          if (_schedSuppressRt) return;
-          clearTimeout(_schedRtDebounce);
-          _schedRtDebounce = setTimeout(function() { loadSchedule(); }, 300);
-        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' },               _schedRtRefresh)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'job_drygoods_prep' },  _schedRtRefresh)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'job_liquid_signoff' }, _schedRtRefresh)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'job_bom_approvals' },  _schedRtRefresh)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'job_tasks' },          _schedRtRefresh)
         .subscribe();
     }
   }
