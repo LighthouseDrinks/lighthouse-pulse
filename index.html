@@ -35315,13 +35315,13 @@ window.saveAdjModal = async function() {
       function vesselFreeCapacity(vesselId, isSource) {
         if (isSource) {
           var cap = contRows[idxOfSource(vesselId)] ? contRows[idxOfSource(vesselId)].capacity : 0;
-          return cap > 0 ? cap : Infinity;
+          return cap > 0 ? window._fillCeiling(cap) : Infinity; // cap +10% hard-fill ceiling
         }
         var d = destConts.find(function(c){ return c.id === vesselId; });
         if (!d) return Infinity;
         var cap2 = parseFloat(d.capacity_litres || 0) || 0;
         if (cap2 <= 0) return Infinity;
-        return Math.max(0, cap2 - parseFloat(d.current_litres || 0));
+        return Math.max(0, window._fillCeiling(cap2) - parseFloat(d.current_litres || 0));
       }
       function idxOfSource(vesselId) {
         for (var i = 0; i < contRows.length; i++) if (contRows[i].id === vesselId) return i;
@@ -40589,7 +40589,7 @@ window.saveAdjModal = async function() {
       return cvPrefix + ref + '  [' + tLbl + ']  ' + (isEmpty ? 'EMPTY' : l.toFixed(0) + 'L');
     }
     if (context === 'dest') {
-      var free = cap > 0 ? (cap - l).toFixed(0) + 'L free  (' + Math.round(l / cap * 100) + '% full)' : l.toFixed(0) + 'L used';
+      var free = cap > 0 ? Math.max(0, cap - l).toFixed(0) + 'L free  (' + Math.min(100, Math.round(l / cap * 100)) + '% full)' : l.toFixed(0) + 'L used';
       return cvPrefix + ref + '  [' + tLbl + ']  ' + free;
     }
     // 'source' (default)
@@ -40788,6 +40788,15 @@ window.saveAdjModal = async function() {
     if (capacity > 0 && litres >= capacity) return 'full';
     return 'partially_full';
   }
+
+  // Hard-fill ceiling: nominal capacity drives the "% full" display, but vessels
+  // physically hold more (e.g. a 1000 L IBC holds ~1100 L). Capacity BLOCKS use this
+  // ceiling, not the nominal rating. One constant to tune.
+  var _FILL_TOLERANCE = 1.10; // IBC 1000 -> 1100, drum 200 -> 220, tank 12500 -> 13750
+  window._fillCeiling = function(capacity) {
+    var c = parseFloat(capacity || 0);
+    return c > 0 ? c * _FILL_TOLERANCE : Infinity;
+  };
 
   // ── LPA METHODOLOGY STANDARD ─────────────────────────────────────────────────
   // All LPA movement calculations in this module use: LPA = litres × ABV / 100
@@ -42069,11 +42078,11 @@ window.saveAdjModal = async function() {
 
     var capErr = false;
     dests.forEach(function(d){
-      var cap = parseFloat(d.cont.capacity_litres||0);
-      var inC = parseFloat(d.cont.current_litres||0);
-      if (cap > 0 && inC + d.litres > cap) capErr = true;
+      var ceil = window._fillCeiling(d.cont.capacity_litres);
+      var inC  = parseFloat(d.cont.current_litres||0);
+      if (ceil !== Infinity && inC + d.litres > ceil + 0.01) capErr = true;
     });
-    if (capErr) { window.toast && window.toast('Disgorge volume would exceed a destination vessel capacity.', 'error'); return; }
+    if (capErr) { window.toast && window.toast('Disgorge volume would exceed a destination vessel max fill (capacity +10%).', 'error'); return; }
 
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
@@ -42250,7 +42259,19 @@ window.saveAdjModal = async function() {
     if (srcConts.length) {
       html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Reuse a source container ────</option>';
       srcConts.forEach(function(c) {
-        html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(_containerLabel(c, 'dest')) + '</option>';
+        // Net-aware label: the draw empties the vessel first, so show room to the ceiling.
+        var tLbl  = (typeof _TYPE_LABELS !== 'undefined' && _TYPE_LABELS[c.type]) || (c.type || '—');
+        var ref   = c.vessel_id || c.reference;
+        var cur   = parseFloat(c.current_litres||0);
+        var drawn = _dlDrawnFromContainer(c.id);
+        var ceil  = window._fillCeiling(c.capacity_litres);
+        var effCur = cur - drawn;
+        var roomTxt;
+        if (ceil === Infinity)        roomTxt = 'reuse in-place';
+        else if (effCur <= 0.01)      roomTxt = 'empties, holds up to ' + ceil.toFixed(0) + 'L';
+        else                          roomTxt = (ceil - effCur).toFixed(0) + 'L free after draw';
+        var lbl = ref + '  [' + tLbl + ']  ' + roomTxt;
+        html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(lbl) + '</option>';
       });
     }
     // Group 2: empty / free vessels only (no partially-filled containers)
@@ -42415,6 +42436,17 @@ window.saveAdjModal = async function() {
     window.calcDilutePreview();
   };
 
+  // Litres being drawn FROM a container across all source rows (for in-place net capacity).
+  function _dlDrawnFromContainer(id) {
+    var sum = 0;
+    document.querySelectorAll('[id^="dl-sc-"]').forEach(function(sel){
+      if (sel.value !== id) return;
+      var i = sel.id.replace('dl-sc-','');
+      sum += parseFloat((document.getElementById('dl-sl-' + i)||{}).value) || 0;
+    });
+    return sum;
+  }
+
   // Operation-aware destination seeding.
   //  Dilution: one auto destination per source (reuse in-place), volume capped at capacity.
   //  Blend:    no source seeding; ensure a single destination row for the combined output.
@@ -42453,9 +42485,9 @@ window.saveAdjModal = async function() {
         var litEl = document.getElementById('dl-dl-' + idx2);
         var portionWater = srcTotalL > 0 ? waterL * (s.litres / srcTotalL) : 0;
         var want = s.litres + portionWater;
-        var cap  = parseFloat(s.cont.capacity_litres||0);
         var orig = parseFloat(s.cont.current_litres||0);
-        var room = cap > 0 ? (cap - orig + s.litres) : Infinity; // capacity left after deducting the draw
+        var ceil = window._fillCeiling(s.cont.capacity_litres); // hard-fill ceiling (cap +10%)
+        var room = ceil !== Infinity ? (ceil - orig + s.litres) : Infinity; // room left after deducting the draw
         var vol  = (room !== Infinity) ? Math.min(want, room) : want;
         if (litEl) litEl.value = (Math.round(vol*10)/10).toFixed(1);
       }
@@ -42507,10 +42539,11 @@ window.saveAdjModal = async function() {
     if (sel && capEl) {
       var cont = sel.value && !isNew ? _bl.find(function(c){ return c.id === sel.value; }) : null;
       if (cont) {
-        var cap = parseFloat(cont.capacity_litres||0);
-        var cur = parseFloat(cont.current_litres||0);
-        var avail = cap > 0 ? (cap - cur) : null;
-        capEl.textContent = avail !== null ? ('Avail cap: ' + avail.toFixed(0) + 'L') : ('Current: ' + cur.toFixed(0) + 'L');
+        var ceil = window._fillCeiling(cont.capacity_litres);
+        var cur  = parseFloat(cont.current_litres||0);
+        var effCur = cur - _dlDrawnFromContainer(cont.id); // liquid drawn out empties first (in-place)
+        var avail = ceil !== Infinity ? (ceil - effCur) : null;
+        capEl.textContent = avail !== null ? ('Room after draw: ' + avail.toFixed(0) + 'L') : ('Current: ' + cur.toFixed(0) + 'L');
         capEl.style.color = (avail !== null && avail <= 0) ? 'var(--red)' : 'var(--muted)';
       } else if (isNew) {
         window._dlOnNewVesselTypeChange(idx);
@@ -43482,7 +43515,7 @@ window.saveAdjModal = async function() {
       if (sel && sel.value && l > 0) {
         if (sel.value === '__newvessel__') {
           var nvCap = parseFloat((document.getElementById('dl-dnv-cap-' + idx) || {}).value) || 0;
-          var nvAvail = nvCap > 0 ? nvCap : Infinity;
+          var nvAvail = window._fillCeiling(nvCap); // cap +10% headroom
           var nvCodeEl = document.getElementById('dl-dnv-code-' + idx);
           var nvCvEl   = document.getElementById('dl-dnv-cvref-' + idx);
           var nvLabel  = (nvCodeEl && nvCodeEl.value) || (nvCvEl && nvCvEl.textContent) || 'New vessel';
@@ -43496,11 +43529,12 @@ window.saveAdjModal = async function() {
         } else {
           var cont = _bl.find(function(c){ return c.id === sel.value; });
           if (cont) {
-            var cap = parseFloat(cont.capacity_litres||0);
-            var cur = parseFloat(cont.current_litres||0);
-            var avail = cap > 0 ? cap - cur : Infinity;
+            var ceil = window._fillCeiling(cont.capacity_litres);
+            var cur  = parseFloat(cont.current_litres||0);
+            var effCur = cur - _dlDrawnFromContainer(cont.id); // in-place: draw empties first
+            var avail = ceil !== Infinity ? ceil - effCur : Infinity;
             if (l > avail + 0.01) {
-              capWarns.push(window.escapeHtml(cont.reference) + ': needs ' + l.toFixed(0) + 'L, only ' + (avail === Infinity ? '∞' : avail.toFixed(0)) + 'L available');
+              capWarns.push(window.escapeHtml(cont.reference) + ': needs ' + l.toFixed(0) + 'L, max fill ' + (avail === Infinity ? '∞' : avail.toFixed(0)) + 'L');
               if (litEl) litEl.style.borderColor = 'var(--red)';
             } else {
               if (litEl) litEl.style.borderColor = 'var(--navy-border)';
@@ -43672,13 +43706,13 @@ window.saveAdjModal = async function() {
       var _capBad = [];
       Object.keys(netMap).forEach(function(id){
         var n = netMap[id];
-        var cap  = parseFloat(n.cont.capacity_litres||0);
+        var ceil = window._fillCeiling(n.cont.capacity_litres);
         var orig = parseFloat(n.cont.current_litres||0);
         var newL = orig - n.deductL + n.addL;
-        if (cap > 0 && newL > cap + 0.01) _capBad.push(n.cont.reference);
+        if (ceil !== Infinity && newL > ceil + 0.01) _capBad.push(n.cont.reference);
       });
       if (_capBad.length) {
-        window.toast && window.toast('Destination capacity exceeded: ' + _capBad.join(', '), 'error'); return;
+        window.toast && window.toast('Destination over max fill (capacity +10%): ' + _capBad.join(', '), 'error'); return;
       }
 
       // LPA reconciliation guard: output LPA should match the expected (or measured) figure.
