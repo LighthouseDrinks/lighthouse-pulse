@@ -25926,11 +25926,26 @@ window.openLiqView = async function(id) {
                    : (h.event_type === 'add' && h.litres_after != null ? parseFloat(h.litres_after) : null);
         var chg  = _lcRaw != null ? (_lcRaw > 0 ? '+' : '') + _lcRaw.toFixed(1) + 'L' : '—';
         var chgC = h.litres_changed > 0 ? 'var(--green)' : h.litres_changed < 0 ? 'var(--red)' : 'var(--muted)';
-        var noteHtml = h.notes
-          ? '<tr style="' + bg + '"><td colspan="8" style="padding:2px 8px 7px 8px;">'
+        var changesArr = h.changes
+          ? (typeof h.changes === 'string' ? (function(){ try { return JSON.parse(h.changes); } catch(e){ return null; } })() : h.changes)
+          : null;
+        var noteHtml;
+        if (changesArr && changesArr.length) {
+          noteHtml = '<tr style="' + bg + '"><td colspan="8" style="padding:2px 8px 7px 8px;">'
+            + changesArr.map(function(ch){
+                return '<span style="font-size:10px;display:inline-block;margin-right:14px;">'
+                  + '<span style="color:var(--muted);font-style:italic;">' + window.escapeHtml(ch.label) + ':</span> '
+                  + '<span style="color:var(--red);">' + window.escapeHtml(String(ch.before)) + '</span> &#8594; '
+                  + '<span style="color:var(--green);">' + window.escapeHtml(String(ch.after)) + '</span></span>';
+              }).join('')
+            + '</td></tr>';
+        } else if (h.notes) {
+          noteHtml = '<tr style="' + bg + '"><td colspan="8" style="padding:2px 8px 7px 8px;">'
             + '<span style="font-size:10px;color:var(--muted);font-style:italic;">&#8627; ' + window.escapeHtml(h.notes) + '</span>'
-            + '</td></tr>'
-          : '';
+            + '</td></tr>';
+        } else {
+          noteHtml = '';
+        }
         html += '<tr style="' + bg + '">'
           + '<td style="padding:6px 8px;color:var(--muted);white-space:nowrap;">' + fDate(h.created_at) + '</td>'
           + '<td style="padding:6px 8px;"><span style="color:' + evCol + ';font-weight:700;">' + evLbl + '</span></td>'
@@ -25992,6 +26007,80 @@ window.calcCMAngelShare = function() {
   document.getElementById('cm-angel-note').textContent = 'Est. Litres: ' + r.estL.toFixed(1) + 'L  ·  Est. ABV: ' + r.estABV.toFixed(2) + '%  ·  2% volume loss/yr, 0.6% ABV loss/yr';
 };
 
+// Build a field-level diff between an existing container record and the
+// payload about to be saved. Returns an array of { field, label, before, after }
+// for fields that actually changed, with display-ready string values. Used to
+// record exactly what a manual Edit Container save altered.
+window._diffContainer = function(oldCont, payload) {
+  if (!oldCont) return [];
+  var TYPE_LABELS = {cask:'Cask',ibc:'IBC',blue_drum:'Blue Drum',tank_1:'Tank 1',tank_2:'Tank 2',tank_3:'Tank 3',tanker:'Tanker'};
+  var optText = function(selectId, value) {
+    if (value == null || value === '') return '—';
+    var sel = document.getElementById(selectId);
+    if (sel) {
+      var opt = Array.prototype.find.call(sel.options || [], function(o){ return o.value === String(value); });
+      if (opt) return opt.text;
+    }
+    return String(value);
+  };
+  var fmtNum = function(v, dp, prefix, unit) {
+    if (v == null || v === '' || isNaN(parseFloat(v))) return '—';
+    return (prefix||'') + parseFloat(v).toFixed(dp) + (unit||'');
+  };
+  var fmtDate = function(v) {
+    if (!v) return '—';
+    var d = new Date(v);
+    return isNaN(d.getTime()) ? String(v) : d.toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'});
+  };
+  var FIELDS = [
+    { key:'reference',         label:'Reference' },
+    { key:'type',              label:'Type', map:TYPE_LABELS },
+    { key:'client_id',         label:'Owner / Client', selectId:'cm-client' },
+    { key:'location',          label:'Location' },
+    { key:'spirit_type',       label:'Product', selectId:'cm-spirit' },
+    { key:'cbw_rotation',      label:'CBW Rotation' },
+    { key:'previous_contents', label:'Previous Contents' },
+    { key:'supplier_id',       label:'Supplier', selectId:'cm-supplier' },
+    { key:'notes',             label:'Notes' },
+    { key:'capacity_litres',   label:'Capacity',     num:true, dp:0, unit:'L' },
+    { key:'current_litres',    label:'Bulk Litres',  num:true, dp:1, unit:'L' },
+    { key:'abv',               label:'ABV',          num:true, dp:2, unit:'%' },
+    { key:'current_lpa',       label:'LPA',          num:true, dp:3 },
+    { key:'lpa_price',         label:'Price / LPA',  num:true, dp:2, prefix:'\u20ac' },
+    { key:'ola',               label:'OLA',          num:true, dp:2 },
+    { key:'fill_number',       label:'Fill Number',  num:true, dp:0 },
+    { key:'fill_date',         label:'Fill Date',    date:true }
+  ];
+  var out = [];
+  FIELDS.forEach(function(f) {
+    var bRaw = oldCont[f.key];
+    var aRaw = payload[f.key];
+    var changed, before, after;
+    if (f.num) {
+      var bn = (bRaw == null || bRaw === '' || isNaN(parseFloat(bRaw))) ? null : parseFloat(parseFloat(bRaw).toFixed(f.dp));
+      var an = (aRaw == null || aRaw === '' || isNaN(parseFloat(aRaw))) ? null : parseFloat(parseFloat(aRaw).toFixed(f.dp));
+      changed = bn !== an;
+      before  = fmtNum(bRaw, f.dp, f.prefix, f.unit);
+      after   = fmtNum(aRaw, f.dp, f.prefix, f.unit);
+    } else if (f.date) {
+      var bd = bRaw ? new Date(bRaw).toISOString().slice(0,10) : null;
+      var ad = aRaw ? new Date(aRaw).toISOString().slice(0,10) : null;
+      changed = bd !== ad;
+      before  = fmtDate(bRaw);
+      after   = fmtDate(aRaw);
+    } else {
+      var bs = bRaw == null ? '' : String(bRaw).trim();
+      var as = aRaw == null ? '' : String(aRaw).trim();
+      changed = bs !== as;
+      if (f.selectId) { before = optText(f.selectId, bRaw); after = optText(f.selectId, aRaw); }
+      else if (f.map) { before = bs ? (f.map[bs]||bs) : '—'; after = as ? (f.map[as]||as) : '—'; }
+      else            { before = bs || '—'; after = as || '—'; }
+    }
+    if (changed) out.push({ field: f.key, label: f.label, before: before, after: after });
+  });
+  return out;
+};
+
 window.saveContainer = async function() {
   var gv = function(id){ var e=document.getElementById(id); return e?e.value.trim():''; };
   if (!gv('cm-reference')) { await window.lpAlert('Reference is required.', { variant: 'warn' }); return; }
@@ -26027,6 +26116,10 @@ window.saveContainer = async function() {
   var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
   try {
     if (editId) {
+      var changes = window._diffContainer ? window._diffContainer(oldCont, payload) : [];
+      var changeSummary = changes.length
+        ? changes.map(function(c){ return c.label + ': ' + c.before + ' \u2192 ' + c.after; }).join('; ')
+        : 'No fields changed';
       await supaMut('PATCH', 'liquid_containers', '?id=eq.' + editId, payload);
       toastMsg('Container updated.');
       if (window._writeBlendHistory) {
@@ -26039,7 +26132,8 @@ window.saveContainer = async function() {
           lpa_after:     parseFloat(gv('cm-lpa'))||0,
           abv_before:    oldCont ? parseFloat(oldCont.abv||0) : null,
           abv_after:     parseFloat(gv('cm-abv'))||null,
-          notes: 'Container record updated manually',
+          notes: changeSummary,
+          changes: changes,
           performed_by_id: pById, performed_by_name: pByName
         });
       }
@@ -34116,7 +34210,8 @@ window.saveAdjModal = async function() {
       if (existingId) {
         await supaMut('PATCH', 'job_liquid_signoff', '?id=eq.'+existingId, payload);
       } else {
-        await supaMut('POST', 'job_liquid_signoff', '', payload);
+        // No id passed — upsert by job_id so we never create a duplicate row.
+        await _lsoUpsertByJob(jobId, payload);
       }
       window.toast && window.toast('Liquid sign-off saved and locked.', 'success');
       // Optimistic: flip the Liquid pill green immediately for the acting user
@@ -34944,6 +35039,21 @@ window.saveAdjModal = async function() {
     window.lsoContainerSelChange();
   };
 
+  // ── Single source of truth for writing a job_liquid_signoff row ─────────────
+  // Every "create if missing, else update" writer must go through this so we never
+  // spawn duplicate rows for the same job (there is one sign-off record per job).
+  // Looks the row up by job_id, PATCHes it if present, otherwise inserts one.
+  async function _lsoUpsertByJob(jobId, patch) {
+    if (!jobId) return null;
+    var existing = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=id&limit=1');
+    if (existing && existing[0]) {
+      await supaMut('PATCH', 'job_liquid_signoff', '?id=eq.' + existing[0].id, patch);
+      return existing[0].id;
+    }
+    var created = await supaMut('POST', 'job_liquid_signoff', '', Object.assign({ job_id: jobId }, patch));
+    return (created && created[0] && created[0].id) || null;
+  }
+
   // ── Silent upsert: persist linked containers to DB whenever they change ──────
   async function _lsoAutoSaveContainers(jobId) {
     if (!jobId) return;
@@ -34951,28 +35061,20 @@ window.saveAdjModal = async function() {
     var lcJson  = JSON.stringify(linked);
     var firstId = linked.length ? linked[0].id : null;
     try {
-      var existing = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=id&limit=1');
-      if (existing && existing[0]) {
-        await supaMut('PATCH', 'job_liquid_signoff', '?id=eq.' + existing[0].id, {
-          linked_container_id:    firstId,
-          linked_containers_json: lcJson
-        });
-      } else {
-        await supaMut('POST', 'job_liquid_signoff', '', {
-          job_id:                 jobId,
-          linked_container_id:    firstId,
-          linked_containers_json: lcJson
-        });
-      }
+      await _lsoUpsertByJob(jobId, {
+        linked_container_id:    firstId,
+        linked_containers_json: lcJson
+      });
     } catch(e) { console.warn('LSO auto-save containers failed:', e.message); }
   }
 
   // ── Link containers from Liquid tab to job sign-off ────────────────────────
-  // Called programmatically from _lsoOfferLinkToJob after user confirms the prompt.
+  // Merges the output container(s) into the job's existing linked list (no dupes)
+  // and persists via the shared single-row upsert.
   async function _lsoLinkContainersToJobSignoff(jobId, containers) {
     if (!jobId || !containers || !containers.length) return;
     try {
-      var existing = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=id,linked_containers_json&limit=1');
+      var existing = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=linked_containers_json&limit=1');
       var current = [];
       if (existing && existing[0]) {
         try { current = JSON.parse(existing[0].linked_containers_json || '[]'); } catch(e2) {}
@@ -34982,41 +35084,21 @@ window.saveAdjModal = async function() {
       });
       var lcJson  = JSON.stringify(current);
       var firstId = current.length ? current[0].id : null;
-      if (existing && existing[0]) {
-        await supaMut('PATCH', 'job_liquid_signoff', '?id=eq.' + existing[0].id, {
-          linked_container_id: firstId, linked_containers_json: lcJson
-        });
-      } else {
-        await supaMut('POST', 'job_liquid_signoff', '', {
-          job_id: jobId, linked_container_id: firstId, linked_containers_json: lcJson
-        });
-      }
+      await _lsoUpsertByJob(jobId, { linked_container_id: firstId, linked_containers_json: lcJson });
       window.toast && window.toast('Container(s) linked to job sign-off.', 'success');
     } catch(e) { window.toast && window.toast('Could not link to sign-off: ' + e.message, 'error'); }
   }
 
-  // Shows a confirm prompt offering to link Liquid tab output to the job sign-off.
+  // Auto-links Liquid tab output to the job sign-off (no prompt). The operator
+  // opened the Liquid tab from a job, so the resultant container(s) are linked to
+  // that job automatically — same effect as a manual link. They can be unlinked
+  // from the sign-off panel if a particular output wasn't for this job.
   // Called after saveDilution / saveBlend when a job context is active.
   function _lsoOfferLinkToJob(jobId, outputContainers) {
     if (!jobId || !outputContainers || !outputContainers.length) return;
-    var listHtml = outputContainers.map(function(c) {
-      return '<li style="padding:4px 0;color:var(--white);">'
-        + window.escapeHtml(c.reference || c.id.slice(0,8)+'…')
-        + ' &mdash; ' + parseFloat(c.litres||0).toFixed(1) + ' L @ ' + parseFloat(c.abv||0).toFixed(1) + '%'
-        + '</li>';
-    }).join('');
-    window._pulseConfirm({
-      title: 'Link to Job Sign-Off?',
-      body:  '<p style="margin:0 0 10px;">Link the output container(s) to the job\'s liquid sign-off?</p>'
-           + '<ul style="margin:0;padding:0 0 0 18px;font-size:11px;line-height:1.8;">' + listHtml + '</ul>'
-           + '<p style="margin:10px 0 0;font-size:11px;color:var(--muted);">These containers will be used for stock deduction when the job is marked complete.</p>',
-      confirmLabel: '+ Link Containers',
-      onConfirm: function() {
-        _lsoLinkContainersToJobSignoff(jobId, outputContainers).then(function() {
-          if (window._lsoCurrentJobId === jobId && typeof window.loadLiquidSignoffPanel === 'function') {
-            window.loadLiquidSignoffPanel(jobId);
-          }
-        });
+    _lsoLinkContainersToJobSignoff(jobId, outputContainers).then(function() {
+      if (window._lsoCurrentJobId === jobId && typeof window.loadLiquidSignoffPanel === 'function') {
+        window.loadLiquidSignoffPanel(jobId);
       }
     });
   }
@@ -40784,7 +40866,8 @@ window.saveAdjModal = async function() {
         litres_changed:    lc                   != null ? lc                  : null,
         container_ref:     data.container_ref   || null,
         product_name:      data.product_name    || null,
-        performed_by_name: data.performed_by_name || null
+        performed_by_name: data.performed_by_name || null,
+        changes:           (data.changes && data.changes.length) ? data.changes : null
       }));
       return;
     } catch(e1) { /* extra columns may not exist yet — fall back */ }
@@ -40839,40 +40922,6 @@ window.saveAdjModal = async function() {
   function _blJobId() {
     var el = document.getElementById('bl-job-id');
     return el ? el.value.trim() : '';
-  }
-
-  async function _blAutoCompleteSignoff(jobId, egid) {
-    // Auto-complete the liquid_signoff task on the linked job and store the event_group_id
-    try {
-      var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
-      var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
-      // Store event_group_id on the job_liquid_signoff record so it can be displayed back in the job
-      var existing = await window.db.select('job_liquid_signoff', '?job_id=eq.' + jobId + '&limit=1');
-      if (existing && existing[0]) {
-        await window.db.update('job_liquid_signoff', '?job_id=eq.' + jobId,
-          { blend_event_group_id: egid });
-      } else {
-        await window.db.insert('job_liquid_signoff',
-          { job_id: jobId, blend_event_group_id: egid });
-      }
-      // Auto-complete the liquid_signoff task
-      if (window.autoCompleteTask) {
-        await window.autoCompleteTask(jobId, 'liquid_signoff');
-      } else {
-        // Fallback: direct PATCH if autoCompleteTask is not accessible from this scope
-        var tasks = await window.db.select('job_tasks', '?job_id=eq.' + jobId + '&task_type=eq.liquid_signoff&limit=1');
-        if (tasks && tasks[0] && tasks[0].status !== 'completed') {
-          await window.db.update('job_tasks', '?id=eq.' + tasks[0].id, {
-            status: 'completed',
-            completed_by: pById,
-            completed_at: new Date().toISOString()
-          });
-        }
-      }
-      window.toast && window.toast('Liquid sign-off task completed on job.', 'success');
-    } catch(e) {
-      window.logError ? window.logError('_blAutoCompleteSignoff', e) : console.error('_blAutoCompleteSignoff', e);
-    }
   }
 
   window._initBlendingPage = function() {
@@ -42972,7 +43021,6 @@ window.saveAdjModal = async function() {
           product_name: productName,
           notes: normalSources.length + ' container(s) blended in-place into ' + destCont.reference + (waterL ? ' + ' + waterL + 'L water' : '') + (blNotes ? ' — ' + blNotes : '') + (blJobId ? ' (job ' + blJobId + ')' : ''),
           performed_by_id: pById, performed_by_name: pByName });
-        if (blJobId) await _blAutoCompleteSignoff(blJobId, egid);
         window.toast && window.toast('Blend saved.', 'success');
         // Capture output container snapshot BEFORE reload (for the link-to-job prompt)
         var _blInPlaceOutput = blJobId ? [{
@@ -43079,7 +43127,6 @@ window.saveAdjModal = async function() {
           notes: d.litres.toFixed(1) + 'L blend "' + productName + '" → ' + d.cont.reference + (blNotes ? ' — ' + blNotes : '') + (blJobId ? ' (job ' + blJobId + ')' : ''),
           performed_by_id: pById, performed_by_name: pByName });
       }
-      if (blJobId) await _blAutoCompleteSignoff(blJobId, egid);
       window.toast && window.toast('Blend saved.', 'success');
       // Capture output containers snapshot BEFORE reload (for the link-to-job prompt)
       var _lpaPerLitreBlend = totalL > 0 ? totalLPA / totalL : 0;
@@ -43468,7 +43515,6 @@ window.saveAdjModal = async function() {
             performed_by_id: pById, performed_by_name: pByName });
         }
       }
-      if (dlJobId) await _blAutoCompleteSignoff(dlJobId, egid);
       window.toast && window.toast('Dilution saved.', 'success');
 
       // Capture output containers BEFORE reload (for the link-to-job prompt).
@@ -43755,7 +43801,7 @@ window.saveAdjModal = async function() {
       var rows = await window.db.select('liquid_history', qs);
       if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No history yet.</td></tr>'; return; }
       var esc = window.escapeHtml;
-      var LABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend In-place', transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal', edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In' };
+      var LABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend In-place', transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal', edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In', container_adjusted:'Adjusted', container_created:'Created', container_archived:'Archived', container_restored:'Restored' };
       var COLS   = { add:'var(--green)', dilution:'var(--amber)', blend_input:'#3b82f6', blend_output:'var(--gold)', blend_inplace:'var(--gold)', transfer_from:'var(--red)', transfer_to:'var(--green)', partial_removal:'var(--amber)', disgorge_out:'#a78bfa', disgorge_in:'#7c3aed' };
 
       // Assign a colour to each unique event_group_id
