@@ -41161,8 +41161,25 @@ window.saveAdjModal = async function() {
       if (window._vrVessels) window._vrVessels.push(Object.assign({ created_at: new Date().toISOString() }, newVessel));
       return code;
     } catch(e) {
-      // If duplicate (race condition), still return the code
-      if ((e.message||'').indexOf('23505') > -1) return code;
+      // Canonical-duplicate conflict (race, or stale local cache): a vessel with the
+      // same canonical id already exists (e.g. 'IBC-078' when we tried 'IBC078'). Resolve
+      // it from the DB and return its REAL id, so the container links to the canonical
+      // vessel instead of creating a phantom split-identity record that double-counts stock.
+      if ((e.message||'').indexOf('23505') > -1) {
+        try {
+          var _existingRows = await window.db.select('vessels', '?status=neq.archived&select=*');
+          var _match = (_existingRows || []).find(function(v){
+            return (window._canonVesselId ? window._canonVesselId(v.id) : String(v.id).toUpperCase()) === _cc;
+          });
+          if (_match) {
+            try { await window.db.update('vessels', '?id=eq.' + _match.id, { status: 'in_use' }); } catch(_u) {}
+            if (window._vrVessels && !_vrVessels.some(function(v){ return v.id === _match.id; })) _vrVessels.push(_match);
+            return _match.id;
+          }
+        } catch(_lookupErr) { /* fall through to code fallback below */ }
+        // Could not resolve the existing row — fall back to the requested code.
+        return code;
+      }
       return null; // vessel table may not exist yet — continue without link
     }
   }
