@@ -25699,8 +25699,8 @@ window.saveLVPrice = async function() {
     var cont = _liquid && _liquid.find(function(c){ return c.id === id; });
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
-    if (typeof writeHistory === 'function') {
-      await writeHistory({
+    if (window._writeBlendHistory) {
+      await window._writeBlendHistory({
         container_id: id,
         container_ref: cont ? cont.reference : null,
         event_type: 'edit',
@@ -35110,14 +35110,18 @@ window.saveAdjModal = async function() {
       return false;
     }
 
-    // Double-deduction guard — check which linked containers already have a bottling_deduction
-    // history record written (job_id is UUID type so we query by container_id instead).
+    // Double-deduction guard — exclude only containers already deducted FOR THIS JOB
+    // (i.e. a retry / re-completion of the same job), NOT containers that were bottled
+    // for some other job and later refilled. bottling_deduction rows record the job in
+    // their notes as "(job <id>)" because liquid_history.job_id is UUID-typed while job
+    // IDs are text, so we match the job tag in notes to scope the guard.
     var alreadyDeductedIds = [];
     try {
       var signoffContIds = linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
       if (signoffContIds.length) {
+        var _jobTag = encodeURIComponent('(job ' + jobId + ')');
         var prevDeductions = await supaGet(
-          'liquid_history?container_id=in.(' + signoffContIds.join(',') + ')&event_type=eq.bottling_deduction&select=container_id'
+          'liquid_history?container_id=in.(' + signoffContIds.join(',') + ')&event_type=eq.bottling_deduction&notes=ilike.*' + _jobTag + '*&select=container_id'
         );
         if (prevDeductions && prevDeductions.length > 0) {
           alreadyDeductedIds = prevDeductions.map(function(r){ return r.container_id; }).filter(Boolean);
@@ -35836,7 +35840,7 @@ window.saveAdjModal = async function() {
         var wasteNote = (isLastLine && wasteL > 0) ? ' (incl. ' + wasteL.toFixed(1) + 'L waste: ' + wasteR + ')' : '';
         // job_id column in liquid_history is UUID type; jobs use text IDs (e.g. JOB-3)
         // so we omit job_id to avoid a type cast error — the job reference goes in notes instead.
-        await writeHistory({
+        await window._writeBlendHistory({
           container_id:      line.containerId,
           event_type:        'bottling_deduction',
           event_group_id:    egid,
@@ -35870,7 +35874,7 @@ window.saveAdjModal = async function() {
     if (Math.abs(varianceL) > 0.05 && plan.lines.length) {
       var attrLine = plan.lines.reduce(function(a, b){ return b.litreDrawn > a.litreDrawn ? b : a; }, plan.lines[0]);
       try {
-        await writeHistory({
+        await window._writeBlendHistory({
           container_id:      attrLine.containerId,
           container_ref:     attrLine.reference,
           event_type:        'measurement_variance',
@@ -35960,7 +35964,7 @@ window.saveAdjModal = async function() {
     if (waterAdded > 0.05 && plan.lines.length) {
       var wLine = plan.lines.reduce(function(a, b){ return b.litreDrawn > a.litreDrawn ? b : a; }, plan.lines[0]);
       try {
-        await writeHistory({
+        await window._writeBlendHistory({
           container_id:      wLine.containerId,
           container_ref:     wLine.reference,
           event_type:        'dilution_water',
@@ -36013,7 +36017,7 @@ window.saveAdjModal = async function() {
       + ' (' + dilNote + ')'
       + (movedOut ? '; ' + movedLit.toFixed(1) + 'L moved out across ' + addedAll.length + ' vessel(s)' : '; kept in ' + lo.reference)
       + ' (job ' + jobId + ')';
-    await writeHistory({
+    await window._writeBlendHistory({
       container_id: srcId, container_ref: lo.reference,
       event_type: movedOut ? 'transfer_from' : 'dilution', event_group_id: egid,
       litres_before: loLit, litres_after: srcLit, lpa_before: loLpa, lpa_after: srcLpa,
@@ -36048,12 +36052,12 @@ window.saveAdjModal = async function() {
       var moveNote = a.litres.toFixed(1) + 'L leftover moved from ' + lo.reference + ' to ' + (d.reference || a.vesselId)
         + (toBott ? ' (diluted to bottling ' + targetAbv.toFixed(1) + '%)' : ' (at ' + targetAbv.toFixed(1) + '%)')
         + (a.cbw ? ' · CBW ' + a.cbw : '') + ' (job ' + jobId + ')';
-      await writeHistory({
+      await window._writeBlendHistory({
         container_id: srcId, container_ref: lo.reference, event_type: 'transfer_from', event_group_id: egid,
         litres_changed: -a.litres, abv_before: targetAbv,
         notes: moveNote, performed_by_id: pById, performed_by_name: pByName
       });
-      await writeHistory({
+      await window._writeBlendHistory({
         container_id: a.vesselId, container_ref: d.reference || a.vesselId, event_type: 'transfer_to', event_group_id: egid,
         litres_before: dLit, litres_after: newDLit, lpa_before: dLpa, lpa_after: newDLpa, abv_after: newDAbv,
         notes: moveNote, performed_by_id: pById, performed_by_name: pByName
