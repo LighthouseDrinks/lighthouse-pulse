@@ -24094,6 +24094,19 @@ window.saveVessel = async function() {
   }
   if (!newId || newId === '—') { window.toast && window.toast('Could not determine vessel code.', 'error'); return; }
 
+  // Block creating a new vessel whose ID is an equivalent (e.g. 'IBC078' vs 'IBC-078')
+  // of an existing non-archived vessel — the root cause of duplicate phantom records.
+  if (!editId && window._canonVesselId && Array.isArray(window._vrVessels)) {
+    var _newCanon = window._canonVesselId(newId);
+    var _dupVessel = window._vrVessels.find(function(v){
+      return v.status !== 'archived' && window._canonVesselId(v.id) === _newCanon;
+    });
+    if (_dupVessel) {
+      window.toast && window.toast('A vessel with an equivalent ID already exists: ' + _dupVessel.id + '. Use that one, or choose a distinct code.', 'error');
+      return;
+    }
+  }
+
   var payload = {
     vessel_type:     type,
     capacity_litres: parseFloat(gv('vm-capacity')) || null,
@@ -40602,6 +40615,10 @@ window.saveAdjModal = async function() {
   }
   window._containerLabel = _containerLabel;
 
+  // Canonical vessel/container id (strip separators + case) so 'IBC-078' and 'IBC078'
+  // collapse to one key. Used to dedupe destination lists and to block duplicate IDs.
+  window._canonVesselId = function(s){ return String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9]/g, ''); };
+
   // onlyTypes: array of types to INCLUDE (e.g. ['cask'])
   // excludeTypes: array of types to EXCLUDE (e.g. ['cask'])
   // context: 'source' (default) | 'dest' — controls label format and empty-container disable
@@ -40622,30 +40639,45 @@ window.saveAdjModal = async function() {
     };
     var html = '<option value="">— Select container —</option>';
     withLiquid.forEach(function(c) { html += makeOpt(c, false); });
-    if (empty.length) {
-      html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Empty containers ────</option>';
-      empty.forEach(function(c) { html += makeOpt(c, context === 'source'); });
-    }
-    // For destination context: also show registered vessels with no active liquid batch
-    if (context === 'dest' && window._vrVessels && window._vrVessels.length) {
-      var activeBatchVesselIds = (window._vrAllContainers || [])
-        .filter(function(c){ return c.vessel_id; })
-        .map(function(c){ return c.vessel_id; });
-      var vestDests = window._vrVessels.filter(function(v){
-        if (v.status === 'archived') return false;
-        if (excludeTypes && excludeTypes.indexOf(v.vessel_type) >= 0) return false;
-        if (onlyTypes    && onlyTypes.indexOf(v.vessel_type)    < 0) return false;
-        if (activeBatchVesselIds.indexOf(v.id) >= 0) return false;
-        return true;
+    if (context !== 'dest') {
+      if (empty.length) {
+        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Empty containers ────</option>';
+        empty.forEach(function(c) { html += makeOpt(c, context === 'source'); });
+      }
+    } else {
+      // Destination: one merged "Empty vessels" group (empty containers + registry-only
+      // vessels), deduped by canonical id, hiding any whose liquid lives elsewhere.
+      var _canon = window._canonVesselId;
+      var liquidCanon = {};
+      containers.forEach(function(c){ if (parseFloat(c.current_litres||0) > 0) liquidCanon[_canon(c.vessel_id||c.reference)] = true; });
+      var seenCanon = {};
+      var emptyHtml = '';
+      empty.forEach(function(c){
+        var cn = _canon(c.vessel_id||c.reference);
+        if (liquidCanon[cn] || seenCanon[cn]) return;
+        seenCanon[cn] = true;
+        emptyHtml += makeOpt(c, false);
       });
-      if (vestDests.length) {
-        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (empty) ────</option>';
-        vestDests.forEach(function(v){
+      if (window._vrVessels && window._vrVessels.length) {
+        var activeBatchVesselIds = (window._vrAllContainers || [])
+          .filter(function(c){ return c.vessel_id; })
+          .map(function(c){ return c.vessel_id; });
+        window._vrVessels.forEach(function(v){
+          if (v.status === 'archived') return;
+          if (excludeTypes && excludeTypes.indexOf(v.vessel_type) >= 0) return;
+          if (onlyTypes    && onlyTypes.indexOf(v.vessel_type)    < 0) return;
+          if (activeBatchVesselIds.indexOf(v.id) >= 0) return;
+          var cn = _canon(v.id);
+          if (liquidCanon[cn] || seenCanon[cn]) return;
+          seenCanon[cn] = true;
           var lbl = v.id + ' — ' + (_TYPE_LABELS[v.vessel_type]||v.vessel_type);
           if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
           if (v.location) lbl += ' · ' + v.location;
-          html += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
+          emptyHtml += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
         });
+      }
+      if (emptyHtml) {
+        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Empty vessels ────</option>' + emptyHtml;
       }
     }
     // For source context: show registered vessels that have no active liquid batch as selectable gold options.
@@ -41074,7 +41106,10 @@ window.saveAdjModal = async function() {
   // Helper: ensure a vessel record exists for a given code, creating one if needed
   async function _ensureVessel(code, type, capacity, location) {
     if (!code) return null;
-    var existing = _vrVessels && _vrVessels.find(function(v){ return v.id.toUpperCase() === code.toUpperCase(); });
+    var _cc = window._canonVesselId ? window._canonVesselId(code) : code.toUpperCase();
+    var existing = _vrVessels && _vrVessels.find(function(v){
+      return (window._canonVesselId ? window._canonVesselId(v.id) : v.id.toUpperCase()) === _cc;
+    });
     if (existing) {
       // Update to in_use
       try { await window.db.update('vessels', '?id=eq.' + existing.id, { status: 'in_use' }); } catch(e) {}
@@ -42283,38 +42318,44 @@ window.saveAdjModal = async function() {
         html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(lbl) + '</option>';
       });
     }
-    // Group 2: empty / free vessels only (no partially-filled containers)
-    var empty = _bl.filter(function(c) {
-      return c.type !== 'cask'
-        && !(parseFloat(c.current_litres || 0) > 0)
-        && srcIds.indexOf(c.id) < 0
-        && excludeIds.indexOf(c.id) < 0;
+    // ── Single "Empty vessels" group: batch-backed empties + registry-only vessels,
+    //    deduped by canonical id, and never showing a vessel whose liquid lives elsewhere. ──
+    var _canon = window._canonVesselId;
+    // Canonical ids that already hold liquid on the live ledger (liquid-twin guard).
+    var liquidCanon = {};
+    _bl.forEach(function(c){ if (parseFloat(c.current_litres||0) > 0) liquidCanon[_canon(c.vessel_id||c.reference)] = true; });
+    var seenCanon = {};
+    var emptyHtml = '';
+    // Batch-backed empties (0 L liquid_containers rows)
+    _bl.forEach(function(c){
+      if (c.type === 'cask') return;
+      if (parseFloat(c.current_litres||0) > 0) return;
+      if (srcIds.indexOf(c.id) >= 0) return;
+      if (excludeIds.indexOf(c.id) >= 0) return;
+      var cn = _canon(c.vessel_id||c.reference);
+      if (liquidCanon[cn] || seenCanon[cn]) return;
+      seenCanon[cn] = true;
+      emptyHtml += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(_containerLabel(c, 'dest')) + '</option>';
     });
-    if (empty.length) {
-      html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Empty / free vessels ────</option>';
-      empty.forEach(function(c) {
-        html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(_containerLabel(c, 'dest')) + '</option>';
-      });
-    }
-    // Include registered vessels that don't yet have an active liquid batch
+    // Registry-only vessels with no active batch
     if (window._vrVessels && window._vrVessels.length) {
       var activeBatchVesselIds = _bl.filter(function(c){ return c.vessel_id; }).map(function(c){ return c.vessel_id; });
-      var vesselDests = window._vrVessels.filter(function(v){
-        if (v.status === 'archived') return false;
-        if (v.vessel_type === 'cask') return false;
-        if (excludeIds.indexOf('__vessel__' + v.id) >= 0) return false;
-        if (activeBatchVesselIds.indexOf(v.id) >= 0) return false;
-        return true;
+      window._vrVessels.forEach(function(v){
+        if (v.status === 'archived') return;
+        if (v.vessel_type === 'cask') return;
+        if (excludeIds.indexOf('__vessel__' + v.id) >= 0) return;
+        if (activeBatchVesselIds.indexOf(v.id) >= 0) return;
+        var cn = _canon(v.id);
+        if (liquidCanon[cn] || seenCanon[cn]) return;
+        seenCanon[cn] = true;
+        var lbl = v.id + ' — ' + (_TYPE_LABELS[v.vessel_type] || v.vessel_type);
+        if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
+        if (v.location) lbl += ' · ' + v.location;
+        emptyHtml += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
       });
-      if (vesselDests.length) {
-        html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Registered vessels (empty) ────</option>';
-        vesselDests.forEach(function(v){
-          var lbl = v.id + ' — ' + (_TYPE_LABELS[v.vessel_type] || v.vessel_type);
-          if (v.capacity_litres) lbl += ' (' + parseFloat(v.capacity_litres).toLocaleString() + 'L)';
-          if (v.location) lbl += ' · ' + v.location;
-          html += '<option value="__vessel__' + v.id + '" style="background:#0d1b2a;color:#c9a84c;">' + window.escapeHtml(lbl) + '</option>';
-        });
-      }
+    }
+    if (emptyHtml) {
+      html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Empty vessels ────</option>' + emptyHtml;
     }
     html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Or register a new vessel ────</option>';
     html += '<option value="__newvessel__" style="background:#0d1b2a;color:#c9a84c;font-style:italic;">+ Register New Vessel…</option>';
