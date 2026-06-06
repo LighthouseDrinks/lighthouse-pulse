@@ -22062,6 +22062,7 @@ window._approvalsBadgePoll = async function() {
         <option value="bottling_deduction">Bottling Draw</option>
         <option value="measurement_variance">Stock Variance</option>
         <option value="dilution_water">Dilution Water</option>
+        <option value="container_created">Created</option>
         <option value="container_adjusted">Adjusted</option>
         <option value="container_archived">Archived</option>
         <option value="container_restored">Restored</option>
@@ -23458,6 +23459,13 @@ window.runCaskPricing = async function() {
     try {
       await window.db.update('vessels', '?id=eq.' + encodeURIComponent(c.vessel_id), { purchase_price: price });
       updated++;
+      try {
+        await window.db.insert('vessel_history', {
+          vessel_id:  c.vessel_id,
+          note:       'Purchase price set to €' + price + ' (bulk fill-number pricing, fill #' + c.fill_number + ').',
+          created_by: (window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email || null) : null)
+        });
+      } catch(_ph) { /* history note is non-blocking */ }
     } catch(e) {
       errors++;
       console.warn('Cask price update error', c.vessel_id, e.message);
@@ -23762,6 +23770,25 @@ window._vrLinkBatch = async function(containerId) {
     if (vessel && vessel.status === 'available') {
       await window.db.update('vessels', '?id=eq.' + vesselId, { status: 'in_use' });
     }
+    // Audit the link so the container's history shows when/who connected it to a vessel.
+    try {
+      var _lc = (window._vrAllContainers || []).find(function(x){ return x.id === containerId; }) || {};
+      if (window._writeBlendHistory) {
+        await window._writeBlendHistory({
+          container_id:      containerId,
+          container_ref:     _lc.reference || null,
+          event_type:        'container_adjusted',
+          litres_before:     _lc.current_litres != null ? parseFloat(_lc.current_litres) : null,
+          litres_after:      _lc.current_litres != null ? parseFloat(_lc.current_litres) : null,
+          lpa_before:        _lc.current_lpa != null ? parseFloat(_lc.current_lpa) : null,
+          lpa_after:         _lc.current_lpa != null ? parseFloat(_lc.current_lpa) : null,
+          notes:             'Linked to vessel ' + vesselId,
+          changes:           [{ label: 'Vessel', before: _lc.vessel_id || '—', after: vesselId }],
+          performed_by_id:   window.CURRENT_USER ? (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id) : null,
+          performed_by_name: window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email) : null
+        });
+      }
+    } catch(_lh) { console.warn('link-batch history skipped:', _lh.message||_lh); }
     window.toast && window.toast('Batch linked to vessel ' + vesselId + '.', 'success');
     await window.loadVesselRegister();
   } catch(e) {
@@ -24147,11 +24174,38 @@ window.saveVessel = async function() {
         await window.db.insert('vessel_history', { vessel_id: editId, note: reactNote, created_by: who }).catch(function(e){ console.error('vessel_history insert failed:', e); window.toast && window.toast('History note not saved: ' + (e.message||e), 'error'); });
       }
 
+      // Log other field changes (price, capacity, location, inspections, notes…) so
+      // edits beyond archive/reactivate are traceable in the vessel's history.
+      try {
+        var _oldV = (window._vrVessels || []).find(function(v){ return v.id === editId; }) || {};
+        var _vFields = [
+          ['capacity_litres','Capacity (L)'], ['owner','Owner'], ['location','Location'],
+          ['purchase_price','Purchase price'], ['purchase_date','Purchase date'],
+          ['last_inspected','Last inspected'], ['next_inspection','Next inspection'], ['notes','Notes']
+        ];
+        var _vChanges = [];
+        _vFields.forEach(function(f){
+          var bn = (_oldV[f[0]] === null || _oldV[f[0]] === undefined || _oldV[f[0]] === '') ? null : _oldV[f[0]];
+          var an = (payload[f[0]] === null || payload[f[0]] === undefined || payload[f[0]] === '') ? null : payload[f[0]];
+          if (String(bn) !== String(an)) _vChanges.push(f[1] + ': ' + (bn==null?'—':bn) + ' → ' + (an==null?'—':an));
+        });
+        if (_vChanges.length) {
+          await window.db.insert('vessel_history', { vessel_id: editId, note: 'Vessel updated — ' + _vChanges.join('; '), created_by: who }).catch(function(e){ console.warn('vessel_history update note failed:', e.message||e); });
+        }
+      } catch(_ve) { console.warn('vessel change note skipped:', _ve.message||_ve); }
+
       window.closeVesselModal();
     } else {
       payload.id = newId;
       await window.db.insert('vessels', payload);
       window.toast && window.toast('Vessel ' + newId + ' registered.', 'success');
+      try {
+        await window.db.insert('vessel_history', {
+          vessel_id: newId,
+          note: 'Vessel registered (' + (type || 'vessel') + (payload.capacity_litres ? ', ' + payload.capacity_litres + ' L' : '') + (payload.location ? ', ' + payload.location : '') + ').',
+          created_by: (window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email || null) : null)
+        });
+      } catch(_vc) { console.warn('vessel_history create note skipped:', _vc.message||_vc); }
       // Switch modal to success state — offer QR print before closing
       var modalBody = document.querySelector('#vessel-modal > div');
       if (modalBody) {
@@ -26070,6 +26124,11 @@ window.saveContainer = async function() {
   if (!gv('cm-client'))    { await window.lpAlert('Please select a client.', { variant: 'warn' }); return; }
   var editId = gv('cm-edit-id');
   var cmLitres = parseFloat(gv('cm-litres'))||0;
+  var _cmLpaIn = gv('cm-lpa') !== '' ? parseFloat(gv('cm-lpa')) : null;
+  if (cmLitres < 0 || (_cmLpaIn != null && _cmLpaIn < 0)) {
+    await window.lpAlert('Litres and LPA cannot be negative.', { variant: 'warn' });
+    return;
+  }
   var cmCap    = parseFloat(gv('cm-capacity'))||0;
   var cmStatus = cmLitres <= 0 ? 'empty' : (cmCap > 0 && cmLitres >= cmCap ? 'full' : 'partially_full');
   var cmType   = gv('cm-type');
@@ -36009,6 +36068,7 @@ window.saveAdjModal = async function() {
     var waterAdded = plan.waterAdded != null ? parseFloat(plan.waterAdded) : null;
     var _soPatch = {};
     if (waterAdded != null && !isNaN(waterAdded)) _soPatch.water_added = waterAdded;
+    if (wasteL > 0.05) { _soPatch.waste_litres = wasteL; if (wasteR) _soPatch.waste_reason = wasteR; }
     if (leftoverSummary) {
       _soPatch.leftover_strength     = leftoverSummary.strength;
       _soPatch.leftover_container_id = leftoverSummary.containerId;
@@ -36038,6 +36098,7 @@ window.saveAdjModal = async function() {
           event_type:        'dilution_water',
           job_id:            jobId,
           event_group_id:    egid,
+          litres_changed:    waterAdded,
           notes:             waterAdded.toFixed(1) + 'L RO water added at completion to reach bottling strength (job ' + jobId + ')',
           performed_by_id:   pById,
           performed_by_name: pByName
