@@ -22058,6 +22058,13 @@ window._approvalsBadgePoll = async function() {
         <option value="partial_removal">Partial Removal</option>
         <option value="disgorge_out">Disgorge Out</option>
         <option value="disgorge_in">Disgorge In</option>
+        <option value="blend_inplace">Blend (in place)</option>
+        <option value="bottling_deduction">Bottling Draw</option>
+        <option value="measurement_variance">Stock Variance</option>
+        <option value="dilution_water">Dilution Water</option>
+        <option value="container_adjusted">Adjusted</option>
+        <option value="container_archived">Archived</option>
+        <option value="container_restored">Restored</option>
       </select>
       <button onclick="window.loadBLHistory()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">&#8635; Refresh</button>
     </div>
@@ -25873,12 +25880,16 @@ window.openLiqView = async function(id) {
     html += '</div>';
 
     // ── History ──
-    var HLABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out',
+    var HLABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend (in place)',
       transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal',
       edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In',
+      bottling_deduction:'Bottling Draw', measurement_variance:'Stock Variance', dilution_water:'Dilution Water',
+      blend_loss:'Blend Loss', dilution_loss:'Dilution Loss',
       container_archived:'Archived', container_restored:'Restored', container_adjusted:'Adjusted', container_created:'Created' };
     var HCOLS = { add:'var(--green)', dilution:'var(--amber)', blend_input:'#3b82f6', blend_output:'var(--gold)', blend_inplace:'var(--gold)',
       transfer_from:'var(--red)', transfer_to:'var(--green)', disgorge_out:'#a78bfa', disgorge_in:'#7c3aed',
+      bottling_deduction:'var(--red)', measurement_variance:'var(--amber)', dilution_water:'#3b82f6',
+      blend_loss:'var(--muted)', dilution_loss:'var(--muted)',
       container_archived:'var(--muted)', container_restored:'var(--green)' };
 
     html += sectionHd('History (last 20 events)');
@@ -26237,7 +26248,29 @@ window.archiveAllCreatedToday = async function() {
   var ts  = new Date().toISOString();
   var fail = 0;
   for (var i = 0; i < todayRecords.length; i++) {
-    try { await window.db.update('liquid_containers', '?id=eq.' + todayRecords[i].id, { archived: true, archived_at: ts, archived_by: who }); }
+    var _rec = todayRecords[i];
+    try {
+      await window.db.update('liquid_containers', '?id=eq.' + _rec.id, { archived: true, archived_at: ts, archived_by: who });
+      // Audit row (non-blocking) — match the single-archive path so bulk archives are traceable.
+      if (window._writeBlendHistory) {
+        try {
+          await window._writeBlendHistory({
+            container_id:      _rec.id,
+            container_ref:     _rec.reference || null,
+            event_type:        'container_archived',
+            litres_before:     parseFloat(_rec.current_litres || 0),
+            litres_after:      parseFloat(_rec.current_litres || 0),
+            lpa_before:        parseFloat(_rec.current_lpa || 0),
+            lpa_after:         parseFloat(_rec.current_lpa || 0),
+            abv_before:        parseFloat(_rec.abv || 0),
+            abv_after:         parseFloat(_rec.abv || 0),
+            notes:             'Bulk archive (all created ' + today + ')',
+            performed_by_name: who,
+            performed_by_id:   window.CURRENT_USER ? (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id) : null
+          });
+        } catch(_h) { /* history is non-blocking */ }
+      }
+    }
     catch(e) { fail++; }
   }
   window.toast && window.toast(
@@ -26260,7 +26293,29 @@ window.bulkArchiveSelected = async function() {
   var ts  = new Date().toISOString();
   var fail = 0;
   for (var i = 0; i < ids.length; i++) {
-    try { await window.db.update('liquid_containers', '?id=eq.' + ids[i], { archived: true, archived_at: ts, archived_by: who }); }
+    try {
+      await window.db.update('liquid_containers', '?id=eq.' + ids[i], { archived: true, archived_at: ts, archived_by: who });
+      // Audit row (non-blocking) — match the single-archive path so bulk archives are traceable.
+      var _bc = _liquid && _liquid.find(function(x){ return x.id === ids[i]; });
+      if (window._writeBlendHistory) {
+        try {
+          await window._writeBlendHistory({
+            container_id:      ids[i],
+            container_ref:     _bc ? (_bc.reference || null) : null,
+            event_type:        'container_archived',
+            litres_before:     _bc ? parseFloat(_bc.current_litres || 0) : null,
+            litres_after:      _bc ? parseFloat(_bc.current_litres || 0) : null,
+            lpa_before:        _bc ? parseFloat(_bc.current_lpa || 0) : null,
+            lpa_after:         _bc ? parseFloat(_bc.current_lpa || 0) : null,
+            abv_before:        _bc ? parseFloat(_bc.abv || 0) : null,
+            abv_after:         _bc ? parseFloat(_bc.abv || 0) : null,
+            notes:             'Bulk archive (selected)',
+            performed_by_name: who,
+            performed_by_id:   window.CURRENT_USER ? (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id) : null
+          });
+        } catch(_h) { /* history is non-blocking */ }
+      }
+    }
     catch(e) { fail++; }
   }
   window.toast && window.toast(
@@ -44189,8 +44244,8 @@ window.saveAdjModal = async function() {
       var rows = await window.db.select('liquid_history', qs);
       if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No history yet.</td></tr>'; return; }
       var esc = window.escapeHtml;
-      var LABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend In-place', transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal', edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In', container_adjusted:'Adjusted', container_created:'Created', container_archived:'Archived', container_restored:'Restored' };
-      var COLS   = { add:'var(--green)', dilution:'var(--amber)', blend_input:'#3b82f6', blend_output:'var(--gold)', blend_inplace:'var(--gold)', transfer_from:'var(--red)', transfer_to:'var(--green)', partial_removal:'var(--amber)', disgorge_out:'#a78bfa', disgorge_in:'#7c3aed' };
+      var LABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend In-place', transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal', edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In', bottling_deduction:'Bottling Draw', measurement_variance:'Stock Variance', dilution_water:'Dilution Water', blend_loss:'Blend Loss', dilution_loss:'Dilution Loss', container_adjusted:'Adjusted', container_created:'Created', container_archived:'Archived', container_restored:'Restored' };
+      var COLS   = { add:'var(--green)', dilution:'var(--amber)', blend_input:'#3b82f6', blend_output:'var(--gold)', blend_inplace:'var(--gold)', transfer_from:'var(--red)', transfer_to:'var(--green)', partial_removal:'var(--amber)', disgorge_out:'#a78bfa', disgorge_in:'#7c3aed', bottling_deduction:'var(--red)', measurement_variance:'var(--amber)', dilution_water:'#3b82f6' };
 
       // Assign a colour to each unique event_group_id
       var GROUP_STRIPES = ['#c9a84c','#3b82f6','#3dba78','#e07b39','#a78bfa','#f472b6'];
