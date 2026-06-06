@@ -35869,6 +35869,7 @@ window.saveAdjModal = async function() {
     var isLastLine = false;
 
     var failures = [];
+    var histFailures = [];
     for (var li = 0; li < plan.lines.length; li++) {
       var line = plan.lines[li];
       isLastLine = (li === plan.lines.length - 1);
@@ -35893,11 +35894,12 @@ window.saveAdjModal = async function() {
       // Non-critical: write history record (failure here does not affect container state)
       try {
         var wasteNote = (isLastLine && wasteL > 0) ? ' (incl. ' + wasteL.toFixed(1) + 'L waste: ' + wasteR + ')' : '';
-        // job_id column in liquid_history is UUID type; jobs use text IDs (e.g. JOB-3)
-        // so we omit job_id to avoid a type cast error — the job reference goes in notes instead.
+        // job_id is now text (migration liquid_history_job_id_text), so record it
+        // directly. The "(job <id>)" tag also stays in notes for the dedup guard.
         await window._writeBlendHistory({
           container_id:      line.containerId,
           event_type:        'bottling_deduction',
+          job_id:            jobId,
           event_group_id:    egid,
           container_ref:     line.reference,
           litres_before:     line.litreBefore,
@@ -35912,11 +35914,21 @@ window.saveAdjModal = async function() {
         });
       } catch(histErr) {
         console.warn('Liquid history write failed for ' + (line.reference || line.containerId) + ' (container already updated):', histErr.message);
+        histFailures.push(line.reference || line.containerId);
       }
     }
     if (failures.length) {
       window.toast && window.toast(
         'Warning: liquid deduction incomplete — failed for: ' + failures.join(', ') + '. Update these containers manually.',
+        'error'
+      );
+    }
+    // Surface (do not swallow) audit-write failures: the stock change succeeded but the
+    // bottling_deduction record did not land — flag it so it can be reconciled. A silent
+    // catch here is exactly what previously hid the close-out audit gap.
+    if (histFailures.length) {
+      window.toast && window.toast(
+        'Stock was deducted, but the bottling audit record failed to save for: ' + histFailures.join(', ') + '. Please notify an admin so the history can be corrected.',
         'error'
       );
     }
@@ -35933,6 +35945,7 @@ window.saveAdjModal = async function() {
           container_id:      attrLine.containerId,
           container_ref:     attrLine.reference,
           event_type:        'measurement_variance',
+          job_id:            jobId,
           event_group_id:    egid,
           litres_changed:    varianceL,
           abv_before:        parseFloat(attrLine.abv || 0),
@@ -36023,12 +36036,13 @@ window.saveAdjModal = async function() {
           container_id:      wLine.containerId,
           container_ref:     wLine.reference,
           event_type:        'dilution_water',
+          job_id:            jobId,
           event_group_id:    egid,
           notes:             waterAdded.toFixed(1) + 'L RO water added at completion to reach bottling strength (job ' + jobId + ')',
           performed_by_id:   pById,
           performed_by_name: pByName
         });
-      } catch(wHistErr) { /* non-critical */ }
+      } catch(wHistErr) { console.warn('dilution_water history write failed (non-critical):', wHistErr && wHistErr.message); }
     }
   }
 
@@ -36074,7 +36088,7 @@ window.saveAdjModal = async function() {
       + ' (job ' + jobId + ')';
     await window._writeBlendHistory({
       container_id: srcId, container_ref: lo.reference,
-      event_type: movedOut ? 'transfer_from' : 'dilution', event_group_id: egid,
+      event_type: movedOut ? 'transfer_from' : 'dilution', job_id: jobId, event_group_id: egid,
       litres_before: loLit, litres_after: srcLit, lpa_before: loLpa, lpa_after: srcLpa,
       abv_before: loAbv, abv_after: targetAbv,
       notes: srcNote, performed_by_id: pById, performed_by_name: pByName
@@ -36108,12 +36122,12 @@ window.saveAdjModal = async function() {
         + (toBott ? ' (diluted to bottling ' + targetAbv.toFixed(1) + '%)' : ' (at ' + targetAbv.toFixed(1) + '%)')
         + (a.cbw ? ' · CBW ' + a.cbw : '') + ' (job ' + jobId + ')';
       await window._writeBlendHistory({
-        container_id: srcId, container_ref: lo.reference, event_type: 'transfer_from', event_group_id: egid,
+        container_id: srcId, container_ref: lo.reference, event_type: 'transfer_from', job_id: jobId, event_group_id: egid,
         litres_changed: -a.litres, abv_before: targetAbv,
         notes: moveNote, performed_by_id: pById, performed_by_name: pByName
       });
       await window._writeBlendHistory({
-        container_id: a.vesselId, container_ref: d.reference || a.vesselId, event_type: 'transfer_to', event_group_id: egid,
+        container_id: a.vesselId, container_ref: d.reference || a.vesselId, event_type: 'transfer_to', job_id: jobId, event_group_id: egid,
         litres_before: dLit, litres_after: newDLit, lpa_before: dLpa, lpa_after: newDLpa, abv_after: newDAbv,
         notes: moveNote, performed_by_id: pById, performed_by_name: pByName
       });
