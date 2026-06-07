@@ -1565,6 +1565,24 @@ const db = {
 // Expose db globally so all script blocks can use the same client
 window.db = db;
 
+// Paged fetch: returns ALL matching rows by walking limit/offset pages, so large
+// tables are never silently truncated by a hard `limit=` cap. Pass a query string
+// WITHOUT a limit/offset (and ideally with an `order=` so paging is stable).
+async function fetchAll(table, qs, pageSize) {
+  qs = qs || '';
+  pageSize = pageSize || 1000;
+  var out = [], offset = 0, page;
+  do {
+    var sep = qs.indexOf('?') >= 0 ? '&' : '?';
+    page = await db.select(table, qs + sep + 'limit=' + pageSize + '&offset=' + offset);
+    if (!Array.isArray(page)) break;
+    out = out.concat(page);
+    offset += pageSize;
+  } while (page.length === pageSize);
+  return out;
+}
+window.fetchAll = fetchAll;
+
 // ── Active-user helpers ──────────────────────────────────────────────────────
 // Terminated employees must not appear in live rosters, assignment dropdowns,
 // or email recipient lists. Use these helpers anywhere a CURRENT staff list is
@@ -23227,6 +23245,27 @@ function supaMut(method, table, qs, body) {
   return Promise.reject(new Error('Unknown method: ' + method));
 }
 
+// Liquid sign-off water/final helpers. Reports should reflect what actually
+// happened at close-out: prefer the recorded actual `water_added`, falling back
+// to the planned `water_required` for legacy/un-closed jobs. There is no actual
+// final-litres column, so derive it from the unchanged source draw:
+//   source = planned final − planned water;  actual final = source + actual water.
+// When water_added is null this collapses back to the planned final_litres.
+function _soWater(lso) {
+  if (!lso) return 0;
+  return lso.water_added != null ? parseFloat(lso.water_added) || 0
+                                 : parseFloat(lso.water_required || 0) || 0;
+}
+function _soFinal(lso) {
+  if (!lso) return 0;
+  var plannedFinal = parseFloat(lso.final_litres || 0) || 0;
+  var plannedWater = parseFloat(lso.water_required || 0) || 0;
+  var source = Math.max(0, plannedFinal - plannedWater);
+  return source + _soWater(lso);
+}
+window._soWater = _soWater;
+window._soFinal = _soFinal;
+
 function clientName(id) {
   var c = _clients.find(function(x){ return x.id === id; });
   return c ? c.name : (id || '—');
@@ -23566,7 +23605,7 @@ window._fixLegacyContainerRefs = async function() {
   // Fetch all containers whose reference has letters immediately followed by digits (no dash)
   var allContainers = [];
   try {
-    allContainers = await window.db.select('liquid_containers', '?select=id,reference,vessel_id&limit=5000');
+    allContainers = await window.fetchAll('liquid_containers', '?select=id,reference,vessel_id');
   } catch(e) {
     window.toast && window.toast('Could not load containers: ' + e.message, 'error'); return;
   }
@@ -24497,8 +24536,9 @@ window.loadReconciliation = async function() {
     // All non-archived containers
     var containers = await supa('liquid_containers', '?archived=is.false&order=client_id.asc,reference.asc');
 
-    // All history (we need pre-range rows to derive opening balance)
-    var allHistory = await supa('liquid_history', '?order=created_at.asc&limit=10000');
+    // All history (we need pre-range rows to derive opening balance) — paged so a
+    // large history table can never silently truncate and skew opening balances.
+    var allHistory = await window.fetchAll('liquid_history', '?order=created_at.asc');
 
     // Client names
     var clients = await supa('clients', '?select=id,name');
@@ -24836,7 +24876,7 @@ async function _cbwFetchMonth(yearMonth) {
   var jobIds = jobs.map(function(j){ return j.id; });
 
   // Fetch liquid signoffs and BOMs in parallel
-  var signoffs = await supa('job_liquid_signoff', '?job_id=in.(' + jobIds.join(',') + ')&select=job_id,linked_containers_json,linked_container_id,water_required,final_litres');
+  var signoffs = await supa('job_liquid_signoff', '?job_id=in.(' + jobIds.join(',') + ')&select=job_id,linked_containers_json,linked_container_id,water_required,water_added,final_litres');
   var bomIds   = jobs.map(function(j){ return j.bom_id; }).filter(function(v,i,a){ return v && a.indexOf(v)===i; });
   var boms     = bomIds.length ? await supa('boms', '?id=in.(' + bomIds.join(',') + ')&select=id,product_name,volume_cl,bottling_abv,abv,bottles_per_shipper,additional_info') : [];
   if (boms && boms.length && window._mergeBomMap) window._mergeBomMap(boms);
@@ -24866,8 +24906,8 @@ async function _cbwFetchMonth(yearMonth) {
     if (!lc.length && so.linked_container_id) lc = [{ id: so.linked_container_id }];
     var linkedConts = lc.map(function(l){ return cMap[l.id] || { id: l.id, reference: l.id }; });
 
-    var waterAdded  = parseFloat(so.water_required  || 0);
-    var finalLitres = parseFloat(so.final_litres     || 0);
+    var waterAdded  = window._soWater(so);
+    var finalLitres = window._soFinal(so);
     var srcLitres   = Math.max(0, finalLitres - waterAdded);
     var bottlingAbv = parseFloat(j.bottling_abv || bom.bottling_abv || bom.abv || 0);
     var srcAbv      = linkedConts.length
@@ -25163,7 +25203,7 @@ window.loadLiquidProducts = async function() {
     if (addBtn) addBtn.style.display = (window.canDo && window.canDo('liquid_products_edit')) ? '' : 'none';
 
     // Check for containers needing retag
-    var containers = await window.db.select('liquid_containers', '?archived=is.false&order=reference.asc&limit=5000').catch(function(){ return []; });
+    var containers = await window.fetchAll('liquid_containers', '?archived=is.false&order=reference.asc').catch(function(){ return []; });
     var clients = await window.db.select('clients', '?order=name.asc&limit=500').catch(function(){ return []; });
     // Expose for the Add/Edit modal and the table client-name column — both
     // were previously hitting empty `window.CLIENTS`/`window._clients` caches
@@ -25448,7 +25488,7 @@ async function loadLiquid() {
   if (tbody) tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
 
   _clients = await supa('clients', '?order=name.asc&limit=1000');
-  _liquid  = await supa('liquid_containers', '?order=type.asc,reference.asc&limit=5000');
+  _liquid  = await window.fetchAll('liquid_containers', '?order=type.asc,reference.asc');
 
   // KPIs — always calculated from non-archived containers only
   var live   = _liquid.filter(function(c){ return !c.archived; });
@@ -30210,7 +30250,7 @@ window.saveAdjModal = async function() {
     listEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">Loading inventory…</div>';
 
     try {
-      _almAllContainers = await window.db.select('liquid_containers', '?archived=is.false&order=type.asc,reference.asc&limit=5000');
+      _almAllContainers = await window.fetchAll('liquid_containers', '?archived=is.false&order=type.asc,reference.asc');
       window._almFilterContainers();
     } catch(e) {
       listEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--red);font-size:12px;">Error loading containers: ' + e.message + '</div>';
@@ -32618,7 +32658,7 @@ window.saveAdjModal = async function() {
     // Fetch linked containers for accurate dilution status
     var _psLso = null;
     try {
-      var _psLsoRows = await supaGet('job_liquid_signoff?job_id=eq.' + j.id + '&select=linked_containers_json,water_required,final_litres');
+      var _psLsoRows = await supaGet('job_liquid_signoff?job_id=eq.' + j.id + '&select=linked_containers_json,water_required,water_added,final_litres');
       _psLso = _psLsoRows[0] || null;
     } catch(e) {}
     var _psLinked = [];
@@ -32645,8 +32685,10 @@ window.saveAdjModal = async function() {
         _psDilutionStr = 'No — container avg ABV (' + _psAvgAbv.toFixed(1) + '%) at or below target (' + _psTargetAbv.toFixed(1) + '%)';
       }
     }
-    var _psWaterStr = (_psLso && _psLso.water_required) ? _psLso.water_required.toFixed(1) + ' L' : null;
-    var _psFinalStr = (_psLso && _psLso.final_litres) ? _psLso.final_litres.toFixed(1) + ' L' : null;
+    var _psWaterVal = _psLso ? window._soWater(_psLso) : 0;
+    var _psFinalVal = _psLso ? window._soFinal(_psLso) : 0;
+    var _psWaterStr = _psWaterVal > 0 ? _psWaterVal.toFixed(1) + ' L' : null;
+    var _psFinalStr = _psFinalVal > 0 ? _psFinalVal.toFixed(1) + ' L' : null;
 
     var rows = section('Job Information')
       + row('Job No', j.id)
@@ -33116,8 +33158,8 @@ window.saveAdjModal = async function() {
         contRowsHtml = '<p style="color:#9ca3af;font-size:12px;">No containers linked to this job.</p>';
       }
 
-      var waterAdded   = parseFloat(lso.water_required || 0);
-      var finalLitres  = parseFloat(lso.final_litres || 0);
+      var waterAdded   = window._soWater(lso);
+      var finalLitres  = window._soFinal(lso);
       var dilutionLine = waterAdded > 0
         ? waterAdded.toFixed(1) + ' L water added → ' + finalLitres.toFixed(1) + ' L final @ ' + bottlingAbv.toFixed(1) + '% ABV'
         : 'No dilution — bottled at cask/original strength (' + bottlingAbv.toFixed(1) + '% ABV)';
@@ -33217,8 +33259,8 @@ window.saveAdjModal = async function() {
       // Spirit type: resolved from linked containers
       var spiritType = (contDetails[0] && contDetails[0].spirit_type) || '—';
 
-      var waterAdded  = parseFloat(lso.water_required || 0);
-      var finalLitres = parseFloat(lso.final_litres || 0);
+      var waterAdded  = window._soWater(lso);
+      var finalLitres = window._soFinal(lso);
       var liquidSummary = waterAdded > 0
         ? 'Diluted to ' + finalLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '% ABV'
         : 'Bottled at ' + (bottlingAbv ? bottlingAbv.toFixed(1) + '% ABV' : 'specified strength');
@@ -33427,8 +33469,8 @@ window.saveAdjModal = async function() {
       var actualCases      = parseFloat(job.actual_cases || 0) || 0;
       var actualHours      = parseFloat(job.actual_job_hours || 0) || 0;
       var liquidLeftover   = parseFloat(job.liquid_leftover || 0) || 0;
-      var finalLitres      = parseFloat(lso.final_litres || 0) || 0;
-      var waterRequired    = parseFloat(lso.water_required || 0) || 0;
+      var finalLitres      = window._soFinal(lso);
+      var waterRequired    = window._soWater(lso);
       var bottlingAbv      = parseFloat(job.bottling_abv || bom.bottling_abv || bom.abv || 0);
       var bottlesPerCase   = parseInt(bom.bottles_per_shipper || 0) || null;
       var casesPerLayer    = parseInt(ai.casesLayer || 0) || null;
@@ -33669,8 +33711,8 @@ window.saveAdjModal = async function() {
       var actualCases     = parseFloat(j.actual_cases || 0) || 0;
       var actualHours     = parseFloat(j.actual_job_hours || 0) || 0;
       var liquidLeftover  = parseFloat(j.liquid_leftover || 0) || 0;
-      var finalLitres     = parseFloat(lso.final_litres || 0) || 0;
-      var waterRequired   = parseFloat(lso.water_required || 0) || 0;
+      var finalLitres     = window._soFinal(lso);
+      var waterRequired   = window._soWater(lso);
       var bottlingAbv     = parseFloat(j.bottling_abv || bom.bottling_abv || bom.abv || 0);
       var bottlesPerCase  = parseInt(bom.bottles_per_shipper || 0) || null;
       var casesPerLayer   = parseInt(ai.casesLayer || 0) || null;
