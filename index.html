@@ -26784,11 +26784,12 @@ window.saveTransfer = async function() {
       var newP2       = existingLPA + lpaIn;
       var newAbv      = newL2 > 0 ? (newP2 / newL2 * 100) : (cont2.abv || null);
 
+      var cap2 = parseFloat(cont2.capacity_litres || 0);
       await supaMut('PATCH','liquid_containers','?id=eq.'+d.container_id,{
         current_litres: Math.round(newL2 * 10000) / 10000,
         current_lpa:    Math.round(newP2 * 10000) / 10000,
         abv:            Math.round(newAbv * 100) / 100,
-        status:         'active'
+        status:         newL2 <= 0 ? 'empty' : (cap2 > 0 && newL2 >= cap2 ? 'full' : 'partially_full')
       });
       if (window._writeBlendHistory) {
         await window._writeBlendHistory({
@@ -43940,6 +43941,25 @@ window.saveAdjModal = async function() {
         var c = _bl.find(function(x){ return x.id === d.cont.id; }) || d.cont;
         var n = _ensureNet(c); n.addL += d.litres; n.addLPA += d.litres * lpaPerLitre;
       });
+
+      // Aggregate over-draw guard: a container can legitimately appear in several
+      // source rows, but the TOTAL drawn must not exceed what it actually holds.
+      // The per-row overLimit check above can't see this (each row looks fine on its
+      // own), and without this the blend would either over-draw or hit the DB
+      // non-negative constraint mid-operation. Validate the netted draw up front.
+      var _drawBad = [];
+      Object.keys(netMap).forEach(function(id){
+        var n = netMap[id];
+        if (n.deductL <= 0.01) return;
+        var origL = parseFloat(n.cont.current_litres||0);
+        if (n.deductL - origL > 0.01) {
+          _drawBad.push(n.cont.reference + ' (need ' + n.deductL.toFixed(1) + 'L, have ' + origL.toFixed(1) + 'L)');
+        }
+      });
+      if (_drawBad.length) {
+        window.toast && window.toast('Source drawn beyond available stock: ' + _drawBad.join('; ') + '. Reduce the amounts.', 'error');
+        return;
+      }
 
       // Blend integrity: the new blend cannot be returned to a source that still holds a
       // leftover of its ORIGINAL product (that would relabel the leftover to the blend name).
