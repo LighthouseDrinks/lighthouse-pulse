@@ -23303,8 +23303,8 @@ var _vrAllContainers = [];
 
 var _vrTypeLabel = { ibc:'IBC', cask:'Cask', blue_drum:'Blue Drum', flexi:'Flexi Tank', tank:'Tank', other:'Other' };
 var _vrTypePrefix = { ibc:'IBC-', cask:'CSK-', blue_drum:'DRM-', flexi:'FLX-', tank:'TNK-', other:'VES-' };
-var _vrStatusColour = { available:'var(--green)', in_use:'var(--gold)', maintenance:'var(--amber)', decommissioned:'var(--muted)' };
-var _vrStatusLabel  = { available:'Available', in_use:'In Use', maintenance:'Maintenance', decommissioned:'Decommissioned' };
+var _vrStatusColour = { available:'var(--green)', in_use:'var(--gold)', maintenance:'var(--amber)', decommissioned:'var(--muted)', archived:'var(--muted)', empty:'var(--muted)' };
+var _vrStatusLabel  = { available:'Available', in_use:'In Use', maintenance:'Maintenance', decommissioned:'Decommissioned', archived:'Archived', empty:'Empty' };
 
 // ── VESSEL RANGE GENERATOR ──────────────────────────────────────────────────
 var _vrgItems = []; // preview list
@@ -24478,6 +24478,13 @@ window.printVesselQR = function(vesselId) {
 };
 
 // ── LPA RECONCILIATION ────────────────────────────────────────────────────────
+window._reconToggle = function(id, caretEl) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var show = el.style.display === 'none';
+  el.style.display = show ? '' : 'none';
+  if (caretEl) caretEl.innerHTML = show ? '&#9662;' : '&#9656;';
+};
 window.loadReconciliation = async function() {
   var contentEl = document.getElementById('recon-content');
   if (!contentEl) return;
@@ -24537,16 +24544,39 @@ window.loadReconciliation = async function() {
         return true;
       });
 
-      var lpaIn = 0, lpaOut = 0;
+      var lpaIn = 0, lpaOut = 0, litIn = 0, litOut = 0, unscored = 0;
+      var movements = [];
       inRange.forEach(function(h){
-        if (h.lpa_after == null) return;
-        // For 'add' events lpa_before may be null (old records written before fix) — treat as 0
+        // LPA delta is the reconciled quantity. For 'add' events lpa_before may be
+        // null (old records) — treat as 0. Any non-add event missing lpa_before, or
+        // any event missing lpa_after, cannot be scored and is a likely variance cause.
         var lpaBefore = h.lpa_before != null ? parseFloat(h.lpa_before)
                       : (h.event_type === 'add' ? 0 : null);
-        if (lpaBefore === null) return; // skip non-add events with missing lpa_before
-        var delta = parseFloat(h.lpa_after) - lpaBefore;
-        if (delta > 0) lpaIn  += delta;
-        if (delta < 0) lpaOut += Math.abs(delta);
+        var lpaAfter  = h.lpa_after != null ? parseFloat(h.lpa_after) : null;
+        var scored    = (lpaAfter != null && lpaBefore !== null);
+        var lpaDelta  = scored ? (lpaAfter - lpaBefore) : null;
+        if (scored) {
+          if (lpaDelta > 0) lpaIn  += lpaDelta;
+          if (lpaDelta < 0) lpaOut += Math.abs(lpaDelta);
+        } else {
+          unscored++;
+        }
+        // Litres delta — volume moved, tracked independently of LPA scoring.
+        var litDelta = h.litres_changed != null ? parseFloat(h.litres_changed)
+                     : (h.litres_before != null && h.litres_after != null
+                        ? parseFloat(h.litres_after) - parseFloat(h.litres_before)
+                        : (h.event_type === 'add' && h.litres_after != null ? parseFloat(h.litres_after) : null));
+        if (litDelta != null) {
+          if (litDelta > 0) litIn  += litDelta;
+          if (litDelta < 0) litOut += Math.abs(litDelta);
+        }
+        movements.push({
+          created_at: h.created_at, event_type: h.event_type,
+          litres_before: h.litres_before, litres_after: h.litres_after, litDelta: litDelta,
+          abv_after: h.abv_after, lpa_before: h.lpa_before, lpa_after: h.lpa_after,
+          lpaDelta: lpaDelta, scored: scored,
+          job_id: h.job_id, notes: h.notes, by: h.performed_by_name
+        });
       });
 
       var calcClosing  = openingLPA + lpaIn - lpaOut;
@@ -24563,6 +24593,10 @@ window.loadReconciliation = async function() {
         openingLPA:    openingLPA,
         lpaIn:         lpaIn,
         lpaOut:        lpaOut,
+        litIn:         litIn,
+        litOut:        litOut,
+        movements:     movements,
+        unscored:      unscored,
         calcClosing:   calcClosing,
         storedClosing: storedClosing,
         variance:      variance,
@@ -24583,20 +24617,29 @@ window.loadReconciliation = async function() {
     }
 
     var TYPEMAP = { cask:'Cask', ibc:'IBC', blue_drum:'Blue Drum', tank:'Tank', tanker:'Tanker' };
+    var EVLBL = { add:'Add', dilution:'Dilution', dilution_water:'Dilution Water',
+      blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend In-place',
+      blend_loss:'Blend Loss', dilution_loss:'Dilution Loss', transfer_from:'Transfer Out',
+      transfer_to:'Transfer In', partial_removal:'Removal', edit:'Edit', empty:'Emptied',
+      disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In', bottling_deduction:'Bottling Draw',
+      measurement_variance:'Stock Variance', container_adjusted:'Adjusted', container_created:'Created',
+      container_archived:'Archived', container_restored:'Restored' };
 
     var html = '<div style="overflow-x:auto;">'
       + '<table class="data-table" style="min-width:900px;">'
       + '<thead><tr>'
-      + '<th style="min-width:90px;">Container</th>'
+      + '<th style="min-width:96px;">Container</th>'
       + '<th class="mob-hide" style="min-width:60px;">Type</th>'
       + '<th style="min-width:110px;">Client</th>'
       + '<th class="mob-hide" style="min-width:130px;">Spirit / Product</th>'
       + '<th style="text-align:right;min-width:85px;">Opening LPA</th>'
+      + '<th class="mob-hide" style="text-align:right;min-width:70px;color:var(--green);">Litres In</th>'
+      + '<th class="mob-hide" style="text-align:right;min-width:70px;color:var(--red);">Litres Out</th>'
       + '<th style="text-align:right;min-width:75px;color:var(--green);">LPA In</th>'
       + '<th style="text-align:right;min-width:75px;color:var(--red);">LPA Out</th>'
       + '<th style="text-align:right;min-width:85px;">Calc. Closing</th>'
       + '<th style="text-align:right;min-width:85px;">Stored LPA</th>'
-      + '<th style="text-align:right;min-width:75px;">Variance</th>'
+      + '<th style="text-align:right;min-width:85px;">Variance</th>'
       + '</tr></thead><tbody>';
 
     // Group rows by client for subtotals
@@ -24607,36 +24650,100 @@ window.loadReconciliation = async function() {
       clientGroups[k].push(r);
     });
 
-    var grandOpen = 0, grandIn = 0, grandOut = 0, grandCalc = 0, grandStored = 0;
+    var grandOpen = 0, grandIn = 0, grandOut = 0, grandCalc = 0, grandStored = 0, grandLitIn = 0, grandLitOut = 0;
 
     Object.keys(clientGroups).forEach(function(clientId){
       var group = clientGroups[clientId];
       var clientName = esc(clientMap[clientId] || clientId || '—');
-      var subOpen = 0, subIn = 0, subOut = 0, subCalc = 0, subStored = 0;
+      var subOpen = 0, subIn = 0, subOut = 0, subCalc = 0, subStored = 0, subLitIn = 0, subLitOut = 0;
 
       group.forEach(function(r){
         var varCol   = r.hasVariance ? 'var(--red)' : 'var(--green)';
         var varLabel = (r.variance >= 0 ? '+' : '') + r.variance.toFixed(3);
         var rowStyle = r.hasVariance ? 'background:rgba(220,53,69,0.06);' : '';
+        var mvId     = 'recon-mv-' + r.container_id;
+        var hasMv    = r.movements.length > 0;
+        var caretCell = hasMv
+          ? '<span class="recon-caret" style="color:var(--gold);font-size:9px;margin-right:5px;">&#9656;</span>'
+          : '<span class="recon-caret" style="display:inline-block;width:12px;"></span>';
 
-        html += '<tr style="' + rowStyle + '">'
-          + '<td style="font-weight:700;color:var(--white);">' + esc(r.reference) + '</td>'
+        html += '<tr style="' + rowStyle + (hasMv ? 'cursor:pointer;' : '') + '"'
+          + (hasMv ? ' onclick="window._reconToggle(\'' + mvId + '\', this.querySelector(\'.recon-caret\'))"' : '') + '>'
+          + '<td style="font-weight:700;color:var(--white);">' + caretCell + esc(r.reference) + '</td>'
           + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + esc(TYPEMAP[r.type] || r.type) + '</td>'
           + '<td style="font-size:12px;">' + clientName + '</td>'
           + '<td class="mob-hide" style="font-size:12px;">' + esc(fmtSt(r.spirit_type)) + '</td>'
           + '<td style="text-align:right;color:var(--muted);">' + r.openingLPA.toFixed(3) + '</td>'
+          + '<td class="mob-hide" style="text-align:right;color:var(--green);">' + (r.litIn > 0 ? r.litIn.toFixed(1) : '—') + '</td>'
+          + '<td class="mob-hide" style="text-align:right;color:var(--red);">' + (r.litOut > 0 ? r.litOut.toFixed(1) : '—') + '</td>'
           + '<td style="text-align:right;color:var(--green);">' + r.lpaIn.toFixed(3) + '</td>'
           + '<td style="text-align:right;color:var(--red);">' + r.lpaOut.toFixed(3) + '</td>'
           + '<td style="text-align:right;font-weight:600;color:var(--gold-light);">' + r.calcClosing.toFixed(3) + '</td>'
           + '<td style="text-align:right;color:var(--muted);">' + r.storedClosing.toFixed(3) + '</td>'
-          + '<td style="text-align:right;font-weight:700;color:' + varCol + ';">' + (r.hasVariance ? varLabel : '✓') + '</td>'
+          + '<td style="text-align:right;font-weight:700;color:' + varCol + ';">' + (r.hasVariance ? varLabel : '✓')
+            + (r.unscored ? '<span style="display:block;font-size:9px;color:var(--amber);font-weight:600;">' + r.unscored + ' unscored</span>' : '') + '</td>'
           + '</tr>';
+
+        // Expandable per-movement breakdown — shows exactly what moved and why a variance exists.
+        if (hasMv) {
+          var mvRows = r.movements.map(function(m){
+            var mLbl = EVLBL[m.event_type] || m.event_type || '—';
+            var md   = new Date(m.created_at);
+            var mds  = md.toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'2-digit'}) + ' ' + md.toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'});
+            var litB = m.litres_before != null ? parseFloat(m.litres_before).toFixed(1) : '—';
+            var litA = m.litres_after  != null ? parseFloat(m.litres_after).toFixed(1)  : '—';
+            var litD = m.litDelta != null ? (m.litDelta > 0 ? '+' : '') + m.litDelta.toFixed(1) : '—';
+            var litDCol = m.litDelta > 0 ? 'var(--green)' : (m.litDelta < 0 ? 'var(--red)' : 'var(--muted)');
+            var abvA = m.abv_after != null ? parseFloat(m.abv_after).toFixed(2) + '%' : '—';
+            var lpaB = m.lpa_before != null ? parseFloat(m.lpa_before).toFixed(3) : (m.event_type === 'add' ? '0.000' : '—');
+            var lpaA = m.lpa_after  != null ? parseFloat(m.lpa_after).toFixed(3)  : '—';
+            var lpaD = m.lpaDelta != null ? (m.lpaDelta > 0 ? '+' : '') + m.lpaDelta.toFixed(3) : '—';
+            var lpaDCol = m.lpaDelta > 0 ? 'var(--green)' : (m.lpaDelta < 0 ? 'var(--red)' : 'var(--muted)');
+            var unTag = m.scored ? '' : ' <span title="No LPA before/after on this record — it is not counted toward the calculated closing balance, and is a likely cause of any variance." style="font-size:9px;color:var(--amber);border:1px solid var(--amber);border-radius:2px;padding:0 3px;margin-left:4px;">unscored</span>';
+            var rbg = m.scored ? '' : 'background:rgba(245,158,11,0.07);';
+            return '<tr style="' + rbg + '">'
+              + '<td style="padding:4px 8px;color:var(--muted);white-space:nowrap;">' + esc(mds) + '</td>'
+              + '<td style="padding:4px 8px;"><span style="color:var(--white);font-weight:600;">' + esc(mLbl) + '</span>' + unTag + '</td>'
+              + '<td style="padding:4px 8px;text-align:right;color:var(--muted);white-space:nowrap;">' + litB + ' &#8594; ' + litA + '</td>'
+              + '<td style="padding:4px 8px;text-align:right;color:' + litDCol + ';font-weight:600;">' + litD + '</td>'
+              + '<td style="padding:4px 8px;text-align:right;color:var(--amber);">' + abvA + '</td>'
+              + '<td style="padding:4px 8px;text-align:right;color:var(--muted);white-space:nowrap;">' + lpaB + ' &#8594; ' + lpaA + '</td>'
+              + '<td style="padding:4px 8px;text-align:right;color:' + lpaDCol + ';font-weight:600;">' + lpaD + '</td>'
+              + '<td style="padding:4px 8px;color:var(--muted);font-size:11px;white-space:nowrap;">' + esc(m.job_id || '—') + '</td>'
+              + '<td style="padding:4px 8px;color:var(--muted);font-size:11px;">' + esc(m.by || '—') + '</td>'
+              + '<td style="padding:4px 8px;color:var(--muted);font-size:11px;">' + esc(m.notes || '—') + '</td>'
+              + '</tr>';
+          }).join('');
+          var summaryLine = 'Opening ' + r.openingLPA.toFixed(3) + ' + In ' + r.lpaIn.toFixed(3) + ' \u2212 Out ' + r.lpaOut.toFixed(3)
+            + ' = Calc ' + r.calcClosing.toFixed(3) + ' LPA  \u00b7  Stored ' + r.storedClosing.toFixed(3) + ' LPA'
+            + (r.hasVariance ? '  \u00b7  Variance ' + (r.variance >= 0 ? '+' : '') + r.variance.toFixed(3) : '  \u00b7  reconciled \u2713')
+            + (r.unscored ? '  \u00b7  ' + r.unscored + ' unscored event' + (r.unscored > 1 ? 's' : '') + ' (no LPA recorded — likely cause of variance)' : '');
+          html += '<tr id="' + mvId + '" style="display:none;">'
+            + '<td colspan="12" style="padding:0 12px 12px 24px;background:rgba(255,255,255,0.015);">'
+            + '<div style="font-size:11px;color:' + (r.unscored ? 'var(--amber)' : 'var(--muted)') + ';margin:8px 0;">' + esc(summaryLine) + '</div>'
+            + '<table style="width:100%;border-collapse:collapse;font-size:11px;">'
+            + '<thead><tr style="color:var(--muted);">'
+            + '<th style="text-align:left;padding:3px 8px;font-weight:600;">Date</th>'
+            + '<th style="text-align:left;padding:3px 8px;font-weight:600;">Event</th>'
+            + '<th style="text-align:right;padding:3px 8px;font-weight:600;">Litres</th>'
+            + '<th style="text-align:right;padding:3px 8px;font-weight:600;">&#916; L</th>'
+            + '<th style="text-align:right;padding:3px 8px;font-weight:600;">ABV</th>'
+            + '<th style="text-align:right;padding:3px 8px;font-weight:600;">LPA</th>'
+            + '<th style="text-align:right;padding:3px 8px;font-weight:600;">&#916; LPA</th>'
+            + '<th style="text-align:left;padding:3px 8px;font-weight:600;">Job</th>'
+            + '<th style="text-align:left;padding:3px 8px;font-weight:600;">By</th>'
+            + '<th style="text-align:left;padding:3px 8px;font-weight:600;">Notes</th>'
+            + '</tr></thead><tbody>' + mvRows + '</tbody></table>'
+            + '</td></tr>';
+        }
 
         subOpen   += r.openingLPA;
         subIn     += r.lpaIn;
         subOut    += r.lpaOut;
         subCalc   += r.calcClosing;
         subStored += r.storedClosing;
+        subLitIn  += r.litIn;
+        subLitOut += r.litOut;
       });
 
       // Client subtotal row (only show if more than one container for this client)
@@ -24646,6 +24753,8 @@ window.loadReconciliation = async function() {
         html += '<tr style="background:rgba(201,168,76,0.05);border-top:1px solid var(--navy-border);">'
           + '<td colspan="4" style="font-size:11px;color:var(--muted);font-style:italic;padding-left:12px;">Subtotal — ' + clientName + '</td>'
           + '<td style="text-align:right;font-weight:600;color:var(--muted);">' + subOpen.toFixed(3) + '</td>'
+          + '<td class="mob-hide" style="text-align:right;font-weight:600;color:var(--green);">' + (subLitIn > 0 ? subLitIn.toFixed(1) : '—') + '</td>'
+          + '<td class="mob-hide" style="text-align:right;font-weight:600;color:var(--red);">' + (subLitOut > 0 ? subLitOut.toFixed(1) : '—') + '</td>'
           + '<td style="text-align:right;font-weight:600;color:var(--green);">' + subIn.toFixed(3) + '</td>'
           + '<td style="text-align:right;font-weight:600;color:var(--red);">' + subOut.toFixed(3) + '</td>'
           + '<td style="text-align:right;font-weight:700;color:var(--gold-light);">' + subCalc.toFixed(3) + '</td>'
@@ -24659,6 +24768,8 @@ window.loadReconciliation = async function() {
       grandOut    += subOut;
       grandCalc   += subCalc;
       grandStored += subStored;
+      grandLitIn  += subLitIn;
+      grandLitOut += subLitOut;
     });
 
     // Grand total
@@ -24667,6 +24778,8 @@ window.loadReconciliation = async function() {
     html += '<tr style="border-top:2px solid var(--navy-border);font-weight:700;">'
       + '<td colspan="4" style="color:var(--muted);">Grand Total</td>'
       + '<td style="text-align:right;color:var(--muted);">' + grandOpen.toFixed(3) + '</td>'
+      + '<td class="mob-hide" style="text-align:right;color:var(--green);">' + (grandLitIn > 0 ? grandLitIn.toFixed(1) : '—') + '</td>'
+      + '<td class="mob-hide" style="text-align:right;color:var(--red);">' + (grandLitOut > 0 ? grandLitOut.toFixed(1) : '—') + '</td>'
       + '<td style="text-align:right;color:var(--green);">' + grandIn.toFixed(3) + '</td>'
       + '<td style="text-align:right;color:var(--red);">' + grandOut.toFixed(3) + '</td>'
       + '<td style="text-align:right;color:var(--gold-light);">' + grandCalc.toFixed(3) + '</td>'
@@ -24681,7 +24794,8 @@ window.loadReconciliation = async function() {
     html += '<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:12px;flex-wrap:wrap;gap:8px;">'
       + '<div style="font-size:11px;color:var(--muted);">'
       + '<span style="color:var(--green);font-weight:700;">✓</span> = Calculated closing matches stored LPA &nbsp;·&nbsp; '
-      + '<span style="color:var(--red);font-weight:700;">± value</span> = Discrepancy — history may be incomplete'
+      + '<span style="color:var(--red);font-weight:700;">± value</span> = Discrepancy &nbsp;·&nbsp; '
+      + 'click any container row to see every movement'
       + (varCount > 0 ? ' &nbsp;<span style="color:var(--red);font-weight:700;">(' + varCount + ' container' + (varCount>1?'s':'')+' with variance)</span>' : '')
       + '</div>'
       + '<div style="font-size:11px;color:var(--muted);text-align:right;">'
@@ -24690,7 +24804,8 @@ window.loadReconciliation = async function() {
       + '<div style="margin-top:10px;padding:10px 14px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.2);border-radius:4px;font-size:11px;color:var(--muted);">'
       + '<strong style="color:var(--gold);">How to read this:</strong> '
       + 'Opening LPA (balance at start of period) + LPA In − LPA Out = Calc. Closing. '
-      + 'Stored LPA is the live value in the container record. A variance means history records are missing for that container in this period.'
+      + 'Stored LPA is the live value in the container record. Click a row to expand its full movement ledger (litres and LPA before→after, job, and notes for each event). '
+      + 'An <span style="color:var(--amber);font-weight:700;">unscored</span> tag marks events with no LPA recorded — these are not counted in the calculation and are the usual reason a container shows a variance.'
       + '</div>';
 
     contentEl.innerHTML = html;
@@ -26132,6 +26247,21 @@ window.saveContainer = async function() {
   var cmCap    = parseFloat(gv('cm-capacity'))||0;
   var cmStatus = cmLitres <= 0 ? 'empty' : (cmCap > 0 && cmLitres >= cmCap ? 'full' : 'partially_full');
   var cmType   = gv('cm-type');
+  // Non-cask LPA consistency guard: for tanks/IBCs/etc. the stored LPA should track
+  // litres × ABV. Casks are exempt — their stored LPA is the at-fill value by design
+  // (angel-share evaporation is handled for display, not by rewriting stock LPA).
+  var _cmAbv = gv('cm-abv') !== '' ? parseFloat(gv('cm-abv')) : null;
+  if (cmType !== 'cask' && cmLitres > 0 && _cmAbv != null && _cmAbv > 0 && _cmLpaIn != null) {
+    var _expLpa = cmLitres * _cmAbv / 100;
+    var _lpaTol = Math.max(0.5, _expLpa * 0.02); // allow 2% or 0.5 LPA, whichever is larger
+    if (Math.abs(_cmLpaIn - _expLpa) > _lpaTol) {
+      var _proceed = await window.lpConfirm(
+        'The LPA you entered (' + _cmLpaIn.toFixed(2) + ') does not match litres × ABV ('
+          + cmLitres.toFixed(1) + 'L × ' + _cmAbv.toFixed(2) + '% = ' + _expLpa.toFixed(2) + ' LPA). Save anyway?',
+        { title: 'Check LPA', confirmLabel: 'Save anyway', cancelLabel: 'Go back' });
+      if (!_proceed) return;
+    }
+  }
   var isClientVessel = !!(gv('cm-client') && !window._cmIsLighthouseClient(gv('cm-client')));
   var payload = {
     type:cmType, reference:gv('cm-reference'), client_id:gv('cm-client'),
@@ -44372,8 +44502,16 @@ window.saveAdjModal = async function() {
         var gid       = r.event_group_id;
         var sc        = gid ? groupColMap[gid] : null;
         var isFirst   = sc && groupPos[gid].first === i;
-        var isLast    = sc && groupPos[gid].last  === i;
+        var lastInGrp = sc && groupPos[gid].last  === i;
         var rowBg     = sc ? 'background:rgba(255,255,255,0.018);' : '';
+
+        // Parse the structured field-change log (same shape rendered in the container detail view).
+        var changesArr = r.changes
+          ? (typeof r.changes === 'string' ? (function(){ try { return JSON.parse(r.changes); } catch(e){ return null; } })() : r.changes)
+          : null;
+        var hasChanges = !!(changesArr && changesArr.length);
+        // When a changes sub-row follows, the group's bottom border belongs on it, not the main row.
+        var isLast    = lastInGrp && !hasChanges;
 
         // Build per-cell border helper
         function b(isLeftEdge, isRightEdge) {
@@ -44386,7 +44524,22 @@ window.saveAdjModal = async function() {
         }
 
         var lpaAfter = r.lpa_after != null ? parseFloat(r.lpa_after).toFixed(3) + ' LPA' : '—';
-        var spacer = isLast ? '<tr><td colspan="8" style="height:6px;padding:0;border:none;background:transparent;"></td></tr>' : '';
+        var spacer = lastInGrp ? '<tr><td colspan="8" style="height:6px;padding:0;border:none;background:transparent;"></td></tr>' : '';
+
+        // Optional sub-row spelling out each field change (before -> after).
+        var changeRow = '';
+        if (hasChanges) {
+          var chBorder = (sc ? 'border-left:2px solid ' + sc + ';border-right:2px solid ' + sc + ';' : '')
+                       + (lastInGrp ? 'border-bottom:2px solid ' + sc + ';padding-bottom:8px;' : '');
+          changeRow = '<tr style="' + rowBg + '"><td colspan="8" style="' + chBorder + 'padding:2px 10px 7px 28px;">'
+            + changesArr.map(function(ch){
+                return '<span style="font-size:10px;display:inline-block;margin-right:14px;">'
+                  + '<span style="color:var(--muted);font-style:italic;">' + esc(ch.label) + ':</span> '
+                  + '<span style="color:var(--red);">' + esc(String(ch.before)) + '</span> &#8594; '
+                  + '<span style="color:var(--green);">' + esc(String(ch.after)) + '</span></span>';
+              }).join('')
+            + '</td></tr>';
+        }
 
         return '<tr style="' + rowBg + '">'
           + '<td style="' + b(true,false) + 'font-size:11px;color:var(--muted);white-space:nowrap;padding-left:10px;">' + esc(dts) + '</td>'
@@ -44397,7 +44550,7 @@ window.saveAdjModal = async function() {
           + '<td class="mob-hide" style="' + b(false,false) + 'color:var(--gold);font-weight:600;">' + esc(lpaAfter) + '</td>'
           + '<td style="' + b(false,false) + 'font-size:11px;color:var(--muted);">' + esc(byName) + '</td>'
           + '<td class="mob-hide" style="' + b(false,true) + 'font-size:11px;color:var(--muted);max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + esc(r.notes||'') + '">' + esc(r.notes||'—') + '</td>'
-          + '</tr>' + spacer;
+          + '</tr>' + changeRow + spacer;
       }).join('');
     } catch(e) {
       tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--red);padding:24px;">Error: ' + window.escapeHtml(e.message) + '</td></tr>';
