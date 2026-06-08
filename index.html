@@ -32043,6 +32043,12 @@ window.saveAdjModal = async function() {
         // accounts for stock that is committed elsewhere (not just this job in isolation).
         try {
           var otherRows = await supaGet('job_components?sku_id=in.(' + skuIds.join(',') + ')&select=job_id,sku_id,qty_required,is_allocated,is_excluded');
+          // Build a "JOB-123 · Product" label so the warning identifies the job by number.
+          var _shareLabel = function(jm){
+            var num  = jm.job_number || jm.reference || (jm.id ? String(jm.id).slice(0,8) : '');
+            var prod = (window.jobLabel && window.jobLabel(jm)) || jm.product_name || '';
+            return num ? (num + (prod ? ' · ' + prod : '')) : (prod || '—');
+          };
           // Resolve stage + label for each involved job (prefer in-memory _jobs, fall back to a fetch).
           var jobMeta = {};
           var missingIds = [];
@@ -32050,15 +32056,15 @@ window.saveAdjModal = async function() {
             if (!r.job_id || r.job_id === jobId || jobMeta[r.job_id]) return;
             var jm = _jobs.find(function(x){ return x.id === r.job_id; });
             if (jm) {
-              jobMeta[r.job_id] = { stage: jm.stage, label: (window.jobLabel && window.jobLabel(jm)) || jm.product_name || r.job_id };
+              jobMeta[r.job_id] = { stage: jm.stage, label: _shareLabel(jm) };
             } else if (missingIds.indexOf(r.job_id) === -1) {
               missingIds.push(r.job_id);
             }
           });
           if (missingIds.length) {
             try {
-              var jrows = await supaGet('jobs?id=in.(' + missingIds.join(',') + ')&select=id,stage,product_name,bom_id');
-              jrows.forEach(function(jr){ jobMeta[jr.id] = { stage: jr.stage, label: (window.jobLabel && window.jobLabel(jr)) || jr.product_name || jr.id }; });
+              var jrows = await supaGet('jobs?id=in.(' + missingIds.join(',') + ')&select=id,stage,product_name,bom_id,job_number,reference');
+              jrows.forEach(function(jr){ jobMeta[jr.id] = { stage: jr.stage, label: _shareLabel(jr) }; });
             } catch(e) { console.warn('Shared SKU job-meta fetch failed:', e); }
           }
           var ACTIVE_STAGES = { 'new':1, 'active':1, 'on_hold':1 };
@@ -32150,9 +32156,9 @@ window.saveAdjModal = async function() {
 
         if (ctx.shared) {
           var warnDiv = document.createElement('div');
-          warnDiv.textContent = '\u26A0 ' + ctx.warnShort;
+          warnDiv.textContent = (ctx.warnIcon || '\u26A0') + ' ' + ctx.warnShort;
           warnDiv.title = ctx.warnFull;
-          warnDiv.style.cssText = 'font-size:9px;font-weight:700;color:var(--amber);margin-top:2px;cursor:help;white-space:nowrap;';
+          warnDiv.style.cssText = 'font-size:9px;font-weight:700;color:' + (ctx.warnColor || 'var(--amber)') + ';margin-top:2px;cursor:help;white-space:nowrap;';
           cell.appendChild(warnDiv);
         }
 
@@ -32186,8 +32192,12 @@ window.saveAdjModal = async function() {
         var onSiteColor = onSite === null ? 'var(--muted)' : sufficient ? 'var(--green)' : availableNet > 0 ? 'var(--amber)' : 'var(--red)';
 
         // Shared-SKU warning text (short marker + full tooltip).
+        // Colour: informational blue when there is still enough net stock (so amber stays
+        // reserved for genuine shortages); matches the shortage colour when the share causes one.
         var shared = sharedJobs.length > 0;
         var warnShort = '', warnFull = '';
+        var warnColor = sufficient ? 'var(--blue,#4a90d9)' : onSiteColor;
+        var warnIcon  = sufficient ? '\u2139' : '\u26A0'; // ℹ info vs ⚠ shortage
         if (shared) {
           if (committedElsewhere > 0) {
             var allocOthers = sharedJobs.filter(function(s){ return s.allocated; });
@@ -32229,6 +32239,7 @@ window.saveAdjModal = async function() {
         var onSiteCtx = {
           excluded: isExcluded, onSiteStr: onSiteStr, onSiteColor: onSiteColor,
           shared: shared, warnShort: warnShort, warnFull: warnFull,
+          warnColor: warnColor, warnIcon: warnIcon,
           skuId: c.sku_id || null, cid: cid, isAllocated: !!c.is_allocated
         };
         tr._onSiteCtx = onSiteCtx;
