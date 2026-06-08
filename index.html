@@ -31993,8 +31993,8 @@ window.saveAdjModal = async function() {
         if (seen[key]) {
           // Keep whichever row has more filled-in fields (PO number, qty ordered, etc.)
           var prev = seen[key];
-          var prevScore = (prev.po_number?1:0) + (prev.qty_ordered?1:0) + (prev.on_site_confirmed?1:0) + (prev.is_excluded?1:0);
-          var curScore  = (c.po_number?1:0)    + (c.qty_ordered?1:0)    + (c.on_site_confirmed?1:0)    + (c.is_excluded?1:0);
+          var prevScore = (prev.po_number?1:0) + (prev.qty_ordered?1:0) + (prev.on_site_confirmed?1:0) + (prev.is_excluded?1:0) + (prev.is_allocated?1:0);
+          var curScore  = (c.po_number?1:0)    + (c.qty_ordered?1:0)    + (c.on_site_confirmed?1:0)    + (c.is_excluded?1:0)    + (c.is_allocated?1:0);
           if (curScore > prevScore) {
             ghostIds.push(prev.id);
             seen[key] = c;
@@ -32016,6 +32016,10 @@ window.saveAdjModal = async function() {
       // Fetch stock, unit costs, and location per SKU
       var skuIds = comps.filter(function(c){return c.sku_id;}).map(function(c){return c.sku_id;});
       var stockMap = {}, locationMap = {}, latestCostMap = {}, nameMap = {};
+      // Shared-SKU allocation: how much of each SKU is claimed by OTHER active jobs.
+      // committedMap[sku] = units allocated to other active jobs (subtracted from this job's availability).
+      // sharedJobsMap[sku] = list of {label, qty, allocated} for every other active job using the SKU.
+      var committedMap = {}, sharedJobsMap = {};
       if (skuIds.length) {
         try {
           var batchRows = await supaGet('dry_goods_batches?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,quantity_remaining,unit_cost&order=delivery_date.desc');
@@ -32034,6 +32038,40 @@ window.saveAdjModal = async function() {
             nameMap[r.id] = window.skuDisplayName(r);
           });
         } catch(e) { console.warn('Location fetch failed:', e); }
+
+        // Aggregate demand for these SKUs from OTHER active jobs so the indicator
+        // accounts for stock that is committed elsewhere (not just this job in isolation).
+        try {
+          var otherRows = await supaGet('job_components?sku_id=in.(' + skuIds.join(',') + ')&select=job_id,sku_id,qty_required,is_allocated,is_excluded');
+          // Resolve stage + label for each involved job (prefer in-memory _jobs, fall back to a fetch).
+          var jobMeta = {};
+          var missingIds = [];
+          otherRows.forEach(function(r){
+            if (!r.job_id || r.job_id === jobId || jobMeta[r.job_id]) return;
+            var jm = _jobs.find(function(x){ return x.id === r.job_id; });
+            if (jm) {
+              jobMeta[r.job_id] = { stage: jm.stage, label: (window.jobLabel && window.jobLabel(jm)) || jm.product_name || r.job_id };
+            } else if (missingIds.indexOf(r.job_id) === -1) {
+              missingIds.push(r.job_id);
+            }
+          });
+          if (missingIds.length) {
+            try {
+              var jrows = await supaGet('jobs?id=in.(' + missingIds.join(',') + ')&select=id,stage,product_name,bom_id');
+              jrows.forEach(function(jr){ jobMeta[jr.id] = { stage: jr.stage, label: (window.jobLabel && window.jobLabel(jr)) || jr.product_name || jr.id }; });
+            } catch(e) { console.warn('Shared SKU job-meta fetch failed:', e); }
+          }
+          var ACTIVE_STAGES = { 'new':1, 'active':1, 'on_hold':1 };
+          otherRows.forEach(function(r){
+            if (!r.sku_id || r.job_id === jobId || r.is_excluded) return;
+            var meta = jobMeta[r.job_id];
+            if (!meta || !ACTIVE_STAGES[meta.stage]) return;
+            var q = r.qty_required || 0;
+            if (!sharedJobsMap[r.sku_id]) sharedJobsMap[r.sku_id] = [];
+            sharedJobsMap[r.sku_id].push({ label: meta.label, qty: q, allocated: !!r.is_allocated });
+            if (r.is_allocated) committedMap[r.sku_id] = (committedMap[r.sku_id] || 0) + q;
+          });
+        } catch(e) { console.warn('Shared SKU demand fetch failed:', e); }
 
         // Backfill unit_price on any component that is missing it
         var backfillNeeded = comps.filter(function(c){ return c.sku_id && c.unit_price == null && latestCostMap[c.sku_id] != null; });
@@ -32095,15 +32133,76 @@ window.saveAdjModal = async function() {
       el.appendChild(tbl);
       var tbody = tbl.querySelector('tbody');
 
+      // Builds the On-Site Qty cell (col 3): the physical stock number, an optional
+      // shared-SKU warning, and an Allocate/Release control. Kept as a helper so the
+      // exclude toggle can rebuild the cell in-place without a full tab reload.
+      function buildOnSiteCell(cell, ctx) {
+        cell.innerHTML = '';
+        if (ctx.excluded) {
+          cell.style.color = 'var(--muted)';
+          cell.textContent = '—';
+          return;
+        }
+        cell.style.color = ctx.onSiteColor;
+        var numDiv = document.createElement('div');
+        numDiv.textContent = ctx.onSiteStr;
+        cell.appendChild(numDiv);
+
+        if (ctx.shared) {
+          var warnDiv = document.createElement('div');
+          warnDiv.textContent = '\u26A0 ' + ctx.warnShort;
+          warnDiv.title = ctx.warnFull;
+          warnDiv.style.cssText = 'font-size:9px;font-weight:700;color:var(--amber);margin-top:2px;cursor:help;white-space:nowrap;';
+          cell.appendChild(warnDiv);
+        }
+
+        if (ctx.skuId) {
+          var allocBtn = document.createElement('button');
+          allocBtn.textContent = ctx.isAllocated ? 'Allocated \u2713' : 'Allocate';
+          allocBtn.title = ctx.isAllocated
+            ? 'Release this job\u2019s claim on stock'
+            : 'Reserve this job\u2019s required quantity of this SKU so other jobs see it as committed';
+          allocBtn.style.cssText = 'margin-top:4px;cursor:pointer;font-size:9px;font-family:Lato,sans-serif;font-weight:700;padding:2px 7px;border-radius:3px;white-space:nowrap;'
+            + (ctx.isAllocated
+                ? 'border:1px solid var(--green);background:rgba(61,186,120,0.15);color:var(--green);'
+                : 'border:1px solid var(--navy-border);background:transparent;color:var(--muted);');
+          allocBtn.onclick = function() { window.toggleComponentAllocation(jobId, ctx.cid, !ctx.isAllocated); };
+          cell.appendChild(allocBtn);
+        }
+      }
+
       comps.forEach(function(c) {
         var cid = c.id;
         var esc = window.escapeHtml;
         var onSite = c.sku_id !== null && c.sku_id !== undefined ? (stockMap[c.sku_id]||0) : null;
         var reqQty = c.qty_required || 0;
-        var sufficient = onSite !== null && onSite >= reqQty;
+        // Net availability = physical stock minus what is allocated to other active jobs.
+        var committedElsewhere = c.sku_id ? (committedMap[c.sku_id]||0) : 0;
+        var sharedJobs = c.sku_id ? (sharedJobsMap[c.sku_id]||[]) : [];
+        var availableNet = onSite !== null ? (onSite - committedElsewhere) : null;
+        var sufficient = availableNet !== null && availableNet >= reqQty;
 
         var onSiteStr   = onSite !== null ? onSite.toLocaleString() : '—';
-        var onSiteColor = onSite === null ? 'var(--muted)' : sufficient ? 'var(--green)' : onSite > 0 ? 'var(--amber)' : 'var(--red)';
+        var onSiteColor = onSite === null ? 'var(--muted)' : sufficient ? 'var(--green)' : availableNet > 0 ? 'var(--amber)' : 'var(--red)';
+
+        // Shared-SKU warning text (short marker + full tooltip).
+        var shared = sharedJobs.length > 0;
+        var warnShort = '', warnFull = '';
+        if (shared) {
+          if (committedElsewhere > 0) {
+            var allocOthers = sharedJobs.filter(function(s){ return s.allocated; });
+            warnShort = committedElsewhere.toLocaleString() + ' committed';
+            warnFull = committedElsewhere.toLocaleString() + ' unit(s) allocated to: '
+              + allocOthers.map(function(s){ return s.label + ' (' + (s.qty||0).toLocaleString() + ')'; }).join(', ')
+              + '. Net available for this job: ' + (availableNet != null ? availableNet.toLocaleString() : '—')
+              + '. Allocate this job to override.';
+          } else {
+            warnShort = 'shared';
+            warnFull = 'Also required by ' + sharedJobs.length + ' other active job(s): '
+              + sharedJobs.map(function(s){ return s.label + ' (' + (s.qty||0).toLocaleString() + ')'; }).join(', ')
+              + ' — not yet allocated to any job.';
+          }
+        }
 
         var isExcluded = !!c.is_excluded;
         var rowMute = isExcluded ? 'opacity:0.4;' : '';
@@ -32117,14 +32216,23 @@ window.saveAdjModal = async function() {
           + '<td style="padding:7px 10px 7px 0;font-size:12px;' + (isExcluded ? 'text-decoration:line-through;' : '') + '">' + esc(c._displayName||c.item_name||c.sku_id||'—') + '</td>'
           // col 2: Required
           + '<td style="padding:7px 6px;text-align:right;font-size:12px;">' + (reqQty ? reqQty.toLocaleString() : '—') + '</td>'
-          // col 3: On-site qty
-          + '<td style="padding:7px 6px;text-align:right;font-size:13px;font-weight:700;color:' + (isExcluded ? 'var(--muted)' : onSiteColor) + ';">' + (isExcluded ? '—' : onSiteStr) + '</td>'
+          // col 3: On-site qty (number + shared-SKU warning + allocate control, filled by buildOnSiteCell)
+          + '<td style="padding:7px 6px;text-align:right;font-size:13px;font-weight:700;"></td>'
           + '<td style="padding:7px 12px;text-align:center;"></td>'   // col 4: on-site ✔
           + '<td style="padding:7px 12px;text-align:center;"></td>'   // col 5: order
           + '<td style="padding:4px 12px;"></td>'                     // col 6: qty ord.
           + '<td style="padding:4px 12px;"></td>'                     // col 7: exp. delivery
           + '<td style="padding:4px 12px;"></td>'                     // col 8: supplier
           + '<td style="padding:7px 12px;text-align:center;"></td>';  // col 9: exclude
+
+        // col 3: On-site qty cell — build via helper (number + shared warning + allocate control).
+        var onSiteCtx = {
+          excluded: isExcluded, onSiteStr: onSiteStr, onSiteColor: onSiteColor,
+          shared: shared, warnShort: warnShort, warnFull: warnFull,
+          skuId: c.sku_id || null, cid: cid, isAllocated: !!c.is_allocated
+        };
+        tr._onSiteCtx = onSiteCtx;
+        buildOnSiteCell(tr.cells[3], onSiteCtx);
 
         // col 4: On-site checkbox — N/A dash if excluded, otherwise auto-ticked when stock >= required
         if (isExcluded) {
@@ -32201,10 +32309,12 @@ window.saveAdjModal = async function() {
             rowTr.style.opacity = excl ? '0.4' : '';
             // Item name strikethrough (col 1)
             if (rowTr.cells[1]) rowTr.cells[1].style.textDecoration = excl ? 'line-through' : '';
-            // On-site qty value + colour (col 3)
-            if (rowTr.cells[3]) {
-              rowTr.cells[3].textContent = excl ? '—' : rowOnSiteStr;
-              rowTr.cells[3].style.color = excl ? 'var(--muted)' : rowOnSiteColor;
+            // On-site qty value + colour (col 3) — rebuild via helper so the shared-SKU
+            // warning and allocate control survive an exclude toggle.
+            if (rowTr.cells[3] && rowTr._onSiteCtx) {
+              var rebuiltCtx = Object.assign({}, rowTr._onSiteCtx, { excluded: excl });
+              rowTr._onSiteCtx = rebuiltCtx;
+              buildOnSiteCell(rowTr.cells[3], rebuiltCtx);
             }
             // On-site tick (col 4)
             if (rowTr.cells[4]) {
@@ -32533,6 +32643,29 @@ window.saveAdjModal = async function() {
     if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) { window.toast && window.toast('You do not have permission to edit supply chain components.', 'error'); return; }
     try { var p={}; p[field]=value; await supaMut('PATCH','job_components','?id=eq.'+id,p); }
     catch(e) { console.warn('Component update failed:', e); window.toast && window.toast('Failed to save — ' + (e.message || 'unknown error'), 'error'); }
+  };
+
+  // Allocate / release a job's claim on a shared SKU. Allocation reserves this job's
+  // required quantity so other active jobs' Supply Chain tabs subtract it from availability.
+  window.toggleComponentAllocation = async function(jobId, id, allocate) {
+    if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) { window.toast && window.toast('You do not have permission to edit supply chain components.', 'error'); return; }
+    try {
+      var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || null;
+      await supaMut('PATCH','job_components','?id=eq.'+id, {
+        is_allocated: !!allocate,
+        allocated_at: allocate ? new Date().toISOString() : null,
+        allocated_by: allocate ? who : null
+      });
+      if (window._currentComps) {
+        var cached = window._currentComps.find(function(x){ return x.id === id; });
+        if (cached) cached.is_allocated = !!allocate;
+      }
+      window.toast && window.toast(allocate ? 'Stock allocated to this job.' : 'Allocation released.', 'success');
+      await loadComponentsTab(jobId);
+    } catch(e) {
+      console.warn('Allocation toggle failed:', e);
+      window.toast && window.toast('Failed to update allocation — ' + (e.message || 'unknown error'), 'error');
+    }
   };
 
   // ── Liquid, Dry Goods, Quality, Weights — skeleton content ───────────────────
