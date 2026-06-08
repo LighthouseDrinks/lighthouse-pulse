@@ -23266,6 +23266,34 @@ function _soFinal(lso) {
 window._soWater = _soWater;
 window._soFinal = _soFinal;
 
+// Keep a vessel's status in sync with whether any linked batch still holds liquid.
+// Only ever toggles available <-> in_use; manual states (maintenance / decommissioned
+// / archived) are left untouched. Non-blocking: failures never interrupt the caller.
+window._syncVesselStatus = async function(vesselId) {
+  if (!vesselId) return;
+  try {
+    var vrows = await window.db.select('vessels', '?id=eq.' + encodeURIComponent(vesselId) + '&select=status&limit=1');
+    var vessel = vrows && vrows[0];
+    if (!vessel) return;
+    // Protect manual states — only available/in_use are auto-managed.
+    if (vessel.status !== 'available' && vessel.status !== 'in_use') return;
+    var conts = await window.db.select('liquid_containers', '?vessel_id=eq.' + encodeURIComponent(vesselId) + '&archived=is.false&select=current_litres');
+    var anyLiquid = (conts || []).some(function(c){ return parseFloat(c.current_litres || 0) > 0; });
+    var target = anyLiquid ? 'in_use' : 'available';
+    if (target === vessel.status) return;
+    await window.db.update('vessels', '?id=eq.' + encodeURIComponent(vesselId), { status: target });
+    try {
+      var who  = window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email || null) : null;
+      var note = target === 'available'
+        ? 'Auto-set to available — all linked batches empty'
+        : 'Auto-set to in use — linked batch holds liquid';
+      await window.db.insert('vessel_history', { vessel_id: vesselId, note: note, created_by: who });
+    } catch(_h) { /* history note is best-effort */ }
+  } catch(e) {
+    console.warn('_syncVesselStatus skipped for ' + vesselId + ':', e && (e.message || e));
+  }
+};
+
 function clientName(id) {
   var c = _clients.find(function(x){ return x.id === id; });
   return c ? c.name : (id || '—');
@@ -23671,6 +23699,25 @@ window.loadVesselRegister = async function() {
     } catch(e) {}
   } catch(e) { _vrAllContainers = []; }
 
+  // Safety-net reconcile: recompute available/in_use for each non-manual vessel from
+  // the in-memory containers and PATCH only the ones whose stored status differs.
+  // Self-heals anything a mutation path missed; manual states are never touched.
+  try {
+    var _liveByVessel = {};
+    (_vrAllContainers || []).forEach(function(c){
+      if (c.vessel_id && parseFloat(c.current_litres || 0) > 0) _liveByVessel[c.vessel_id] = true;
+    });
+    (_vrVessels || []).forEach(function(v){
+      if (v.status !== 'available' && v.status !== 'in_use') return; // protect manual states
+      var target = _liveByVessel[v.id] ? 'in_use' : 'available';
+      if (target !== v.status) {
+        v.status = target; // keep KPIs/table in sync immediately
+        window.db.update('vessels', '?id=eq.' + encodeURIComponent(v.id), { status: target })
+          .catch(function(err){ console.warn('vessel status reconcile skipped for ' + v.id + ':', err && (err.message || err)); });
+      }
+    });
+  } catch(_rc) { /* reconcile is best-effort */ }
+
   // Populate vessel dropdown in Add Container form
   window._vrPopulateVesselDropdown();
 
@@ -23804,11 +23851,8 @@ window._vrLinkBatch = async function(containerId) {
   var vesselId = sel.value;
   try {
     await window.db.update('liquid_containers', '?id=eq.' + containerId, { vessel_id: vesselId });
-    // Mark vessel in_use if it currently shows available
-    var vessel = _vrVessels.find(function(v){ return v.id === vesselId; });
-    if (vessel && vessel.status === 'available') {
-      await window.db.update('vessels', '?id=eq.' + vesselId, { status: 'in_use' });
-    }
+    // Recompute the vessel's status from its linked batches (single source of truth).
+    if (window._syncVesselStatus) await window._syncVesselStatus(vesselId);
     // Audit the link so the container's history shows when/who connected it to a vessel.
     try {
       var _lc = (window._vrAllContainers || []).find(function(x){ return x.id === containerId; }) || {};
@@ -26364,6 +26408,9 @@ window.saveContainer = async function() {
         });
       }
     }
+    // Keep the linked vessel's status in sync with the container's new litres.
+    var _svid = editId ? (oldCont && oldCont.vessel_id) : (newRow && newRow[0] && newRow[0].vessel_id);
+    if (_svid && window._syncVesselStatus) window._syncVesselStatus(_svid);
     closeContainerModal(); await loadLiquid();
   } catch(e) { toastMsg('Error: ' + e.message, 'error'); }
   finally { btn.disabled = false; btn.textContent = editId ? 'Save Changes' : 'Save Container'; }
@@ -26420,6 +26467,7 @@ window.archiveContainer = async function(id) {
       });
     }
 
+    if (c.vessel_id && window._syncVesselStatus) window._syncVesselStatus(c.vessel_id);
     await loadLiquid();
   } catch(e) { logError('archiveContainer', e); toastMsg('Error archiving container: ' + e.message, 'error'); }
 };
@@ -26506,6 +26554,12 @@ window.archiveAllCreatedToday = async function() {
     fail === 0 ? todayRecords.length + ' records archived — clean slate ready.' : (todayRecords.length - fail) + ' archived, ' + fail + ' failed.',
     fail === 0 ? 'success' : 'error'
   );
+  // Re-sync each affected vessel now that its batches are archived.
+  if (window._syncVesselStatus) {
+    var _avids = {};
+    todayRecords.forEach(function(r){ if (r.vessel_id) _avids[r.vessel_id] = true; });
+    Object.keys(_avids).forEach(function(vid){ window._syncVesselStatus(vid); });
+  }
   window.liqClearSelection();
   await loadLiquid();
 };
@@ -26551,6 +26605,15 @@ window.bulkArchiveSelected = async function() {
     fail === 0 ? ids.length + ' casks archived.' : (ids.length - fail) + ' archived, ' + fail + ' failed.',
     fail === 0 ? 'success' : 'error'
   );
+  // Re-sync each affected vessel now that its batches are archived.
+  if (window._syncVesselStatus) {
+    var _bvids = {};
+    ids.forEach(function(cid){
+      var _bc2 = _liquid && _liquid.find(function(x){ return x.id === cid; });
+      if (_bc2 && _bc2.vessel_id) _bvids[_bc2.vessel_id] = true;
+    });
+    Object.keys(_bvids).forEach(function(vid){ window._syncVesselStatus(vid); });
+  }
   window.liqClearSelection();
   await loadLiquid();
 };
@@ -36278,6 +36341,26 @@ window.saveAdjModal = async function() {
         });
       } catch(wHistErr) { console.warn('dilution_water history write failed (non-critical):', wHistErr && wHistErr.message); }
     }
+
+    // Re-sync the status of every vessel behind a container touched by this close-out
+    // (bottled sources plus any leftover destinations). Non-blocking.
+    if (window._syncVesselStatus) {
+      try {
+        var _coCids = {};
+        (plan.lines || []).forEach(function(l){ if (l && l.containerId) _coCids[l.containerId] = true; });
+        (leftoverActions || []).forEach(function(lo){
+          if (lo && lo.containerId) _coCids[lo.containerId] = true;
+          (lo.allocations || []).forEach(function(a){ if (a && a.vesselId) _coCids[a.vesselId] = true; });
+        });
+        var _coIds = Object.keys(_coCids);
+        if (_coIds.length) {
+          var _coRows = await window.db.select('liquid_containers', '?id=in.(' + _coIds.join(',') + ')&select=vessel_id');
+          var _coVids = {};
+          (_coRows || []).forEach(function(r){ if (r && r.vessel_id) _coVids[r.vessel_id] = true; });
+          Object.keys(_coVids).forEach(function(vid){ window._syncVesselStatus(vid); });
+        }
+      } catch(_se) { /* vessel sync is best-effort */ }
+    }
   }
 
   // Apply one leftover reconciliation action at job close (Phase 3 — capacity-
@@ -44236,6 +44319,16 @@ window.saveAdjModal = async function() {
       }
 
       window.toast && window.toast((isBlend ? 'Blend' : 'Dilution') + ' saved.', 'success');
+
+      // Re-sync the status of every vessel whose container changed in this operation.
+      if (window._syncVesselStatus) {
+        var _dvids = {};
+        Object.keys(netMap).forEach(function(id){
+          var n = netMap[id];
+          if (n && n.cont && n.cont.vessel_id) _dvids[n.cont.vessel_id] = true;
+        });
+        Object.keys(_dvids).forEach(function(vid){ window._syncVesselStatus(vid); });
+      }
 
       // Capture output containers BEFORE reload (for the link-to-job prompt).
       var _dlOutput = null;
