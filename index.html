@@ -56037,6 +56037,7 @@ window.attendanceReject=async function(reqId,btn){
   function render(){
     var el = root(); if(!el) return;
     if (S.detail){ renderDetail(el); return; }
+    var admin=S.isAdmin || (window.canDo&&window.canDo('meetings_admin'));
     var html = ''
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:6px;">'
       +   '<div><div class="page-label">Pulse on Pulse</div>'
@@ -56050,6 +56051,7 @@ window.attendanceReject=async function(reqId,btn){
       +     '<button class="'+(S.view==='search'?'on':'')+'" onclick="MH.setView(\'search\')">Search</button>'
       +   '</div>'
       +   '<div style="flex:1"></div>'
+      +   (admin?'<button class="mh-btn" onclick="MH.manageTemplates()">\u2699 Templates</button>':'')
       +   '<button class="mh-btn" onclick="MH.refresh()">\u21BB Refresh</button>'
       + '</div>'
       + (S.error?('<div class="mh-card" style="padding:10px 14px;margin-bottom:14px;border-color:rgba(214,77,77,0.4);color:var(--red);font-size:12px;">'+esc(S.error)+'</div>'):'')
@@ -56200,9 +56202,40 @@ window.attendanceReject=async function(reqId,btn){
           entries = await db.select('kpi_entries','?kpi_id=in.('+ids.join(',')+')&order=period_start.desc&limit=200');
         }
       }
+      // Auto-seed a fresh recurring occurrence: when this week's agenda is still
+      // empty, lay down the agenda from the series' linked template and carry any
+      // open actions forward from the previous occurrence. Runs once — as soon as
+      // an agenda exists this whole block is skipped on later opens.
+      var _seedMsg='';
+      if (meeting.google_recurring_id && !agenda.length){
+        try {
+          if (seriesTpl && seriesTpl.template_id){
+            var tIts = await db.select('meeting_template_items','?template_id=eq.'+seriesTpl.template_id+'&order=position.asc');
+            if (tIts.length){
+              var seedRows = tIts.map(function(it,i){ return { id:uuid(), meeting_id:meeting.id, position:i, topic:it.topic, owner_role:it.owner_role, time_box_min:it.time_box_min, created_by:meId() }; });
+              var seeded = await db.insert('meeting_agenda_items', seedRows);
+              agenda = seeded || seedRows;
+            }
+          }
+          if (!actions.length){
+            var prevM = await db.select('meetings','?google_recurring_id=eq.'+encodeURIComponent(meeting.google_recurring_id)+'&starts_at=lt.'+encodeURIComponent(meeting.starts_at)+'&order=starts_at.desc&limit=1');
+            if (prevM.length){
+              var prevAc = await db.select('meeting_actions','?meeting_id=eq.'+prevM[0].id+'&done=eq.false');
+              if (prevAc.length){
+                var carryRows = prevAc.map(function(a){ return { id:uuid(), meeting_id:meeting.id, text:a.text, assigned_to:a.assigned_to, due_date:a.due_date, created_by:meId() }; });
+                var carried = await db.insert('meeting_actions', carryRows);
+                actions = actions.concat(carried || carryRows);
+              }
+            }
+          }
+          var parts=[]; if(agenda.length) parts.push(agenda.length+' agenda item'+(agenda.length>1?'s':'')+' from the template'); if(actions.length) parts.push(actions.length+' open action'+(actions.length>1?'s':'')+' carried over');
+          if(parts.length) _seedMsg='Set up this week: '+parts.join(' and ')+'.';
+        } catch(e){ /* non-fatal: leave it empty and let the admin apply manually */ }
+      }
       S.detail = { meeting:meeting, attendees:attendees, agenda:agenda, actions:actions, seriesKpis:seriesKpis, entries:entries, seriesTpl:seriesTpl, id:meetingId };
     } catch(e){ S.detail={ error:'Could not load meeting: '+((e&&e.message)||e), id:meetingId }; }
     render();
+    if (_seedMsg) window.toast&&window.toast(_seedMsg,'success');
   };
   MH.close = function(){ S.detail=null; render(); };
 
@@ -56406,8 +56439,10 @@ window.attendanceReject=async function(reqId,btn){
     var tpls = await db.select('meeting_templates','?order=name.asc&select=*,meeting_template_items(*)');
     if(!tpls.length){ window.toast&&window.toast('No templates available.'); return; }
     var opts = tpls.map(function(t){ return '<option value="'+t.id+'">'+esc(t.name)+'</option>'; }).join('');
+    var recurring=!!(S.detail.meeting&&S.detail.meeting.google_recurring_id);
     modal('Apply agenda template',
-      '<p class="mh-muted" style="margin:0 0 10px;">This adds the template\u2019s items to the agenda (existing items are kept).</p>'
+      '<p class="mh-muted" style="margin:0 0 10px;">This adds the template\u2019s items to the agenda now (existing items are kept).'
+      + (recurring?' It also becomes the standing template for this series \u2014 future weeks open with this agenda already laid out, plus any open actions carried forward.':'')+'</p>'
       + '<select id="mh-tpl-sel" class="mh-in">'+opts+'</select>',
       'Apply', async function(){
         var tid=document.getElementById('mh-tpl-sel').value; var t=tpls.find(function(x){return x.id===tid;}); if(!t) return true;
@@ -56591,6 +56626,134 @@ window.attendanceReject=async function(reqId,btn){
   }
 
   // ── Modal helper ───────────────────────────────────────
+  // ── Agenda template manager (admin) ────────────────────
+  // Standalone overlay so admins can create/edit/delete the standing agenda
+  // templates that get applied (and auto-seeded) onto recurring meetings.
+  MH._tm = { ov:null, view:'list', tpls:[], edit:null };
+
+  MH.manageTemplates = async function(){
+    var admin=S.isAdmin || (window.canDo&&window.canDo('meetings_admin'));
+    if(!admin){ window.toast&&window.toast('Admins only.'); return; }
+    try { MH._tm.tpls = await db.select('meeting_templates','?order=name.asc&select=*,meeting_template_items(*)'); }
+    catch(e){ MH._tm.tpls=[]; }
+    MH._tm.view='list'; MH._tm.edit=null;
+    if(!MH._tm.ov){
+      var ov=document.createElement('div'); ov.className='mh-modal-ov';
+      ov.addEventListener('click',function(e){ if(e.target===ov) MH.tmClose(); });
+      document.body.appendChild(ov); MH._tm.ov=ov;
+    }
+    tmRender();
+  };
+  MH.tmClose=function(){ if(MH._tm.ov&&MH._tm.ov.parentNode) MH._tm.ov.parentNode.removeChild(MH._tm.ov); MH._tm.ov=null; };
+
+  function tmRender(){
+    var ov=MH._tm.ov; if(!ov) return;
+    var inEditor=(MH._tm.view==='editor');
+    var title=inEditor?((MH._tm.edit&&MH._tm.edit._new)?'New agenda template':'Edit agenda template'):'Agenda templates';
+    ov.innerHTML='<div class="mh-modal" style="max-width:640px;width:100%;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid var(--navy-border);">'
+      +   '<div style="font-size:15px;font-weight:800;color:var(--white);">'+esc(title)+'</div>'
+      +   '<button class="mh-x" onclick="MH.tmClose()">\u2715</button>'
+      + '</div>'
+      + '<div style="padding:18px;max-height:64vh;overflow:auto;">'+(inEditor?tmEditorHtml():tmListHtml())+'</div>'
+      + '</div>';
+  }
+
+  function tmListHtml(){
+    var rows=(MH._tm.tpls||[]).map(function(t){
+      var n=(t.meeting_template_items||[]).length;
+      return '<div class="mh-card" style="padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:10px;">'
+        + '<div style="flex:1;min-width:0;"><div style="font-weight:800;color:var(--white);font-size:13px;">'+esc(t.name)+'</div>'
+        + '<div class="mh-muted" style="font-size:11px;">'+n+' item'+(n===1?'':'s')+'</div></div>'
+        + '<button class="mh-btn" onclick="MH.tmEdit(\''+t.id+'\')">Edit</button>'
+        + '<button class="mh-btn" onclick="MH.tmDelete(\''+t.id+'\')" style="color:var(--red);">Delete</button>'
+        + '</div>';
+    }).join('');
+    if(!(MH._tm.tpls||[]).length) rows='<div class="mh-muted" style="margin-bottom:12px;">No templates yet \u2014 create one to apply on your recurring meetings.</div>';
+    return rows + '<button class="mh-btn gold" onclick="MH.tmNew()" style="margin-top:6px;">+ New template</button>';
+  }
+
+  function tmEditorHtml(){
+    var e=MH._tm.edit; if(!e) return '';
+    var items=(e.items||[]).map(function(it,i){
+      return '<div class="mh-card" style="padding:10px;margin-bottom:8px;">'
+        + '<div style="display:flex;gap:8px;align-items:flex-start;">'
+        +   '<div style="display:flex;flex-direction:column;gap:3px;padding-top:2px;">'
+        +     '<button class="mh-btn" style="padding:2px 7px;" onclick="MH.tmMove('+i+',-1)" '+(i===0?'disabled':'')+'>\u2191</button>'
+        +     '<button class="mh-btn" style="padding:2px 7px;" onclick="MH.tmMove('+i+',1)" '+(i===e.items.length-1?'disabled':'')+'>\u2193</button>'
+        +   '</div>'
+        +   '<div style="flex:1;min-width:0;display:grid;gap:6px;">'
+        +     '<input class="mh-in tm-topic" data-i="'+i+'" placeholder="Topic" value="'+esc(it.topic||'')+'">'
+        +     '<div style="display:flex;gap:6px;">'
+        +       '<input class="mh-in tm-owner" data-i="'+i+'" placeholder="Owner / role (optional)" value="'+esc(it.owner_role||'')+'" style="flex:1;">'
+        +       '<input class="mh-in tm-time" data-i="'+i+'" type="number" min="0" placeholder="min" value="'+(it.time_box_min!=null?it.time_box_min:'')+'" style="width:84px;">'
+        +     '</div>'
+        +   '</div>'
+        +   '<button class="mh-x" onclick="MH.tmDelItem('+i+')" title="Remove item">\u2715</button>'
+        + '</div></div>';
+    }).join('');
+    return '<label class="mh-lbl">Template name</label>'
+      + '<input class="mh-in" id="tm-name" placeholder="e.g. Weekly Sales Review" value="'+esc(e.name||'')+'" style="margin:5px 0 14px;">'
+      + '<label class="mh-lbl">Agenda items</label>'
+      + '<div style="margin:6px 0 10px;">'+(items||'<div class="mh-muted">No items yet.</div>')+'</div>'
+      + '<button class="mh-btn" onclick="MH.tmAddItem()">+ Add item</button>'
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;border-top:1px solid var(--navy-border);padding-top:14px;">'
+      +   '<button class="mh-btn" onclick="MH.tmCancel()">Cancel</button>'
+      +   '<button class="mh-btn gold" onclick="MH.tmSave()">Save template</button>'
+      + '</div>';
+  }
+
+  // Pull the current input values into state before any re-render so edits stick.
+  function tmCapture(){
+    var e=MH._tm.edit, ov=MH._tm.ov; if(!e||!ov) return;
+    var nameEl=ov.querySelector('#tm-name'); if(nameEl) e.name=nameEl.value;
+    ov.querySelectorAll('.tm-topic').forEach(function(el){ var i=+el.getAttribute('data-i'); if(e.items[i]) e.items[i].topic=el.value; });
+    ov.querySelectorAll('.tm-owner').forEach(function(el){ var i=+el.getAttribute('data-i'); if(e.items[i]) e.items[i].owner_role=el.value||null; });
+    ov.querySelectorAll('.tm-time').forEach(function(el){ var i=+el.getAttribute('data-i'); if(e.items[i]) e.items[i].time_box_min=(el.value!==''?parseInt(el.value,10):null); });
+  }
+
+  MH.tmEdit=function(id){
+    var t=(MH._tm.tpls||[]).find(function(x){return x.id===id;}); if(!t) return;
+    MH._tm.edit={ id:t.id, name:t.name, _new:false, items:(t.meeting_template_items||[]).slice().sort(function(a,b){return (a.position||0)-(b.position||0);}).map(function(it){ return { topic:it.topic, owner_role:it.owner_role, time_box_min:it.time_box_min }; }) };
+    MH._tm.view='editor'; tmRender();
+  };
+  MH.tmNew=function(){ MH._tm.edit={ id:uuid(), name:'', _new:true, items:[{ topic:'', owner_role:null, time_box_min:null }] }; MH._tm.view='editor'; tmRender(); };
+  MH.tmAddItem=function(){ tmCapture(); MH._tm.edit.items.push({ topic:'', owner_role:null, time_box_min:null }); tmRender(); };
+  MH.tmDelItem=function(i){ tmCapture(); MH._tm.edit.items.splice(i,1); tmRender(); };
+  MH.tmMove=function(i,dir){ tmCapture(); var a=MH._tm.edit.items, j=i+dir; if(j<0||j>=a.length) return; var t=a[i]; a[i]=a[j]; a[j]=t; tmRender(); };
+  MH.tmCancel=function(){ MH._tm.view='list'; MH._tm.edit=null; tmRender(); };
+
+  MH.tmSave=async function(){
+    tmCapture();
+    var e=MH._tm.edit; if(!e) return;
+    if(!e.name||!e.name.trim()){ window.toast&&window.toast('Give the template a name.','error'); return; }
+    var items=(e.items||[]).filter(function(it){ return it.topic&&it.topic.trim(); });
+    try {
+      await db.upsert('meeting_templates',{ id:e.id, name:e.name.trim() });
+      if(!e._new){ try{ await db.delete('meeting_template_items','?template_id=eq.'+e.id); }catch(_){} }
+      if(items.length){
+        var rows=items.map(function(it,i){ return { id:uuid(), template_id:e.id, position:i, topic:it.topic.trim(), owner_role:(it.owner_role&&it.owner_role.trim())||null, time_box_min:(it.time_box_min!=null&&!isNaN(it.time_box_min))?it.time_box_min:null }; });
+        await db.insert('meeting_template_items', rows);
+      }
+      window.toast&&window.toast('Template saved.','success');
+      MH._tm.tpls = await db.select('meeting_templates','?order=name.asc&select=*,meeting_template_items(*)');
+      MH._tm.view='list'; MH._tm.edit=null; tmRender();
+    } catch(err){ window.toast&&window.toast('Could not save template: '+((err&&err.message)||err),'error'); }
+  };
+
+  MH.tmDelete=async function(id){
+    var t=(MH._tm.tpls||[]).find(function(x){return x.id===id;}); if(!t) return;
+    var ok = window.lpConfirm ? await window.lpConfirm('Delete the template \u201C'+t.name+'\u201D? Agendas already created from it are not affected.',{title:'Delete template',confirmLabel:'Delete',destructive:true}) : confirm('Delete this template?');
+    if(!ok) return;
+    try {
+      try{ await db.delete('meeting_template_items','?template_id=eq.'+id); }catch(_){}
+      await db.delete('meeting_templates','?id=eq.'+id);
+      window.toast&&window.toast('Template deleted.','success');
+      MH._tm.tpls=(MH._tm.tpls||[]).filter(function(x){return x.id!==id;});
+      tmRender();
+    } catch(err){ window.toast&&window.toast('Could not delete: '+((err&&err.message)||err),'error'); }
+  };
+
   function modal(title, bodyHtml, okLabel, onOk){
     var ov=document.createElement('div'); ov.className='mh-modal-ov';
     ov.innerHTML='<div class="mh-modal"><div style="display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid var(--navy-border);"><div style="font-size:15px;font-weight:800;color:var(--white);">'+esc(title)+'</div><button class="mh-x" id="mh-mx">\u2715</button></div><div style="padding:18px;">'+bodyHtml+'</div><div style="display:flex;justify-content:flex-end;gap:8px;padding:0 18px 18px;"><button class="mh-btn" id="mh-mc">Cancel</button><button class="mh-btn gold" id="mh-mo">'+esc(okLabel||'OK')+'</button></div></div>';
