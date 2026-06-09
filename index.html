@@ -41285,7 +41285,7 @@ window.saveAdjModal = async function() {
 
   // Resolve a destination container ID — if it's a __vessel__ prefixed value,
   // auto-create an empty liquid_containers record for that vessel and return its UUID
-  async function _resolveDestId(val, clientId) {
+  async function _resolveDestId(val, clientId, createdSink) {
     if (!val) return null;
     if (!val.startsWith || !val.startsWith('__vessel__')) return val;
     var vesselId = val.replace('__vessel__', '');
@@ -41307,6 +41307,7 @@ window.saveAdjModal = async function() {
       var ins = await window.db.insert('liquid_containers', payload);
       var newId = ins && ins[0] && ins[0].id;
       if (newId) {
+        if (createdSink && createdSink.containers) createdSink.containers.push(newId); // rollback-eligible
         // Update vessel status
         try { await window.db.update('vessels', '?id=eq.' + vessel.id, { status: 'in_use' }); } catch(e) {}
         // Reload liquid data so the new record is in _bl
@@ -41323,7 +41324,7 @@ window.saveAdjModal = async function() {
   // liquid_containers UUID. Returns null on validation failure (caller should
   // abort) and toasts the reason. Does NOT call loadBlData — the dilute save
   // flow re-loads _bl once after pre-resolving all destinations.
-  async function _resolveNewVesselDest(idx) {
+  async function _resolveNewVesselDest(idx, createdSink) {
     var clientSel = document.getElementById('dl-dnv-client-' + idx);
     var typeSel   = document.getElementById('dl-dnv-type-' + idx);
     var codeEl    = document.getElementById('dl-dnv-code-' + idx);
@@ -41364,7 +41365,7 @@ window.saveAdjModal = async function() {
         payload.is_client_vessel    = true;
         payload.client_vessel_label = code;
       } else {
-        var vesselCode = await _ensureVessel(code, type, capacity, location);
+        var vesselCode = await _ensureVessel(code, type, capacity, location, createdSink && createdSink.vessels);
         if (!vesselCode) {
           window.toast && window.toast('Could not register vessel "' + code + '". Check for duplicates and try again.', 'error');
           return null;
@@ -41379,6 +41380,7 @@ window.saveAdjModal = async function() {
         window.toast && window.toast('Failed to create liquid container for new vessel.', 'error');
         return null;
       }
+      if (createdSink && createdSink.containers) createdSink.containers.push(newId); // rollback-eligible
       return newId;
     } catch(e) {
       var msg = (e && e.message) || String(e);
@@ -41681,7 +41683,7 @@ window.saveAdjModal = async function() {
   };
 
   // Helper: ensure a vessel record exists for a given code, creating one if needed
-  async function _ensureVessel(code, type, capacity, location) {
+  async function _ensureVessel(code, type, capacity, location, createdSink) {
     if (!code) return null;
     var _cc = window._canonVesselId ? window._canonVesselId(code) : code.toUpperCase();
     var existing = _vrVessels && _vrVessels.find(function(v){
@@ -41705,6 +41707,7 @@ window.saveAdjModal = async function() {
       await window.db.insert('vessels', newVessel);
       // Update local cache
       if (window._vrVessels) window._vrVessels.push(Object.assign({ created_at: new Date().toISOString() }, newVessel));
+      if (createdSink && createdSink.push) createdSink.push(code); // newly created — eligible for rollback
       return code;
     } catch(e) {
       // Canonical-duplicate conflict (race, or stale local cache): a vessel with the
@@ -43314,6 +43317,15 @@ window.saveAdjModal = async function() {
         var n = parseInt(v.id.slice(prefix.length), 10) || 0;
         if (n > maxN) maxN = n;
       });
+      // Also avoid codes already entered in OTHER open new-vessel rows in this form —
+      // otherwise three fresh IBC rows would all suggest the same next number.
+      document.querySelectorAll('[id^="dl-dnv-code-"]').forEach(function(inp){
+        if (inp === codeEl) return;
+        var ov = (inp.value || '').trim().toUpperCase();
+        if (ov.indexOf(prefix) !== 0) return;
+        var on = parseInt(ov.slice(prefix.length), 10) || 0;
+        if (on > maxN) maxN = on;
+      });
       codeEl.value = prefix + String(maxN + 1).padStart(3, '0');
     } else if (isClientVessel) {
       window._dlOnNewVesselClientChange(idx);
@@ -44292,10 +44304,65 @@ window.saveAdjModal = async function() {
     // ── Collect and validate destinations (always net-per-container) ──
     var dests  = [];
     var netMap = {};
+    // Track vessels/containers created during this save so they can be rolled back if a
+    // later validation aborts (a failed save must never leave orphan IBCs behind).
+    var _created  = { containers: [], vessels: [] };
+    var _applying = false; // set true once container updates start committing
+    var _rollbackNew = async function() {
+      // Delete containers BEFORE vessels (container.vessel_id references the vessel row).
+      for (var i = _created.containers.length - 1; i >= 0; i--) {
+        try { await window.db.delete('liquid_containers', '?id=eq.' + _created.containers[i]); } catch(e) {}
+      }
+      for (var j = _created.vessels.length - 1; j >= 0; j--) {
+        try { await window.db.delete('vessels', '?id=eq.' + encodeURIComponent(_created.vessels[j])); } catch(e) {}
+      }
+      _created.containers = []; _created.vessels = [];
+    };
+    var _failDest = async function(msg) { await _rollbackNew(); window.toast && window.toast(msg, 'error'); };
     {
+      // idx -> resolved real liquid_containers UUID. We must NOT write the new UUID back
+      // onto the <select>: its option list is frozen and has no matching option, so
+      // select.value would silently reset to "" and the destination would be dropped.
+      var resolvedById = {};
+
+      // Pre-flight (before creating anything): there must be at least one destination with
+      // volume, and the allocation must balance — gate on these so a bad form never writes.
+      var _intendedAlloc = 0, _intendedCount = 0;
+      document.querySelectorAll('[id^="dl-dr-"]').forEach(function(row) {
+        var i2  = row.id.replace('dl-dr-','');
+        var s2  = document.getElementById('dl-dc-' + i2);
+        var l2  = parseFloat((document.getElementById('dl-dl-' + i2) || {}).value) || 0;
+        if (!s2 || !s2.value || l2 <= 0) return;
+        _intendedCount++; _intendedAlloc += l2;
+      });
+      if (!_intendedCount) { window.toast && window.toast('Add at least one destination container with a volume.', 'error'); return; }
+      if (Math.abs(_intendedAlloc - outputL) > 0.1) {
+        window.toast && window.toast('Allocated ' + _intendedAlloc.toFixed(1) + 'L but total output is ' + outputL.toFixed(1) + 'L — they must balance.', 'error'); return;
+      }
+
+      // Pre-flight: reject duplicate new-vessel codes across rows BEFORE creating anything.
+      var _newCodes = {}, _dupCode = null;
+      document.querySelectorAll('[id^="dl-dc-"]').forEach(function(sel0){
+        if (_dupCode || sel0.value !== '__newvessel__') return;
+        var i0 = sel0.id.replace('dl-dc-','');
+        if ((parseFloat((document.getElementById('dl-dl-' + i0) || {}).value) || 0) <= 0) return;
+        var clientSel0 = document.getElementById('dl-dnv-client-' + i0);
+        var isCv0 = clientSel0 && clientSel0.value && window._cmIsLighthouseClient
+          ? !window._cmIsLighthouseClient(clientSel0.value, clientSel0) : false;
+        var raw0 = isCv0
+          ? ((document.getElementById('dl-dnv-cvref-' + i0) || {}).textContent || '')
+          : ((document.getElementById('dl-dnv-code-' + i0) || {}).value || '');
+        var code0 = window._canonVesselId ? window._canonVesselId(raw0) : String(raw0).trim().toUpperCase();
+        if (!code0 || code0 === '—') return;
+        if (_newCodes[code0]) _dupCode = (raw0 || '').trim();
+        _newCodes[code0] = true;
+      });
+      if (_dupCode) {
+        window.toast && window.toast('Two destination vessels have the same code "' + _dupCode + '" — give each a unique code.', 'error'); return;
+      }
+
       // Pre-resolve any __newvessel__ destination rows first (these register a
-      // brand-new vessel + create a liquid_containers row). Done before the
-      // __vessel__ pass so the subsequent _bl reload covers both.
+      // brand-new vessel + create a liquid_containers row).
       var _dlDestSels = document.querySelectorAll('[id^="dl-dc-"]');
       for (var _dnvi = 0; _dnvi < _dlDestSels.length; _dnvi++) {
         if (_dlDestSels[_dnvi].value === '__newvessel__') {
@@ -44303,17 +44370,18 @@ window.saveAdjModal = async function() {
           // Skip rows with no litres allocated — would create an orphan empty container.
           var _dnvLitres = parseFloat((document.getElementById('dl-dl-' + _dnvIdx) || {}).value) || 0;
           if (_dnvLitres <= 0) continue;
-          var _dnvId  = await _resolveNewVesselDest(_dnvIdx);
-          if (!_dnvId) return; // _resolveNewVesselDest already toasted; abort save
-          _dlDestSels[_dnvi].value = _dnvId;
+          var _dnvId  = await _resolveNewVesselDest(_dnvIdx, _created);
+          if (!_dnvId) { await _rollbackNew(); return; } // _resolveNewVesselDest already toasted
+          resolvedById[_dnvIdx] = _dnvId;
         }
       }
       // Pre-resolve any __vessel__ destination values into real liquid_containers IDs
       _dlDestSels = document.querySelectorAll('[id^="dl-dc-"]');
       for (var _dvi = 0; _dvi < _dlDestSels.length; _dvi++) {
         if (_dlDestSels[_dvi].value && _dlDestSels[_dvi].value.indexOf('__vessel__') === 0) {
-          var _dlResolved = await _resolveDestId(_dlDestSels[_dvi].value, null);
-          if (_dlResolved) _dlDestSels[_dvi].value = _dlResolved;
+          var _dvIdx = _dlDestSels[_dvi].id.replace('dl-dc-','');
+          var _dlResolved = await _resolveDestId(_dlDestSels[_dvi].value, null, _created);
+          if (_dlResolved) resolvedById[_dvIdx] = _dlResolved;
         }
       }
       // Reload _bl so newly-created vessel containers are findable
@@ -44324,23 +44392,26 @@ window.saveAdjModal = async function() {
         var idx   = row.id.replace('dl-dr-','');
         var sel   = document.getElementById('dl-dc-' + idx);
         var litEl = document.getElementById('dl-dl-' + idx);
-        if (!sel || !sel.value) return;
-        var cont = _bl.find(function(c){ return c.id === sel.value; });
+        // Use the resolved id (new/registered vessels) and fall back to the select value
+        // (existing containers, whose id IS a real option).
+        var cid   = resolvedById[idx] || (sel && sel.value);
+        if (!cid || cid.indexOf('__') === 0) return; // ignore unresolved __newvessel__/__vessel__ placeholders
+        var cont = _bl.find(function(c){ return c.id === cid; });
         if (!cont) return;
         var l = parseFloat(litEl && litEl.value) || 0;
         if (l <= 0) return;
         dests.push({ cont: cont, litres: l });
       });
-      if (!dests.length) { window.toast && window.toast('Add at least one destination container with a volume.', 'error'); return; }
+      if (!dests.length) { await _failDest('Add at least one destination container with a volume.'); return; }
       var totalAlloc = dests.reduce(function(s,d){ return s + d.litres; }, 0);
       if (Math.abs(totalAlloc - outputL) > 0.1) {
-        window.toast && window.toast('Allocated ' + totalAlloc.toFixed(1) + 'L but total output is ' + outputL.toFixed(1) + 'L — they must balance.', 'error'); return;
+        await _failDest('Allocated ' + totalAlloc.toFixed(1) + 'L but total output is ' + outputL.toFixed(1) + 'L — they must balance.'); return;
       }
 
       // LH → Client gatekeeper: confirm sale when LH-owned liquid flows into a client vessel.
       if (typeof window._confirmLhOutflowIfNeeded === 'function') {
         var _okOutflow = await window._confirmLhOutflowIfNeeded(sources, dests);
-        if (!_okOutflow) return;
+        if (!_okOutflow) { await _rollbackNew(); return; }
       }
 
       // ── Build net-per-container map: a container can be both source and destination ──
@@ -44372,7 +44443,7 @@ window.saveAdjModal = async function() {
         }
       });
       if (_drawBad.length) {
-        window.toast && window.toast('Source drawn beyond available stock: ' + _drawBad.join('; ') + '. Reduce the amounts.', 'error');
+        await _failDest('Source drawn beyond available stock: ' + _drawBad.join('; ') + '. Reduce the amounts.');
         return;
       }
 
@@ -44387,7 +44458,7 @@ window.saveAdjModal = async function() {
           }
         });
         if (_blendBad.length) {
-          window.toast && window.toast('Blend output can\'t go back into a partially-used source (its leftover keeps its original product): ' + _blendBad.join(', ') + '. Send the blend to an empty/free or new vessel.', 'error');
+          await _failDest('Blend output can\'t go back into a partially-used source (its leftover keeps its original product): ' + _blendBad.join(', ') + '. Send the blend to an empty/free or new vessel.');
           return;
         }
       }
@@ -44402,7 +44473,7 @@ window.saveAdjModal = async function() {
         if (ceil !== Infinity && newL > ceil + 0.01) _capBad.push(n.cont.reference);
       });
       if (_capBad.length) {
-        window.toast && window.toast('Destination over max fill (capacity +10%): ' + _capBad.join(', '), 'error'); return;
+        await _failDest('Destination over max fill (capacity +10%): ' + _capBad.join(', ')); return;
       }
 
       // LPA reconciliation guard: output LPA should match the expected (or measured) figure.
@@ -44416,6 +44487,7 @@ window.saveAdjModal = async function() {
 
     try {
       if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+      _applying = true; // container updates begin here — don't auto-rollback created vessels past this point
 
       // Net-per-container apply: one update per container, separate history rows for take vs fill
       var _ids = Object.keys(netMap);
@@ -44514,6 +44586,8 @@ window.saveAdjModal = async function() {
       await loadBlData(); initBLDilute();
       if (_dlOutput) _lsoOfferLinkToJob(dlJobId, _dlOutput);
     } catch(e) {
+      // If we failed before any container update committed, undo the vessels/containers we created.
+      if (!_applying) { try { await _rollbackNew(); } catch(_re) {} }
       window.toast && window.toast('Error: ' + e.message, 'error');
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = isBlend ? 'Save Blend' : 'Save Dilution'; }
