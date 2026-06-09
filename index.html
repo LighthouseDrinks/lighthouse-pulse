@@ -55899,7 +55899,8 @@ window.attendanceReject=async function(reqId,btn){
     loading: false,
     error: null,
     detail: null,         // open meeting detail bundle
-    kpiCat: 'Finance',
+    kpiSet: 'management',
+    kpiCat: 'Operations',
     users: null,
     isAdmin: false,
     me: ''
@@ -56297,7 +56298,7 @@ window.attendanceReject=async function(reqId,btn){
       + '<div class="nm">'+esc(kpi.name)+'</div>'
       + '<div style="font-size:18px;font-weight:800;color:var(--white);">'+esc(latest?(latest.value||latest.numeric_value||'\u2014'):'\u2014')+'</div>'
       + ragBadge(status)
-      + '<div style="font-size:11px;color:var(--muted);">Target: '+esc(kpi.target||'\u2014')+'</div>'
+      + '<div style="font-size:11px;color:var(--muted);">'+(kpi.target?('Target: '+esc(kpi.target)):(kpi.rag_rule?esc(kpi.rag_rule):'\u2014'))+'</div>'
       + '<button class="mh-btn" style="padding:5px 8px;font-size:11px;" onclick="MH.kpiEntry(\''+kpi.id+'\')">Update reading</button>'
       + '</div>';
   }
@@ -56420,13 +56421,19 @@ window.attendanceReject=async function(reqId,btn){
   MH.adminPanel = async function(){
     var m=S.detail.meeting;
     if(!m.google_recurring_id){ window.toast&&window.toast('This is a one-off meeting (no recurring series to configure).'); return; }
-    var allK = await db.select('kpis','?active=eq.true&order=category.asc,position.asc');
+    var allK = await db.select('kpis','?active=eq.true&order=kpi_set.asc,position.asc');
     var cur = (S.detail.seriesKpis||[]).map(function(x){return x.kpi_id;});
-    var byCat={}; allK.forEach(function(k){ (byCat[k.category]=byCat[k.category]||[]).push(k); });
-    var body='<p class="mh-muted" style="margin:0 0 10px;">Tick the KPIs this meeting series reviews. They appear beside the agenda each time.</p><div style="max-height:46vh;overflow:auto;">';
-    Object.keys(byCat).forEach(function(cat){
-      body+='<div class="mh-lbl" style="margin:8px 0 4px;color:var(--gold);">'+esc(cat)+'</div>';
-      byCat[cat].forEach(function(k){ body+='<label style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text);padding:3px 0;cursor:pointer;"><input type="checkbox" class="mh-kchk" value="'+k.id+'" '+(cur.indexOf(k.id)>=0?'checked':'')+'>'+esc(k.name)+'</label>'; });
+    function chk(k){ return '<label style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text);padding:3px 0;cursor:pointer;"><input type="checkbox" class="mh-kchk" value="'+k.id+'" '+(cur.indexOf(k.id)>=0?'checked':'')+'>'+esc(k.name)+(k.subcategory?(' <span style="color:var(--muted);">\u00B7 '+esc(k.subcategory)+'</span>'):'')+'</label>'; }
+    var body='<p class="mh-muted" style="margin:0 0 10px;">Tick the KPIs this meeting series reviews. They appear beside the agenda each time. The management set and the department sets are kept separate \u2014 link whichever this meeting reviews.</p><div style="max-height:46vh;overflow:auto;">';
+    [['management','Management Objectives'],['department','Departments']].forEach(function(pair){
+      var setK=allK.filter(function(k){return k.kpi_set===pair[0];});
+      if(!setK.length) return;
+      body+='<div style="font-size:12px;font-weight:800;color:var(--white);margin:12px 0 4px;text-transform:uppercase;letter-spacing:.08em;">'+esc(pair[1])+'</div>';
+      var cats=[]; setK.forEach(function(k){ if(cats.indexOf(k.category)<0) cats.push(k.category); });
+      cats.forEach(function(cat){
+        body+='<div class="mh-lbl" style="margin:8px 0 4px;color:var(--gold);">'+esc(cat)+'</div>';
+        setK.filter(function(k){return k.category===cat;}).forEach(function(k){ body+=chk(k); });
+      });
     });
     body+='</div>';
     modal('KPIs for this series', body, 'Save', async function(){
@@ -56467,35 +56474,65 @@ window.attendanceReject=async function(reqId,btn){
   };
 
   // ── KPI Tracker (standalone) ───────────────────────────
-  var CATS=['Finance','Sales','Operations','Quality','E-Commerce','People'];
+  // Two strictly-separate sets: the management "Lighthouse Objectives" (16) and
+  // the per-department KPIs (45). They never cross over.
+  var DEPTS=['Operations','Quality','Finance','Sales','E-Commerce'];
+  var MGMT_HEADINGS=['Finance','Customer','Internal Processes','Learning & Growth'];
+
+  function kpiCardFull(k, entries, admin){
+    var es=entries.filter(function(e){return e.kpi_id===k.id;});
+    var latest=es[0];
+    var status=latest?(latest.status||computeRag(k,latest.numeric_value)):null;
+    var inactive=(k.active===false);
+    var meta = k.target ? ('Target: '+esc(k.target)+(k.cadence?(' \u00B7 '+esc(k.cadence)):'')) : (k.rag_rule?esc(k.rag_rule):'\u2014');
+    return '<div class="mh-kpi" style="border-left:4px solid '+ragMeta(status).c+';'+(inactive?'opacity:.55;':'')+'">'
+      + '<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="nm">'+esc(k.name)+'</div>'
+      +   (inactive?'<span class="mh-pill" style="background:rgba(255,255,255,0.08);color:var(--muted);flex:none;">On hold</span>':'')+'</div>'
+      + '<div style="font-size:20px;font-weight:800;color:var(--white);">'+esc(latest?(latest.value||latest.numeric_value||'\u2014'):'\u2014')+'</div>'
+      + ragBadge(status)
+      + sparkline(es)
+      + '<div style="font-size:11px;color:var(--muted);">'+meta+'</div>'
+      + (k.owner_role?('<div style="font-size:11px;color:var(--muted);">Owner: '+esc(roleLabel(k.owner_role))+'</div>'):'')
+      + (latest&&latest.period_start?('<div style="font-size:10px;color:var(--muted);">Last: '+esc(new Date(latest.period_start).toLocaleDateString('en-GB'))+'</div>'):'')
+      + ((admin&&!inactive)?'<button class="mh-btn" style="padding:5px 8px;font-size:11px;" onclick="MH.kpiEntryStandalone(\''+k.id+'\')">+ Reading</button>':'')
+      + '</div>';
+  }
+  function kpiGroup(label, list, entries, admin){
+    if(!list.length) return '';
+    return '<div class="mh-daygroup"><div class="mh-daylabel">'+esc(label)+'</div>'
+      + '<div class="mh-kgrid">'+list.map(function(k){return kpiCardFull(k,entries,admin);}).join('')+'</div></div>';
+  }
+
   async function renderKpis(v){
     v.innerHTML='<div class="mh-muted" style="padding:30px;text-align:center;">Loading KPIs\u2026</div>';
     var kpis, entries;
     try {
-      kpis = await db.select('kpis','?active=eq.true&order=category.asc,position.asc');
+      kpis = await db.select('kpis','?order=kpi_set.asc,position.asc');
       entries = await db.select('kpi_entries','?order=period_start.desc&limit=1000');
     } catch(e){ v.innerHTML='<div class="mh-card" style="padding:20px;color:var(--red);">Could not load KPIs: '+esc((e&&e.message)||e)+'</div>'; return; }
     var admin=S.isAdmin || (window.canDo&&window.canDo('meetings_admin'));
-    var tabs='<div class="mh-bar">'+CATS.map(function(c){ return '<span class="mh-chip '+(S.kpiCat===c?'on':'')+'" onclick="MH.setKpiCat(\''+c+'\')">'+esc(c)+'</span>'; }).join('')+'</div>';
-    var list=kpis.filter(function(k){return k.category===S.kpiCat;});
-    var grid='<div class="mh-kgrid">'+list.map(function(k){
-      var es=entries.filter(function(e){return e.kpi_id===k.id;});
-      var latest=es[0];
-      var status=latest?(latest.status||computeRag(k,latest.numeric_value)):null;
-      return '<div class="mh-kpi" style="border-left:4px solid '+ragMeta(status).c+';">'
-        + '<div style="display:flex;justify-content:space-between;gap:8px;"><div class="nm">'+esc(k.name)+'</div></div>'
-        + '<div style="font-size:20px;font-weight:800;color:var(--white);">'+esc(latest?(latest.value||latest.numeric_value||'\u2014'):'\u2014')+'</div>'
-        + ragBadge(status)
-        + sparkline(es)
-        + '<div style="font-size:11px;color:var(--muted);">Target: '+esc(k.target||'\u2014')+' \u00B7 '+esc(k.cadence||'')+'</div>'
-        + '<div style="font-size:11px;color:var(--muted);">Owner: '+esc(k.owner_role?roleLabel(k.owner_role):'\u2014')+'</div>'
-        + (latest&&latest.recorded_at?('<div style="font-size:10px;color:var(--muted);">Last: '+esc(new Date(latest.period_start).toLocaleDateString('en-GB'))+'</div>'):'')
-        + (admin?'<button class="mh-btn" style="padding:5px 8px;font-size:11px;" onclick="MH.kpiEntryStandalone(\''+k.id+'\')">+ Reading</button>':'')
-        + '</div>';
-    }).join('')+'</div>';
-    if(!list.length) grid='<div class="mh-muted" style="padding:24px;">No KPIs in this category.</div>';
-    v.innerHTML=tabs+grid;
     S._kpis=kpis;
+    if (DEPTS.indexOf(S.kpiCat)<0) S.kpiCat='Operations';
+
+    var setSeg='<div class="mh-bar"><div class="mh-seg">'
+      + '<button class="'+(S.kpiSet==='management'?'on':'')+'" onclick="MH.setKpiSet(\'management\')">Management Objectives</button>'
+      + '<button class="'+(S.kpiSet==='department'?'on':'')+'" onclick="MH.setKpiSet(\'department\')">Departments</button>'
+      + '</div></div>';
+
+    var bodyHtml='';
+    if (S.kpiSet==='management'){
+      var mgmt=kpis.filter(function(k){return k.kpi_set==='management';});
+      bodyHtml += '<div class="mh-muted" style="margin:-4px 0 14px;">Company-wide scorecard \u2014 reviewed in the management meeting.</div>';
+      MGMT_HEADINGS.forEach(function(h){ bodyHtml += kpiGroup(h, mgmt.filter(function(k){return k.category===h;}), entries, admin); });
+      if(!mgmt.length) bodyHtml='<div class="mh-muted" style="padding:24px;">No management KPIs.</div>';
+    } else {
+      bodyHtml += '<div class="mh-bar">'+DEPTS.map(function(c){ return '<span class="mh-chip '+(S.kpiCat===c?'on':'')+'" onclick="MH.setKpiCat(\''+c+'\')">'+esc(c)+'</span>'; }).join('')+'</div>';
+      var dept=kpis.filter(function(k){return k.kpi_set==='department'&&k.category===S.kpiCat;});
+      var subs=[]; dept.forEach(function(k){ var s=k.subcategory||'Other'; if(subs.indexOf(s)<0) subs.push(s); });
+      subs.forEach(function(s){ bodyHtml += kpiGroup(s, dept.filter(function(k){return (k.subcategory||'Other')===s;}), entries, admin); });
+      if(!dept.length) bodyHtml+='<div class="mh-muted" style="padding:24px;">No KPIs in this department.</div>';
+    }
+    v.innerHTML=setSeg+bodyHtml;
   }
   function roleLabel(key){ var r=window.ROLES_BY_KEY&&window.ROLES_BY_KEY[key]; return r?(r.label||key):key; }
   function sparkline(es){
@@ -56562,6 +56599,7 @@ window.attendanceReject=async function(reqId,btn){
   MH.setView=function(v){ S.view=v; render(); if(v==='calendar'&&!S.feed) loadFeed(); };
   MH.setCal=function(c){ S.calView=c; loadFeed(); };
   MH.setRoom=function(r){ S.room=r; render(); };
+  MH.setKpiSet=function(s){ S.kpiSet=s; render(); };
   MH.setKpiCat=function(c){ S.kpiCat=c; render(); };
   MH.nav=function(dir){ var step=(S.calView==='day')?1:(S.calView==='week')?7:7; S.anchor=addDays(S.anchor,dir*step); loadFeed(); };
   MH.today=function(){ S.anchor=startOfDay(new Date()); loadFeed(); };
