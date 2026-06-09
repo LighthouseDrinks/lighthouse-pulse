@@ -21949,10 +21949,10 @@ window._approvalsBadgePoll = async function() {
               <input type="text" id="dl-cbw" placeholder="e.g. R-2025-043">
               <div class="field-hint">Optional — assign later once issued.</div>
             </div>
-            <div class="mfield" id="dl-owner-wrap" style="display:none;">
-              <label>Output Owner *</label>
-              <select id="dl-owner" style="width:100%;background:var(--navy-dark);border:1px solid var(--gold);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;"><option value="">— Select owner —</option></select>
-              <div class="field-hint">Sources span multiple owners — choose who owns the blended product.</div>
+            <div class="mfield" id="dl-owner-wrap">
+              <label id="dl-owner-label">Output Owner</label>
+              <select id="dl-owner" onchange="window._dlOwnerTouched && window._dlOwnerTouched()" style="width:100%;background:var(--navy-dark);border:1px solid var(--gold);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;"><option value="">— Select owner —</option></select>
+              <div class="field-hint" id="dl-owner-hint">Owner of the resultant liquid — change only to transfer title (sale).</div>
             </div>
           </div>
           <!-- Optional measured-output reconciliation (excise loss-of-account) -->
@@ -35579,11 +35579,15 @@ window.saveAdjModal = async function() {
   function _lsoOfferLinkToJob(jobId, outputContainers) {
     if (!jobId || !outputContainers || !outputContainers.length) return;
     _lsoLinkContainersToJobSignoff(jobId, outputContainers).then(function() {
-      if (window._lsoCurrentJobId === jobId && typeof window.loadLiquidSignoffPanel === 'function') {
-        window.loadLiquidSignoffPanel(jobId);
+      if (window._lsoCurrentJobId === jobId && typeof window.loadLiquidTab === 'function') {
+        window.loadLiquidTab(jobId);
       }
     });
   }
+  // Exposed on window: the save handlers (saveDilution/saveBlend) live in a separate
+  // <script> IIFE and call these by name. Without this they throw a ReferenceError.
+  window._lsoOfferLinkToJob = _lsoOfferLinkToJob;
+  window.loadLiquidTab      = loadLiquidTab;
 
   // ── Liquid stock deduction modal (shown BEFORE dry goods at job completion) ──
   async function _showLiquidDeductionModal(job, jobId) {
@@ -43059,7 +43063,7 @@ window.saveAdjModal = async function() {
         st.disabled = false; // no/unknown source type yet — keep BOM/manual prefill editable
       }
     })();
-    if (op === 'blend') _dlUpdateOwnerVisibility();
+    _dlUpdateOwnerVisibility();
     _dlSyncDests();
     if ((document.getElementById('dl-target-abv')||{}).value) window.calcDLWaterFromTargetABV();
     window.calcDilutePreview();
@@ -43772,7 +43776,7 @@ window.saveAdjModal = async function() {
         var wc=document.getElementById('bl-water-check'); if(wc) wc.checked=false;
         var ww=document.getElementById('bl-water-wrap'); if(ww) ww.style.display='none';
         await loadBlData(); initBLBlend();
-        if (_blInPlaceOutput) _lsoOfferLinkToJob(blJobId, _blInPlaceOutput);
+        if (_blInPlaceOutput && window._lsoOfferLinkToJob) window._lsoOfferLinkToJob(blJobId, _blInPlaceOutput);
       } catch(e) {
         window.toast && window.toast('Error: ' + e.message, 'error');
       } finally {
@@ -43885,7 +43889,7 @@ window.saveAdjModal = async function() {
       var wc=document.getElementById('bl-water-check'); if(wc) wc.checked=false;
       var ww=document.getElementById('bl-water-wrap'); if(ww) ww.style.display='none';
       await loadBlData(); initBLBlend();
-      if (_blMultiOutput) _lsoOfferLinkToJob(blJobId, _blMultiOutput);
+      if (_blMultiOutput && window._lsoOfferLinkToJob) window._lsoOfferLinkToJob(blJobId, _blMultiOutput);
     } catch(e) {
       window.toast && window.toast('Error: ' + e.message, 'error');
     } finally {
@@ -43911,7 +43915,8 @@ window.saveAdjModal = async function() {
     var tn = document.getElementById('dl-target-note');  if (tn) tn.style.display = 'none';
     var op = document.getElementById('dl-operation');    if (op) op.value = 'dilution';
     _dlPopulateOwners();
-    var ow = document.getElementById('dl-owner-wrap');   if (ow) ow.style.display = 'none';
+    if (window._dlResetOwnerTouched) window._dlResetOwnerTouched();
+    var owSel = document.getElementById('dl-owner'); if (owSel) owSel.value = '';
     var st = document.getElementById('dl-spirit-type');
     if (st) {
       st.value = ''; st.disabled = false;
@@ -44038,18 +44043,35 @@ window.saveAdjModal = async function() {
     sel.innerHTML = opts;
   }
 
-  // Show the Output Owner picker only for blends whose sources span more than one owner.
+  // The Output Owner picker is always visible. It pre-fills with the single source
+  // owner (so the resultant liquid keeps that owner by default, even in a Lighthouse
+  // vessel); the operator can override it to transfer title. Cross-owner blends have
+  // no default and require an explicit pick.
+  var _dlOwnerTouchedFlag = false;
+  window._dlOwnerTouched = function(){ _dlOwnerTouchedFlag = true; };
+  window._dlResetOwnerTouched = function(){ _dlOwnerTouchedFlag = false; };
   function _dlUpdateOwnerVisibility() {
     var wrap = document.getElementById('dl-owner-wrap');
     if (!wrap) return;
-    var op = (document.getElementById('dl-operation')||{}).value || 'dilution';
+    wrap.style.display = '';
+    var sel   = document.getElementById('dl-owner');
+    var label = document.getElementById('dl-owner-label');
+    var hint  = document.getElementById('dl-owner-hint');
     var owners = [];
     document.querySelectorAll('[id^="dl-sc-"]').forEach(function(s){
       if (!s.value) return;
       var c = _bl.find(function(x){ return x.id === s.value; });
       if (c && c.client_id && owners.indexOf(c.client_id) < 0) owners.push(c.client_id);
     });
-    wrap.style.display = (op === 'blend' && owners.length > 1) ? '' : 'none';
+    var multi = owners.length > 1;
+    if (label) label.textContent = multi ? 'Output Owner *' : 'Output Owner';
+    if (hint)  hint.textContent  = multi
+      ? 'Sources span multiple owners — choose who owns the blended product.'
+      : 'Owner of the resultant liquid — change only to transfer title (sale).';
+    // Pre-fill the single source owner unless the operator has manually changed it.
+    if (sel && !_dlOwnerTouchedFlag) {
+      sel.value = owners.length === 1 ? owners[0] : '';
+    }
   }
   window._dlUpdateOwnerVisibility = _dlUpdateOwnerVisibility;
 
@@ -44262,15 +44284,36 @@ window.saveAdjModal = async function() {
       if (_dilTypes.length > 1) { window.toast && window.toast('Dilution requires one spirit type — switch the operation to Blend to combine different liquids.', 'error'); return; }
     }
 
-    // Cross-owner blend: when sources span multiple owners, an output owner must be chosen.
+    // Output owner of the resultant liquid.
+    //  • Single distinct source owner  → inherit it (so the blend/dilution stays
+    //    owned by e.g. Micil even when it lands in a Lighthouse-tracked vessel).
+    //  • Multiple owners (blend)        → operator must pick.
+    //  • Operator override              → the picker value wins; if it differs
+    //    from the single source owner that's a change of title (sale) — confirm + log.
+    var _owners = [];
+    sources.forEach(function(s){ var o = s.cont.client_id; if (o && _owners.indexOf(o) < 0) _owners.push(o); });
+    var _pickedOwner = gv('dl-owner');
     var outputOwner = '';
-    if (isBlend) {
-      var _owners = [];
-      sources.forEach(function(s){ var o = s.cont.client_id; if (o && _owners.indexOf(o) < 0) _owners.push(o); });
-      if (_owners.length > 1) {
-        outputOwner = gv('dl-owner');
-        if (!outputOwner) { window.toast && window.toast('Sources span multiple owners — select the output owner.', 'error'); return; }
+    if (_owners.length > 1) {
+      outputOwner = _pickedOwner;
+      if (!outputOwner) { window.toast && window.toast('Sources span multiple owners — select the output owner.', 'error'); return; }
+    } else {
+      outputOwner = _pickedOwner || _owners[0] || '';
+    }
+    // Title change: a single-owner input whose chosen output owner differs = a sale.
+    var _ownerChanged = (_owners.length === 1 && outputOwner && outputOwner !== _owners[0]);
+    var _ownerFromName = _ownerChanged ? (window._clientNameById ? (window._clientNameById(_owners[0]) || _owners[0]) : _owners[0]) : '';
+    var _ownerToName   = _ownerChanged ? (window._clientNameById ? (window._clientNameById(outputOwner) || outputOwner) : outputOwner) : '';
+    if (_ownerChanged) {
+      var _ocMsg = 'Transfer ownership of the resultant liquid from ' + _ownerFromName + ' to ' + _ownerToName + '?'
+        + '\n\nThis records a change of title (treated as a sale) on the output container(s).\n\nContinue?';
+      var _ocOk;
+      if (typeof window.lpConfirm === 'function') {
+        _ocOk = await window.lpConfirm(_ocMsg, { title: 'Change of Liquid Ownership', confirmLabel: 'Yes, transfer ownership', destructive: true });
+      } else {
+        _ocOk = window.confirm(_ocMsg);
       }
+      if (!_ocOk) return;
     }
 
     var srcTotalL   = sources.reduce(function(s,c){ return s + c.litres; }, 0);
@@ -44508,7 +44551,7 @@ window.saveAdjModal = async function() {
         };
         if (n.addL > 0) {
           upd.spirit_type = dlSpirit; upd.cbw_rotation = newRot || null;
-          if (outputOwner) upd.client_id = outputOwner; // cross-owner blend: assign chosen owner
+          if (outputOwner) upd.client_id = outputOwner; // owner of the resultant liquid (inherited or chosen)
         }
         else if (newL <= 0) { upd.spirit_type = null; upd.cbw_rotation = null; }
         await window.db.update('liquid_containers', '?id=eq.' + n.cont.id, upd);
@@ -44530,7 +44573,9 @@ window.saveAdjModal = async function() {
             lpa_before: afterDeductLP, lpa_after: newLP,
             cbw_rotation_before: n.cont.cbw_rotation, cbw_rotation_after: newRot,
             notes: n.addL.toFixed(1) + 'L ' + opName + ' output (ABV ' + newABVc.toFixed(2) + '%) → ' + n.cont.reference
-                 + (outputOwner ? ' [owner ' + (window._clientNameById ? (window._clientNameById(outputOwner)||outputOwner) : outputOwner) + ']' : '')
+                 + (_ownerChanged
+                      ? ' [ownership transferred ' + _ownerFromName + ' → ' + _ownerToName + ']'
+                      : (outputOwner ? ' [owner ' + (window._clientNameById ? (window._clientNameById(outputOwner)||outputOwner) : outputOwner) + ']' : ''))
                  + (dlJobId ? ' (job ' + dlJobId + ')' : ''),
             performed_by_id: pById, performed_by_name: pByName });
         }
@@ -44584,7 +44629,7 @@ window.saveAdjModal = async function() {
 
       hideDilutePreview();
       await loadBlData(); initBLDilute();
-      if (_dlOutput) _lsoOfferLinkToJob(dlJobId, _dlOutput);
+      if (_dlOutput && window._lsoOfferLinkToJob) window._lsoOfferLinkToJob(dlJobId, _dlOutput);
     } catch(e) {
       // If we failed before any container update committed, undo the vessels/containers we created.
       if (!_applying) { try { await _rollbackNew(); } catch(_re) {} }
