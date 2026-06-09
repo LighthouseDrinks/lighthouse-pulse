@@ -18047,6 +18047,10 @@ window.loadBoms = async function initBoms() {
   }
 
   // ── Notification polling (every 45s while tab is visible) ─────────────
+  // The 45s poll is now just a backstop: live updates come from the realtime
+  // subscription below, and an immediate refresh fires when the user returns
+  // to the tab. This keeps the red bell badge prompt even when, e.g., the
+  // person who sent a task is waiting for the assignee to mark it complete.
   function startNotifPolling(){
     if (window._notifPollStarted) return;
     window._notifPollStarted = true;
@@ -18058,6 +18062,40 @@ window.loadBoms = async function initBoms() {
     }, 45000);
   }
 
+  // Refresh the moment the tab regains focus/visibility so a returning user
+  // sees the latest badge instantly instead of waiting for the next poll tick.
+  function startNotifFocusRefresh(){
+    if (window._notifFocusRefreshStarted) return;
+    window._notifFocusRefreshStarted = true;
+    document.addEventListener('visibilitychange', function(){
+      if (document.visibilityState === 'visible' && meId()) reloadNotifications();
+    });
+    window.addEventListener('focus', function(){
+      if (meId()) reloadNotifications();
+    });
+  }
+
+  // ── Notification realtime ─────────────────────────────────────────────
+  // Near-instant badge updates: subscribe to inserts/updates on this user's
+  // own notification rows and refresh the bell on any change (debounced).
+  var _notifRtDebounce = null;
+  function startNotifRealtime(){
+    if (window._notifRtChannel || !window._sb) return;
+    var me = meId();
+    if (!me) return;
+    function _notifRtRefresh(){
+      clearTimeout(_notifRtDebounce);
+      _notifRtDebounce = setTimeout(function(){ reloadNotifications(); }, 300);
+    }
+    try {
+      window._notifRtChannel = window._sb
+        .channel('crm_notifications_' + me)
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'crm_notifications', filter: 'user_id=eq.' + me }, _notifRtRefresh)
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'crm_notifications', filter: 'user_id=eq.' + me }, _notifRtRefresh)
+        .subscribe();
+    } catch(e) { window.logError && window.logError('startNotifRealtime', e); }
+  }
+
   // ── Bootstrap ────────────────────────────────────────────────────────
   function boot(){
     loadAppUsers().then(function(){
@@ -18067,6 +18105,8 @@ window.loadBoms = async function initBoms() {
       }
       startDDObserver();
       startNotifPolling();
+      startNotifFocusRefresh();
+      startNotifRealtime();
       if (window._approvalsBadgePoll) {
         window._approvalsBadgePoll();
         setInterval(function() {
@@ -56261,7 +56301,6 @@ window.attendanceReject=async function(reqId,btn){
       +   '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">'
       +     '<div style="font-size:15px;font-weight:800;color:var(--white);">Agenda</div>'
       +     '<div style="display:flex;gap:8px;">'
-      +       (m.google_recurring_id?'<button class="mh-btn" onclick="MH.carryOver()">\u21A9 Carry over</button>':'')
       +       (admin?'<button class="mh-btn" onclick="MH.applyTemplate()">Apply template</button>':'')
       +       '<button class="mh-btn gold" onclick="MH.addAgenda()">+ Item</button>'
       +     '</div>'
@@ -56290,17 +56329,12 @@ window.attendanceReject=async function(reqId,btn){
     return items.map(function(it){
       return '<div class="mh-ag" data-id="'+it.id+'">'
         + '<div class="row1">'
-        +   '<input type="checkbox" '+(it.done?'checked':'')+' onchange="MH.agField(\''+it.id+'\',\'done\',this.checked)" title="Done">'
+        +   '<input type="checkbox" '+(it.done?'checked':'')+' onchange="MH.agField(\''+it.id+'\',\'done\',this.checked)" title="Mark covered">'
         +   '<input class="mh-in" style="font-weight:700;" value="'+esc(it.topic||'')+'" onchange="MH.agField(\''+it.id+'\',\'topic\',this.value)" placeholder="Topic">'
-        +   '<input class="mh-in" style="width:74px;flex:none;" type="number" value="'+(it.time_box_min==null?'':it.time_box_min)+'" onchange="MH.agField(\''+it.id+'\',\'time_box_min\',this.value)" title="Time-box (min)" placeholder="min">'
+        +   '<input class="mh-in" style="width:58px;flex:none;text-align:right;" type="number" min="0" value="'+(it.time_box_min==null?'':it.time_box_min)+'" onchange="MH.agField(\''+it.id+'\',\'time_box_min\',this.value)" title="Minutes for this topic (optional)" placeholder="min">'
+        +   '<span class="mh-muted" style="font-size:11px;flex:none;">min</span>'
         +   '<button class="mh-x" onclick="MH.delAgenda(\''+it.id+'\')" title="Delete">\u2715</button>'
         + '</div>'
-        + '<div style="display:flex;gap:8px;margin-top:8px;align-items:center;">'
-        +   '<span class="mh-lbl">Owner</span>'
-        +   '<select class="mh-in" style="width:auto;flex:none;" onchange="MH.agField(\''+it.id+'\',\'owner_id\',this.value||null)">'+userOptions(it.owner_id)+'</select>'
-        +   '<label style="font-size:11px;color:var(--muted);display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" '+(it.carries_over?'checked':'')+' onchange="MH.agField(\''+it.id+'\',\'carries_over\',this.checked)">Carries over</label>'
-        + '</div>'
-        + '<textarea class="mh-in" style="margin-top:8px;" placeholder="Notes\u2026" onchange="MH.agField(\''+it.id+'\',\'notes\',this.value)">'+esc(it.notes||'')+'</textarea>'
         + '</div>';
     }).join('');
   }
@@ -56413,25 +56447,6 @@ window.attendanceReject=async function(reqId,btn){
       window.toast&&window.toast(a.assigned_to?('Task created for '+assigneeName):'No owner set \u2014 task created for you','success');
       if (window.updateMyTasksBadge) try{ window.updateMyTasksBadge(); }catch(e){}
     } catch(e){ window.toast&&window.toast('Could not create task: '+((e&&e.message)||e),'error'); }
-  };
-
-  // Carry over from previous occurrence in the same series
-  MH.carryOver = async function(){
-    var m=S.detail.meeting; if(!m.google_recurring_id) return;
-    try {
-      var prev = await db.select('meetings','?google_recurring_id=eq.'+encodeURIComponent(m.google_recurring_id)+'&starts_at=lt.'+encodeURIComponent(m.starts_at)+'&order=starts_at.desc&limit=1');
-      if(!prev.length){ window.toast&&window.toast('No earlier meeting in this series to carry over from.'); return; }
-      var pid=prev[0].id;
-      var pAg = await db.select('meeting_agenda_items','?meeting_id=eq.'+pid+'&order=position.asc');
-      var pAc = await db.select('meeting_actions','?meeting_id=eq.'+pid+'&done=eq.false');
-      var newAg = pAg.map(function(it,i){ return { id:uuid(), meeting_id:m.id, position:(S.detail.agenda.length+i), topic:it.topic, owner_id:it.owner_id, owner_role:it.owner_role, time_box_min:it.time_box_min, carries_over:it.carries_over, created_by:meId() }; });
-      var newAc = pAc.map(function(a){ return { id:uuid(), meeting_id:m.id, text:a.text, assigned_to:a.assigned_to, due_date:a.due_date, created_by:meId() }; });
-      if(newAg.length){ var rA=await db.insert('meeting_agenda_items',newAg); S.detail.agenda=S.detail.agenda.concat(rA); }
-      if(newAc.length){ var rB=await db.insert('meeting_actions',newAc); S.detail.actions=S.detail.actions.concat(rB); }
-      document.getElementById('mh-agenda').innerHTML=renderAgendaItems(S.detail.agenda);
-      document.getElementById('mh-actions').innerHTML=renderActions(S.detail.actions);
-      window.toast&&window.toast('Carried over '+newAg.length+' agenda item(s) and '+newAc.length+' open action(s).','success');
-    } catch(e){ window.toast&&window.toast('Carry over failed: '+((e&&e.message)||e),'error'); }
   };
 
   // Apply a standing template (admin)
@@ -56682,12 +56697,10 @@ window.attendanceReject=async function(reqId,btn){
         +     '<button class="mh-btn" style="padding:2px 7px;" onclick="MH.tmMove('+i+',-1)" '+(i===0?'disabled':'')+'>\u2191</button>'
         +     '<button class="mh-btn" style="padding:2px 7px;" onclick="MH.tmMove('+i+',1)" '+(i===e.items.length-1?'disabled':'')+'>\u2193</button>'
         +   '</div>'
-        +   '<div style="flex:1;min-width:0;display:grid;gap:6px;">'
-        +     '<input class="mh-in tm-topic" data-i="'+i+'" placeholder="Topic" value="'+esc(it.topic||'')+'">'
-        +     '<div style="display:flex;gap:6px;">'
-        +       '<input class="mh-in tm-owner" data-i="'+i+'" placeholder="Owner / role (optional)" value="'+esc(it.owner_role||'')+'" style="flex:1;">'
-        +       '<input class="mh-in tm-time" data-i="'+i+'" type="number" min="0" placeholder="min" value="'+(it.time_box_min!=null?it.time_box_min:'')+'" style="width:84px;">'
-        +     '</div>'
+        +   '<div style="flex:1;min-width:0;display:flex;gap:6px;align-items:center;">'
+        +     '<input class="mh-in tm-topic" data-i="'+i+'" placeholder="Topic" value="'+esc(it.topic||'')+'" style="flex:1;">'
+        +     '<input class="mh-in tm-time" data-i="'+i+'" type="number" min="0" placeholder="min" value="'+(it.time_box_min!=null?it.time_box_min:'')+'" style="width:64px;text-align:right;flex:none;">'
+        +     '<span class="mh-muted" style="font-size:11px;flex:none;">min</span>'
         +   '</div>'
         +   '<button class="mh-x" onclick="MH.tmDelItem('+i+')" title="Remove item">\u2715</button>'
         + '</div></div>';
@@ -56708,7 +56721,6 @@ window.attendanceReject=async function(reqId,btn){
     var e=MH._tm.edit, ov=MH._tm.ov; if(!e||!ov) return;
     var nameEl=ov.querySelector('#tm-name'); if(nameEl) e.name=nameEl.value;
     ov.querySelectorAll('.tm-topic').forEach(function(el){ var i=+el.getAttribute('data-i'); if(e.items[i]) e.items[i].topic=el.value; });
-    ov.querySelectorAll('.tm-owner').forEach(function(el){ var i=+el.getAttribute('data-i'); if(e.items[i]) e.items[i].owner_role=el.value||null; });
     ov.querySelectorAll('.tm-time').forEach(function(el){ var i=+el.getAttribute('data-i'); if(e.items[i]) e.items[i].time_box_min=(el.value!==''?parseInt(el.value,10):null); });
   }
 
