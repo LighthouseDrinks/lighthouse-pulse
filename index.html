@@ -26381,6 +26381,21 @@ window.saveContainer = async function() {
       if (!_proceed) return;
     }
   }
+  // Soft register check: warn (don't block) when the chosen spirit/product isn't
+  // an active liquid-product register entry — keeps legacy rows editable while
+  // flagging values that will land under "Containers Needing Retag".
+  var _cmSpirit = cmLitres > 0 ? gv('cm-spirit') : '';
+  if (_cmSpirit) {
+    try {
+      var _cmReg = await window.getLiquidProducts();
+      if (_cmReg && _cmReg.length && !_cmReg.some(function(p){ return p.name === _cmSpirit; })) {
+        var _cmGo = await window.lpConfirm(
+          '"' + _cmSpirit + '" is not in the liquid product register, so this container will appear under "Containers Needing Retag". Save anyway?',
+          { title: 'Product not in register', confirmLabel: 'Save anyway', cancelLabel: 'Go back' });
+        if (!_cmGo) return;
+      }
+    } catch(eCmReg) { /* register unavailable — don't block the save */ }
+  }
   var isClientVessel = !!(gv('cm-client') && !window._cmIsLighthouseClient(gv('cm-client')));
   var payload = {
     type:cmType, reference:gv('cm-reference'), client_id:gv('cm-client'),
@@ -34171,6 +34186,30 @@ window.saveAdjModal = async function() {
   }
   window._lsoEffAbv = _lsoEffAbv;
 
+  // Liquid-identity badge: register membership + BOM liquid description match.
+  // Independent of the ABV badge — "ABV matches BOM" says nothing about WHICH
+  // liquid is in the container, so this surfaces identity separately.
+  function _lsoLiquidBadge(cont, bomDesc) {
+    if (!cont || !cont.spirit_type) return '';
+    var norm = function(s){ return String(s || '').toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim(); };
+    var st = norm(cont.spirit_type);
+    var names = window._lsoActiveProductNames || [];
+    var base = 'font-size:10px;font-weight:700;border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;';
+    // Only assert "not in register" when the register actually loaded.
+    if (names.length && !names.some(function(n){ return norm(n) === st; })) {
+      return '<span style="' + base + 'color:var(--red);background:rgba(220,53,69,0.12);border:1px solid rgba(220,53,69,0.4);">Liquid not in register</span>';
+    }
+    if (!bomDesc) return '';
+    var bd = norm(bomDesc);
+    // liquid_spec is free text — accept exact match or containment either way.
+    var matches = bd === st || bd.indexOf(st) >= 0 || st.indexOf(bd) >= 0;
+    if (matches) {
+      return '<span style="' + base + 'color:var(--green);background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.4);">Liquid matches BOM</span>';
+    }
+    return '<span style="' + base + 'color:var(--amber);background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.4);">Verify liquid vs BOM</span>';
+  }
+  window._lsoLiquidBadge = _lsoLiquidBadge;
+
   // ── LIQUID SIGN-OFF (5.02.02) ──────────────────────────────────────────────
   async function loadLiquidTab(jobId) {
     var el = document.getElementById('jd-liquid-content');
@@ -34207,6 +34246,13 @@ window.saveAdjModal = async function() {
           }
         } catch(e3) { /* non-critical */ }
       }
+
+      // Active liquid-product register names — powers the per-container
+      // liquid-identity badge (non-critical: badge degrades gracefully if empty).
+      try {
+        var _lpRows = await window.getLiquidProducts();
+        window._lsoActiveProductNames = (_lpRows || []).map(function(p){ return p.name; });
+      } catch(e4) { window._lsoActiveProductNames = window._lsoActiveProductNames || []; }
 
       var lsoBtnId    = d.id || '';
       var alreadySigned = !!(d.signed_by && d.signed_at);
@@ -34465,9 +34511,11 @@ window.saveAdjModal = async function() {
           } else if (_effAbv < _bottlingAbv - LSO_ABV_TOL) {
             _badge = '<span style="font-size:10px;font-weight:700;color:var(--red);background:rgba(220,53,69,0.12);border:1px solid rgba(220,53,69,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Below bottling ABV</span>';
           } else {
-            _badge = '<span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Matches BOM</span>';
+            _badge = '<span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">ABV matches BOM</span>';
           }
         }
+        // Liquid-identity badge (register membership + BOM liquid description)
+        if (cont) _badge += _lsoLiquidBadge(cont, _lsoLiquidSkuDesc);
         html += '<div class="lso-linked-row" data-idx="' + idx + '" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
           + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + _badge + '</span>'
           + (!isLocked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" title="Delink this container from the job" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:600;">&#10005; Delink</button>' : '')
@@ -35424,9 +35472,11 @@ window.saveAdjModal = async function() {
         } else if (effAbv < _bottAbv - _tol) {
           abvBadge = '<span style="font-size:10px;font-weight:700;color:var(--red);background:rgba(220,53,69,0.12);border:1px solid rgba(220,53,69,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Below bottling ABV</span>';
         } else {
-          abvBadge = '<span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">Matches BOM</span>';
+          abvBadge = '<span style="font-size:10px;font-weight:700;color:var(--green);background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.4);border-radius:3px;padding:2px 7px;margin-left:8px;white-space:nowrap;">ABV matches BOM</span>';
         }
       }
+      // Liquid-identity badge (register membership + BOM liquid description)
+      if (cont && window._lsoLiquidBadge) abvBadge += window._lsoLiquidBadge(cont, window._lsoLiquidSkuDesc);
       return '<div class="lso-linked-row" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
         + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + abvBadge + '</span>'
         + (!_locked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" title="Delink this container from the job" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:600;">&#10005; Delink</button>' : '')
@@ -43110,9 +43160,16 @@ window.saveAdjModal = async function() {
       // Dilution = same product weaker: lock output to the single source type when known.
       if (op === 'dilution' && st && types.length === 1) {
         var hasOpt = Array.prototype.some.call(st.options, function(o){ return o.value === types[0]; });
-        if (!hasOpt) { var o = document.createElement('option'); o.value = types[0]; o.textContent = types[0]; st.appendChild(o); }
-        st.value = types[0];
-        st.disabled = true;
+        if (hasOpt) {
+          st.value = types[0];
+          st.disabled = true;
+        } else {
+          // Source spirit type isn't in the register — don't silently inject and
+          // lock it (that's how orphan values like "blended_whiskey" propagate).
+          // Keep the select editable so the operator picks a registered product.
+          st.disabled = false;
+          window.toast && window.toast('Source liquid "' + types[0] + '" is not in the product register — pick a registered output product, then retag the source container.', 'warn');
+        }
       } else if (op === 'dilution' && st) {
         st.disabled = false; // no/unknown source type yet — keep BOM/manual prefill editable
       }
@@ -44323,6 +44380,16 @@ window.saveAdjModal = async function() {
 
     // Output spirit type is mandatory in every mode.
     if (!dlSpirit || dlSpirit === '__newproduct__') { window.toast && window.toast('Select an output spirit type.', 'error'); return; }
+    // …and it must be a registered liquid product. Free-text/legacy values
+    // (e.g. "blended_whiskey") create orphan containers that never match a BOM
+    // and immediately land in the "Containers Needing Retag" list.
+    try {
+      var _dlRegister = await window.getLiquidProducts();
+      if (_dlRegister && _dlRegister.length && !_dlRegister.some(function(p){ return p.name === dlSpirit; })) {
+        window.toast && window.toast('"' + dlSpirit + '" is not in the liquid product register. Add it under Inventory → Liquid Products first, or pick a registered product.', 'error');
+        return;
+      }
+    } catch(eReg) { /* register unavailable — don't block the save on a lookup failure */ }
     // Water is required for a dilution, optional for a blend.
     if (!isBlend && !waterL) { window.toast && window.toast('Enter RO water volume (or switch the operation to Blend).', 'error'); return; }
 
