@@ -16750,7 +16750,7 @@ window.loadBoms = async function initBoms() {
 
 <!-- Task create/edit modal -->
 <div id="task-modal-overlay" class="modal-overlay" style="display:none;z-index:50200;">
-  <div class="modal" style="max-width:640px;width:92%;padding:0;border:1px solid var(--navy-border);">
+  <div class="modal-box" style="max-width:640px;width:92%;padding:0;">
     <div style="padding:18px 22px;border-bottom:1px solid var(--navy-border);display:flex;justify-content:space-between;align-items:center;">
       <div>
         <div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;color:var(--muted);font-weight:700;" id="tm-mode-label">New Task</div>
@@ -16808,6 +16808,13 @@ window.loadBoms = async function initBoms() {
       <div style="margin-bottom:14px;">
         <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase;margin-bottom:4px;">Description</label>
         <textarea id="tm-description" rows="4" placeholder="More context, links, acceptance criteria&hellip;" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--white);padding:9px 11px;font-size:13px;border-radius:4px;font-family:Lato,sans-serif;resize:vertical;"></textarea>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);letter-spacing:0.05em;text-transform:uppercase;margin-bottom:4px;">Attachments</label>
+        <div id="tm-attach-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+        <input id="tm-files" type="file" multiple style="display:none;" onchange="window._tmFilesPicked(this)" />
+        <button type="button" onclick="document.getElementById('tm-files').click()" class="btn btn-outline" style="font-size:12px;padding:7px 14px;">+ Attach files</button>
       </div>
     </div>
     <div style="padding:14px 22px;border-top:1px solid var(--navy-border);display:flex;justify-content:space-between;gap:8px;">
@@ -17136,6 +17143,8 @@ window.loadBoms = async function initBoms() {
 
   // ── Task modal ────────────────────────────────────────────────────────
   var _tmWatchers = [];
+  var _tmAttachments  = [];   // saved attachments [{name,url,path}]
+  var _tmPendingFiles = [];   // File objects picked but not yet uploaded
 
   window.openTaskModal = async function(taskId, presets){
     await loadAppUsers();
@@ -17179,6 +17188,11 @@ window.loadBoms = async function initBoms() {
     renderWatcherChips();
     refreshWatcherAddSelect();
 
+    _tmAttachments  = (t && Array.isArray(t.attachments)) ? t.attachments.slice() : [];
+    _tmPendingFiles = [];
+    document.getElementById('tm-files').value = '';
+    renderAttachList();
+
     document.getElementById('task-modal-overlay').style.display = 'flex';
     setTimeout(function(){ document.getElementById('tm-title').focus(); }, 50);
   };
@@ -17219,6 +17233,55 @@ window.loadBoms = async function initBoms() {
     renderWatcherChips(); refreshWatcherAddSelect();
   };
 
+  // ── Task modal: attachments ───────────────────────────────────────────
+  function fmtFileSize(bytes){
+    if (bytes == null) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes/1024).toFixed(0) + ' KB';
+    return (bytes/1048576).toFixed(1) + ' MB';
+  }
+
+  function renderAttachList(){
+    var host = document.getElementById('tm-attach-list'); if (!host) return;
+    var rows = [];
+    _tmAttachments.forEach(function(a, i){
+      rows.push('<div style="display:flex;align-items:center;gap:8px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;padding:6px 10px;">'
+        + '<span style="font-size:13px;">&#128206;</span>'
+        + '<a href="' + esc(a.url) + '" target="_blank" rel="noopener" style="flex:1;min-width:0;font-size:12px;color:var(--gold);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name || 'file') + '</a>'
+        + '<button onclick="window._tmRemoveAttachment(' + i + ')" title="Remove" style="background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:0 2px;">&times;</button>'
+        + '</div>');
+    });
+    _tmPendingFiles.forEach(function(f, i){
+      rows.push('<div style="display:flex;align-items:center;gap:8px;background:var(--navy-mid);border:1px dashed var(--navy-border);border-radius:4px;padding:6px 10px;">'
+        + '<span style="font-size:13px;">&#128206;</span>'
+        + '<span style="flex:1;min-width:0;font-size:12px;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(f.name) + '</span>'
+        + '<span style="font-size:10px;color:var(--muted);">' + fmtFileSize(f.size) + ' &middot; pending</span>'
+        + '<button onclick="window._tmRemovePendingFile(' + i + ')" title="Remove" style="background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:0 2px;">&times;</button>'
+        + '</div>');
+    });
+    host.innerHTML = rows.length ? rows.join('')
+      : '<span style="font-size:11px;color:var(--muted);">No attachments yet. The assignee will be able to download anything you attach.</span>';
+  }
+
+  window._tmFilesPicked = function(input){
+    var files = Array.prototype.slice.call(input.files || []);
+    var MAX = 25 * 1048576;
+    files.forEach(function(f){
+      if (f.size > MAX) { window.lpAlert && window.lpAlert('"' + f.name + '" is over 25 MB — please attach a smaller file.'); return; }
+      _tmPendingFiles.push(f);
+    });
+    input.value = '';
+    renderAttachList();
+  };
+  window._tmRemoveAttachment = function(i){
+    _tmAttachments.splice(i, 1);
+    renderAttachList();
+  };
+  window._tmRemovePendingFile = function(i){
+    _tmPendingFiles.splice(i, 1);
+    renderAttachList();
+  };
+
   // Keep watcher-add dropdown excluding the currently selected assignee
   document.addEventListener('change', function(ev){
     if (ev.target && ev.target.id === 'tm-assignee') refreshWatcherAddSelect();
@@ -17241,6 +17304,23 @@ window.loadBoms = async function initBoms() {
     var due_at    = dueRaw ? new Date(dueRaw + 'T17:00:00').toISOString() : null;
     var remind_at = remindRaw ? new Date(remindRaw + 'T09:00:00').toISOString() : null;
 
+    // Upload any newly picked files before writing the task row
+    var taskKey = id || uuid();
+    var attachments = _tmAttachments.slice();
+    if (_tmPendingFiles.length) {
+      window.toast && window.toast('Uploading ' + _tmPendingFiles.length + ' attachment' + (_tmPendingFiles.length>1?'s':'') + '…');
+      for (var fi = 0; fi < _tmPendingFiles.length; fi++) {
+        try {
+          var up = await window._portalUploadFile(_tmPendingFiles[fi], 'task-attachments', taskKey);
+          attachments.push({ name: _tmPendingFiles[fi].name, url: up.url, path: up.path });
+        } catch(upErr) {
+          window.lpAlert && window.lpAlert('Could not upload "' + _tmPendingFiles[fi].name + '": ' + (upErr.message||upErr));
+          return;
+        }
+      }
+      _tmPendingFiles = [];
+    }
+
     var payload = {
       title: title,
       description: description,
@@ -17256,7 +17336,8 @@ window.loadBoms = async function initBoms() {
       remind_at: remind_at,
       deal_id: deal_id,
       client_id: client_id,
-      job_id: job_id
+      job_id: job_id,
+      attachments: attachments.length ? attachments : null
     };
 
     try {
@@ -17268,7 +17349,7 @@ window.loadBoms = async function initBoms() {
         var idx = TASKS.findIndex(function(x){ return x.id === id; });
         if (idx >= 0) TASKS[idx] = savedTask;
       } else {
-        payload.id = uuid();
+        payload.id = taskKey;
         payload.created_by = meId();
         payload.created_at = new Date().toISOString();
         await db.insert('job_tasks', payload);
@@ -17447,6 +17528,20 @@ window.loadBoms = async function initBoms() {
           '<div style="margin-bottom:16px;">'
           + '<div style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Description</div>'
           + '<div style="font-size:13px;color:var(--text);line-height:1.55;white-space:pre-wrap;word-break:break-word;">' + esc(t.description) + '</div>'
+          + '</div>'
+        ) : '')
+      + ((t.attachments && t.attachments.length) ? (
+          '<div style="margin-bottom:16px;">'
+          + '<div style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Attachments</div>'
+          + '<div style="display:flex;flex-direction:column;gap:6px;">'
+          + t.attachments.map(function(a){
+              return '<a href="' + esc(a.url) + '" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:8px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;padding:7px 10px;font-size:12px;color:var(--gold);text-decoration:none;">'
+                + '<span style="font-size:13px;">&#128206;</span>'
+                + '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name || 'file') + '</span>'
+                + '<span style="font-size:10px;color:var(--muted);">Download</span>'
+                + '</a>';
+            }).join('')
+          + '</div>'
           + '</div>'
         ) : '')
       + '<div>'
