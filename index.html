@@ -12814,15 +12814,18 @@ window.loadBoms = async function initBoms() {
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <!-- Staff Broadcast Modal -->
 <div id="staff-broadcast-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center;padding:16px;">
-  <div class="sb-modal-card">
-    <div class="sb-modal-title">Staff Broadcast</div>
-    <div class="sb-modal-sub">Send an email to a group of Lighthouse Drinks employees.</div>
+  <div class="sb-modal-card" id="sb-modal-card">
+    <div class="sb-modal-title" id="sb-modal-title">Staff Broadcast</div>
+    <div class="sb-modal-sub" id="sb-modal-sub">Send an email to a group of staff or clients.</div>
+    <div class="sb-ext-banner" id="sb-ext-banner"><span>&#9888;</span><span>External recipients &mdash; this email goes to clients outside Lighthouse Drinks. Double-check the message before sending.</span></div>
     <label class="sb-label">Send To</label>
     <div class="sb-pill-row" id="sb-pill-row">
       <button class="sb-pill sb-pill-active" data-group="all"        onclick="window.sbSelectGroup(this)">All Staff</button>
       <button class="sb-pill"                data-group="management" onclick="window.sbSelectGroup(this)">Management</button>
       <button class="sb-pill"                data-group="production" onclick="window.sbSelectGroup(this)">Production</button>
       <button class="sb-pill"                data-group="ecom"       onclick="window.sbSelectGroup(this)">Ecom</button>
+      <div class="sb-divider-ext">External</div>
+      <button class="sb-pill sb-pill-client" data-group="clients"    onclick="window.sbSelectGroup(this)">&#9888; Clients (external)</button>
     </div>
     <label class="sb-label">Subject</label>
     <input id="sb-subject" class="sb-input" placeholder="Staff Broadcast" maxlength="200"/>
@@ -51391,9 +51394,35 @@ if (typeof _origOpenDD === 'function') {
   // role to a group from Settings → Roles takes effect on next reload.
   function _SB_GROUPS() { return window.SB_GROUPS || {}; }
 
+  // Flip the modal between internal (staff) and external (clients) looks so it
+  // is visually unmistakable which audience is selected.
+  function _sbApplyMode(group) {
+    var isClient = group === 'clients';
+    var card    = document.getElementById('sb-modal-card');
+    var title   = document.getElementById('sb-modal-title');
+    var subject = document.getElementById('sb-subject');
+    var sendBtn = document.getElementById('sb-send-btn');
+    if (card)  card.classList.toggle('sb-external', isClient);
+    if (title) title.textContent = isClient ? 'Client Broadcast' : 'Staff Broadcast';
+    if (subject) subject.placeholder = isClient ? 'A message from Lighthouse Drinks' : 'Staff Broadcast';
+    if (sendBtn) {
+      sendBtn.textContent = isClient ? 'Send to Clients' : 'Send';
+      if (isClient) {
+        sendBtn.style.background  = 'var(--red)';
+        sendBtn.style.borderColor = 'var(--red)';
+        sendBtn.style.color       = '#fff';
+      } else {
+        sendBtn.style.background  = '';
+        sendBtn.style.borderColor = '';
+        sendBtn.style.color       = '';
+      }
+    }
+  }
+
   window.sbSelectGroup = function(btn) {
     document.querySelectorAll('#sb-pill-row .sb-pill').forEach(function(p) { p.classList.remove('sb-pill-active'); });
     btn.classList.add('sb-pill-active');
+    _sbApplyMode(btn.dataset.group);
   };
 
   window.openStaffBroadcastModal = function() {
@@ -51404,6 +51433,7 @@ if (typeof _origOpenDD === 'function') {
     document.querySelectorAll('#sb-pill-row .sb-pill').forEach(function(p) { p.classList.remove('sb-pill-active'); });
     var first = document.querySelector('#sb-pill-row .sb-pill[data-group="all"]');
     if (first) first.classList.add('sb-pill-active');
+    _sbApplyMode('all');
     document.getElementById('staff-broadcast-overlay').style.display = 'flex';
   };
 
@@ -51412,10 +51442,16 @@ if (typeof _origOpenDD === 'function') {
   };
 
   window.sendStaffBroadcast = async function() {
-    var subject  = (document.getElementById('sb-subject').value.trim()) || 'Staff Broadcast';
-    var message  = document.getElementById('sb-message').value.trim();
     var statusEl = document.getElementById('sb-status');
     var sendBtn  = document.getElementById('sb-send-btn');
+    var message  = document.getElementById('sb-message').value.trim();
+
+    var activeBtn = document.querySelector('#sb-pill-row .sb-pill-active');
+    var group     = activeBtn ? activeBtn.dataset.group : 'all';
+    var isClient  = group === 'clients';
+
+    var subject  = (document.getElementById('sb-subject').value.trim())
+      || (isClient ? 'A message from Lighthouse Drinks' : 'Staff Broadcast');
 
     if (!message) {
       statusEl.textContent = 'Please enter a message.';
@@ -51423,25 +51459,45 @@ if (typeof _origOpenDD === 'function') {
       return;
     }
 
-    var activeBtn = document.querySelector('#sb-pill-row .sb-pill-active');
-    var group     = activeBtn ? activeBtn.dataset.group : 'all';
-    var groups    = _SB_GROUPS();
-    var roles     = groups[group] || groups.all || [];
-
     sendBtn.disabled = true;
     statusEl.style.color = 'var(--muted)';
     statusEl.textContent = 'Fetching recipient list\u2026';
 
     try {
-      var roleFilter = '(' + roles.join(',') + ')';
-      var users = await window.db.select('app_users', '?status=eq.active&role=in.' + encodeURIComponent(roleFilter) + '&select=email,display_name');
-      var emails = (users || []).map(function(u) { return u.email; }).filter(Boolean);
+      var users, emails;
+      if (isClient) {
+        // External audience — query the client portal accounts directly.
+        users = await window.db.select('app_users', '?status=eq.active&role=eq.client&select=email,display_name');
+      } else {
+        // Staff groups: hard-exclude the 'client' pseudo-role so client
+        // accounts can never be swept into an internal broadcast, even if
+        // the client role were ever given 'all' in its sb_groups.
+        var groups = _SB_GROUPS();
+        var roles  = (groups[group] || groups.all || []).filter(function(r) { return r !== 'client'; });
+        var roleFilter = '(' + roles.join(',') + ')';
+        users = await window.db.select('app_users', '?status=eq.active&role=in.' + encodeURIComponent(roleFilter) + '&select=email,display_name');
+      }
+      emails = (users || []).map(function(u) { return u.email; }).filter(Boolean);
 
       if (!emails.length) {
-        statusEl.textContent = 'No active employees found in this group.';
+        statusEl.textContent = isClient ? 'No active client accounts found.' : 'No active employees found in this group.';
         statusEl.style.color = 'var(--red)';
         sendBtn.disabled = false;
         return;
+      }
+
+      // Explicit external-send confirmation — calls out the audience and count.
+      if (isClient) {
+        var ok = window.confirm(
+          'You are about to email ' + emails.length + ' EXTERNAL client' + (emails.length === 1 ? '' : 's') +
+          ' (outside Lighthouse Drinks).\n\nSubject: ' + subject + '\n\nSend now?'
+        );
+        if (!ok) {
+          statusEl.textContent = 'Cancelled.';
+          statusEl.style.color = 'var(--muted)';
+          sendBtn.disabled = false;
+          return;
+        }
       }
 
       var senderEmail = window.CURRENT_USER && window.CURRENT_USER.email;
@@ -51455,20 +51511,25 @@ if (typeof _origOpenDD === 'function') {
         .replace(/>/g, '&gt;')
         .replace(/\n/g, '<br>');
 
+      // Internal sends are signed with the Pulse sender line; external client
+      // sends use a neutral Lighthouse Drinks sign-off (no internal wording).
+      var footer = isClient
+        ? '<p style="font-size:12px;color:#666;">Kind regards,<br>Lighthouse Drinks</p>'
+        : '<p style="font-size:11px;color:#888;">Sent via Lighthouse Pulse by ' + senderName + '</p>';
+
       var html = '<div style="font-family:sans-serif;max-width:600px;color:#333;">'
         + '<p style="font-size:15px;line-height:1.7;">' + safeMsg + '</p>'
         + '<hr style="border:none;border-top:1px solid #ddd;margin:20px 0;">'
-        + '<p style="font-size:11px;color:#888;">Sent via Lighthouse Pulse by ' + senderName + '</p>'
+        + footer
         + '</div>';
 
       var sent = 0;
       for (var i = 0; i < emails.length; i++) {
         statusEl.textContent = 'Sending ' + (i + 1) + ' of ' + emails.length + '\u2026';
-        await window.sendEmail({
-          to:      emails[i],
-          subject: subject,
-          html:    html
-        });
+        var mail = { to: emails[i], subject: subject, html: html };
+        // For client sends, route replies to the sender rather than noreply.
+        if (isClient && senderEmail) mail.replyTo = senderEmail;
+        await window.sendEmail(mail);
         sent++;
       }
 
