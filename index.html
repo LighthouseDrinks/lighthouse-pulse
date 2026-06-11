@@ -35932,11 +35932,22 @@ window.saveAdjModal = async function() {
     var reqLPA = (reqLitres > 0 && bottlingAbv > 0) ? (reqLitres * bottlingAbv / 100) : 0;
 
     // Colouring is captured here at completion (moved out of the sign-off).
-    // Prefill caramel spec from a prior sign-off value, else the BOM spec; and
-    // the 430nm reading from any prior sign-off value.
+    // The BOM colour_spec is the colour TARGET (e.g. "0.84" @ 430nm) and is shown
+    // read-only; the caramel actually added is recorded as amount + unit and is
+    // prefilled ONLY from a prior sign-off value (resume case), never the BOM.
     var _soRow0          = (signoffRows && signoffRows[0]) || {};
-    var _colourPrefillSpec = _soRow0.colour_spec || _bomColourSpec || '';
     var _colour430Prefill  = (_soRow0.colour_actual_430nm != null) ? _soRow0.colour_actual_430nm : '';
+    var _caramelPrefillAmt = '', _caramelPrefillUnit = 'ml', _caramelLegacyNote = '';
+    if (_soRow0.colour_spec) {
+      var _cm = String(_soRow0.colour_spec).trim().match(/^([0-9]+(?:\.[0-9]+)?)\s*(g|kg|ml|l)$/i);
+      if (_cm) {
+        _caramelPrefillAmt  = _cm[1];
+        _caramelPrefillUnit = _cm[2].toLowerCase() === 'l' ? 'L' : _cm[2].toLowerCase();
+      } else {
+        // Legacy free-text spec (e.g. "250 ml E150a") — surface it, leave inputs blank.
+        _caramelLegacyNote = String(_soRow0.colour_spec);
+      }
+    }
 
     // Fetch live container data (fallback where snapshot is absent)
     var contIds  = linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
@@ -36050,10 +36061,15 @@ window.saveAdjModal = async function() {
         var inp = document.getElementById('lq-water-added');
         return inp ? Math.max(0, parseFloat(inp.value) || 0) : 0;
       }
-      // Colouring (captured here at completion when the BOM requires it)
+      // Colouring (captured here at completion when the BOM requires it).
+      // The caramel dose is amount + unit (e.g. "1.2 kg"), stored as text in the
+      // sign-off colour_spec field.
       function getColourSpec() {
-        var inp = document.getElementById('lq-colour-spec');
-        return inp ? (inp.value || '').trim() : '';
+        var amtEl  = document.getElementById('lq-caramel-amt');
+        var unitEl = document.getElementById('lq-caramel-unit');
+        var amt = amtEl ? parseFloat(amtEl.value) : NaN;
+        if (!isFinite(amt) || amt <= 0) return '';
+        return amt + ' ' + (unitEl ? unitEl.value : 'ml');
       }
       function getColour430() {
         var inp = document.getElementById('lq-colour-430nm');
@@ -36095,7 +36111,8 @@ window.saveAdjModal = async function() {
             vesselId: s ? (s.value || '') : '',
             isSource: false,
             litres:   litEl ? Math.max(0, parseFloat(litEl.value) || 0) : 0,
-            cbw:      cbwEl ? (cbwEl.value || '').trim() : ''
+            cbw:      cbwEl ? (cbwEl.value || '').trim() : '',
+            nvIdx:    rowEl.dataset.nvIdx || ''
           });
         });
         return out;
@@ -36150,9 +36167,7 @@ window.saveAdjModal = async function() {
         });
         var waste     = getWasteLitres();
         var variance  = getVarianceLitres();
-        var varCap    = getVarianceCap();
         var avgDrawnAbv = totalDrawn > 0 ? (totalDrawnLPA / totalDrawn * 100) : (bottlingAbv || 0);
-        var withinCap = Math.abs(variance) <= varCap + 1e-6;
         var wasteOk      = waste <= 0 || getWasteReason().length > 0;
         var varianceUsed = Math.abs(variance) > 0.05;
         var varianceOk   = !varianceUsed || getVarianceReason().length > 0;
@@ -36194,6 +36209,16 @@ window.saveAdjModal = async function() {
           added.forEach(function(r) {
             if (r.litres <= 0) return;
             if (!r.vesselId) { rowOk = false; rowMsg = 'select a vessel for the added row'; return; }
+            if (r.vesselId === '__newvessel__') {
+              // New vessel registered at confirm: validate against the capacity
+              // entered in its sub-block (whole vessel is empty). Multiple new
+              // vessels are allowed, so skip the duplicate check.
+              var capEl = document.getElementById('dl-dnv-cap-' + r.nvIdx);
+              var nvCap = capEl ? (parseFloat(capEl.value) || 0) : 0;
+              var nvFree = nvCap > 0 ? window._fillCeiling(nvCap) : Infinity;
+              if (r.litres > nvFree + 0.5) { rowOk = false; rowMsg = 'allocation exceeds the new vessel\u2019s capacity'; }
+              return;
+            }
             if (seen[r.vesselId]) { rowOk = false; rowMsg = 'a vessel is listed twice'; return; }
             seen[r.vesselId] = true;
             var free = vesselFreeCapacity(r.vesselId, false);
@@ -36213,21 +36238,25 @@ window.saveAdjModal = async function() {
           if (!rowOk) { leftoverOkAll = false; if (!leftoverMsg) leftoverMsg = rowMsg; }
         });
 
+        // Effective drawn = book drawn corrected by the measurement variance —
+        // the litres/alcohol that physically went into bottling. Used by the
+        // water suggestion, the balance gate and the footer readout.
+        var effDrawnLitres = totalDrawn + variance;
+        var effDrawnLPA    = totalDrawnLPA + variance * (avgDrawnAbv / 100);
+
         // Default water to add = finished litres made (req + waste) minus the source
         // litres drawn, PLUS any water to bring leftover up to bottling strength.
         // When the source is within the as-is ABV tolerance no proofing water is
         // added on the floor, so the suggestion is 0.
-        var effSrcLitres = totalDrawn + variance;
         var bottlingBatchWater = (reqLitres > 0 && !bottledAsIs)
-          ? Math.max(0, (reqLitres + waste) - effSrcLitres)
+          ? Math.max(0, (reqLitres + waste) - effDrawnLitres)
           : 0;
         // Never suggest more water than would dilute the effective drawn alcohol
         // below bottling strength — an alcohol shortfall (e.g. a variance entered
         // without correcting Remaining After to the measured dip) must be fixed by
         // the source records, not papered over with water.
-        if (bottlingBatchWater > 0 && bottlingAbv > 0 && effSrcLitres > 0) {
-          var effSrcLPA = totalDrawnLPA + variance * (avgDrawnAbv / 100);
-          var maxDiluteWater = Math.max(0, effSrcLPA / (bottlingAbv / 100) - effSrcLitres);
+        if (bottlingBatchWater > 0 && bottlingAbv > 0 && effDrawnLitres > 0) {
+          var maxDiluteWater = Math.max(0, effDrawnLPA / (bottlingAbv / 100) - effDrawnLitres);
           bottlingBatchWater = Math.min(bottlingBatchWater, maxDiluteWater);
         }
         var suggestedWater = bottlingBatchWater + leftoverConvWater;
@@ -36235,50 +36264,41 @@ window.saveAdjModal = async function() {
         if (waterInp && !_waterTouched) waterInp.value = suggestedWater.toFixed(1);
         var waterAdded = getWaterAdded();
 
-        // Over-cap variance is a soft warning (amber), never a hard block: a
-        // genuine container-record correction can legitimately exceed the cap.
-        var overCap = varianceUsed && !withinCap;
         var dipHint = '<br><span style="font-size:10px;font-weight:400;">Check Remaining After is the measured dip, not the book value.</span>';
         var balanced, balanceLabel, col;
         var wasteLPA = waste * ((bottlingAbv || avgDrawnAbv) / 100);
         if (reqLPA > 0 && !bottledAsIs) {
-          // Alcohol balance: drawn alcohol (± variance, valued at drawn strength)
-          // must equal the alcohol in the finished bottles plus any wasted finished liquid.
-          var targetLPA    = reqLPA + wasteLPA;
-          var effectiveLPA = totalDrawnLPA + variance * (avgDrawnAbv / 100);
-          var diffLPA      = Math.abs(effectiveLPA - targetLPA);
-          var finTol       = Math.max(0.5, contRows.length * 0.15);
-          var tolLPA       = finTol * ((bottlingAbv || avgDrawnAbv || 1) / 100);
+          // Alcohol balance: effective drawn alcohol must equal the alcohol in
+          // the finished bottles plus any wasted finished liquid. The variance
+          // itself is reported in its own footer cell, so a balanced state is a
+          // plain green OK regardless of variance size.
+          var targetLPA = reqLPA + wasteLPA;
+          var diffLPA   = Math.abs(effDrawnLPA - targetLPA);
+          var finTol    = Math.max(0.5, contRows.length * 0.15);
+          var tolLPA    = finTol * ((bottlingAbv || avgDrawnAbv || 1) / 100);
           balanced = totalDrawnLPA > 0 && diffLPA <= tolLPA;
-          col = balanced ? (overCap ? 'var(--amber)' : 'var(--green)') : 'var(--red)';
-          var shortLPA = targetLPA - effectiveLPA;
+          col = balanced ? 'var(--green)' : 'var(--red)';
+          var shortLPA = targetLPA - effDrawnLPA;
           var shortFin = (bottlingAbv > 0) ? shortLPA / (bottlingAbv / 100) : shortLPA;
           if (balanced) {
-            balanceLabel = overCap
-              ? '&#10003; OK &mdash; variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L exceeds typical cap (&plusmn;' + varCap.toFixed(1) + ' L)'
-              : (varianceUsed
-                  ? '&#10003; OK (variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L applied)'
-                  : '&#10003; OK');
+            balanceLabel = '&#10003; OK';
           } else if (shortLPA > 0) {
             balanceLabel = shortFin.toFixed(1) + ' L (' + shortLPA.toFixed(2) + ' LPA) short — draw more' + (varianceUsed ? dipHint : '');
           } else {
             balanceLabel = Math.abs(shortFin).toFixed(1) + ' L (' + Math.abs(shortLPA).toFixed(2) + ' LPA) over' + (varianceUsed ? dipHint : '');
           }
         } else {
-          // No BOM/bottles → fall back to a pure litres balance.
-          var target    = reqLitres + waste;
-          var effective = totalDrawn + variance;
-          var diff      = reqLitres > 0 ? Math.abs(effective - target) : 0;
+          // No BOM/bottles, or bottled as-is → a pure litres balance.
+          var target = reqLitres + waste;
+          var diff   = reqLitres > 0 ? Math.abs(effDrawnLitres - target) : 0;
           balanced = totalDrawn > 0 && (reqLitres === 0 || diff <= 0.5);
-          col = balanced ? (overCap ? 'var(--amber)' : 'var(--green)') : 'var(--red)';
+          col = balanced ? 'var(--green)' : 'var(--red)';
           if (reqLitres === 0) {
             balanceLabel = totalDrawn > 0 ? '&#10003; OK' : 'Enter drawn';
           } else if (balanced) {
-            balanceLabel = overCap
-              ? '&#10003; OK &mdash; variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L exceeds typical cap (&plusmn;' + varCap.toFixed(1) + ' L)'
-              : '&#10003; OK';
+            balanceLabel = '&#10003; OK';
           } else {
-            var short = target - effective;
+            var short = target - effDrawnLitres;
             balanceLabel = (short > 0 ? short.toFixed(1) + ' L short' : Math.abs(short).toFixed(1) + ' L over') + (varianceUsed ? dipHint : '');
           }
         }
@@ -36309,12 +36329,16 @@ window.saveAdjModal = async function() {
           // Show the book → effective drawn maths so the operator can see what
           // the variance actually does to the reconciliation.
           var varSub = varianceUsed
-            ? 'book ' + totalDrawn.toFixed(1) + ' L &rarr; eff ' + (totalDrawn + variance).toFixed(1) + ' L drawn'
+            ? 'book ' + totalDrawn.toFixed(1) + ' L &rarr; eff ' + effDrawnLitres.toFixed(1) + ' L drawn'
             : '';
+          // Alcohol/Source Drawn report what was actually USED for bottling
+          // (book figures net of variance) — variance litres never existed, so
+          // they are not "drawn". Book values stay visible per container row
+          // and in the Variance cell breakdown.
           balEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Required LPA</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + (reqLPA > 0 ? reqLPA.toFixed(2) : '—') + '</div><div style="font-size:9px;color:var(--muted);">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '%' + (bottledAsIs ? ' (as-is, &plusmn;' + ABV_TOL.toFixed(1) + '% tol)' : '') : '') + '</div></div>'
-            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Alcohol Drawn</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + totalDrawnLPA.toFixed(2) + '</div><div style="font-size:9px;color:var(--muted);">LPA</div></div>'
-            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Source Drawn</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + totalDrawn.toFixed(1) + ' L</div><div style="font-size:9px;color:var(--muted);">+ ' + waterAdded.toFixed(1) + ' L water</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Alcohol Drawn</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + effDrawnLPA.toFixed(2) + '</div><div style="font-size:9px;color:var(--muted);">LPA</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Source Drawn</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + effDrawnLitres.toFixed(1) + ' L</div><div style="font-size:9px;color:var(--muted);">+ ' + waterAdded.toFixed(1) + ' L water</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Variance</div><div style="font-size:15px;font-weight:800;color:' + varCol + ';">' + varTxt + '</div><div style="font-size:9px;color:var(--muted);">' + varSub + '</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Balance</div><div style="font-size:12px;font-weight:800;color:' + col + ';">' + balanceLabel + '</div></div>'
             + '</div>';
@@ -36379,7 +36403,9 @@ window.saveAdjModal = async function() {
               var cap = parseFloat(d.capacity_litres || 0) || 0;
               var freeTxt = cap > 0 ? ' — free ' + Math.max(0, window._fillCeiling(cap) - l).toFixed(0) + 'L' : (l > 0 ? ' — ' + l.toFixed(0) + 'L' : ' — empty');
               return '<option value="' + d.id + '">' + esc(d.reference) + ' [' + t + ']' + freeTxt + '</option>';
-            }).join('');
+            }).join('')
+          + '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Or register a new vessel ────</option>'
+          + '<option value="__newvessel__" style="background:#0d1b2a;color:#c9a84c;font-style:italic;">+ Register New Vessel…</option>';
       };
       window._lqDestOpts = _destOpts;
       var _selStyle = 'width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;';
@@ -36461,13 +36487,23 @@ window.saveAdjModal = async function() {
         + (job.colouring
             ? '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
               + '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Colouring</div>'
-              + '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">Caramel / colour is added after dilution. Record what was added and the post-colouring 430nm reading.</div>'
-              + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
-              +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Caramel / colour added</label>'
-              +     '<input type="text" id="lq-colour-spec" value="' + esc(String(_colourPrefillSpec)) + '" placeholder="e.g. 250 ml E150a" '
+              + '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">Caramel / colour is added after dilution. Record the amount of caramel used and the final colour reading taken at Lighthouse.</div>'
+              + (_bomColourSpec
+                  ? '<div style="margin-bottom:10px;padding:7px 10px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.3);border-radius:3px;font-size:11px;color:var(--gold-light);">Colour target (from BOM): <strong>' + esc(String(_bomColourSpec)) + ' @ 430nm</strong></div>'
+                  : '<div style="margin-bottom:10px;font-size:10px;color:var(--muted);">No colour target specified on the BOM.</div>')
+              + (_caramelLegacyNote
+                  ? '<div style="margin-bottom:8px;font-size:10px;color:var(--muted);">Previously recorded: <em>' + esc(_caramelLegacyNote) + '</em></div>'
+                  : '')
+              + '<div style="display:grid;grid-template-columns:160px 110px 1fr;gap:12px;">'
+              +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Caramel used</label>'
+              +     '<input type="number" id="lq-caramel-amt" min="0" step="0.01" value="' + esc(String(_caramelPrefillAmt)) + '" placeholder="e.g. 250" '
               +     'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
-              +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Post-colouring 430nm <span style="color:var(--red);">*</span></label>'
-              +     '<input type="number" id="lq-colour-430nm" step="0.01" value="' + esc(String(_colour430Prefill)) + '" placeholder="e.g. 1.42" oninput="window._lqUpdateBalance()" '
+              +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Unit</label>'
+              +     '<select id="lq-caramel-unit" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;">'
+              +       ['g','kg','ml','L'].map(function(u){ return '<option value="' + u + '"' + (u === _caramelPrefillUnit ? ' selected' : '') + '>' + u + '</option>'; }).join('')
+              +     '</select></div>'
+              +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Final colour @ 430nm (Lighthouse reading) <span style="color:var(--red);">*</span></label>'
+              +     '<input type="number" id="lq-colour-430nm" step="0.01" value="' + esc(String(_colour430Prefill)) + '" placeholder="e.g. 0.84" oninput="window._lqUpdateBalance()" '
               +     'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;"></div>'
               + '</div>'
               + '</div>'
@@ -36504,38 +36540,76 @@ window.saveAdjModal = async function() {
 
       window._lqUpdateBalance = function() { updateBalance(); };
       window._lqWaterTouched  = function() { _waterTouched = true; };
-      // Append an "added vessel" allocation row to a leftover container.
+      // Append an "added vessel" allocation row to a leftover container. Each
+      // row gets a unique numeric nvIdx so the standard Register-New-Vessel
+      // sub-block (shared with the dilute flow) can attach without colliding
+      // with dilute's own dl-dnv-* IDs (dilute counts from 0; we start at 9000).
+      // Must be numeric: the sub-block's inline handlers interpolate it unquoted.
+      var _lqNvSeq = 9000;
       window._lqLoAddVessel = function(idx) {
         var wrap = document.getElementById('lq-lo-alloc-' + idx);
         if (!wrap) return;
         var srcId = contRows[idx] ? contRows[idx].id : '';
         var rowEl = document.createElement('div');
         rowEl.setAttribute('data-lo-row', 'added');
+        rowEl.dataset.nvIdx = String(_lqNvSeq++);
         rowEl.style.cssText = 'display:grid;grid-template-columns:1fr 120px 1fr 28px;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--navy-border);';
         rowEl.innerHTML =
-            '<select class="lq-lo-vessel" onchange="window._lqUpdateBalance()" style="' + window._lqSelStyle + '">' + window._lqDestOpts(srcId) + '</select>'
+            '<select class="lq-lo-vessel" onchange="window._lqLoVesselChange(this)" style="' + window._lqSelStyle + '">' + window._lqDestOpts(srcId) + '</select>'
           + '<input type="number" class="lq-lo-litres" min="0" step="0.1" value="0" oninput="window._lqUpdateBalance()" style="' + window._lqSelStyle + 'text-align:right;">'
           + '<input type="text" class="lq-lo-cbw" placeholder="CBW (optional)" style="' + window._lqSelStyle + '">'
           + '<button type="button" title="Remove vessel" onclick="window._lqLoRemoveRow(this)" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:12px;border-radius:3px;cursor:pointer;height:30px;">&#10005;</button>';
         wrap.appendChild(rowEl);
         updateBalance();
       };
+      // Toggle the standard Register-New-Vessel sub-block under a row when
+      // "+ Register New Vessel…" is selected. The sub-block + helpers are the
+      // exact ones the dilute flow uses (exposed via window._lqNewVesselHelpers).
+      window._lqLoVesselChange = function(sel) {
+        var rowEl = sel && sel.closest('[data-lo-row="added"]');
+        if (!rowEl) { updateBalance(); return; }
+        var nvIdx  = rowEl.dataset.nvIdx;
+        var nvWrap = document.getElementById('dl-dnv-wrap-' + nvIdx);
+        if (sel.value === '__newvessel__') {
+          if (!nvWrap && window._lqNewVesselHelpers) {
+            var holder = document.createElement('div');
+            holder.innerHTML = window._lqNewVesselHelpers.subBlockHtml(nvIdx)
+              // capacity edits revalidate the leftover allocation, not the dilute preview
+              .replace('oninput="window.calcDilutePreview()"', 'oninput="window._lqUpdateBalance()"');
+            nvWrap = holder.firstChild;
+            rowEl.parentNode.insertBefore(nvWrap, rowEl.nextSibling);
+            window._lqNewVesselHelpers.populateClients(nvIdx);
+          }
+          if (nvWrap) nvWrap.style.display = '';
+        } else if (nvWrap) {
+          nvWrap.style.display = 'none';
+        }
+        updateBalance();
+      };
       window._lqLoRemoveRow = function(btn) {
         var rowEl = btn && btn.closest('[data-lo-row="added"]');
-        if (rowEl) rowEl.remove();
+        if (rowEl) {
+          var nvWrap = document.getElementById('dl-dnv-wrap-' + rowEl.dataset.nvIdx);
+          if (nvWrap) nvWrap.remove();
+          rowEl.remove();
+        }
         updateBalance();
       };
       updateBalance();
 
-      function closeModal() {
-        ov.remove();
-        document.body.style.overflow = '';
+      function cleanupGlobals() {
         delete window._lqUpdateBalance;
         delete window._lqWaterTouched;
         delete window._lqLoAddVessel;
+        delete window._lqLoVesselChange;
         delete window._lqLoRemoveRow;
         delete window._lqDestOpts;
         delete window._lqSelStyle;
+      }
+      function closeModal() {
+        ov.remove();
+        document.body.style.overflow = '';
+        cleanupGlobals();
         resolve(false);
       }
 
@@ -36555,9 +36629,46 @@ window.saveAdjModal = async function() {
         };
       }
 
-      ov.querySelector('#lq-dd-confirm').onclick = function() {
+      ov.querySelector('#lq-dd-confirm').onclick = async function() {
         var confirmBtn2 = ov.querySelector('#lq-dd-confirm');
         if (confirmBtn2 && confirmBtn2.disabled) return;
+
+        // Resolve any "+ Register New Vessel" leftover rows BEFORE building the
+        // plan (the sub-block DOM is destroyed when the modal closes). The
+        // shared dilute-flow resolver validates the inputs, registers the
+        // vessel and returns the new liquid_containers UUID, which is injected
+        // into the row's select so the plan build below picks it up.
+        var nvSelects = [];
+        ov.querySelectorAll('[data-lo-row="added"]').forEach(function(rowEl) {
+          var s     = rowEl.querySelector('.lq-lo-vessel');
+          var litEl = rowEl.querySelector('.lq-lo-litres');
+          var lit   = litEl ? (parseFloat(litEl.value) || 0) : 0;
+          if (s && s.value === '__newvessel__' && lit > 0.05) nvSelects.push({ sel: s, nvIdx: rowEl.dataset.nvIdx });
+        });
+        if (nvSelects.length) {
+          if (!window._lqNewVesselHelpers) {
+            window.toast && window.toast('Vessel registration is unavailable — pick an existing vessel.', 'error');
+            return;
+          }
+          confirmBtn2.disabled = true;
+          confirmBtn2.textContent = 'Registering vessel…';
+          for (var nv = 0; nv < nvSelects.length; nv++) {
+            var newId = await window._lqNewVesselHelpers.resolve(nvSelects[nv].nvIdx, null);
+            if (!newId) {
+              // Resolver already toasted the reason — re-enable and keep the modal open.
+              confirmBtn2.disabled = false;
+              confirmBtn2.innerHTML = 'Confirm &amp; Continue to Dry Goods &#8594;';
+              updateBalance();
+              return;
+            }
+            var opt = document.createElement('option');
+            opt.value = newId;
+            opt.textContent = '(new vessel)';
+            nvSelects[nv].sel.appendChild(opt);
+            nvSelects[nv].sel.value = newId;
+          }
+        }
+
         var plan = {
           lines: contRows.map(function(row, idx) {
             var rem   = getRemaining(idx);
@@ -36601,12 +36712,7 @@ window.saveAdjModal = async function() {
         };
         ov.remove();
         document.body.style.overflow = '';
-        delete window._lqUpdateBalance;
-        delete window._lqWaterTouched;
-        delete window._lqLoAddVessel;
-        delete window._lqLoRemoveRow;
-        delete window._lqDestOpts;
-        delete window._lqSelStyle;
+        cleanupGlobals();
         resolve(plan);
       };
     });
@@ -43581,6 +43687,21 @@ window.saveAdjModal = async function() {
     });
     window._dlOnNewVesselClientChange(idx);
   }
+
+  // Expose the Register-New-Vessel helpers for reuse outside this IIFE (the job
+  // close-out leftover handling embeds the same sub-block + resolve flow).
+  // populateClients lazily fetches clients when the blending module has not
+  // loaded its own list yet.
+  window._lqNewVesselHelpers = {
+    subBlockHtml: _dlNewVesselSubBlockHtml,
+    populateClients: async function(idx) {
+      if (!_blClients || !_blClients.length) {
+        try { _blClients = await window.db.select('clients', '?order=name.asc'); } catch(e) {}
+      }
+      _dlPopulateNewVesselClients(idx);
+    },
+    resolve: _resolveNewVesselDest
+  };
 
   window._dlOnNewVesselClientChange = function(idx) {
     var clientSel = document.getElementById('dl-dnv-client-' + idx);
