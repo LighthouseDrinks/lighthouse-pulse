@@ -35971,7 +35971,9 @@ window.saveAdjModal = async function() {
         var inp = document.getElementById('lq-variance-reason');
         return inp ? inp.value.trim() : '';
       }
-      // Tolerance cap on |variance|: 1% of required, floored at 2 L. Tunable.
+      // Typical-variance threshold: 1% of required, floored at 2 L. Exceeding it
+      // is a soft warning (amber + flagged in the audit trail), not a hard block,
+      // so genuine container-record corrections can still be reconciled.
       function getVarianceCap() {
         return Math.max(2, reqLitres * 0.01);
       }
@@ -36145,14 +36147,28 @@ window.saveAdjModal = async function() {
 
         // Default water to add = finished litres made (req + waste) minus the source
         // litres drawn, PLUS any water to bring leftover up to bottling strength.
+        var effSrcLitres = totalDrawn + variance;
         var bottlingBatchWater = (reqLitres > 0)
-          ? Math.max(0, (reqLitres + waste) - (totalDrawn + variance))
+          ? Math.max(0, (reqLitres + waste) - effSrcLitres)
           : 0;
+        // Never suggest more water than would dilute the effective drawn alcohol
+        // below bottling strength — an alcohol shortfall (e.g. a variance entered
+        // without correcting Remaining After to the measured dip) must be fixed by
+        // the source records, not papered over with water.
+        if (bottlingAbv > 0 && effSrcLitres > 0) {
+          var effSrcLPA = totalDrawnLPA + variance * (avgDrawnAbv / 100);
+          var maxDiluteWater = Math.max(0, effSrcLPA / (bottlingAbv / 100) - effSrcLitres);
+          bottlingBatchWater = Math.min(bottlingBatchWater, maxDiluteWater);
+        }
         var suggestedWater = bottlingBatchWater + leftoverConvWater;
         var waterInp = document.getElementById('lq-water-added');
         if (waterInp && !_waterTouched) waterInp.value = suggestedWater.toFixed(1);
         var waterAdded = getWaterAdded();
 
+        // Over-cap variance is a soft warning (amber), never a hard block: a
+        // genuine container-record correction can legitimately exceed the cap.
+        var overCap = varianceUsed && !withinCap;
+        var dipHint = '<br><span style="font-size:10px;font-weight:400;">Check Remaining After is the measured dip, not the book value.</span>';
         var balanced, balanceLabel, col;
         var wasteLPA = waste * ((bottlingAbv || avgDrawnAbv) / 100);
         if (reqLPA > 0) {
@@ -36163,37 +36179,37 @@ window.saveAdjModal = async function() {
           var diffLPA      = Math.abs(effectiveLPA - targetLPA);
           var finTol       = Math.max(0.5, contRows.length * 0.15);
           var tolLPA       = finTol * ((bottlingAbv || avgDrawnAbv || 1) / 100);
-          balanced = totalDrawnLPA > 0 && diffLPA <= tolLPA && withinCap;
-          col = balanced ? 'var(--green)' : 'var(--red)';
+          balanced = totalDrawnLPA > 0 && diffLPA <= tolLPA;
+          col = balanced ? (overCap ? 'var(--amber)' : 'var(--green)') : 'var(--red)';
           var shortLPA = targetLPA - effectiveLPA;
           var shortFin = (bottlingAbv > 0) ? shortLPA / (bottlingAbv / 100) : shortLPA;
-          if (!withinCap) {
-            balanceLabel = 'Variance exceeds cap (&plusmn;' + varCap.toFixed(1) + ' L) &mdash; check container records';
-          } else if (balanced) {
-            balanceLabel = varianceUsed
-              ? '&#10003; OK (variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L applied)'
-              : '&#10003; OK';
+          if (balanced) {
+            balanceLabel = overCap
+              ? '&#10003; OK &mdash; variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L exceeds typical cap (&plusmn;' + varCap.toFixed(1) + ' L)'
+              : (varianceUsed
+                  ? '&#10003; OK (variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L applied)'
+                  : '&#10003; OK');
           } else if (shortLPA > 0) {
-            balanceLabel = shortFin.toFixed(1) + ' L (' + shortLPA.toFixed(2) + ' LPA) short — draw more';
+            balanceLabel = shortFin.toFixed(1) + ' L (' + shortLPA.toFixed(2) + ' LPA) short — draw more' + (varianceUsed ? dipHint : '');
           } else {
-            balanceLabel = Math.abs(shortFin).toFixed(1) + ' L (' + Math.abs(shortLPA).toFixed(2) + ' LPA) over';
+            balanceLabel = Math.abs(shortFin).toFixed(1) + ' L (' + Math.abs(shortLPA).toFixed(2) + ' LPA) over' + (varianceUsed ? dipHint : '');
           }
         } else {
           // No BOM/bottles → fall back to a pure litres balance.
           var target    = reqLitres + waste;
           var effective = totalDrawn + variance;
           var diff      = reqLitres > 0 ? Math.abs(effective - target) : 0;
-          balanced = totalDrawn > 0 && (reqLitres === 0 || diff <= 0.5) && withinCap;
-          col = balanced ? 'var(--green)' : 'var(--red)';
+          balanced = totalDrawn > 0 && (reqLitres === 0 || diff <= 0.5);
+          col = balanced ? (overCap ? 'var(--amber)' : 'var(--green)') : 'var(--red)';
           if (reqLitres === 0) {
             balanceLabel = totalDrawn > 0 ? '&#10003; OK' : 'Enter drawn';
-          } else if (!withinCap) {
-            balanceLabel = 'Variance exceeds cap (&plusmn;' + varCap.toFixed(1) + ' L) &mdash; check container records';
           } else if (balanced) {
-            balanceLabel = '&#10003; OK';
+            balanceLabel = overCap
+              ? '&#10003; OK &mdash; variance ' + (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L exceeds typical cap (&plusmn;' + varCap.toFixed(1) + ' L)'
+              : '&#10003; OK';
           } else {
             var short = target - effective;
-            balanceLabel = short > 0 ? short.toFixed(1) + ' L short' : Math.abs(short).toFixed(1) + ' L over';
+            balanceLabel = (short > 0 ? short.toFixed(1) + ' L short' : Math.abs(short).toFixed(1) + ' L over') + (varianceUsed ? dipHint : '');
           }
         }
 
@@ -36220,11 +36236,16 @@ window.saveAdjModal = async function() {
         if (balEl) {
           var varCol = varianceUsed ? 'var(--amber)' : 'var(--muted)';
           var varTxt = varianceUsed ? (variance >= 0 ? '+' : '') + variance.toFixed(1) + ' L' : '0.0 L';
+          // Show the book → effective drawn maths so the operator can see what
+          // the variance actually does to the reconciliation.
+          var varSub = varianceUsed
+            ? 'book ' + totalDrawn.toFixed(1) + ' L &rarr; eff ' + (totalDrawn + variance).toFixed(1) + ' L drawn'
+            : '';
           balEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Required LPA</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + (reqLPA > 0 ? reqLPA.toFixed(2) : '—') + '</div><div style="font-size:9px;color:var(--muted);">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '%' : '') + '</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Alcohol Drawn</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + totalDrawnLPA.toFixed(2) + '</div><div style="font-size:9px;color:var(--muted);">LPA</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Source Drawn</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + totalDrawn.toFixed(1) + ' L</div><div style="font-size:9px;color:var(--muted);">+ ' + waterAdded.toFixed(1) + ' L water</div></div>'
-            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Variance</div><div style="font-size:15px;font-weight:800;color:' + varCol + ';">' + varTxt + '</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Variance</div><div style="font-size:15px;font-weight:800;color:' + varCol + ';">' + varTxt + '</div><div style="font-size:9px;color:var(--muted);">' + varSub + '</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Balance</div><div style="font-size:12px;font-weight:800;color:' + col + ';">' + balanceLabel + '</div></div>'
             + '</div>';
         }
@@ -36385,7 +36406,7 @@ window.saveAdjModal = async function() {
         +     '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">Measurement Variance (Optional)</div>'
         +     '<button type="button" id="lq-variance-autofill" style="display:none;background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;padding:4px 10px;border-radius:3px;cursor:pointer;">Auto-fill from gap</button>'
         +   '</div>'
-        +   '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">Use when a container\'s recorded litres differ from reality (e.g. IBC booked at 920.8 L actually held ~924 L). Positive = container held more than recorded; negative = held less.</div>'
+        +   '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">Use when a container\'s recorded litres differ from reality (e.g. IBC booked at 920.8 L actually held ~924 L). Positive = container held more than recorded; negative = held less. <strong style="color:var(--white);">Enter the measured litres left in the container (the dip) in Remaining After above</strong>, then the variance explaining the book difference &mdash; variance adjusts the book drawn figure, it does not replace the dip.</div>'
         +   '<div style="display:grid;grid-template-columns:160px 1fr;gap:12px;">'
         +     '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Variance litres (&plusmn;)</label>'
         +       '<input type="number" id="lq-variance-litres" step="0.1" value="0" oninput="window._lqUpdateBalance()" '
@@ -36472,7 +36493,7 @@ window.saveAdjModal = async function() {
             return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv, lpaBefore: row.lpaBefore, clientId: row.clientId };
           }).filter(function(l){ return l.litreDrawn > 0.001 && alreadyDeductedIds.indexOf(l.containerId) < 0; }),
           waste:      { litres: getWasteLitres(),    reason: getWasteReason() },
-          variance:   { litres: getVarianceLitres(), reason: getVarianceReason() },
+          variance:   { litres: getVarianceLitres(), reason: getVarianceReason(), cap: getVarianceCap() },
           waterAdded: getWaterAdded(),
           reqLPA:     reqLPA,
           bottlingAbv: bottlingAbv,
@@ -36597,10 +36618,16 @@ window.saveAdjModal = async function() {
     // Audit-only: stock measurement variance (e.g. IBC actually held more than recorded).
     // Container current_litres has already been set to operator-entered Remaining After above —
     // the variance row is a separate, non-state-changing reconciliation record for traceability.
-    var varianceL = plan.variance ? parseFloat(plan.variance.litres || 0) : 0;
-    var varianceR = plan.variance ? (plan.variance.reason || '') : '';
+    var varianceL   = plan.variance ? parseFloat(plan.variance.litres || 0) : 0;
+    var varianceR   = plan.variance ? (plan.variance.reason || '') : '';
+    var varianceCap = plan.variance ? parseFloat(plan.variance.cap || 0) : 0;
     if (Math.abs(varianceL) > 0.05 && plan.lines.length) {
       var attrLine = plan.lines.reduce(function(a, b){ return b.litreDrawn > a.litreDrawn ? b : a; }, plan.lines[0]);
+      // Flag over-cap variances in the audit trail — they completed with an
+      // amber warning rather than the normal in-tolerance reconciliation.
+      var capNote = (varianceCap > 0 && Math.abs(varianceL) > varianceCap + 1e-6)
+        ? ' (exceeds \u00b1' + varianceCap.toFixed(1) + ' L cap)'
+        : '';
       try {
         await window._writeBlendHistory({
           container_id:      attrLine.containerId,
@@ -36611,7 +36638,8 @@ window.saveAdjModal = async function() {
           litres_changed:    varianceL,
           abv_before:        parseFloat(attrLine.abv || 0),
           notes:             (varianceL >= 0 ? '+' : '') + varianceL.toFixed(1)
-                              + 'L stock variance reconciled during bottling (job ' + jobId + '): '
+                              + 'L stock variance reconciled during bottling (job ' + jobId + ')'
+                              + capNote + ': '
                               + varianceR,
           performed_by_id:   pById,
           performed_by_name: pByName
