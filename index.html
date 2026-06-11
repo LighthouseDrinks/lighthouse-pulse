@@ -35914,12 +35914,21 @@ window.saveAdjModal = async function() {
     // If every container was already deducted (clean full run), skip the modal
     if (!contRows.length && alreadyDeductedIds.length > 0) return [];
 
+    // ABV leniency: incoming spirit within ±ABV_TOL of the bottling strength is
+    // bottled AS-IS on the floor — no proofing water is added and the ABV is not
+    // adjusted. In that case the reconciliation is volume-based (drawn litres =
+    // finished litres) rather than LPA-rebalanced against the BOM strength.
+    var ABV_TOL = 0.2; // % either side of BOM/bottling strength. Tunable.
+    var bottledAsIs = reqLPA > 0 && bottlingAbv > 0 && contRows.length > 0
+      && contRows.every(function(r){ return r.abv > 0 && Math.abs(r.abv - bottlingAbv) <= ABV_TOL + 1e-9; });
+
     // FIFO pre-fill — allocate required ALCOHOL (LPA) across containers in the
     // deterministic linked order. For each container we draw enough source litres
     // (at its effective ABV) to contribute its share of reqLPA. When no reqLPA is
-    // known (no BOM/bottles) fall back to litres-based allocation.
+    // known (no BOM/bottles), or the source is within the as-is ABV tolerance,
+    // fall back to litres-based allocation (drawn litres = finished litres).
     var fifoRemaining = [];
-    if (reqLPA > 0) {
+    if (reqLPA > 0 && !bottledAsIs) {
       var lpaToAllocate = reqLPA;
       for (var fi = 0; fi < contRows.length; fi++) {
         var _r = contRows[fi];
@@ -36147,15 +36156,17 @@ window.saveAdjModal = async function() {
 
         // Default water to add = finished litres made (req + waste) minus the source
         // litres drawn, PLUS any water to bring leftover up to bottling strength.
+        // When the source is within the as-is ABV tolerance no proofing water is
+        // added on the floor, so the suggestion is 0.
         var effSrcLitres = totalDrawn + variance;
-        var bottlingBatchWater = (reqLitres > 0)
+        var bottlingBatchWater = (reqLitres > 0 && !bottledAsIs)
           ? Math.max(0, (reqLitres + waste) - effSrcLitres)
           : 0;
         // Never suggest more water than would dilute the effective drawn alcohol
         // below bottling strength — an alcohol shortfall (e.g. a variance entered
         // without correcting Remaining After to the measured dip) must be fixed by
         // the source records, not papered over with water.
-        if (bottlingAbv > 0 && effSrcLitres > 0) {
+        if (bottlingBatchWater > 0 && bottlingAbv > 0 && effSrcLitres > 0) {
           var effSrcLPA = totalDrawnLPA + variance * (avgDrawnAbv / 100);
           var maxDiluteWater = Math.max(0, effSrcLPA / (bottlingAbv / 100) - effSrcLitres);
           bottlingBatchWater = Math.min(bottlingBatchWater, maxDiluteWater);
@@ -36171,7 +36182,7 @@ window.saveAdjModal = async function() {
         var dipHint = '<br><span style="font-size:10px;font-weight:400;">Check Remaining After is the measured dip, not the book value.</span>';
         var balanced, balanceLabel, col;
         var wasteLPA = waste * ((bottlingAbv || avgDrawnAbv) / 100);
-        if (reqLPA > 0) {
+        if (reqLPA > 0 && !bottledAsIs) {
           // Alcohol balance: drawn alcohol (± variance, valued at drawn strength)
           // must equal the alcohol in the finished bottles plus any wasted finished liquid.
           var targetLPA    = reqLPA + wasteLPA;
@@ -36222,7 +36233,7 @@ window.saveAdjModal = async function() {
         var autofillBtn = document.getElementById('lq-variance-autofill');
         if (autofillBtn) {
           var gapLitres;
-          if (reqLPA > 0) {
+          if (reqLPA > 0 && !bottledAsIs) {
             var gapLPA = (reqLPA + wasteLPA) - totalDrawnLPA;
             gapLitres = (avgDrawnAbv > 0) ? gapLPA / (avgDrawnAbv / 100) : 0;
           } else {
@@ -36242,7 +36253,7 @@ window.saveAdjModal = async function() {
             ? 'book ' + totalDrawn.toFixed(1) + ' L &rarr; eff ' + (totalDrawn + variance).toFixed(1) + ' L drawn'
             : '';
           balEl.innerHTML = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;">'
-            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Required LPA</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + (reqLPA > 0 ? reqLPA.toFixed(2) : '—') + '</div><div style="font-size:9px;color:var(--muted);">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '%' : '') + '</div></div>'
+            + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Required LPA</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + (reqLPA > 0 ? reqLPA.toFixed(2) : '—') + '</div><div style="font-size:9px;color:var(--muted);">' + (reqLitres > 0 ? reqLitres.toFixed(1) + ' L @ ' + bottlingAbv.toFixed(1) + '%' + (bottledAsIs ? ' (as-is, &plusmn;' + ABV_TOL.toFixed(1) + '% tol)' : '') : '') + '</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Alcohol Drawn</div><div style="font-size:15px;font-weight:800;color:' + col + ';">' + totalDrawnLPA.toFixed(2) + '</div><div style="font-size:9px;color:var(--muted);">LPA</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Source Drawn</div><div style="font-size:15px;font-weight:800;color:var(--white);">' + totalDrawn.toFixed(1) + ' L</div><div style="font-size:9px;color:var(--muted);">+ ' + waterAdded.toFixed(1) + ' L water</div></div>'
             + '<div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px;">Variance</div><div style="font-size:15px;font-weight:800;color:' + varCol + ';">' + varTxt + '</div><div style="font-size:9px;color:var(--muted);">' + varSub + '</div></div>'
@@ -36288,7 +36299,9 @@ window.saveAdjModal = async function() {
 
       var reqDisp = reqLitres > 0
         ? actualBottles.toLocaleString() + ' bottles &times; ' + bomVolCl + ' cl = <strong style="color:var(--white);">' + reqLitres.toFixed(1) + ' L</strong> @ <strong style="color:var(--white);">' + bottlingAbv.toFixed(1) + '%</strong> = <strong style="color:var(--gold-light);">' + reqLPA.toFixed(2) + ' LPA required</strong>'
-          + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Enter the litres <strong>left in each container</strong> after the run. Reconciliation is on alcohol (LPA) — water added to reach bottling strength is recorded below.</div>'
+          + (bottledAsIs
+              ? '<div style="font-size:11px;color:var(--muted);margin-top:4px;"><strong style="color:var(--gold-light);">Bottled as-is:</strong> source strength is within &plusmn;' + ABV_TOL.toFixed(1) + '% of the bottling strength, so no water is added and the ABV is not adjusted. Reconciliation is on litres &mdash; drawn litres should equal the finished litres.</div>'
+              : '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Enter the litres <strong>left in each container</strong> after the run. Reconciliation is on alcohol (LPA) — water added to reach bottling strength is recorded below.</div>')
         : 'Required volume not calculated &mdash; adjust remaining values to match actual drawn.';
 
       var partialBanner = alreadyDeductedIds.length
@@ -36376,7 +36389,7 @@ window.saveAdjModal = async function() {
 
         + '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
         +   '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Water Added at Completion</div>'
-        +   '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">RO water added to bring the drawn liquid down to bottling strength. Defaults to (finished litres &minus; source drawn); adjust to the actual amount added. Water changes litres only, never alcohol (LPA), so it does not affect the balance above.</div>'
+        +   '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">RO water added to bring the drawn liquid down to bottling strength. Defaults to (finished litres &minus; source drawn), or 0 when the source is within the &plusmn;' + ABV_TOL.toFixed(1) + '% as-is tolerance of the bottling strength; adjust to the actual amount added. Water changes litres only, never alcohol (LPA), so it does not affect the balance above.</div>'
         +   '<div style="display:grid;grid-template-columns:160px 1fr;gap:12px;align-items:center;">'
         +     '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Water added (L)</label>'
         +       '<input type="number" id="lq-water-added" min="0" step="0.1" value="0" '
