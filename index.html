@@ -40466,6 +40466,13 @@ window.saveAdjModal = async function() {
     return Math.round((e - s) / 60000);
   }
 
+  // Monday 00:00 of the week containing d (UK convention).
+  function _weekStart(d) {
+    var w = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    w.setDate(w.getDate() - ((w.getDay() + 6) % 7));
+    return w;
+  }
+
   function _lastChangeoverMins(job) {
     var candidates = (_schedJobs || []).filter(function(j) {
       if (!j.actual_start) return false;
@@ -40536,7 +40543,40 @@ window.saveAdjModal = async function() {
     rows.actual.sort(function(a, b) {
       return new Date(b.end || b.start) - new Date(a.end || a.start);
     });
-    rows.actual = rows.actual.slice(0, 10);
+    // Keep everything from the last 4 weeks (this week + 3 prior, Monday start)
+    // and tag each row with its week index: 0 = this week … 3 = three weeks ago.
+    var thisWeekStart = _weekStart(now);
+    var WEEK_MS = 7 * 86400000;
+    rows.actual = rows.actual.filter(function(r) {
+      var wk = Math.round((thisWeekStart - _weekStart(r.end || r.start)) / WEEK_MS);
+      r.weekIdx = wk;
+      return wk >= 0 && wk <= 3;
+    });
+
+    // Window totals: bottles produced, changeover minutes, and idle minutes
+    // (gaps where neither a run nor a changeover was recorded).
+    var totals = { bottles: 0, changeoverMins: 0, idleMins: 0 };
+    rows.actual.forEach(function(r) {
+      if (r.event === 'Run' && r.job && r.job.actual_bottles_produced) {
+        totals.bottles += Number(r.job.actual_bottles_produced) || 0;
+      }
+      if (r.event === 'Changeover' && r.len) totals.changeoverMins += r.len;
+    });
+    var chrono = rows.actual.slice().sort(function(a, b) { return a.start - b.start; });
+    var maxEnd = null;
+    chrono.forEach(function(r) {
+      if (maxEnd && r.start > maxEnd) totals.idleMins += Math.round((r.start - maxEnd) / 60000);
+      var e = r.end || r.start;
+      if (!maxEnd || e > maxEnd) maxEnd = e;
+    });
+    // Idle continues from the last recorded event until the line picked back up
+    // (earliest active changeover/run) or, failing that, until now.
+    if (maxEnd) {
+      var boundary = now;
+      rows.now.forEach(function(r) { if (r.start < boundary) boundary = r.start; });
+      if (boundary > maxEnd) totals.idleMins += Math.round((boundary - maxEnd) / 60000);
+    }
+    rows.actualTotals = totals;
 
     var seed = new Date(now);
     active.forEach(function(j) {
@@ -40640,6 +40680,52 @@ window.saveAdjModal = async function() {
       h += '</div>' + list.map(rowHtml).join('') + '</div></div>';
       return h;
     }
+    // "Recent actual events" — same shell as section(), but rows are blocked into
+    // week groups (This week / Last week / …) with a totals strip at the bottom.
+    function actualSection(title, subtitle, list, totals, empty) {
+      var h = '<div style="margin-bottom:14px;">'
+        + '<div style="display:flex;align-items:baseline;gap:10px;margin:0 0 7px;">'
+        +   '<div style="font-size:9px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:var(--gold);">' + title + '</div>'
+        +   '<div style="font-size:10px;color:var(--muted);">' + subtitle + '</div>'
+        + '</div>';
+      if (!list.length) return h + '<div style="color:var(--muted);font-size:12px;padding:10px 12px;border:1px solid var(--navy-border);border-radius:4px;">' + empty + '</div></div>';
+      var weekNames = ['This week', 'Last week', '2 weeks ago', '3 weeks ago'];
+      function weekLabel(idx) {
+        var ws = _weekStart(new Date());
+        ws.setDate(ws.getDate() - idx * 7);
+        var we = new Date(ws); we.setDate(we.getDate() + 6);
+        function mo(d) { return d.toLocaleDateString('en-GB', { month: 'short' }); }
+        var range = ws.getMonth() === we.getMonth()
+          ? ws.getDate() + ' \u2013 ' + we.getDate() + ' ' + mo(we)
+          : ws.getDate() + ' ' + mo(ws) + ' \u2013 ' + we.getDate() + ' ' + mo(we);
+        return weekNames[idx] + ' \u00b7 ' + range;
+      }
+      h += '<div style="border:1px solid var(--navy-border);border-radius:4px;overflow:hidden;">';
+      h += '<div style="display:grid;grid-template-columns:' + cols + ';gap:8px;padding:6px 12px;background:rgba(255,255,255,0.025);border-bottom:1px solid var(--navy-border);">';
+      ['Job','Client','Event','Start','Finish','Length','BPH / Assumption'].forEach(function(lbl) {
+        h += '<div style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">' + lbl + '</div>';
+      });
+      h += '</div>';
+      for (var wk = 0; wk <= 3; wk++) {
+        var group = list.filter(function(r) { return r.weekIdx === wk; });
+        if (!group.length) continue;
+        h += '<div style="padding:5px 12px;background:rgba(200,168,106,0.07);border-bottom:1px solid var(--navy-border);font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);">' + weekLabel(wk) + '</div>';
+        h += group.map(rowHtml).join('');
+      }
+      function totCell(lbl, val) {
+        return '<div style="display:flex;align-items:baseline;gap:6px;">'
+          + '<span style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">' + lbl + '</span>'
+          + '<span style="font-size:11px;font-weight:700;color:var(--white);">' + val + '</span></div>';
+      }
+      h += '<div style="display:flex;flex-wrap:wrap;gap:8px 24px;padding:8px 12px;background:rgba(255,255,255,0.04);border-top:1px solid var(--navy-border);">'
+        + totCell('Totals \u2014 4 weeks', '')
+        + totCell('Bottles produced', (totals.bottles || 0).toLocaleString())
+        + totCell('Changeover', totals.changeoverMins ? _fmtSchedMins(totals.changeoverMins) : '0 mins')
+        + totCell('Line idle', totals.idleMins ? _fmtSchedMins(totals.idleMins) : '0 mins')
+        + '</div>';
+      h += '</div></div>';
+      return h;
+    }
     var PROJ_DEFAULT_CAP = 10;
     var totalProjected = rows.projected.length;
     var capped = !_schedShowAllProjections && totalProjected > PROJ_DEFAULT_CAP;
@@ -40652,7 +40738,7 @@ window.saveAdjModal = async function() {
     }
     el.innerHTML =
       section('Now', 'current line state', rows.now, 'Line is idle — see banner above.') +
-      section('Recent actual events', 'last 10 — newest first', rows.actual, 'No actual run/changeover events recorded yet.') +
+      actualSection('Recent actual events', 'last 4 weeks — newest first', rows.actual, rows.actualTotals || {}, 'No actual run/changeover events recorded in the last 4 weeks.') +
       section('Projected next jobs', 'projections use last actual BPH and changeover when available; falls back to 400 BPH / 3h', projVisible, 'No queued jobs to project.', projHeader);
   }
 
