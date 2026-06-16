@@ -19899,6 +19899,9 @@ window.loadBoms = async function initBoms() {
       <button class="btn" onclick="window.openManageLocations()" style="white-space:nowrap;background:var(--navy-card);border:1px solid var(--navy-border);color:var(--muted);">
         📍 Locations
       </button>
+      <button class="btn" onclick="window.openStockReconciliation()" style="white-space:nowrap;background:var(--navy-card);border:1px solid var(--navy-border);color:var(--muted);">
+        ⚖ Reconcile
+      </button>
     </div>
 
     <!-- Booking-in instructions -->
@@ -23923,7 +23926,7 @@ window.loadVesselRegister = async function() {
   }
 
   try {
-    _vrAllContainers = await supa('liquid_containers', '?archived=is.false&select=id,reference,type,spirit_type,current_litres,current_lpa,status,vessel_id,fill_date,is_client_vessel,client_vessel_label,client_id&order=reference.asc');
+    _vrAllContainers = await supa('liquid_containers', '?archived=is.false&select=id,reference,type,spirit_type,current_litres,current_lpa,status,vessel_id,fill_date,is_client_vessel,client_vessel_label,client_id,liquid_owner_client_id&order=reference.asc');
     // Annotate each row with derived client-vessel flag (works for legacy records too)
     try {
       var _clMap = {};
@@ -27339,12 +27342,15 @@ window.saveTransfer = async function() {
       var lpaDeduct = s.lpa_actual || (s.litres_actual * parseFloat(cont.abv||0) / 100);
       var newP = Math.max(0, parseFloat(cont.current_lpa||0) - lpaDeduct);
       var newAbvSrc = newL > 0 && newP > 0 ? (newP / newL * 100) : (cont.abv || null);
-      await supaMut('PATCH','liquid_containers','?id=eq.'+s.container_id,{
+      var _srcUpd = {
         current_litres: Math.round(newL * 10000) / 10000,
         current_lpa:    Math.round(newP * 10000) / 10000,
         abv:            newL > 0 ? Math.round(newAbvSrc * 100) / 100 : null,
         status:         newL <= 0 ? 'empty' : cont.status
-      });
+      };
+      // Emptied tank/tanker no longer holds anyone's liquid — clear the liquid owner.
+      if ((cont.type === 'tank' || cont.type === 'tanker') && newL <= 0.01) _srcUpd.liquid_owner_client_id = null;
+      await supaMut('PATCH','liquid_containers','?id=eq.'+s.container_id, _srcUpd);
       if (window._writeBlendHistory) {
         await window._writeBlendHistory({
           container_id: s.container_id, event_type: 'transfer_from', event_group_id: tfEgid,
@@ -27366,6 +27372,19 @@ window.saveTransfer = async function() {
     }, 0);
     var totalDstLitres = dests.reduce(function(s,x){ return s+(x.litres_received||0); }, 0);
 
+    // Liquid owner of each contributing source (liquid_owner_client_id wins, else the
+    // vessel owner). If every source shares one owner, tank/tanker destinations inherit
+    // it; mixed sources leave it unset (a blend of owners).
+    var _srcOwnerSet = {};
+    sources.forEach(function(x){
+      if (!x.litres_actual) return;
+      var c = _liquid.find(function(cc){ return cc.id === x.container_id; });
+      var o = c ? (c.liquid_owner_client_id || c.client_id || null) : null;
+      if (o) _srcOwnerSet[o] = true;
+    });
+    var _srcOwnerKeys = Object.keys(_srcOwnerSet);
+    var _singleSrcOwner = _srcOwnerKeys.length === 1 ? _srcOwnerKeys[0] : null;
+
     for (var j=0; j<dests.length; j++) {
       var d = dests[j];
       var cont2 = _liquid.find(function(c){ return c.id===d.container_id; });
@@ -27380,12 +27399,20 @@ window.saveTransfer = async function() {
       var newAbv      = newL2 > 0 ? (newP2 / newL2 * 100) : (cont2.abv || null);
 
       var cap2 = parseFloat(cont2.capacity_litres || 0);
-      await supaMut('PATCH','liquid_containers','?id=eq.'+d.container_id,{
+      var _dstUpd = {
         current_litres: Math.round(newL2 * 10000) / 10000,
         current_lpa:    Math.round(newP2 * 10000) / 10000,
         abv:            Math.round(newAbv * 100) / 100,
         status:         newL2 <= 0 ? 'empty' : (cap2 > 0 && newL2 >= cap2 ? 'full' : 'partially_full')
-      });
+      };
+      // Carry the liquid owner onto tank/tanker destinations so it isn't lost when
+      // client spirit moves into an LH-owned vessel.
+      if (cont2.type === 'tank' || cont2.type === 'tanker') {
+        var _existingOwner = cont2.liquid_owner_client_id || null;
+        if (existingL <= 0.01) _dstUpd.liquid_owner_client_id = _singleSrcOwner;
+        else if (!_existingOwner && _singleSrcOwner) _dstUpd.liquid_owner_client_id = _singleSrcOwner;
+      }
+      await supaMut('PATCH','liquid_containers','?id=eq.'+d.container_id, _dstUpd);
       if (window._writeBlendHistory) {
         await window._writeBlendHistory({
           container_id: d.container_id, event_type: 'transfer_to', event_group_id: tfEgid,
@@ -29448,6 +29475,142 @@ window.saveAdjModal = async function() {
 
 })();
 
+</script>
+
+<!-- ══ STOCK RECONCILIATION (audit) ═══════════════════════════════════════════════════════ -->
+<script>
+(function() {
+  // Read-only audit: per SKU, compare the movement ledger (sum of dry_goods_movements)
+  // against the on-hand (sum of dry_goods_batches.quantity_remaining) and explain any
+  // drift using completed jobs whose depletion was never recorded. No data is mutated.
+  function esc(s){ return window.escapeHtml ? window.escapeHtml(String(s==null?'':s)) : String(s==null?'':s); }
+
+  function expectedConsumption(jc, job, bom) {
+    var actual = parseInt(job.actual_bottles_produced || 0);
+    if (!actual) return null;
+    var nm = (jc.item_name || '').toLowerCase();
+    var isCase = nm.indexOf('shipper') > -1 || nm.indexOf('divider') > -1;
+    var bps = bom ? parseInt(bom.bottles_per_shipper || 0) : 0;
+    if (isCase && bps > 0) return Math.ceil(actual / bps);
+    var qr = jc.qty_required != null ? parseFloat(jc.qty_required) : null;
+    var tgt = job.bottle_target ? parseFloat(job.bottle_target) : null;
+    if (qr != null && tgt) return Math.ceil((qr / tgt) * actual);
+    return actual;
+  }
+
+  window.openStockReconciliation = async function() {
+    var ov = document.createElement('div');
+    ov.id = 'stock-recon-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.92);z-index:100040;display:flex;align-items:flex-start;justify-content:center;padding:24px;overflow-y:auto;font-family:Lato,sans-serif;';
+    ov.innerHTML = '<div style="background:var(--navy);border:1px solid var(--navy-border);border-radius:8px;max-width:1100px;width:100%;padding:24px;">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">'
+      +   '<div style="font-size:17px;font-weight:700;color:var(--white);">Stock Reconciliation</div>'
+      +   '<button id="src-close" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1;">&times;</button>'
+      + '</div>'
+      + '<div style="font-size:12px;color:var(--muted);margin-bottom:16px;">Compares the stock-history ledger against on-hand for every SKU. Discrepancies are explained where a completed job&rsquo;s depletion was never recorded. Read-only.</div>'
+      + '<div id="src-body" style="color:var(--muted);font-size:13px;padding:24px;text-align:center;">Loading&hellip;</div>'
+      + '</div>';
+    document.body.appendChild(ov);
+    document.body.style.overflow = 'hidden';
+    function close(){ ov.remove(); document.body.style.overflow=''; }
+    ov.querySelector('#src-close').onclick = close;
+    ov.addEventListener('click', function(e){ if (e.target === ov) close(); });
+
+    var body = ov.querySelector('#src-body');
+    try {
+      var results = await Promise.all([
+        window.db.select('dry_goods_batches', '?select=sku_id,quantity_remaining'),
+        window.db.select('dry_goods_movements', '?select=sku_id,quantity,movement_type,job_id'),
+        window.db.select('dry_goods_skus', '?select=id,description'),
+        window.db.select('job_components', '?is_excluded=eq.false&sku_id=not.is.null&select=sku_id,job_id,qty_required,item_name'),
+        window.db.select('jobs', '?stage=eq.complete&select=id,actual_bottles_produced,bottle_target,bom_id'),
+        window.db.select('boms', '?select=id,bottles_per_shipper')
+      ]);
+      var batches = results[0] || [], moves = results[1] || [], skus = results[2] || [];
+      var jcs = results[3] || [], jobs = results[4] || [], boms = results[5] || [];
+
+      var nameMap = {}; skus.forEach(function(s){ nameMap[s.id] = s.description; });
+      var jobMap = {}; jobs.forEach(function(j){ jobMap[j.id] = j; });
+      var bomMap = {}; boms.forEach(function(b){ bomMap[b.id] = b; });
+
+      var onhand = {}, ledger = {}, manualCnt = {};
+      batches.forEach(function(b){ onhand[b.sku_id] = (onhand[b.sku_id]||0) + parseInt(b.quantity_remaining||0); });
+      // movement keys present per (job_id+sku_id) so we know which job depletions were recorded
+      var loggedJobSku = {};
+      moves.forEach(function(m){
+        ledger[m.sku_id] = (ledger[m.sku_id]||0) + parseInt(m.quantity||0);
+        if (m.movement_type === 'manual_in' || m.movement_type === 'manual_out') manualCnt[m.sku_id] = (manualCnt[m.sku_id]||0)+1;
+        if (m.job_id) loggedJobSku[m.job_id + '|' + m.sku_id] = true;
+      });
+
+      // Missing completed-job depletions per SKU (job completed, used the SKU, no ledger row)
+      var missingBySku = {};
+      jcs.forEach(function(jc){
+        var job = jobMap[jc.job_id];
+        if (!job) return; // not a completed job
+        if (loggedJobSku[jc.job_id + '|' + jc.sku_id]) return; // already recorded
+        var exp = expectedConsumption(jc, job, bomMap[job.bom_id]);
+        if (exp == null) return;
+        if (!missingBySku[jc.sku_id]) missingBySku[jc.sku_id] = { total:0, jobs:[] };
+        missingBySku[jc.sku_id].total += exp;
+        missingBySku[jc.sku_id].jobs.push(jc.job_id);
+      });
+
+      var allSkuIds = {};
+      Object.keys(onhand).forEach(function(k){ allSkuIds[k]=1; });
+      Object.keys(ledger).forEach(function(k){ allSkuIds[k]=1; });
+      var rows = [];
+      Object.keys(allSkuIds).forEach(function(sku){
+        var oh = onhand[sku]||0, lg = ledger[sku]||0, drift = lg - oh;
+        if (drift === 0) return;
+        var miss = missingBySku[sku] || { total:0, jobs:[] };
+        var residual = drift - miss.total;
+        var mc = manualCnt[sku]||0;
+        var cls, label, colour;
+        if (miss.total > 0 && mc === 0 && Math.abs(residual) <= Math.max(200, Math.abs(drift)*0.02)) {
+          cls='recoverable'; label='Missing job depletion'; colour='var(--green)';
+        } else if (mc > 0 || miss.total > 0) {
+          cls='review'; label='Manual adj / partial'; colour='var(--amber)';
+        } else {
+          cls='unexplained'; label = drift < 0 ? 'On-hand exceeds ledger' : 'Unexplained'; colour='var(--red)';
+        }
+        rows.push({ sku:sku, name:nameMap[sku]||sku, oh:oh, lg:lg, drift:drift, miss:miss.total, jobs:miss.jobs, residual:residual, cls:cls, label:label, colour:colour });
+      });
+      rows.sort(function(a,b){ return Math.abs(b.drift) - Math.abs(a.drift); });
+
+      if (!rows.length) {
+        body.innerHTML = '<div style="color:var(--green);font-size:14px;padding:24px;">All SKUs reconcile &mdash; ledger matches on-hand.</div>';
+        return;
+      }
+      var counts = { recoverable:0, review:0, unexplained:0 };
+      rows.forEach(function(r){ counts[r.cls]++; });
+      var head = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;font-size:11px;">'
+        + '<span style="color:var(--green);">&#9679; ' + counts.recoverable + ' recoverable (missing job)</span>'
+        + '<span style="color:var(--amber);">&#9679; ' + counts.review + ' needs review (manual)</span>'
+        + '<span style="color:var(--red);">&#9679; ' + counts.unexplained + ' unexplained</span>'
+        + '<span style="color:var(--muted);">&mdash; ' + rows.length + ' SKUs drifting</span></div>';
+      var table = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+        + '<thead><tr style="color:var(--muted);font-size:10px;letter-spacing:0.06em;text-transform:uppercase;text-align:left;">'
+        + '<th style="padding:6px 8px;">SKU</th><th style="padding:6px 8px;">Item</th>'
+        + '<th style="padding:6px 8px;text-align:right;">On-hand</th><th style="padding:6px 8px;text-align:right;">Ledger</th>'
+        + '<th style="padding:6px 8px;text-align:right;">Drift</th><th style="padding:6px 8px;">Likely cause</th></tr></thead><tbody>'
+        + rows.map(function(r){
+            return '<tr style="border-top:1px solid var(--navy-border);">'
+              + '<td style="padding:7px 8px;font-family:monospace;color:var(--gold);">' + esc(r.sku) + '</td>'
+              + '<td style="padding:7px 8px;color:var(--text);">' + esc(r.name) + '</td>'
+              + '<td style="padding:7px 8px;text-align:right;color:var(--text);">' + r.oh.toLocaleString() + '</td>'
+              + '<td style="padding:7px 8px;text-align:right;color:var(--muted);">' + r.lg.toLocaleString() + '</td>'
+              + '<td style="padding:7px 8px;text-align:right;font-weight:700;color:' + r.colour + ';">' + (r.drift>0?'+':'') + r.drift.toLocaleString() + '</td>'
+              + '<td style="padding:7px 8px;color:' + r.colour + ';">' + esc(r.label) + (r.jobs.length? ' <span style="color:var(--muted);">('+esc(r.jobs.join(', '))+')</span>':'') + '</td>'
+              + '</tr>';
+          }).join('')
+        + '</tbody></table>';
+      body.innerHTML = head + table;
+    } catch(e) {
+      body.innerHTML = '<div style="color:var(--red);padding:16px;">Could not load reconciliation: ' + esc(e && e.message) + '</div>';
+    }
+  };
+})();
 </script>
 
 <!-- ══ SUPPLIERS SCRIPT ═══════════════════════════════════════════════════════════════════ -->
@@ -37186,7 +37349,7 @@ window.saveAdjModal = async function() {
       var a = addedAll[i];
       var aLpa = Math.round(a.litres * (targetAbv / 100) * 1e4) / 1e4;
       var dRows = [];
-      try { dRows = await supaGet('liquid_containers?id=eq.' + a.vesselId + '&select=id,reference,current_litres,current_lpa,abv,fill_date'); } catch(e) {}
+      try { dRows = await supaGet('liquid_containers?id=eq.' + a.vesselId + '&select=id,reference,current_litres,current_lpa,abv,fill_date,type,liquid_owner_client_id'); } catch(e) {}
       var d    = (dRows && dRows[0]) || {};
       var dLit = parseFloat(d.current_litres || 0);
       var dLpa = parseFloat(d.current_lpa || 0);
@@ -37203,6 +37366,11 @@ window.saveAdjModal = async function() {
       // destination was previously empty.
       if (dLit <= 0.001 && lo.fillDate) destUpd.fill_date = lo.fillDate;
       if (a.cbw) destUpd.cbw_rotation = a.cbw;
+      // For LH-owned tank/tanker destinations that were empty, carry the leftover's
+      // owner onto the liquid owner so it isn't lost.
+      if ((d.type === 'tank' || d.type === 'tanker') && dLit <= 0.001 && lo.clientId) {
+        destUpd.liquid_owner_client_id = lo.clientId;
+      }
       await window.db.update('liquid_containers', '?id=eq.' + a.vesselId, destUpd);
 
       var moveNote = a.litres.toFixed(1) + 'L leftover moved from ' + lo.reference + ' to ' + (d.reference || a.vesselId)
@@ -42076,7 +42244,18 @@ window.saveAdjModal = async function() {
     var type      = typeSel   ? typeSel.value   : '';
     if (!clientId) { window.toast && window.toast('Pick an Owner / Client for the new vessel.', 'error'); return null; }
     if (!type)     { window.toast && window.toast('Pick a Vessel Type for the new vessel.',     'error'); return null; }
-    var isClientVessel = window._cmIsLighthouseClient ? !window._cmIsLighthouseClient(clientId, clientSel) : false;
+    // Tanks/tankers are LH-owned vessels: never a client vessel. The picked client is
+    // treated as the LIQUID owner; the vessel owner stays Lighthouse.
+    var isLhFleet = (type === 'tank' || type === 'tanker');
+    var isClientVessel = !isLhFleet && (window._cmIsLighthouseClient ? !window._cmIsLighthouseClient(clientId, clientSel) : false);
+    var liquidOwnerId = null, vesselOwnerId = clientId;
+    if (isLhFleet) {
+      // Resolve Lighthouse's client id from the picker options.
+      var _lhId = null;
+      if (clientSel) Array.from(clientSel.options).forEach(function(o){ if ((o.text||'').toLowerCase().indexOf('lighthouse') >= 0) _lhId = o.value; });
+      vesselOwnerId = _lhId || clientId;
+      liquidOwnerId = (clientId && clientId !== vesselOwnerId) ? clientId : null;
+    }
     var capacity = parseFloat(capEl && capEl.value) || null;
     if ((type === 'tanker' || type === 'other') && !capacity) {
       window.toast && window.toast('Enter Capacity for the new ' + type + ' vessel.', 'error');
@@ -42094,12 +42273,13 @@ window.saveAdjModal = async function() {
       var payload = {
         type:            type,
         reference:       code,
-        client_id:       clientId,
+        client_id:       vesselOwnerId,
         capacity_litres: capacity,
         location:        location,
         status:          'empty',
         current_litres:  0,
-        current_lpa:     0
+        current_lpa:     0,
+        liquid_owner_client_id: liquidOwnerId
       };
       if (isClientVessel) {
         payload.vessel_id           = null;
@@ -44139,7 +44319,7 @@ window.saveAdjModal = async function() {
     return '<div id="dl-dnv-wrap-' + idx + '" style="display:none;margin-bottom:8px;padding:10px 12px;background:rgba(201,168,76,0.05);border:1px solid rgba(201,168,76,0.3);border-radius:4px;">'
       + '<div style="font-size:9px;letter-spacing:0.16em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:8px;">Register New Vessel</div>'
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">'
-      + '<div><label style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Owner / Client *</label>'
+      + '<div><label id="dl-dnv-client-label-' + idx + '" style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Owner / Client *</label>'
       +   '<select id="dl-dnv-client-' + idx + '" onchange="window._dlOnNewVesselClientChange(' + idx + ')" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:11px;border-radius:3px;box-sizing:border-box;"><option value="">— Select client —</option></select></div>'
       + '<div><label style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:700;display:block;margin-bottom:3px;">Vessel Type *</label>'
       +   '<select id="dl-dnv-type-' + idx + '" onchange="window._dlOnNewVesselTypeChange(' + idx + ')" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:11px;border-radius:3px;box-sizing:border-box;">'
@@ -44241,6 +44421,9 @@ window.saveAdjModal = async function() {
       }
     }
     var _isLhFleet = (type === 'tank' || type === 'tanker');
+    // For tanks/tankers the vessel is LH-owned, so this picker means the LIQUID owner.
+    var _clientLabel = document.getElementById('dl-dnv-client-label-' + idx);
+    if (_clientLabel) _clientLabel.textContent = _isLhFleet ? 'Liquid Owner / Client' : 'Owner / Client *';
     var isClientVessel = !_isLhFleet && clientSel && clientSel.value && window._cmIsLighthouseClient
       ? !window._cmIsLighthouseClient(clientSel.value, clientSel)
       : false;
@@ -45234,7 +45417,7 @@ window.saveAdjModal = async function() {
     //  • Operator override              → the picker value wins; if it differs
     //    from the single source owner that's a change of title (sale) — confirm + log.
     var _owners = [];
-    sources.forEach(function(s){ var o = s.cont.client_id; if (o && _owners.indexOf(o) < 0) _owners.push(o); });
+    sources.forEach(function(s){ var o = s.cont.liquid_owner_client_id || s.cont.client_id; if (o && _owners.indexOf(o) < 0) _owners.push(o); });
     var _pickedOwner = gv('dl-owner');
     var outputOwner = '';
     if (_owners.length > 1) {
@@ -45492,11 +45675,20 @@ window.saveAdjModal = async function() {
           abv: Math.round(newABVc*100)/100,
           status: autoStatus(newL, parseFloat(n.cont.capacity_litres||0))
         };
+        var _destIsLhFleet = (n.cont.type === 'tank' || n.cont.type === 'tanker');
         if (n.addL > 0) {
           upd.spirit_type = dlSpirit; upd.cbw_rotation = newRot || null;
-          if (outputOwner) upd.client_id = outputOwner; // owner of the resultant liquid (inherited or chosen)
+          // Owner of the resultant liquid (inherited or chosen). For LH-owned tanks/tankers
+          // this is the LIQUID owner — the vessel owner (client_id) stays Lighthouse.
+          if (outputOwner) {
+            if (_destIsLhFleet) upd.liquid_owner_client_id = outputOwner;
+            else upd.client_id = outputOwner;
+          }
         }
-        else if (newL <= 0) { upd.spirit_type = null; upd.cbw_rotation = null; }
+        else if (newL <= 0) {
+          upd.spirit_type = null; upd.cbw_rotation = null;
+          if (_destIsLhFleet) upd.liquid_owner_client_id = null; // emptied tank holds no one's liquid
+        }
         await window.db.update('liquid_containers', '?id=eq.' + n.cont.id, upd);
 
         if (n.deductL > 0) {
