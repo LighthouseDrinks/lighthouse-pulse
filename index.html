@@ -10701,6 +10701,20 @@ function el(id) { return document.getElementById(id); }
 function gv(id) { var e = el(id); return e ? e.value.trim() : ''; }
 
 // ── Render BOM table ─────────────────────────────────────────────────────────
+// Resolve a customer name for BOM displays across ALL lifecycle stages.
+// APP.clients is filtered to active clients only, so opportunities/leads/
+// prospects fall through to window.CLIENTS and the all-stages cache built in
+// loadBoms before finally falling back to the raw id.
+window._bomClientDisplayName = function(id) {
+  if (!id) return '—';
+  var ac = (window.APP && window.APP.clients || []).find(function(x){ return x.id === id; });
+  if (ac && ac.name) return ac.name;
+  var c = (window.CLIENTS || []).find(function(x){ return x.id === id; });
+  if (c && (c.company || c.name)) return c.company || c.name;
+  if (window._bomClientNames && window._bomClientNames[id]) return window._bomClientNames[id];
+  return id;
+};
+
 function renderBoms() {
   var tbody = el('boms-tbody');
   var countEl = el('bom-count-label');
@@ -10721,7 +10735,7 @@ function renderBoms() {
   }
   if (filterClientEl && filterClientEl.children.length <= 1) {
     var clientNames = {};
-    BOMS.forEach(function(b){ if (b.clientId) clientNames[b.clientId] = clientsMap[b.clientId] || (window._clientName && window._clientName(b.clientId) !== '—' ? window._clientName(b.clientId) : null) || b.clientId; });
+    BOMS.forEach(function(b){ if (b.clientId) clientNames[b.clientId] = window._bomClientDisplayName(b.clientId); });
     var sortedClients = Object.keys(clientNames).sort(function(a,b){ return (clientNames[a]||'').localeCompare(clientNames[b]||''); });
     filterClientEl.innerHTML = '<option value="">All Clients</option>'
       + sortedClients.map(function(id){ return '<option value="' + id + '"' + (selectedClient===id?' selected':'') + '>' + clientNames[id] + '</option>'; }).join('');
@@ -10760,8 +10774,8 @@ function renderBoms() {
 
   // Sort: client name A-Z, then product name A-Z
   filtered.sort(function(a, b) {
-    var ca = (clientsMap[a.clientId] || a.clientId || '').toLowerCase();
-    var cb = (clientsMap[b.clientId] || b.clientId || '').toLowerCase();
+    var ca = (window._bomClientDisplayName(a.clientId) || '').toLowerCase();
+    var cb = (window._bomClientDisplayName(b.clientId) || '').toLowerCase();
     if (ca !== cb) return ca.localeCompare(cb);
     return (a.product || '').toLowerCase().localeCompare((b.product || '').toLowerCase());
   });
@@ -10773,7 +10787,7 @@ function renderBoms() {
   filtered.forEach(function(b) {
     if (b.clientId !== currentClientId) {
       currentClientId = b.clientId;
-      var _cname = clientsMap[b.clientId] || (window._clientName && window._clientName(b.clientId) !== '—' ? window._clientName(b.clientId) : null) || b.clientId || '—';
+      var _cname = window._bomClientDisplayName(b.clientId) || b.clientId || '—';
       groups.push({ clientId: b.clientId, clientName: _cname, boms: [] });
     }
     groups[groups.length-1].boms.push(b);
@@ -10795,7 +10809,7 @@ function renderBoms() {
       + '</td>'
       + '</tr>';
     groupedHtml += g.boms.map(function(b) {
-    var clientName  = esc(clientsMap[b.clientId] || b.clientId || '—');
+    var clientName  = esc(window._bomClientDisplayName(b.clientId) || '—');
     var linked      = jobCounts[b.id] || 0;
     var rawVolAbv   = (b.volume ? b.volume + 'cl' : '') + (b.abv ? (b.volume ? ' / ' : '') + b.abv + '%' : '');
     var volAbv      = esc(rawVolAbv || '—');
@@ -11268,28 +11282,42 @@ async function openBomModal(editId) {
 
       // Load client inventory, then restore dropdown selections by SKU ID
       window.onBomClientChange().then(function() {
-        var restoreMap = {
-          'bm-liquid-sku':      null, // handled above via populateLiquidProductSelect
-          'bm-bottle':          b.bottleSkuId,
-          'bm-cork':            b.corkSkuId,
-          'bm-ropp':            b.roppSkuId,
-          'bm-foil':            b.foilSkuId,
-          'bm-label-front-sel': b.frontLabelSkuId,
-          'bm-label-back-sel':  b.backLabelSkuId,
-          'bm-label-neck-sel':  b.neckLabelSkuId,
-          'bm-label-outer-sel': b.outerCaseLabelSkuId,
-          'bm-shipper-sel':     b.shipperSkuId,
-          'bm-divider-sel':     b.dividerSkuId,
-          'bm-string-sel':      b.stringTwineSkuId,
-          'bm-monocarton':      b.monocartonSkuId,
-          'bm-gift-tube':       b.giftTubeSkuId,
-          'bm-tube-lid':        b.tubeLidSkuId,
-          'bm-tin':             b.tinSkuId
-        };
-        Object.keys(restoreMap).forEach(function(selId) {
-          var skuId = restoreMap[selId];
+        // [selId, saved sku id, stored description] — description is the fallback
+        // label used when the saved SKU is not in the freshly-loaded dropdown
+        // (e.g. Lighthouse/CLI-000 stock, or a since-archived/deactivated SKU).
+        var restoreList = [
+          ['bm-bottle',          b.bottleSkuId,         b.bottle],
+          ['bm-cork',            b.corkSkuId,           b.cork],
+          ['bm-ropp',            b.roppSkuId,           b.ropp],
+          ['bm-foil',            b.foilSkuId,           b.foil],
+          ['bm-label-front-sel', b.frontLabelSkuId,     b.labelFront],
+          ['bm-label-back-sel',  b.backLabelSkuId,      b.labelBack],
+          ['bm-label-neck-sel',  b.neckLabelSkuId,      b.labelNeck],
+          ['bm-label-outer-sel', b.outerCaseLabelSkuId, b.labelOuter],
+          ['bm-shipper-sel',     b.shipperSkuId,        b.shipper],
+          ['bm-divider-sel',     b.dividerSkuId,        b.divider],
+          ['bm-string-sel',      b.stringTwineSkuId,    b.string],
+          ['bm-monocarton',      b.monocartonSkuId,     b.monocarton],
+          ['bm-gift-tube',       b.giftTubeSkuId,       b.giftTube],
+          ['bm-tube-lid',        b.tubeLidSkuId,        b.tubeLid],
+          ['bm-tin',             b.tinSkuId,            b.tin]
+        ];
+        restoreList.forEach(function(entry) {
+          var selId = entry[0], skuId = entry[1], desc = entry[2];
           if (!skuId) return;
           var sel = el(selId); if (!sel) return;
+          var has = false;
+          for (var i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value === skuId) { has = true; break; }
+          }
+          if (!has) {
+            var label = (desc && String(desc).trim()) ? desc : skuId;
+            var opt = document.createElement('option');
+            opt.value = skuId;
+            opt.textContent = label;
+            opt.setAttribute('data-desc', label);
+            sel.appendChild(opt);
+          }
           sel.value = skuId;
         });
       });
@@ -11398,7 +11426,7 @@ async function viewBom(bomId) {
     return '<tr><td colspan="2" style="' + _TR_SEC + '">' + title + '</td></tr>';
   }
 
-  var clientName = clientsMap[b.clientId] || b.clientId || '—';
+  var clientName = clientsMap[b.clientId] || window._bomClientDisplayName(b.clientId) || '—';
 
   var tableRows = ''
     + vSecHdr('Product Specification')
@@ -11591,7 +11619,7 @@ window.printBom = async function(bomId) {
   if (window.APP && window.APP.clients) {
     window.APP.clients.forEach(function(c){ clientsMap[c.id] = c.name; });
   }
-  var clientName = clientsMap[b.clientId] || b.clientId || '—';
+  var clientName = clientsMap[b.clientId] || window._bomClientDisplayName(b.clientId) || '—';
 
   // ── Print row builders ───────────────────────────────
   var _pe = window.escapeHtml || function(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
@@ -12825,6 +12853,17 @@ window.loadBoms = async function initBoms() {
     window.BOMS = BOMS;
     // Ensure client names are available before rendering (handles direct BOMs-page navigation)
     if (typeof loadClients === 'function') { try { await loadClients(); } catch(_){} }
+    // Cache an ALL-lifecycle-stage client id->name map so BOMs drafted for
+    // opportunities/leads/prospects (which APP.clients filters out) still show
+    // their name instead of the raw id (e.g. "Bear Distillery" not "CLI-069").
+    try {
+      var _allCustomers = await window.db.select('clients', '?select=id,name');
+      if (Array.isArray(_allCustomers)) {
+        var _map = {};
+        _allCustomers.forEach(function(c){ if (c && c.id) _map[c.id] = c.name; });
+        window._bomClientNames = _map;
+      }
+    } catch(_){}
     renderBoms();
   } catch(e) {
     console.warn('BOMs load failed:', e.message);
@@ -28160,7 +28199,7 @@ window.openSKUPanel = async function(skuId) {
         return '<div style="background:var(--navy-card);border:1px solid var(--navy-border);border-left:3px solid var(--gold);border-radius:4px;padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">'
           + '<div>'
           +   '<div style="font-size:13px;font-weight:700;color:var(--white);">' + window.bomDisplayName(b) + '</div>'
-          +   '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + (clientsMap[b.clientId] || b.clientId || '—') + '</div>'
+          +   '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + (clientsMap[b.clientId] || (window._bomClientDisplayName && window._bomClientDisplayName(b.clientId)) || b.clientId || '—') + '</div>'
           +   '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;">'
           +     m.usedAs.map(function(label) {
                   return '<span style="font-size:10px;letter-spacing:0.05em;background:rgba(201,168,76,0.1);color:var(--gold);border:1px solid var(--gold-dim);padding:1px 7px;border-radius:3px;">' + label + '</span>';
