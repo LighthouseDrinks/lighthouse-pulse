@@ -22319,7 +22319,7 @@ window._approvalsBadgePoll = async function() {
             <th>Container</th>
             <th>Litres Change</th>
             <th class="mob-hide">ABV</th>
-            <th class="mob-hide">LPA After</th>
+            <th class="mob-hide">Alcohol (LPA)</th>
             <th>By</th>
             <th class="mob-hide">Notes</th>
           </tr>
@@ -24213,32 +24213,51 @@ window._isLhHousedClientName = function(name) {
 
 // Figure out the next sequential number for a client's client-owned vessels.
 // Format: {ABBREV}-CV-{NNN}. Checks the in-memory liquid cache first, falls back to 1.
-window._nextClientVesselRef = function(clientId, clientName) {
+window._nextClientVesselRef = async function(clientId, clientName) {
   // Failsafe: never generate a client-vessel ref for an LH-housed client (Lighthouse/Fero).
   // This only gets called when we've decided it's a client vessel, so the client
   // shouldn't be LH-housed. Bail out to avoid "LIGHTH-CV-*" / "FERO-CV-*".
   if (window._isLhHousedClientName(clientName)) return '';
   var abbrev = window._clientAbbrev(clientName);
   var prefix = abbrev + '-CV-';
-  var cache = (typeof _bl !== 'undefined' && _bl && _bl.length) ? _bl
-            : (typeof _liquid !== 'undefined' && _liquid && _liquid.length) ? _liquid
-            : (window._vrAllContainers || []);
   var maxN = 0;
-  cache.forEach(function(c){
-    if (!c || c.client_id !== clientId) return;
-    var ref = String(c.reference || '').toUpperCase();
-    if (ref.indexOf(prefix) === 0) {
-      var n = parseInt(ref.slice(prefix.length), 10) || 0;
-      if (n > maxN) maxN = n;
-    }
-  });
+  // Authoritative: scan ALL liquid_containers sharing this prefix — INCLUDING
+  // archived rows. The reference column is globally unique, so an archived
+  // POWERS-CV-012 still blocks reuse even though it is hidden from the staff
+  // list. Scanning by prefix (not client_id) also covers two clients that
+  // happen to abbreviate the same. Falls back to the in-memory caches if the
+  // lookup fails so the preview still works offline.
+  try {
+    // PostgREST ilike uses '*' as the wildcard (not '%'); leave it unencoded.
+    var rows = await window.db.select('liquid_containers',
+      '?reference=ilike.' + encodeURIComponent(prefix) + '*&select=reference');
+    (rows || []).forEach(function(c){
+      var ref = String(c && c.reference || '').toUpperCase();
+      if (ref.indexOf(prefix) === 0) {
+        var n = parseInt(ref.slice(prefix.length), 10) || 0;
+        if (n > maxN) maxN = n;
+      }
+    });
+  } catch(e) {
+    var cache = (typeof _bl !== 'undefined' && _bl && _bl.length) ? _bl
+              : (typeof _liquid !== 'undefined' && _liquid && _liquid.length) ? _liquid
+              : (window._vrAllContainers || []);
+    cache.forEach(function(c){
+      if (!c || c.client_id !== clientId) return;
+      var ref = String(c.reference || '').toUpperCase();
+      if (ref.indexOf(prefix) === 0) {
+        var n = parseInt(ref.slice(prefix.length), 10) || 0;
+        if (n > maxN) maxN = n;
+      }
+    });
+  }
   return prefix + String(maxN + 1).padStart(3, '0');
 };
 
 // Toggle between LH-fleet vessel UI and auto-generated client-vessel reference
 // based on the selected Owner/Client. Lighthouse = fleet register; anyone else = client vessel.
 // DOM-first, no cache dependencies. Lighthouse is ALWAYS the default on load.
-window._blacClientChange = function() {
+window._blacClientChange = async function() {
   var sel = document.getElementById('blac-client');
   if (!sel) return;
   var lhWrap    = document.getElementById('blac-lh-vessel-wrap');
@@ -24268,7 +24287,7 @@ window._blacClientChange = function() {
 
   if (isClientVessel) {
     if (vesselSel) vesselSel.value = '';
-    var autoRef = window._nextClientVesselRef(clientId, opt.text);
+    var autoRef = await window._nextClientVesselRef(clientId, opt.text);
     if (cvHid)  cvHid.value  = autoRef;
     if (cvDisp) cvDisp.textContent = autoRef;
     if (hidRef) hidRef.value = autoRef;
@@ -25001,7 +25020,7 @@ window.loadReconciliation = async function() {
         // Expandable per-movement breakdown — shows exactly what moved and why a variance exists.
         if (hasMv) {
           var mvRows = r.movements.map(function(m){
-            var mLbl = EVLBL[m.event_type] || m.event_type || '—';
+            var mLbl = (window.lhDescribe ? window.lhDescribe(m).label : null) || EVLBL[m.event_type] || m.event_type || '—';
             var md   = new Date(m.created_at);
             var mds  = md.toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'2-digit'}) + ' ' + md.toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'});
             var litB = m.litres_before != null ? parseFloat(m.litres_before).toFixed(1) : '—';
@@ -26138,7 +26157,7 @@ window._cmIsLighthouseClient = function(clientId, selectEl) {
   return true;
 };
 
-window._cmUpdateOwnership = function() {
+window._cmUpdateOwnership = async function() {
   var clientEl = document.getElementById('cm-client');
   var clientId = clientEl ? clientEl.value : '';
   var isClientVessel = clientId && !window._cmIsLighthouseClient(clientId, clientEl);
@@ -26146,6 +26165,23 @@ window._cmUpdateOwnership = function() {
   var labelField = document.getElementById('cm-client-vessel-label-field');
   if (indicator)  indicator.style.display  = isClientVessel ? 'flex' : 'none';
   if (labelField) labelField.style.display = isClientVessel ? '' : 'none';
+
+  // Preload the sequenced client-vessel reference so it stays consistent.
+  // Create flow only — never touch an existing reference when editing.
+  var editEl = document.getElementById('cm-edit-id');
+  var isEditing = !!(editEl && editEl.value);
+  var refEl = document.getElementById('cm-reference');
+  if (!refEl || isEditing) return;
+  if (isClientVessel) {
+    var clientName = (clientEl && clientEl.selectedIndex >= 0)
+      ? clientEl.options[clientEl.selectedIndex].text : '';
+    var ref = await window._nextClientVesselRef(clientId, clientName);
+    if (ref) { refEl.value = ref; refEl.readOnly = true; }
+  } else {
+    // Switched back to an LH-housed client: drop any auto CV ref and re-enable typing.
+    if (/-CV-\d+$/i.test(refEl.value || '')) refEl.value = '';
+    refEl.readOnly = false;
+  }
 };
 
 window.handleCMTypeChange = function() {
@@ -26362,42 +26398,29 @@ window.openLiqView = async function(id) {
     }
     html += '</div>';
 
-    // ── History ──
-    var HLABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend (in place)',
-      transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal',
-      edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In',
-      bottling_deduction:'Bottling Draw', measurement_variance:'Stock Variance', dilution_water:'Dilution Water',
-      blend_loss:'Blend Loss', dilution_loss:'Dilution Loss',
-      container_archived:'Archived', container_restored:'Restored', container_adjusted:'Adjusted', container_created:'Created' };
-    var HCOLS = { add:'var(--green)', dilution:'var(--amber)', blend_input:'#3b82f6', blend_output:'var(--gold)', blend_inplace:'var(--gold)',
-      transfer_from:'var(--red)', transfer_to:'var(--green)', disgorge_out:'#a78bfa', disgorge_in:'#7c3aed',
-      bottling_deduction:'var(--red)', measurement_variance:'var(--amber)', dilution_water:'#3b82f6',
-      blend_loss:'var(--muted)', dilution_loss:'var(--muted)',
-      container_archived:'var(--muted)', container_restored:'var(--green)' };
-
+    // ── History ── (labels/colours/alcohol-moved via shared window.lhDescribe)
     html += sectionHd('History (last 20 events)');
     if (hist && hist.length) {
       html += '<div style="overflow-x:auto;">';
       html += '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
       html += '<thead><tr>';
-      ['Date','Event','Litres Before','Litres After','Change','ABV After','LPA After','By'].forEach(function(h){
+      ['Date','Event','Litres Before','Litres After','Change','ABV After','Alcohol Moved','Balance (LPA)','By'].forEach(function(h){
         html += '<th style="text-align:left;padding:5px 8px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--navy-border);white-space:nowrap;">' + h + '</th>';
       });
       html += '</tr></thead><tbody>';
       hist.forEach(function(h, i) {
         var bg   = i%2===0?'':'background:rgba(255,255,255,0.02);';
-        var evLbl= HLABELS[h.event_type] || h.event_type || '—';
-        var evCol= HCOLS[h.event_type]   || 'var(--muted)';
-        var _lcRaw = h.litres_changed != null ? parseFloat(h.litres_changed)
-                   : (h.event_type === 'add' && h.litres_after != null ? parseFloat(h.litres_after) : null);
-        var chg  = _lcRaw != null ? (_lcRaw > 0 ? '+' : '') + _lcRaw.toFixed(1) + 'L' : '—';
-        var chgC = h.litres_changed > 0 ? 'var(--green)' : h.litres_changed < 0 ? 'var(--red)' : 'var(--muted)';
+        var _d   = window.lhDescribe ? window.lhDescribe(h) : null;
+        var evLbl= _d ? _d.label : (h.event_type || '—');
+        var evCol= _d ? _d.color : 'var(--muted)';
+        var chg  = _d ? _d.litresStr : '—';
+        var chgC = _d ? _d.litresColor : 'var(--muted)';
         var changesArr = h.changes
           ? (typeof h.changes === 'string' ? (function(){ try { return JSON.parse(h.changes); } catch(e){ return null; } })() : h.changes)
           : null;
         var noteHtml;
         if (changesArr && changesArr.length) {
-          noteHtml = '<tr style="' + bg + '"><td colspan="8" style="padding:2px 8px 7px 8px;">'
+          noteHtml = '<tr style="' + bg + '"><td colspan="9" style="padding:2px 8px 7px 8px;">'
             + changesArr.map(function(ch){
                 return '<span style="font-size:10px;display:inline-block;margin-right:14px;">'
                   + '<span style="color:var(--muted);font-style:italic;">' + window.escapeHtml(ch.label) + ':</span> '
@@ -26406,7 +26429,7 @@ window.openLiqView = async function(id) {
               }).join('')
             + '</td></tr>';
         } else if (h.notes) {
-          noteHtml = '<tr style="' + bg + '"><td colspan="8" style="padding:2px 8px 7px 8px;">'
+          noteHtml = '<tr style="' + bg + '"><td colspan="9" style="padding:2px 8px 7px 8px;">'
             + '<span style="font-size:10px;color:var(--muted);font-style:italic;">&#8627; ' + window.escapeHtml(h.notes) + '</span>'
             + '</td></tr>';
         } else {
@@ -26419,6 +26442,7 @@ window.openLiqView = async function(id) {
           + '<td style="padding:6px 8px;color:var(--white);">' + (h.litres_after!=null?parseFloat(h.litres_after).toFixed(1)+'L':'—') + '</td>'
           + '<td style="padding:6px 8px;color:' + chgC + ';font-weight:700;">' + chg + '</td>'
           + '<td style="padding:6px 8px;color:var(--amber);">' + (h.abv_after!=null?parseFloat(h.abv_after).toFixed(2)+'%':'—') + '</td>'
+          + '<td style="padding:6px 8px;color:' + (_d ? _d.alcoholColor : 'var(--muted)') + ';font-weight:600;">' + (_d ? _d.alcoholStr : '—') + '</td>'
           + '<td style="padding:6px 8px;color:var(--gold);">' + (h.lpa_after!=null?parseFloat(h.lpa_after).toFixed(2):'—') + '</td>'
           + '<td style="padding:6px 8px;color:var(--muted);font-size:10px;">' + window.escapeHtml(h.performed_by_name||'—') + '</td>'
           + '</tr>'
@@ -26657,7 +26681,14 @@ window.saveContainer = async function() {
     var _svid = editId ? (oldCont && oldCont.vessel_id) : (newRow && newRow[0] && newRow[0].vessel_id);
     if (_svid && window._syncVesselStatus) window._syncVesselStatus(_svid);
     closeContainerModal(); await loadLiquid();
-  } catch(e) { toastMsg('Error: ' + e.message, 'error'); }
+  } catch(e) {
+    var _cmMsg = (e && e.message) || String(e);
+    if (_cmMsg.indexOf('23505') > -1 || _cmMsg.indexOf('duplicate key') > -1 || _cmMsg.indexOf('reference_unique') > -1) {
+      toastMsg('A container with reference "' + gv('cm-reference') + '" already exists. Use a different reference.', 'error');
+    } else {
+      toastMsg('Error: ' + _cmMsg, 'error');
+    }
+  }
   finally { btn.disabled = false; btn.textContent = editId ? 'Save Changes' : 'Save Container'; }
 };
 
@@ -29176,16 +29207,16 @@ window.printBatchQR = function() {
     '<html><head><style>'
     + '@page { size: landscape; margin: 0.18in; }'
     + 'body { margin:0; padding:0; font-family:Arial,sans-serif; background:#fff; }'
-    + '.label { display:flex; flex-direction:row; align-items:center; justify-content:flex-start;'
-    + '         width:100%; height:100%; box-sizing:border-box; padding:14px 16px; gap:32px; }'
-    + '.info  { display:flex; flex-direction:column; justify-content:center; gap:6px; max-width:340px; }'
+    + '.label { display:inline-flex; flex-direction:row; align-items:center;'
+    + '         box-sizing:border-box; padding:14px 16px; gap:24px; }'
+    + '.info  { display:flex; flex-direction:column; justify-content:center; gap:6px; max-width:300px; }'
     + '.title { font-size:19px; font-weight:700; color:#0d1b2a; line-height:1.35; word-break:break-word; }'
     + '.meta  { font-size:14px; font-weight:700; color:#333; line-height:1.5; }'
     + '.meta strong { color:#0d1b2a; }'
     + '.meta.big { font-size:19px; }'
     + '.meta.loc { color:#0d1b2a; }'
     + '.qr    { flex-shrink:0; display:flex; flex-direction:column; align-items:center; gap:6px; }'
-    + '.qr img { width:240px; height:240px; display:block; }'
+    + '.qr img { width:200px; height:200px; display:block; }'
     + '.qr-ref { font-size:11px; font-weight:700; color:#888; font-family:monospace; text-align:center; }'
     + '</style></head><body>'
     + '<div class="label">'
@@ -29221,16 +29252,16 @@ window.showBatchQR = function(batchId) {
       '<html><head><style>'
       + '@page { size: landscape; margin: 0.18in; }'
       + 'body { margin:0; padding:0; font-family:Arial,sans-serif; background:#fff; }'
-      + '.label { display:flex; flex-direction:row; align-items:center; justify-content:flex-start;'
-      + '         width:100%; height:100%; box-sizing:border-box; padding:14px 16px; gap:32px; }'
-      + '.info  { display:flex; flex-direction:column; justify-content:center; gap:6px; max-width:340px; }'
+      + '.label { display:inline-flex; flex-direction:row; align-items:center;'
+      + '         box-sizing:border-box; padding:14px 16px; gap:24px; }'
+      + '.info  { display:flex; flex-direction:column; justify-content:center; gap:6px; max-width:300px; }'
       + '.title { font-size:19px; font-weight:700; color:#0d1b2a; line-height:1.35; word-break:break-word; }'
       + '.meta  { font-size:14px; font-weight:700; color:#333; line-height:1.5; }'
       + '.meta strong { color:#0d1b2a; }'
       + '.meta.big { font-size:19px; }'
       + '.meta.loc { color:#0d1b2a; }'
       + '.qr    { flex-shrink:0; display:flex; flex-direction:column; align-items:center; gap:6px; }'
-      + '.qr img { width:240px; height:240px; display:block; }'
+      + '.qr img { width:200px; height:200px; display:block; }'
       + '.qr-ref { font-size:11px; font-weight:700; color:#888; font-family:monospace; text-align:center; }'
       + '</style></head><body>'
       + '<div class="label">'
@@ -34841,11 +34872,12 @@ window.saveAdjModal = async function() {
               + '<div>Operation</div><div>Container</div><div>Change</div><div>Performed by</div><div style="text-align:right;">Date</div></div>';
             _lcHist.forEach(function(ev) {
               var isJobEv = _defEgid && ev.event_group_id === _defEgid;
-              var evLabel = _evTypeLabel[ev.event_type] || ev.event_type.replace(/_/g,' ') || '—';
+              var _ed = window.lhDescribe ? window.lhDescribe(ev) : null;
+              var evLabel = _ed ? _ed.label : (_evTypeLabel[ev.event_type] || ev.event_type.replace(/_/g,' ') || '—');
               var lc = _allConts.find(function(c){ return c.id === ev.container_id; });
               var ref = (lc && lc.reference) || ev.container_ref || '—';
-              var lChange = ev.litres_changed != null ? (ev.litres_changed >= 0 ? '+' : '') + parseFloat(ev.litres_changed).toFixed(1) + ' L' : '—';
-              var lColour = ev.litres_changed > 0 ? 'var(--green)' : ev.litres_changed < 0 ? 'var(--amber)' : 'var(--muted)';
+              var lChange = _ed ? _ed.litresStr : (ev.litres_changed != null ? (ev.litres_changed >= 0 ? '+' : '') + parseFloat(ev.litres_changed).toFixed(1) + ' L' : '—');
+              var lColour = _ed ? _ed.litresColor : (ev.litres_changed > 0 ? 'var(--green)' : ev.litres_changed < 0 ? 'var(--amber)' : 'var(--muted)');
               var evDate  = new Date(ev.created_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
               html += '<div style="display:grid;grid-template-columns:130px 90px 70px 1fr 130px;gap:8px;align-items:start;padding:7px 0;border-bottom:1px solid var(--navy-border);">'
                 + '<div><span style="display:inline-block;font-size:10px;padding:2px 7px;border-radius:3px;font-weight:700;white-space:nowrap;max-width:128px;overflow:hidden;text-overflow:ellipsis;'
@@ -36003,7 +36035,13 @@ window.saveAdjModal = async function() {
     // non-cask, non-archived vessel; the source container itself is excluded per row.
     var destConts = [];
     try {
-      destConts = await supaGet('liquid_containers?select=id,reference,type,current_litres,current_lpa,abv,client_id,fill_date,capacity_litres&type=neq.cask&archived=is.false&order=type.asc,reference.asc');
+      destConts = await supaGet('liquid_containers?select=id,reference,type,current_litres,current_lpa,abv,client_id,fill_date,capacity_litres,status&type=neq.cask&archived=is.false&order=type.asc,reference.asc');
+      // Only fully-empty vessels are valid destinations for relocated leftover —
+      // a partially-full IBC (e.g. 20/70/90 L) is useless here. Treat null litres
+      // as empty; status==='empty' is a belt-and-suspenders signal.
+      destConts = (destConts || []).filter(function(c){
+        return c && (parseFloat(c.current_litres || 0) <= 0.05 || c.status === 'empty');
+      });
     } catch(e) { /* non-critical */ }
 
     // Build rows — prefer snapshotted litres/lpa recorded at link time.
@@ -37053,14 +37091,14 @@ window.saveAdjModal = async function() {
       var moveNote = a.litres.toFixed(1) + 'L leftover moved from ' + lo.reference + ' to ' + (d.reference || a.vesselId)
         + (toBott ? ' (diluted to bottling ' + targetAbv.toFixed(1) + '%)' : ' (at ' + targetAbv.toFixed(1) + '%)')
         + (a.cbw ? ' · CBW ' + a.cbw : '') + ' (job ' + jobId + ')';
-      await window._writeBlendHistory({
-        container_id: srcId, container_ref: lo.reference, event_type: 'transfer_from', job_id: jobId, event_group_id: egid,
-        litres_changed: -a.litres, abv_before: targetAbv,
-        notes: moveNote, performed_by_id: pById, performed_by_name: pByName
-      });
+      // NOTE: the source-side outflow for this move is already captured by the single
+      // summary `transfer_from`/`dilution` row written above (loLit -> srcLit, loLpa ->
+      // srcLpa). Writing a second per-destination `transfer_from` here duplicated the
+      // row in the ledger and double-counted litres in the reconciliation report, so we
+      // only write the matching destination `transfer_to` leg.
       await window._writeBlendHistory({
         container_id: a.vesselId, container_ref: d.reference || a.vesselId, event_type: 'transfer_to', job_id: jobId, event_group_id: egid,
-        litres_before: dLit, litres_after: newDLit, lpa_before: dLpa, lpa_after: newDLpa, abv_after: newDAbv,
+        litres_before: dLit, litres_after: newDLit, litres_changed: a.litres, lpa_before: dLpa, lpa_after: newDLpa, abv_after: newDAbv,
         notes: moveNote, performed_by_id: pById, performed_by_name: pByName
       });
     }
@@ -42046,6 +42084,137 @@ window.saveAdjModal = async function() {
   }
   window._writeBlendHistory = writeHistory;
 
+  // ── Shared liquid-ledger display helpers ─────────────────────────────────────
+  // Single source of truth so every surface (History tab, container detail, job
+  // sign-off, reconciliation) describes a movement the same human-readable way.
+  // The headline number for a movement is the ALCOHOL THAT MOVED (signed LPA),
+  // not the balance left behind — that was the core source of confusion.
+  var LH_LABELS = {
+    add:'Add', dilution:'Dilution', dilute_in_place:'Dilution', dilution_water:'Dilution Water',
+    blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend In-place',
+    transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal',
+    edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In',
+    bottling_deduction:'Bottling Draw', measurement_variance:'Stock Variance',
+    blend_loss:'Blend Loss', dilution_loss:'Dilution Loss', regauge:'Regauge',
+    price_change:'Price Update', lpa_price:'Price Update',
+    container_adjusted:'Adjusted', container_created:'Created',
+    container_archived:'Archived', container_restored:'Restored'
+  };
+  var LH_COLORS = {
+    add:'var(--green)', dilution:'var(--amber)', dilution_water:'#3b82f6',
+    blend_input:'#3b82f6', blend_output:'var(--gold)', blend_inplace:'var(--gold)',
+    transfer_from:'var(--blue,#4a90d9)', transfer_to:'var(--blue,#4a90d9)', partial_removal:'var(--amber)',
+    disgorge_out:'#a78bfa', disgorge_in:'#7c3aed',
+    bottling_deduction:'var(--red)', measurement_variance:'var(--amber)',
+    blend_loss:'var(--muted)', dilution_loss:'var(--muted)', regauge:'var(--amber)',
+    container_adjusted:'var(--muted)', container_created:'var(--green)',
+    container_archived:'var(--muted)', container_restored:'var(--green)'
+  };
+  window.LH_LABELS = LH_LABELS;
+  window.LH_COLORS = LH_COLORS;
+
+  function _lhNum(v) {
+    if (v == null || v === '') return null;
+    var n = parseFloat(v);
+    return isNaN(n) ? null : n;
+  }
+  function _lhLitresDelta(r) {
+    var lc = _lhNum(r.litres_changed);
+    if (lc != null) return lc;
+    var lb = _lhNum(r.litres_before), la = _lhNum(r.litres_after);
+    if (lb != null && la != null) return la - lb;
+    if (r.event_type === 'add' && la != null) return la;
+    return null;
+  }
+  function _lhAlcoholMoved(r) {
+    var lb = _lhNum(r.lpa_before);
+    var la = _lhNum(r.lpa_after);
+    if (r.event_type === 'add' && lb == null) lb = 0;
+    if (lb != null && la != null) return la - lb;
+    var ld = _lhLitresDelta(r);
+    var abv = _lhNum(r.abv_after);
+    if (abv == null) abv = _lhNum(r.abv_before);
+    if (ld != null && abv != null) return ld * abv / 100;
+    return null;
+  }
+  function _lhDirection(r) {
+    var n = r.notes || '', from = null, to = null;
+    var m = n.match(/from\s+([A-Za-z0-9._\-]+)\s+to\s+([A-Za-z0-9._\-]+)/i);
+    if (m) { from = m[1]; to = m[2]; }
+    else {
+      var mt = n.match(/\bto\s+([A-Za-z0-9._\-]+)/i); if (mt) to = mt[1];
+      var mf = n.match(/\bfrom\s+([A-Za-z0-9._\-]+)/i); if (mf) from = mf[1];
+    }
+    if (r.event_type === 'transfer_from' && !from) from = r.container_ref || null;
+    if (r.event_type === 'transfer_to'   && !to)   to   = r.container_ref || null;
+    return { from: from, to: to };
+  }
+  function _lhSigned(v, unit, dp) {
+    if (v == null) return '—';
+    var s = v < 0 ? '-' : (v > 0 ? '+' : '');
+    return s + Math.abs(v).toFixed(dp) + unit;
+  }
+  // Describe a single liquid_history row into a normalized, render-ready shape.
+  window.lhDescribe = function(r) {
+    r = r || {};
+    var et = r.event_type || '';
+    var litres  = _lhLitresDelta(r);
+    var alcohol = _lhAlcoholMoved(r);
+    var balance = _lhNum(r.lpa_after);
+    var abvV = _lhNum(r.abv_after); if (abvV == null) abvV = _lhNum(r.abv_before);
+    return {
+      eventType:       et,
+      label:           LH_LABELS[et] || (et ? et.replace(/_/g, ' ') : '—'),
+      color:           LH_COLORS[et] || 'var(--muted)',
+      litres:          litres,
+      litresStr:       _lhSigned(litres, 'L', 1),
+      litresColor:     litres == null ? 'var(--muted)' : (litres < 0 ? 'var(--red)' : 'var(--green)'),
+      alcohol:         alcohol,
+      alcoholStr:      _lhSigned(alcohol, ' LPA', 3),
+      alcoholColor:    alcohol == null ? 'var(--muted)' : (alcohol < 0 ? 'var(--red)' : 'var(--green)'),
+      balanceAfter:    balance,
+      balanceAfterStr: balance != null ? balance.toFixed(3) + ' LPA' : '—',
+      abvStr:          abvV != null ? abvV.toFixed(2) + '%' : '—',
+      direction:       _lhDirection(r),
+      containerRef:    r.container_ref || null,
+      notes:           r.notes || ''
+    };
+  };
+  // Collapse a set of rows that share an event_group_id into a one-line summary.
+  window.lhGroupSummary = function(rows) {
+    if (!rows || !rows.length) return null;
+    var job = null;
+    rows.forEach(function(r){ if (!job && r.job_id) job = r.job_id; });
+    var bottled = 0, varianceL = 0, hasVar = false, dilutions = 0;
+    var transfers = [], containers = {};
+    rows.forEach(function(r){
+      var d = window.lhDescribe(r);
+      if (r.container_ref) containers[r.container_ref] = true;
+      if (r.event_type === 'bottling_deduction') bottled += Math.abs(d.litres || 0);
+      else if (r.event_type === 'measurement_variance') { hasVar = true; varianceL += (d.litres || 0); }
+      else if (r.event_type === 'transfer_to') transfers.push({ litres: Math.abs(d.litres || 0), from: d.direction.from, to: d.direction.to || r.container_ref });
+      else if (r.event_type === 'dilution' || r.event_type === 'dilute_in_place') dilutions++;
+    });
+    var parts = [];
+    if (bottled > 0.05) parts.push(bottled.toFixed(0) + 'L bottled');
+    if (hasVar && Math.abs(varianceL) > 0.05) parts.push((varianceL > 0 ? '+' : '') + varianceL.toFixed(0) + 'L variance reconciled');
+    transfers.forEach(function(t){ parts.push(t.litres.toFixed(0) + 'L ' + (t.from ? t.from + ' \u2192 ' : '\u2192 ') + (t.to || '?')); });
+    if (!bottled && !transfers.length && dilutions) parts.push('leftover brought to strength');
+    var contList = Object.keys(containers);
+    var head = (job || 'Operation') + (contList.length ? ' \u00b7 ' + contList.slice(0,3).join(', ') + (contList.length > 3 ? '\u2026' : '') : '');
+    return { job: job, headline: head + (parts.length ? ': ' + parts.join(', ') : ''), parts: parts, containers: contList };
+  };
+
+  // Toggle the leg rows of a grouped History entry.
+  window._blToggleGroup = function(key) {
+    var els = document.querySelectorAll('tr[data-blgrp="' + (window.CSS && window.CSS.escape ? window.CSS.escape(key) : key) + '"]');
+    var caret = document.getElementById('blgrp-caret-' + key);
+    var anyHidden = false;
+    els.forEach(function(el){ if (el.style.display === 'none') anyHidden = true; });
+    els.forEach(function(el){ el.style.display = anyHidden ? '' : 'none'; });
+    if (caret) caret.innerHTML = anyHidden ? '&#9662;' : '&#9656;';
+  };
+
   // ── Sub-tab switcher ──────────────────────────────────────────────────────
   window.showBlendTab = async function(tab, btn) {
     document.querySelectorAll('.blend-tab-panel').forEach(function(p){ p.style.display = 'none'; });
@@ -43881,7 +44050,7 @@ window.saveAdjModal = async function() {
     resolve: _resolveNewVesselDest
   };
 
-  window._dlOnNewVesselClientChange = function(idx) {
+  window._dlOnNewVesselClientChange = async function(idx) {
     var clientSel = document.getElementById('dl-dnv-client-' + idx);
     var lhRow     = document.getElementById('dl-dnv-lh-row-' + idx);
     var cvRow     = document.getElementById('dl-dnv-cv-row-' + idx);
@@ -43894,7 +44063,7 @@ window.saveAdjModal = async function() {
     if (cvRow) cvRow.style.display = isClientVessel ? '' : 'none';
     if (isClientVessel) {
       var name = clientSel.options[clientSel.selectedIndex] ? clientSel.options[clientSel.selectedIndex].text : '';
-      var ref  = window._nextClientVesselRef ? window._nextClientVesselRef(clientId, name) : '';
+      var ref  = window._nextClientVesselRef ? await window._nextClientVesselRef(clientId, name) : '';
       var dispEl = document.getElementById('dl-dnv-cvref-' + idx);
       if (dispEl) dispEl.textContent = ref || '—';
     } else {
@@ -45505,88 +45674,88 @@ window.saveAdjModal = async function() {
       var rows = await window.db.select('liquid_history', qs);
       if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No history yet.</td></tr>'; return; }
       var esc = window.escapeHtml;
-      var LABELS = { add:'Add', dilution:'Dilution', blend_input:'Blend In', blend_output:'Blend Out', blend_inplace:'Blend In-place', transfer_from:'Transfer Out', transfer_to:'Transfer In', partial_removal:'Removal', edit:'Edit', empty:'Emptied', disgorge_out:'Disgorge Out', disgorge_in:'Disgorge In', bottling_deduction:'Bottling Draw', measurement_variance:'Stock Variance', dilution_water:'Dilution Water', blend_loss:'Blend Loss', dilution_loss:'Dilution Loss', container_adjusted:'Adjusted', container_created:'Created', container_archived:'Archived', container_restored:'Restored' };
-      var COLS   = { add:'var(--green)', dilution:'var(--amber)', blend_input:'#3b82f6', blend_output:'var(--gold)', blend_inplace:'var(--gold)', transfer_from:'var(--red)', transfer_to:'var(--green)', partial_removal:'var(--amber)', disgorge_out:'#a78bfa', disgorge_in:'#7c3aed', bottling_deduction:'var(--red)', measurement_variance:'var(--amber)', dilution_water:'#3b82f6' };
+      var D   = window.lhDescribe;
 
-      // Assign a colour to each unique event_group_id
-      var GROUP_STRIPES = ['#c9a84c','#3b82f6','#3dba78','#e07b39','#a78bfa','#f472b6'];
-      var groupColMap = {}, groupIdx = 0;
-      // Also track first/last row index per group
-      var groupPos = {}; // gid -> {first, last}
-      rows.forEach(function(r, i) {
+      function fmtDt(s){ var dt = new Date(s); return dt.toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) + ' ' + dt.toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'}); }
+      function safeChanges(r){
+        if (!r.changes) return null;
+        if (typeof r.changes !== 'string') return r.changes;
+        try { return JSON.parse(r.changes); } catch(e){ return null; }
+      }
+
+      // Group rows that share an event_group_id (e.g. a whole job close-out) so the
+      // ledger reads as one physical operation, expandable to its individual legs.
+      var groups = [], byGid = {};
+      rows.forEach(function(r){
         var gid = r.event_group_id;
-        if (!gid) return;
-        if (!groupColMap[gid]) { groupColMap[gid] = GROUP_STRIPES[groupIdx % GROUP_STRIPES.length]; groupIdx++; }
-        if (!groupPos[gid]) groupPos[gid] = { first: i, last: i };
-        groupPos[gid].last = i;
+        if (gid && byGid[gid]) { byGid[gid].rows.push(r); return; }
+        var g = { gid: gid || null, rows: [r], key: gid || ('s' + groups.length) };
+        if (gid) byGid[gid] = g;
+        groups.push(g);
       });
 
-      tbody.innerHTML = rows.map(function(r, i) {
-        var col    = COLS[r.event_type] || 'var(--muted)';
-        var lbl    = LABELS[r.event_type] || r.event_type;
-        var lcRaw  = r.litres_changed != null ? parseFloat(r.litres_changed)
-                   : (r.event_type === 'add' && r.litres_after != null ? parseFloat(r.litres_after) : null);
-        var lc     = lcRaw != null ? (lcRaw > 0 ? '+' : '') + lcRaw.toFixed(1) + 'L' : '—';
-        var abvVal = r.abv_after != null ? r.abv_after : (r.abv_before != null ? r.abv_before : null);
-        var abv    = abvVal != null ? parseFloat(abvVal).toFixed(2) + '%' : '—';
-        var dt     = new Date(r.created_at);
-        var dts    = dt.toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) + ' ' + dt.toLocaleTimeString('en-IE',{hour:'2-digit',minute:'2-digit'});
-        var lcCol  = (lcRaw != null && lcRaw < 0) ? 'var(--red)' : 'var(--green)';
-        var contRef = r.container_ref || '—';
-        var byName  = r.performed_by_name || '—';
-
-        var gid       = r.event_group_id;
-        var sc        = gid ? groupColMap[gid] : null;
-        var isFirst   = sc && groupPos[gid].first === i;
-        var lastInGrp = sc && groupPos[gid].last  === i;
-        var rowBg     = sc ? 'background:rgba(255,255,255,0.018);' : '';
-
-        // Parse the structured field-change log (same shape rendered in the container detail view).
-        var changesArr = r.changes
-          ? (typeof r.changes === 'string' ? (function(){ try { return JSON.parse(r.changes); } catch(e){ return null; } })() : r.changes)
-          : null;
-        var hasChanges = !!(changesArr && changesArr.length);
-        // When a changes sub-row follows, the group's bottom border belongs on it, not the main row.
-        var isLast    = lastInGrp && !hasChanges;
-
-        // Build per-cell border helper
-        function b(isLeftEdge, isRightEdge) {
-          if (!sc) return '';
-          var s = 'border-left:' + (isLeftEdge ? '2px solid ' + sc : '1px solid transparent') + ';'
-                + 'border-right:' + (isRightEdge ? '2px solid ' + sc : '1px solid transparent') + ';';
-          if (isFirst) s += 'border-top:2px solid ' + sc + ';padding-top:8px;';
-          if (isLast)  s += 'border-bottom:2px solid ' + sc + ';padding-bottom:8px;';
-          return s;
+      // The 8 cells for a single leg / standalone row, headlined by alcohol MOVED.
+      function legCells(r, indent){
+        var d = D(r);
+        var contCell;
+        if ((r.event_type === 'transfer_from' || r.event_type === 'transfer_to') && d.direction.from && d.direction.to) {
+          contCell = esc(d.direction.from) + ' &#8594; ' + esc(d.direction.to);
+        } else {
+          contCell = esc(d.containerRef || '—');
         }
+        var pad = indent ? 'padding-left:26px;' : 'padding-left:10px;';
+        var balTitle = d.balanceAfter != null ? 'Balance after: ' + d.balanceAfterStr : '';
+        return ''
+          + '<td style="' + pad + 'font-size:11px;color:var(--muted);white-space:nowrap;">' + esc(fmtDt(r.created_at)) + '</td>'
+          + '<td><span style="display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;border:1px solid ' + d.color + ';color:' + d.color + ';">' + esc(d.label) + '</span></td>'
+          + '<td style="font-size:12px;color:var(--white);font-weight:600;">' + contCell + '</td>'
+          + '<td style="color:' + d.litresColor + ';font-weight:700;">' + esc(d.litresStr) + '</td>'
+          + '<td class="mob-hide" style="color:var(--amber);">' + esc(d.abvStr) + '</td>'
+          + '<td class="mob-hide" style="color:' + d.alcoholColor + ';font-weight:600;" title="' + esc(balTitle) + '">' + esc(d.alcoholStr) + '</td>'
+          + '<td style="font-size:11px;color:var(--muted);">' + esc(r.performed_by_name || '—') + '</td>'
+          + '<td class="mob-hide" style="font-size:11px;color:var(--muted);max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + esc(r.notes||'') + '">' + esc(r.notes||'—') + '</td>';
+      }
+      // Optional sub-row spelling out structured field changes (edit / adjusted events).
+      function changeRow(r, key){
+        var ca = safeChanges(r);
+        if (!ca || !ca.length) return '';
+        var attr = key ? ' data-blgrp="' + esc(key) + '"' : '';
+        var disp = key ? 'display:none;' : '';
+        return '<tr' + attr + ' style="' + disp + '"><td colspan="8" style="padding:2px 10px 7px 30px;">'
+          + ca.map(function(ch){
+              return '<span style="font-size:10px;display:inline-block;margin-right:14px;">'
+                + '<span style="color:var(--muted);font-style:italic;">' + esc(ch.label) + ':</span> '
+                + '<span style="color:var(--red);">' + esc(String(ch.before)) + '</span> &#8594; '
+                + '<span style="color:var(--green);">' + esc(String(ch.after)) + '</span></span>';
+            }).join('')
+          + '</td></tr>';
+      }
 
-        var lpaAfter = r.lpa_after != null ? parseFloat(r.lpa_after).toFixed(3) + ' LPA' : '—';
-        var spacer = lastInGrp ? '<tr><td colspan="8" style="height:6px;padding:0;border:none;background:transparent;"></td></tr>' : '';
-
-        // Optional sub-row spelling out each field change (before -> after).
-        var changeRow = '';
-        if (hasChanges) {
-          var chBorder = (sc ? 'border-left:2px solid ' + sc + ';border-right:2px solid ' + sc + ';' : '')
-                       + (lastInGrp ? 'border-bottom:2px solid ' + sc + ';padding-bottom:8px;' : '');
-          changeRow = '<tr style="' + rowBg + '"><td colspan="8" style="' + chBorder + 'padding:2px 10px 7px 28px;">'
-            + changesArr.map(function(ch){
-                return '<span style="font-size:10px;display:inline-block;margin-right:14px;">'
-                  + '<span style="color:var(--muted);font-style:italic;">' + esc(ch.label) + ':</span> '
-                  + '<span style="color:var(--red);">' + esc(String(ch.before)) + '</span> &#8594; '
-                  + '<span style="color:var(--green);">' + esc(String(ch.after)) + '</span></span>';
-              }).join('')
-            + '</td></tr>';
+      tbody.innerHTML = groups.map(function(g){
+        // Standalone event: render the leg row directly, no grouping chrome.
+        if (g.rows.length === 1) {
+          return '<tr>' + legCells(g.rows[0], false) + '</tr>' + changeRow(g.rows[0], null);
         }
-
-        return '<tr style="' + rowBg + '">'
-          + '<td style="' + b(true,false) + 'font-size:11px;color:var(--muted);white-space:nowrap;padding-left:10px;">' + esc(dts) + '</td>'
-          + '<td style="' + b(false,false) + '"><span style="display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;border:1px solid ' + col + ';color:' + col + ';">' + esc(lbl) + '</span></td>'
-          + '<td style="' + b(false,false) + 'font-size:12px;color:var(--white);font-weight:600;">' + esc(contRef) + '</td>'
-          + '<td style="' + b(false,false) + 'color:' + lcCol + ';font-weight:700;">' + esc(lc) + '</td>'
-          + '<td class="mob-hide" style="' + b(false,false) + 'color:var(--amber);">' + esc(abv) + '</td>'
-          + '<td class="mob-hide" style="' + b(false,false) + 'color:var(--gold);font-weight:600;">' + esc(lpaAfter) + '</td>'
-          + '<td style="' + b(false,false) + 'font-size:11px;color:var(--muted);">' + esc(byName) + '</td>'
-          + '<td class="mob-hide" style="' + b(false,true) + 'font-size:11px;color:var(--muted);max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + esc(r.notes||'') + '">' + esc(r.notes||'—') + '</td>'
-          + '</tr>' + changeRow + spacer;
+        // Multi-leg group: one human-readable summary headline, expandable to legs.
+        var summary = window.lhGroupSummary(g.rows) || { headline: '', job: null };
+        var latest  = g.rows[0]; // rows are created_at desc → first is latest
+        var key     = esc(g.key);
+        var badge   = summary.job ? esc(summary.job) : 'Close-out';
+        var header  = '<tr style="background:rgba(201,168,76,0.06);cursor:pointer;" onclick="window._blToggleGroup(\'' + key + '\')">'
+          + '<td style="padding:8px 10px;font-size:11px;color:var(--muted);white-space:nowrap;">' + esc(fmtDt(latest.created_at)) + '</td>'
+          + '<td><span style="display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;border:1px solid var(--gold);color:var(--gold);">' + badge + '</span></td>'
+          + '<td colspan="5" style="font-size:12px;color:var(--white);">'
+          +   '<span id="blgrp-caret-' + key + '" style="color:var(--gold);margin-right:6px;">&#9656;</span>'
+          +   esc(summary.headline)
+          +   ' <span style="color:var(--muted);font-size:11px;">(' + g.rows.length + ' steps)</span>'
+          + '</td>'
+          + '<td style="font-size:11px;color:var(--muted);">' + esc(latest.performed_by_name || '—') + '</td>'
+          + '</tr>';
+        var legs = g.rows.map(function(r){
+          return '<tr data-blgrp="' + key + '" style="display:none;background:rgba(255,255,255,0.012);">' + legCells(r, true) + '</tr>'
+               + changeRow(r, g.key);
+        }).join('');
+        return header + legs;
       }).join('');
     } catch(e) {
       tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--red);padding:24px;">Error: ' + window.escapeHtml(e.message) + '</td></tr>';
