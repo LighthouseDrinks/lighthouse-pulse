@@ -6802,6 +6802,7 @@ window.copyInviteLink = function() {
       <button class="modal-close" onclick="closeContainerModal()">✕</button>
     </div>
     <input type="hidden" id="cm-edit-id">
+    <input type="hidden" id="cm-vessel-id">
 
     <div class="inv-section-title">Container Details</div>
     <div class="modal-grid">
@@ -25813,6 +25814,43 @@ async function loadLiquid() {
   var lhId   = lhClient   ? lhClient.id   : null;
   var feroId = feroClient ? feroClient.id : null;
 
+  // Empty LH-fleet vessels (tanks/tankers) that are registered but not yet filled should
+  // still appear in the inventory when viewing "all tanks". Synthesize read-only rows from
+  // the vessel register for any tank/tanker with no liquid_containers row. Kept in a
+  // separate array so KPI/value calculations (which use _liquid) are unaffected.
+  window._emptyFleetVessels = [];
+  try {
+    var _fleet = await supa('vessels', '?vessel_type=in.(tank,tanker)&order=id.asc');
+    var _haveVessel = {};
+    _liquid.forEach(function(c){
+      if (c.vessel_id) _haveVessel[String(c.vessel_id).toUpperCase()] = true;
+      if (c.reference) _haveVessel[String(c.reference).toUpperCase()] = true;
+    });
+    (_fleet || []).forEach(function(v){
+      if (!v.id || v.status === 'archived' || v.status === 'decommissioned') return;
+      if (_haveVessel[String(v.id).toUpperCase()]) return;
+      window._emptyFleetVessels.push({
+        _phantom: true,
+        id: '__vessel__' + v.id,
+        _vesselRegId: v.id,
+        type: v.vessel_type,
+        reference: v.id,
+        vessel_id: v.id,
+        client_id: lhId,
+        liquid_owner_client_id: null,
+        is_client_vessel: false,
+        capacity_litres: v.capacity_litres,
+        current_litres: 0,
+        current_lpa: 0,
+        abv: null,
+        spirit_type: null,
+        status: 'empty',
+        location: v.location || null,
+        archived: false
+      });
+    });
+  } catch(e) { window._emptyFleetVessels = []; }
+
   var fmt = function(n, dp) { return n.toLocaleString('en-IE',{minimumFractionDigits:dp||0,maximumFractionDigits:dp||0}); };
   var fmtEur = function(n) { return '€' + fmt(n, 2); };
 
@@ -25931,7 +25969,7 @@ window.renderLiquid = function() {
   // Keep spirit dropdown options fresh
   window._populateSpiritFilter();
 
-  var list = _liquid.filter(function(c){
+  var list = _liquid.concat(window._emptyFleetVessels || []).filter(function(c){
     // Show archived or active based on toggle
     if (_showArchived ? !c.archived : c.archived) return false;
     if (typef   && c.type       !== typef)   return false;
@@ -26031,6 +26069,30 @@ window.renderLiquid = function() {
     var clientVesselBadge = _isClientVessel
       ? '<span title="' + esc(c.client_vessel_label || 'Client-owned vessel') + '" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;letter-spacing:0.08em;padding:2px 6px;background:rgba(232,152,58,0.14);color:var(--amber,#e8983a);border:1px solid rgba(232,152,58,0.32);border-radius:3px;vertical-align:middle;">CLIENT VESSEL</span>'
       : '';
+
+    // Registered-but-unfilled LH fleet vessel: read-only row with an "Add Liquid" action.
+    if (c._phantom) {
+      var unfilledTag = '<span style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;letter-spacing:0.08em;padding:2px 6px;background:rgba(155,159,196,0.12);color:#9b9fc4;border:1px solid rgba(155,159,196,0.28);border-radius:3px;vertical-align:middle;">UNFILLED</span>';
+      var fillBtn = '<button class="liq-fill-btn" data-vessel="' + esc(c._vesselRegId) + '" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Add Liquid</button>';
+      return '<tr class="mob-data-row liq-row" data-vessel="' + esc(c._vesselRegId) + '" style="opacity:0.9;">'
+        + '<td style="width:32px;padding:8px;"></td>'
+        + '<td style="font-weight:700;color:var(--white);">' + ref + lhVesselTag + unfilledTag + '</td>'
+        + '<td class="mob-hide" style="font-size:11px;color:var(--muted);">' + typ + '</td>'
+        + '<td class="mob-hide" style="font-size:12px;">' + cname + '</td>'
+        + '<td class="mob-hide"><span style="color:var(--muted);font-size:11px;">—</span></td>'
+        + '<td>' + litresLabel + bar + '</td>'
+        + '<td class="mob-hide" style="white-space:nowrap;">' + statusPill + '</td>'
+        + '<td class="mob-hide" style="text-align:center;">—</td>'
+        + '<td style="white-space:nowrap;text-align:center;">' + fillBtn + '</td></tr>'
+        + '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="8"><div class="mob-detail-inner">'
+        + '<div class="mob-d-item"><span class="mob-d-label">Type</span><span class="mob-d-value">' + typ + '</span></div>'
+        + '<div class="mob-d-item"><span class="mob-d-label">Vessel Owner</span><span class="mob-d-value">' + cname + '</span></div>'
+        + '<div class="mob-d-item"><span class="mob-d-label">Status</span><span class="mob-d-value">Empty (unfilled)</span></div>'
+        + (loc ? '<div class="mob-d-item"><span class="mob-d-label">Location</span><span class="mob-d-value">' + loc + '</span></div>' : '')
+        + '<div class="mob-d-item" style="grid-column:1/-1;padding-top:4px;">' + fillBtn + '</div>'
+        + '</div></td></tr>';
+    }
+
     return '<tr class="mob-data-row liq-row" data-cid="' + cid + '">'
       + '<td style="width:32px;padding:8px;"><input type="checkbox" class="liq-row-cb" data-cid="' + cid + '" data-ref="' + (c.reference||'') + '" onclick="window.liqRowCheck(this)" style="cursor:pointer;accent-color:var(--gold);"></td>'
       + '<td style="font-weight:700;color:var(--white);">' + ref + clientVesselBadge + lhVesselTag + '</td>'
@@ -26076,6 +26138,9 @@ window.renderLiquid = function() {
   });
   tbody.querySelectorAll('.liq-unarchive-btn').forEach(function(btn) {
     btn.addEventListener('click', function(e) { e.stopPropagation(); window.unarchiveContainer(this.getAttribute('data-cid')); });
+  });
+  tbody.querySelectorAll('.liq-fill-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) { e.stopPropagation(); window.fillVesselFromRegister(this.getAttribute('data-vessel')); });
   });
 
   // Wire tap-to-expand on mobile
@@ -26153,15 +26218,17 @@ window.openContainerModal = async function(editId) {
       sv('cm-filldate', c.fill_date||''); sv('cm-ola', c.ola||''); sv('cm-notes', c.notes||'');
       sv('cm-supplier', c.supplier_id||'');
       sv('cm-client-vessel-label', c.client_vessel_label||'');
+      sv('cm-vessel-id', c.vessel_id||'');
       // Liquid owner only meaningful for tanks/tankers; default to vessel owner / Lighthouse otherwise.
       if (loSel && c.liquid_owner_client_id) loSel.value = c.liquid_owner_client_id;
     }
   } else {
     ['cm-reference','cm-capacity','cm-location','cm-spirit','cm-cbw','cm-abv','cm-litres',
      'cm-lpa','cm-lpa-price','cm-lpa-value','cm-filldate','cm-ola','cm-notes','cm-supplier',
-     'cm-client-vessel-label'].forEach(function(id){
+     'cm-client-vessel-label','cm-vessel-id'].forEach(function(id){
       var e = gid(id); if(e) e.value = '';
     });
+    var _refReset = gid('cm-reference'); if (_refReset) _refReset.readOnly = false;
   }
   window._cmUpdateOwnership();
   if (window.handleCMTypeChange) window.handleCMTypeChange();
@@ -26270,6 +26337,22 @@ window.closeContainerModal = function() {
   if (ov) ov.classList.remove('open'); document.body.style.overflow = '';
 };
 window.editContainer = function(id) { openContainerModal(id); };
+
+// Open the Add Container modal pre-filled to fill a registered-but-empty fleet vessel
+// (a tank/tanker that exists in the vessel register but has no liquid_containers row yet).
+window.fillVesselFromRegister = async function(vesselId) {
+  var v = (window._emptyFleetVessels || []).find(function(x){ return x._vesselRegId === vesselId; });
+  await window.openContainerModal();
+  var gid = function(id){ return document.getElementById(id); };
+  var typeEl = gid('cm-type');
+  if (typeEl) typeEl.value = (v && v.type) || 'tank';
+  if (window.handleCMTypeChange) window.handleCMTypeChange();
+  var refEl = gid('cm-reference');
+  if (refEl) { refEl.value = vesselId; refEl.readOnly = true; }
+  if (v && v.capacity_litres != null && gid('cm-capacity')) gid('cm-capacity').value = v.capacity_litres;
+  if (v && v.location && gid('cm-location')) gid('cm-location').value = v.location;
+  if (gid('cm-vessel-id')) gid('cm-vessel-id').value = vesselId;
+};
 
 // ── LIQUID RECORD VIEW ─────────────────────────────────
 window.closeLiqView = function() {
@@ -26720,6 +26803,7 @@ window.saveContainer = async function() {
     liquid_owner_client_id: _cmIsLhFleet ? (gv('cm-liquid-owner')||null) : null
   };
   if (isClientVessel) payload.vessel_id = null;
+  else if (gv('cm-vessel-id')) payload.vessel_id = gv('cm-vessel-id'); // link to the registered fleet vessel
   var btn = document.getElementById('container-save-btn');
   btn.disabled = true; btn.textContent = 'Saving…';
   var oldCont = editId ? _liquid.find(function(c){ return c.id === editId; }) : null;
