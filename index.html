@@ -36844,7 +36844,10 @@ window.saveAdjModal = async function() {
               + '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Target volume to place: <strong style="color:var(--white);"><span id="lq-lo-target-' + idx + '">' + fifoRemaining[idx].toFixed(1) + '</span> L</strong> @ <span id="lq-lo-targetabv-' + idx + '">' + row.abv.toFixed(1) + '</span>%</div>'
               + '<div id="lq-lo-alloc-' + idx + '" data-lo-idx="' + idx + '">' + srcRow + '</div>'
               + '<div id="lq-lo-sum-' + idx + '" style="font-size:10px;color:var(--muted);margin-top:6px;"></div>'
-              + '<button type="button" onclick="window._lqLoAddVessel(' + idx + ')" style="margin-top:8px;background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;padding:5px 12px;border-radius:3px;cursor:pointer;">+ Add vessel</button>'
+              + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">'
+              +   '<button type="button" onclick="window._lqLoAddVessel(' + idx + ')" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;padding:5px 12px;border-radius:3px;cursor:pointer;">+ Add vessel</button>'
+              +   '<button type="button" onclick="window._lqLoAutoFill(' + idx + ')" title="Spread the target volume across the added vessels, filling each to its free capacity. Any remainder stays in ' + esc(row.reference) + '." style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;padding:5px 12px;border-radius:3px;cursor:pointer;">Auto-fill remaining</button>'
+              + '</div>'
               + '</div>';
           }).join('')
         + '</div>';
@@ -36969,6 +36972,41 @@ window.saveAdjModal = async function() {
         wrap.appendChild(rowEl);
         updateBalance();
       };
+      // Spread the full target volume across the added vessel rows, filling each
+      // to its free capacity in order (top to bottom). New-vessel rows use the
+      // capacity entered in their sub-block; one with no capacity yet soaks up
+      // whatever is left. The source vessel automatically keeps any remainder,
+      // so the maths always balances — this just saves typing each litre figure.
+      window._lqLoAutoFill = function(idx) {
+        var wrap = document.getElementById('lq-lo-alloc-' + idx);
+        if (!wrap) return;
+        var rows = wrap.querySelectorAll('[data-lo-row="added"]');
+        if (!rows.length) {
+          window.toast && window.toast('Add a vessel first, then auto-fill.', 'info');
+          return;
+        }
+        var remaining = getLeftoverTargetVol(idx);
+        rows.forEach(function(rowEl) {
+          var sel   = rowEl.querySelector('.lq-lo-vessel');
+          var litEl = rowEl.querySelector('.lq-lo-litres');
+          if (!sel || !litEl) return;
+          var free;
+          if (sel.value === '__newvessel__') {
+            var capEl = document.getElementById('dl-dnv-cap-' + rowEl.dataset.nvIdx);
+            var nvCap = capEl ? (parseFloat(capEl.value) || 0) : 0;
+            free = nvCap > 0 ? window._fillCeiling(nvCap) : remaining; // no cap yet → take the rest
+          } else if (sel.value) {
+            free = vesselFreeCapacity(sel.value, false);
+          } else {
+            free = 0; // nothing selected → skip this row
+          }
+          var give = Math.max(0, Math.min(remaining, free));
+          give = Math.round(give * 10) / 10; // match the 0.1 L input step
+          litEl.value = give.toFixed(1);
+          remaining = Math.round((remaining - give) * 1e4) / 1e4;
+        });
+        updateBalance();
+      };
       // Toggle the standard Register-New-Vessel sub-block under a row when
       // "+ Register New Vessel…" is selected. The sub-block + helpers are the
       // exact ones the dilute flow uses (exposed via window._lqNewVesselHelpers).
@@ -37008,6 +37046,7 @@ window.saveAdjModal = async function() {
         delete window._lqUpdateBalance;
         delete window._lqWaterTouched;
         delete window._lqLoAddVessel;
+        delete window._lqLoAutoFill;
         delete window._lqLoVesselChange;
         delete window._lqLoRemoveRow;
         delete window._lqDestOpts;
@@ -44442,6 +44481,23 @@ window.saveAdjModal = async function() {
       var name = clientSel.options[clientSel.selectedIndex] ? clientSel.options[clientSel.selectedIndex].text : '';
       var ref  = window._nextClientVesselRef ? await window._nextClientVesselRef(clientId, name) : '';
       var dispEl = document.getElementById('dl-dnv-cvref-' + idx);
+      // Dedup against OTHER open new-vessel rows in this same form. _nextClientVesselRef
+      // only scans saved/cached containers, so two fresh rows for one client both compute
+      // the same "next" number (e.g. both POWERS-CV-013). The displayed ref is what gets
+      // saved (see _resolveNewVesselDest), so bump past any ref already shown elsewhere.
+      var m = ref && ref.match(/^(.*-CV-)(\d+)$/);
+      if (m) {
+        var pfx = m[1].toUpperCase();
+        var n   = parseInt(m[2], 10) || 0;
+        var taken = {};
+        document.querySelectorAll('[id^="dl-dnv-cvref-"]').forEach(function(el){
+          if (el === dispEl) return;
+          var t = (el.textContent || '').trim().toUpperCase();
+          if (t.indexOf(pfx) === 0) taken[t] = true;
+        });
+        while (taken[pfx + String(n).padStart(3, '0')]) n++;
+        ref = pfx + String(n).padStart(3, '0');
+      }
       if (dispEl) dispEl.textContent = ref || '—';
     } else {
       window._dlOnNewVesselTypeChange(idx);
