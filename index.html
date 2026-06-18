@@ -11085,12 +11085,28 @@ window._bomQtyFor = function(skuCol, job, bom) {
   return effectiveBottles || null;
 };
 
-window.onBomClientChange = async function() {
+window.onBomClientChange = async function(preserveSelections) {
   var clientId = gv('bm-client');
 
   // Show/hide the LH stock toggle — not applicable when Lighthouse is the selected client
   var lhRow = el('bm-lh-stock-row');
   if (lhRow) lhRow.style.display = (clientId && clientId !== 'CLI-000') ? 'flex' : 'none';
+
+  // Snapshot current selections so an inventory reload (e.g. toggling Lighthouse
+  // stock) preserves the user's in-progress choices instead of wiping the BOM.
+  var _prevSel = {};
+  if (preserveSelections) {
+    BOM_DROPDOWNS.forEach(function(d) {
+      var s = el(d.id);
+      if (s && s.value) {
+        var opt = s.options[s.selectedIndex];
+        _prevSel[d.id] = {
+          value: s.value,
+          desc:  opt ? (opt.getAttribute('data-desc') || opt.text) : s.value
+        };
+      }
+    });
+  }
 
   // Reset all component dropdowns
   BOM_DROPDOWNS.forEach(function(d) {
@@ -11178,6 +11194,28 @@ window.onBomClientChange = async function() {
       sel.disabled = false;
     });
 
+    // Re-apply preserved selections. If a SKU is not in the freshly-loaded list
+    // (e.g. Lighthouse stock toggled off, or a since-archived SKU), append a
+    // fallback option so the choice survives the reload.
+    if (preserveSelections) {
+      Object.keys(_prevSel).forEach(function(selId) {
+        var sel = el(selId); if (!sel) return;
+        var snap = _prevSel[selId];
+        var has = false;
+        for (var i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === snap.value) { has = true; break; }
+        }
+        if (!has) {
+          var opt = document.createElement('option');
+          opt.value = snap.value;
+          opt.textContent = snap.desc || snap.value;
+          opt.setAttribute('data-desc', snap.desc || snap.value);
+          sel.appendChild(opt);
+        }
+        sel.value = snap.value;
+      });
+    }
+
     // Liquid dropdown sources from the Liquid Products Register (not client containers)
     if (liqSel) {
       var curVal = liqSel.value || '';
@@ -11254,6 +11292,10 @@ async function openBomModal(editId) {
   window._bmLabelPhotos = {};
   if (typeof window._bmRenderLabelPhotos === 'function') window._bmRenderLabelPhotos();
 
+  // Default the Lighthouse-stock toggle off — the edit branch re-detects below.
+  window._bomIncludeLhStock = false;
+  if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
+
   ov.style.display = 'flex';
   document.body.style.overflow = 'hidden';
 
@@ -11298,6 +11340,25 @@ async function openBomModal(editId) {
       // Hydrate label master photos from the stored BOM
       window._bmLabelPhotos = Object.assign({}, b.labelMasterPhotos || {});
       if (typeof window._bmRenderLabelPhotos === 'function') window._bmRenderLabelPhotos();
+
+      // Detect whether this draft uses any shared Lighthouse (CLI-000) stock. If
+      // so, auto-enable the toggle so onBomClientChange loads those goods into the
+      // dropdowns — otherwise they'd be missing and could not be changed.
+      window._bomIncludeLhStock = false;
+      if (b.clientId && b.clientId !== 'CLI-000') {
+        var _editSkuIds = [b.bottleSkuId, b.corkSkuId, b.roppSkuId, b.foilSkuId,
+          b.frontLabelSkuId, b.backLabelSkuId, b.neckLabelSkuId, b.outerCaseLabelSkuId,
+          b.shipperSkuId, b.dividerSkuId, b.stringTwineSkuId, b.monocartonSkuId,
+          b.giftTubeSkuId, b.tubeLidSkuId, b.tinSkuId].filter(Boolean);
+        if (_editSkuIds.length) {
+          try {
+            var _lhRows = await window.db.select('dry_goods_skus',
+              '?client_id=eq.CLI-000&id=in.(' + _editSkuIds.join(',') + ')&select=id');
+            if (Array.isArray(_lhRows) && _lhRows.length) window._bomIncludeLhStock = true;
+          } catch(_) {}
+        }
+      }
+      if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
 
       // Load client inventory, then restore dropdown selections by SKU ID
       window.onBomClientChange().then(function() {
@@ -11778,15 +11839,7 @@ function closeBomModal() {
   // Reset LH stock toggle so the next BOM opens clean
   if (window._bomIncludeLhStock) {
     window._bomIncludeLhStock = false;
-    var btn  = el('bm-include-lh-stock');
-    var hint = el('bm-lh-stock-hint');
-    if (btn) {
-      btn.style.borderColor = 'var(--navy-border)';
-      btn.style.color       = 'var(--muted)';
-      btn.style.background  = 'transparent';
-      btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.5.5 0 0 1 .5.5V7.5h6a.5.5 0 0 1 0 1h-6v6a.5.5 0 0 1-1 0v-6h-6a.5.5 0 0 1 0-1h6V1.5A.5.5 0 0 1 8 1z"/></svg> Include Lighthouse Stock';
-    }
-    if (hint) hint.style.display = 'none';
+    if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
   }
 }
 
@@ -32173,20 +32226,53 @@ window.saveAdjModal = async function() {
         confirmBtn.textContent = 'Processing…';
 
         // Idempotency guard — never deduct stock twice for the same job. A job that is
-        // already 'complete', or that already has dry_goods_movements rows, has been
-        // processed; re-running would double-deduct (the bug that corrupted JOB-3).
+        // already 'complete' is fully done. A job that is NOT complete but already has
+        // dry_goods_movements rows is a half-finished attempt (dry goods deducted, but
+        // liquid execution or finalisation failed afterwards). Rather than dead-ending
+        // such a job forever (the old behaviour that could brick it), RESUME it: skip
+        // the dry-goods deduction (already done) and just run the liquid plan — which
+        // is itself dedup-safe — and finalise. This recovers the close-out instead of
+        // re-deducting (the double-deduct bug that corrupted JOB-3).
+        var _resumeSkipDryGoods = false;
         try {
           var _jobNow  = await supaGet('jobs?id=eq.' + jobId + '&select=stage');
           var _isDone  = _jobNow && _jobNow[0] && String(_jobNow[0].stage || '').toLowerCase() === 'complete';
           var _priorMv = await supaGet('dry_goods_movements?job_id=eq.' + encodeURIComponent(jobId) + '&select=id&limit=1');
-          if (_isDone || (_priorMv && _priorMv.length)) {
+          if (_isDone) {
             await window.lpAlert('This job has already been completed and its stock already deducted — no further deduction was made.', { title: 'Already completed', variant: 'warn' });
             ov.remove();
             document.body.style.overflow = '';
             resolve(false);
             return;
           }
+          if (_priorMv && _priorMv.length) _resumeSkipDryGoods = true;
         } catch(_guardErr) { console.warn('Idempotency guard check failed (continuing):', _guardErr && _guardErr.message); }
+
+        // ── Resume path: dry goods already deducted by a prior attempt that never
+        //    finished. Don't touch dry-goods stock again — just complete the liquid
+        //    side (dedup-safe) and mark the job complete.
+        if (_resumeSkipDryGoods) {
+          deductionsDone = true; // dry goods already irreversibly deducted earlier
+          try {
+            if (liquidPlan && liquidPlan.lines && liquidPlan.lines.length) {
+              await _executeLiquidDeductionPlan(jobId, liquidPlan, job);
+            }
+            await _finaliseJobComplete(jobId, job.stage);
+            window.toast && window.toast('Job complete — dry goods stock was already deducted from an earlier attempt.', 'success');
+            ov.remove();
+            document.body.style.overflow = '';
+            await loadJobs();
+            window.closeJobDetail();
+            resolve(false);
+          } catch(e) {
+            // Liquid plan is dedup-safe and dry goods is untouched, so retry is safe.
+            ov.remove();
+            document.body.style.overflow = '';
+            window.toast && window.toast('Could not finalise the job (' + (e.message || 'unknown error') + '). Dry goods stock is unchanged — please retry completion.', 'error');
+            resolve(false);
+          }
+          return;
+        }
 
         // Build deduction list — include production qty, collect qty, and waste separately
         var deductions = [];
@@ -32327,13 +32413,17 @@ window.saveAdjModal = async function() {
             } catch(e) { console.warn('job_waste insert failed (non-critical):', e.message); }
           }
 
+          // Dry-goods batches, movements and waste are now written and irreversible.
+          // Mark this BEFORE liquid execution so that a failure in the liquid plan or
+          // finalisation routes to the "already deducted" recovery path (re-opening
+          // the job resumes and finalises) rather than the "safe to retry" path that
+          // would re-deduct dry-goods stock and double-count it.
+          deductionsDone = true;
+
           // 5. Execute liquid deductions if a plan was collected
           if (liquidPlan && liquidPlan.lines && liquidPlan.lines.length) {
             await _executeLiquidDeductionPlan(jobId, liquidPlan, job);
           }
-
-          // Mark deductions as done — past this point do not allow retry (would double-deduct)
-          deductionsDone = true;
 
           // 6. Mark job complete
           await _finaliseJobComplete(jobId, job.stage);
@@ -32346,13 +32436,16 @@ window.saveAdjModal = async function() {
           resolve(false); // outer caller must not run again
         } catch(e) {
           if (deductionsDone) {
-            // Stock was already deducted — closing the modal to prevent a retry that would double-deduct.
-            // The job stage update failed; it must be corrected manually in the database.
+            // Dry-goods stock was already deducted — close the modal to prevent a retry
+            // that would double-deduct it. The liquid/finalise step failed, but the job
+            // can be recovered safely: re-open it and click Complete again. The resume
+            // guard will detect the existing deduction, skip dry goods, and finish the
+            // (dedup-safe) liquid plan + finalisation.
             ov.remove();
             document.body.style.overflow = '';
             window.toast && window.toast(
-              'Stock deducted but job completion failed (' + (e.message || 'unknown error') + '). ' +
-              'Stock has been updated — please manually mark the job as Complete or contact support.',
+              'Dry goods stock was deducted but the job did not finish (' + (e.message || 'unknown error') + '). ' +
+              'Re-open the job and click Complete again to finish — stock will not be deducted twice.',
               'error'
             );
             resolve(false);
