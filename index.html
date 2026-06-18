@@ -22282,15 +22282,16 @@ window._approvalsBadgePoll = async function() {
           <button onclick="window.addBTFSource()" class="btn btn-outline" style="font-size:11px;padding:5px 12px;">+ Add Source</button>
         </div>
         <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Destination Containers (To)</div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Litres received = source total (minus any waste noted below)</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Set the litres going into each destination. Leave volumes blank to split the source total evenly.</div>
         <div id="btf-dests-wrap"></div>
-        <div style="display:flex;justify-content:flex-end;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+          <span id="btf-dest-total" style="font-size:12px;color:var(--gold);font-weight:700;"></span>
           <button onclick="window.addBTFDest()" class="btn btn-outline" style="font-size:11px;padding:5px 12px;">+ Add Destination</button>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
           <div class="mfield">
             <label>Waste / Loss (L)</label>
-            <input type="number" id="btf-waste" placeholder="0" min="0" step="0.1" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:13px;border-radius:3px;width:100%;box-sizing:border-box;">
+            <input type="number" id="btf-waste" placeholder="0" min="0" step="0.1" oninput="window._btfCalcDestTotal()" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:13px;border-radius:3px;width:100%;box-sizing:border-box;">
             <div class="field-hint">Deducted from total before distributing to destination(s)</div>
           </div>
           <div class="mfield">
@@ -45909,6 +45910,7 @@ window.saveAdjModal = async function() {
     });
     var totalEl = document.getElementById('btf-src-total');
     if (totalEl) totalEl.textContent = total > 0 ? total.toFixed(1) + 'L total' : '';
+    if (window._btfRefreshDests) window._btfRefreshDests();
   };
 
   window.addBTFSource = function() {
@@ -45982,11 +45984,92 @@ window.saveAdjModal = async function() {
     var wrap = document.getElementById('btf-dests-wrap'); if (!wrap) return;
     var row = document.createElement('div');
     row.id = 'btf-dr-' + i;
-    row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:8px;';
+    row.style.cssText = 'margin-bottom:10px;padding:10px 12px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:4px;';
     row.innerHTML =
-      '<select id="btf-dc-' + i + '" style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">' + conOptHtml(_bl, null, null, ['cask'], 'dest') + '</select>'
-      + '<button onclick="document.getElementById(\'btf-dr-' + i + '\').remove()" style="flex-shrink:0;background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 9px;border-radius:3px;cursor:pointer;">✕</button>';
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">'
+      + '<select id="btf-dc-' + i + '" onchange="window.onBTFDestChange(' + i + ')" style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">' + conOptHtml(_bl, null, null, ['cask'], 'dest') + '</select>'
+      + '<button onclick="document.getElementById(\'btf-dr-' + i + '\').remove();window._btfCalcDestTotal();" style="flex-shrink:0;background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 9px;border-radius:3px;cursor:pointer;">✕</button>'
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;">'
+      + '<div id="btf-droom-' + i + '" style="font-size:11px;padding:6px 10px;background:rgba(0,0,0,0.25);border:1px solid var(--navy-border);border-radius:3px;color:var(--muted);">Room: —</div>'
+      + '<input type="number" id="btf-dl-' + i + '" placeholder="Litres to add" min="0" step="0.1" oninput="window.onBTFDestChange(' + i + ')" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;width:100%;box-sizing:border-box;">'
+      + '<span id="btf-dlpa-' + i + '" style="font-size:11px;color:var(--gold);white-space:nowrap;min-width:60px;text-align:right;">— LPA</span>'
+      + '</div>';
     wrap.appendChild(row);
+    window.onBTFDestChange(i);
+  };
+
+  // Aggregate source litres + LPA, mirroring saveBlendTransfer's proportional LPA logic.
+  function _btfSourceTotals() {
+    var litres = 0, lpa = 0;
+    document.querySelectorAll('[id^="btf-sc-"]').forEach(function(sel){
+      if (!sel.value) return;
+      var i = sel.id.replace('btf-sc-','');
+      var cont = _bl.find(function(c){ return c.id === sel.value; });
+      var l = parseFloat((document.getElementById('btf-sl-' + i)||{}).value) || 0;
+      if (cont && l > 0) {
+        litres += l;
+        var cl = parseFloat(cont.current_litres||0), clp = parseFloat(cont.current_lpa||0);
+        lpa += cl > 0 ? (l / cl) * clp : l * parseFloat(cont.abv||0) / 100;
+      }
+    });
+    return { litres: litres, lpa: lpa };
+  }
+
+  window.onBTFDestChange = function(i) {
+    var sel    = document.getElementById('btf-dc-' + i);
+    var roomEl = document.getElementById('btf-droom-' + i);
+    var litEl  = document.getElementById('btf-dl-' + i);
+    var lpaEl  = document.getElementById('btf-dlpa-' + i);
+    var cont   = sel && sel.value ? _bl.find(function(c){ return c.id === sel.value; }) : null;
+    var want   = parseFloat((litEl||{}).value) || 0;
+    if (roomEl) {
+      if (cont) {
+        var cap = parseFloat(cont.capacity_litres||0), cur = parseFloat(cont.current_litres||0);
+        if (cap > 0) {
+          var room = Math.max(0, cap - cur);
+          roomEl.textContent = 'Room: ' + room.toFixed(0) + 'L';
+          roomEl.style.color = want > room ? 'var(--red)' : 'var(--muted)';
+        } else {
+          roomEl.textContent = 'Current: ' + cur.toFixed(0) + 'L';
+          roomEl.style.color = 'var(--muted)';
+        }
+      } else {
+        roomEl.textContent = 'Room: —';
+        roomEl.style.color = 'var(--muted)';
+      }
+    }
+    if (lpaEl) {
+      var t = _btfSourceTotals();
+      var strength = t.litres > 0 ? t.lpa / t.litres : 0;
+      lpaEl.textContent = (want > 0 && strength > 0) ? (want * strength).toFixed(2) + ' LPA' : '— LPA';
+    }
+    window._btfCalcDestTotal();
+  };
+
+  window._btfRefreshDests = function _btfRefreshDests() {
+    document.querySelectorAll('[id^="btf-dc-"]').forEach(function(sel){
+      window.onBTFDestChange(parseInt(sel.id.replace('btf-dc-',''), 10));
+    });
+  };
+
+  window._btfCalcDestTotal = function _btfCalcDestTotal() {
+    var allocated = 0, any = false;
+    document.querySelectorAll('[id^="btf-dl-"]').forEach(function(el){
+      var v = parseFloat(el.value); if (v > 0) { allocated += v; any = true; }
+    });
+    var src = _btfSourceTotals();
+    var wasteV = parseFloat((document.getElementById('btf-waste')||{}).value) || 0;
+    var avail = Math.max(0, src.litres - wasteV);
+    var el = document.getElementById('btf-dest-total');
+    if (!el) return;
+    if (!any) {
+      el.textContent = src.litres > 0 ? ('Even split: ' + avail.toFixed(1) + 'L') : '';
+      el.style.color = 'var(--gold)';
+    } else {
+      el.textContent = allocated.toFixed(1) + 'L of ' + src.litres.toFixed(1) + 'L allocated';
+      el.style.color = allocated > src.litres + 0.01 ? 'var(--red)' : 'var(--gold)';
+    }
   };
 
   window.saveBlendTransfer = async function() {
@@ -46031,16 +46114,30 @@ window.saveAdjModal = async function() {
     var dests = [];
     document.querySelectorAll('[id^="btf-dc-"]').forEach(function(sel) {
       if (!sel.value) return;
-      dests.push({ container_id: sel.value });
+      var di = sel.id.replace('btf-dc-','');
+      var spec = parseFloat(gv('btf-dl-' + di));
+      dests.push({ container_id: sel.value, litres_specified: (isFinite(spec) && spec > 0) ? spec : null });
     });
-    // distribute litres equally among destinations (minus waste)
     var srcTotal = sources.reduce(function(s,x){ return s+(x.litres_actual||0); }, 0);
     var wasteV = parseFloat(gv('btf-waste')) || 0;
     var totalToReceive = Math.max(0, srcTotal - wasteV);
-    var perDest = dests.length > 0 ? totalToReceive / dests.length : 0;
-    dests.forEach(function(d){ d.litres_received = perDest; });
+    // Honour explicit per-destination volumes when given; otherwise split the total evenly.
+    var _anyDestSpecified = dests.some(function(d){ return d.litres_specified != null; });
+    if (_anyDestSpecified) {
+      dests.forEach(function(d){ d.litres_received = d.litres_specified || 0; });
+    } else {
+      var perDest = dests.length > 0 ? totalToReceive / dests.length : 0;
+      dests.forEach(function(d){ d.litres_received = perDest; });
+    }
     if (!sources.length) { window.toast && window.toast('Add at least one source container.', 'error'); return; }
     if (!dests.length)   { window.toast && window.toast('Add at least one destination container.', 'error'); return; }
+    if (_anyDestSpecified) {
+      var _dstSpecTotal = dests.reduce(function(s,d){ return s+(d.litres_received||0); }, 0);
+      if (_dstSpecTotal > srcTotal + 0.01) {
+        window.toast && window.toast('Destination total (' + _dstSpecTotal.toFixed(1) + 'L) exceeds source total (' + srcTotal.toFixed(1) + 'L).', 'error');
+        return;
+      }
+    }
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
     var notes   = gv('btf-notes');
