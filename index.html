@@ -32467,7 +32467,10 @@ window.saveAdjModal = async function() {
         job_id:     jobId,
         from_stage: fromStage,
         to_stage:   toStage,
-        changed_by: window.CURRENT_USER ? window.CURRENT_USER.app_user_id : null,
+        // Store the auth user id — _renderAuditTimeline resolves names via
+        // _staffMap, which is keyed by auth_user_id — so the timeline shows the
+        // person's name rather than a raw id.
+        changed_by: window.CURRENT_USER ? (window.CURRENT_USER.id || window.CURRENT_USER.app_user_id) : null,
         reason:     reason || null
       });
     } catch(e) { /* audit log is non-critical — never block the main action */ }
@@ -36431,7 +36434,14 @@ window.saveAdjModal = async function() {
       if (actualBottles && bomVolCl) reqLitres = (actualBottles * bomVolCl) / 100;
     } catch(e) {}
     // Prefer a measured bottling ABV when the job carries one; else BOM spec.
-    var _measuredAbv = parseFloat(job.abv_actual || 0);
+    // The measured ABV is captured on the on-line production checks
+    // (job_quality_checks.abv_actual), not on the jobs row, so read the most
+    // recent on-line round that recorded one. Failure falls back to the BOM spec.
+    var _measuredAbv = 0;
+    try {
+      var _qcAbv = await supaGet('job_quality_checks?job_id=eq.' + jobId + '&check_type=eq.online&abv_actual=not.is.null&order=check_round.desc&limit=1&select=abv_actual');
+      if (_qcAbv && _qcAbv[0]) _measuredAbv = parseFloat(_qcAbv[0].abv_actual || 0) || 0;
+    } catch(e) { /* measured-ABV lookup is best-effort — fall back to BOM spec */ }
     if (_measuredAbv > 0) bottlingAbv = _measuredAbv;
     var reqLPA = (reqLitres > 0 && bottlingAbv > 0) ? (reqLitres * bottlingAbv / 100) : 0;
 
@@ -42373,8 +42383,11 @@ window.saveAdjModal = async function() {
       return '<option value="' + c.id + '"' + dis + ' style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(label) + '</option>';
     };
     var html = '<option value="">— Select container —</option>';
-    withLiquid.forEach(function(c) { html += makeOpt(c, false); });
-    if (context !== 'dest') {
+    // 'dest-empty' (e.g. Transfer destinations): never offer full/partial containers.
+    if (context !== 'dest-empty') {
+      withLiquid.forEach(function(c) { html += makeOpt(c, false); });
+    }
+    if (context !== 'dest' && context !== 'dest-empty') {
       if (empty.length) {
         html += '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Empty containers ────</option>';
         empty.forEach(function(c) { html += makeOpt(c, context === 'source'); });
@@ -46139,7 +46152,7 @@ window.saveAdjModal = async function() {
     row.style.cssText = 'margin-bottom:10px;padding:10px 12px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:4px;';
     row.innerHTML =
       '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">'
-      + '<select id="btf-dc-' + i + '" onchange="window.onBTFDestChange(' + i + ')" style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">' + conOptHtml(_bl, null, null, ['cask'], 'dest') + '</select>'
+      + '<select id="btf-dc-' + i + '" onchange="window.onBTFDestChange(' + i + ')" style="flex:1;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;">' + conOptHtml(_bl, null, null, ['cask'], 'dest-empty') + '</select>'
       + '<button onclick="document.getElementById(\'btf-dr-' + i + '\').remove();window._btfCalcDestTotal();" style="flex-shrink:0;background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:4px 9px;border-radius:3px;cursor:pointer;">✕</button>'
       + '</div>'
       + '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;">'
