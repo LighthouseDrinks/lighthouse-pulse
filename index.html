@@ -7551,7 +7551,12 @@ window.copyInviteLink = function() {
       var lookupId = window.CURRENT_USER.app_user_id || window.CURRENT_USER.id;
       var profiles = await sbGet('hr_profiles?user_id=eq.'+lookupId+'&limit=1');
       var p = profiles[0];
-      if (!p || !p.profile_complete) {
+      // Gate on the employee's own completion (first_login_done), NOT profile_complete.
+      // profile_complete only flips true once an admin/manager fills the admin-only
+      // Employment + Pay tabs, so gating on it traps employees in a re-entry loop until
+      // their manager finishes payroll setup. The outstanding manager work is still
+      // tracked via the hr_profile_setup task and the "PROFILE PENDING" directory badge.
+      if (!p || !p.first_login_done) {
         // Fetch invite data so we can pre-fill & lock the name fields
         var inviteData = null;
         try {
@@ -7728,7 +7733,11 @@ window.copyInviteLink = function() {
         var newUsersRow = await sbGet('app_users?id=eq.'+newUserId+'&select=reports_to_id&limit=1');
         var reportsToId = (newUsersRow[0] && newUsersRow[0].reports_to_id) || null;
         if (window.DEBUG) console.log('[TASK] reportsToId:', reportsToId);
-        if(reportsToId) {
+        // Avoid duplicate tasks: only create one if there isn't already a pending
+        // hr_profile_setup task for this employee. Without this, every re-submit of the
+        // first-login form spawns another identical task for the manager.
+        var existingTasks = reportsToId ? await sbGet('job_tasks?target_user_id=eq.'+newUserId+'&task_type=eq.hr_profile_setup&status=eq.pending&limit=1') : [];
+        if(reportsToId && !existingTasks.length) {
           var mgrRow = await sbGet('app_users?id=eq.'+reportsToId+'&select=auth_user_id,role&limit=1');
           var mgrAuthId = mgrRow[0] && mgrRow[0].auth_user_id;
           var mgrRole  = (mgrRow[0] && mgrRow[0].role) || 'managing_director';
@@ -7748,8 +7757,8 @@ window.copyInviteLink = function() {
           } else {
             console.error('[TASK] no mgrAuthId found for reportsToId:', reportsToId);
           }
-        } else {
-          console.warn('[TASK] no reports_to_id set for user:', newUserId);
+        } else if (window.DEBUG) {
+          console.log('[TASK] skipped — no reports_to_id or pending task already exists for user:', newUserId);
         }
       } catch(e) { console.error('[TASK] failed:', e.message, e); }
 
