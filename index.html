@@ -36570,6 +36570,10 @@ window.saveAdjModal = async function() {
       // a sanity readout, but the pass/fail gate is the alcohol balance. When
       // effective ABV == bottling ABV (a bottling-strength linked job) this reduces
       // exactly to the old litres balance, so legacy jobs behave identically.
+      // Latest unmet-condition list, refreshed on every updateBalance() pass. The
+      // Confirm button stays clickable; if this is non-empty the click handler
+      // surfaces these reasons instead of silently doing nothing.
+      var _lqBlockReasons = [];
       function updateBalance() {
         var totalDrawn = 0, totalDrawnLPA = 0;
         contRows.forEach(function(row, idx) {
@@ -36682,7 +36686,9 @@ window.saveAdjModal = async function() {
         var waterAdded = getWaterAdded();
 
         var dipHint = '<br><span style="font-size:10px;font-weight:400;">Check Remaining After is the measured dip, not the book value.</span>';
+        var dipHintPlain = varianceUsed ? ' (check Remaining After is the measured dip, not the book value)' : '';
         var balanced, balanceLabel, col;
+        var balancePlain = ''; // plain-text reason when not balanced (for the block banner / alert)
         var wasteLPA = waste * ((bottlingAbv || avgDrawnAbv) / 100);
         if (reqLPA > 0 && !bottledAsIs) {
           // Alcohol balance: effective drawn alcohol must equal the alcohol in
@@ -36699,10 +36705,15 @@ window.saveAdjModal = async function() {
           var shortFin = (bottlingAbv > 0) ? shortLPA / (bottlingAbv / 100) : shortLPA;
           if (balanced) {
             balanceLabel = '&#10003; OK';
+          } else if (totalDrawnLPA <= 0) {
+            balanceLabel = shortFin.toFixed(1) + ' L (' + shortLPA.toFixed(2) + ' LPA) short — draw more' + (varianceUsed ? dipHint : '');
+            balancePlain = 'No liquid drawn yet — set Remaining After on at least one container so ' + shortFin.toFixed(1) + ' L (' + shortLPA.toFixed(2) + ' LPA) is drawn.';
           } else if (shortLPA > 0) {
             balanceLabel = shortFin.toFixed(1) + ' L (' + shortLPA.toFixed(2) + ' LPA) short — draw more' + (varianceUsed ? dipHint : '');
+            balancePlain = 'Liquid draw is ' + shortFin.toFixed(1) + ' L (' + shortLPA.toFixed(2) + ' LPA) short of the bottled requirement — draw more (lower Remaining After)' + dipHintPlain + '.';
           } else {
             balanceLabel = Math.abs(shortFin).toFixed(1) + ' L (' + Math.abs(shortLPA).toFixed(2) + ' LPA) over' + (varianceUsed ? dipHint : '');
+            balancePlain = 'Liquid draw is ' + Math.abs(shortFin).toFixed(1) + ' L (' + Math.abs(shortLPA).toFixed(2) + ' LPA) over the bottled requirement — draw less (raise Remaining After)' + dipHintPlain + '.';
           }
         } else {
           // No BOM/bottles, or bottled as-is → a pure litres balance.
@@ -36712,11 +36723,15 @@ window.saveAdjModal = async function() {
           col = balanced ? 'var(--green)' : 'var(--red)';
           if (reqLitres === 0) {
             balanceLabel = totalDrawn > 0 ? '&#10003; OK' : 'Enter drawn';
+            if (totalDrawn <= 0) balancePlain = 'No liquid drawn yet — set Remaining After on at least one container.';
           } else if (balanced) {
             balanceLabel = '&#10003; OK';
           } else {
             var short = target - effDrawnLitres;
             balanceLabel = (short > 0 ? short.toFixed(1) + ' L short' : Math.abs(short).toFixed(1) + ' L over') + (varianceUsed ? dipHint : '');
+            balancePlain = (short > 0
+              ? 'Liquid draw is ' + short.toFixed(1) + ' L short of the bottled requirement — draw more (lower Remaining After)'
+              : 'Liquid draw is ' + Math.abs(short).toFixed(1) + ' L over the bottled requirement — draw less (raise Remaining After)') + dipHintPlain + '.';
           }
         }
 
@@ -36770,15 +36785,42 @@ window.saveAdjModal = async function() {
         // before the job can be completed (mirrors the old sign-off "required").
         var colourOk = !job.colouring || getColour430().length > 0;
 
+        // Build the explicit list of unmet conditions so the operator always
+        // sees WHY the job can't be completed yet. leftoverMsg may carry esc()'d
+        // HTML for vessel references, so the banner is rendered with innerHTML.
+        var reasons = [];
+        if (!balanced)   reasons.push(balancePlain || 'Liquid reconciliation is not balanced yet — see the Balance readout above.');
+        if (!wasteOk)    reasons.push('Enter a reason for the recorded liquid waste.');
+        if (!varianceOk) reasons.push('Enter a reason for the measurement variance.');
+        if (!leftoverOk) reasons.push('Leftover allocation: ' + (leftoverMsg || 'check vessel capacities') + '.');
+        if (!colourOk)   reasons.push('Enter the post-colouring 430nm reading.');
+        _lqBlockReasons = reasons;
+
+        var ok = reasons.length === 0;
+
+        var banner = document.getElementById('lq-block-banner');
+        if (banner) {
+          if (ok) {
+            banner.style.display = 'none';
+            banner.innerHTML = '';
+          } else {
+            banner.style.display = '';
+            banner.innerHTML = '<div style="font-size:11px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:var(--red,#e05757);margin-bottom:6px;">&#9888; Can\u2019t continue to dry goods yet</div>'
+              + '<ul style="margin:0;padding-left:18px;font-size:12px;color:var(--text);line-height:1.5;">'
+              + reasons.map(function(r){ return '<li>' + r + '</li>'; }).join('')
+              + '</ul>';
+          }
+        }
+
+        // Keep the button clickable at all times — the click handler surfaces the
+        // reasons above when blocked, so a click is never a silent no-op. Only the
+        // styling reflects the blocked state.
         var confirmBtn = document.getElementById('lq-dd-confirm');
         if (confirmBtn) {
-          var ok = balanced && wasteOk && varianceOk && leftoverOk && colourOk;
-          confirmBtn.disabled    = !ok;
-          confirmBtn.style.opacity = ok ? '1' : '0.4';
-          confirmBtn.style.cursor  = ok ? 'pointer' : 'not-allowed';
-          confirmBtn.title = !leftoverOk
-            ? ('Leftover allocation: ' + (leftoverMsg || 'check vessel capacities') + '.')
-            : (!colourOk ? 'Enter the post-colouring 430nm reading.' : '');
+          confirmBtn.disabled = false;
+          confirmBtn.style.opacity = ok ? '1' : '0.55';
+          confirmBtn.style.cursor  = 'pointer';
+          confirmBtn.title = ok ? '' : reasons.join('\n');
         }
       }
 
@@ -36950,9 +36992,11 @@ window.saveAdjModal = async function() {
 
         + '<div id="lq-balance-display" style="margin-top:14px;padding:14px 16px;background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:5px;"></div>'
 
+        + '<div id="lq-block-banner" style="display:none;margin-top:14px;padding:12px 16px;background:rgba(224,87,87,0.08);border:1px solid rgba(224,87,87,0.4);border-radius:5px;"></div>'
+
         + '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:22px;flex-wrap:wrap;">'
         +   '<button id="lq-dd-cancel" style="padding:10px 20px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;">Cancel</button>'
-        +   '<button id="lq-dd-confirm" disabled style="padding:10px 22px;background:var(--gold);border:none;border-radius:4px;color:var(--navy-dark);cursor:not-allowed;font-size:12px;font-weight:800;opacity:0.4;">Confirm &amp; Continue to Dry Goods &#8594;</button>'
+        +   '<button id="lq-dd-confirm" style="padding:10px 22px;background:var(--gold);border:none;border-radius:4px;color:var(--navy-dark);cursor:pointer;font-size:12px;font-weight:800;">Confirm &amp; Continue to Dry Goods &#8594;</button>'
         + '</div></div>';
 
       document.body.appendChild(ov);
@@ -37088,6 +37132,21 @@ window.saveAdjModal = async function() {
       ov.querySelector('#lq-dd-confirm').onclick = async function() {
         var confirmBtn2 = ov.querySelector('#lq-dd-confirm');
         if (confirmBtn2 && confirmBtn2.disabled) return;
+
+        // Refresh the gate, then — if still blocked — tell the operator exactly
+        // why instead of doing nothing. This is the fix for the "final button
+        // didn't seem to work" report: a blocked click is now always explained.
+        updateBalance();
+        if (_lqBlockReasons && _lqBlockReasons.length) {
+          var _plain = _lqBlockReasons.map(function(r){ return r.replace(/<[^>]*>/g, ''); });
+          await window.lpAlert(
+            'This job can\u2019t be completed yet:\n\n\u2022 ' + _plain.join('\n\u2022 '),
+            { title: 'Liquid reconciliation incomplete', variant: 'warn' }
+          );
+          var bannerEl = document.getElementById('lq-block-banner');
+          if (bannerEl && bannerEl.scrollIntoView) bannerEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
 
         // Resolve any "+ Register New Vessel" leftover rows BEFORE building the
         // plan (the sub-block DOM is destroyed when the modal closes). The
