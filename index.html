@@ -27296,7 +27296,7 @@ window.onTfDstChange = function(idx) {
   // Base info — spirit, current litres, headspace
   info.innerHTML = '<span class="tf-info-badge">' + spirit + '</span>'
     + (litres > 0 ? '<span style="color:var(--text);font-size:11px;margin-left:6px;">Currently ' + litres.toFixed(1) + ' L</span>' : '')
-    + (cap > 0 ? '<span style="color:var(--green);font-size:11px;margin-left:6px;">' + Math.max(0, window._fillCeiling(cap)-litres).toFixed(0) + ' L headspace</span>' : '');
+    + (cap > 0 ? '<span style="color:var(--green);font-size:11px;margin-left:6px;">' + Math.max(0, window._fillCeiling(cap, cont.type)-litres).toFixed(0) + ' L headspace</span>' : '');
   // Now fire showWaste so LPA received + ABV after populate immediately
   var litEl = document.getElementById('tf-dst-litres-' + idx);
   if (litEl) showWaste(litEl);
@@ -27414,6 +27414,20 @@ window.saveTransfer = async function() {
 
   if (!sources.length) { await window.lpAlert('Add at least one source container.', { variant: 'warn' }); return; }
   if (!dests.length)   { await window.lpAlert('Add at least one destination container.', { variant: 'warn' }); return; }
+
+  // IBC hard cap: an IBC can only receive liquid up to its nominal 1,000 L. Block the
+  // transfer if any IBC destination would be pushed past its fill ceiling.
+  for (var _di = 0; _di < dests.length; _di++) {
+    var _dc = _liquid.find(function(x){ return x.id === dests[_di].container_id; });
+    if (!_dc) continue;
+    var _dcap = parseFloat(_dc.capacity_litres || 0);
+    var _dceil = window._fillCeiling(_dcap, _dc.type);
+    var _dnew = parseFloat(_dc.current_litres || 0) + (parseFloat(dests[_di].litres_received) || 0);
+    if (_dceil !== Infinity && _dnew > _dceil + 0.01) {
+      await window.lpAlert(_dc.reference + ' would hold ' + _dnew.toFixed(0) + ' L — over its ' + _dceil.toFixed(0) + ' L limit. Reduce the amount or add another destination.', { variant: 'warn' });
+      return;
+    }
+  }
 
   var srcTotal = sources.reduce(function(s,x){ return s+(x.litres_actual||0); },0);
   var dstTotal = dests.reduce(function(s,x){ return s+(x.litres_received||0); },0);
@@ -36476,7 +36490,7 @@ window.saveAdjModal = async function() {
     var contIds  = linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
     var liveConts = [];
     try {
-      if (contIds.length) liveConts = await supaGet('liquid_containers?id=in.(' + contIds.join(',') + ')&select=id,reference,current_litres,current_lpa,abv,client_id,fill_date,capacity_litres,spirit_type');
+      if (contIds.length) liveConts = await supaGet('liquid_containers?id=in.(' + contIds.join(',') + ')&select=id,reference,type,current_litres,current_lpa,abv,client_id,fill_date,capacity_litres,spirit_type');
     } catch(e) {}
 
     // Candidate destination vessels for relocating leftover (Phase 3). Any
@@ -36507,6 +36521,7 @@ window.saveAdjModal = async function() {
                lpaBefore: lpaB > 0 ? lpaB : (before * effAbv / 100),
                clientId: (live && live.client_id) || null,
                fillDate: (live && live.fill_date) || null,
+               type: (live && live.type) || null,
                capacity: parseFloat((live && live.capacity_litres) || 0) || 0 };
     }).filter(function(row){ return alreadyDeductedIds.indexOf(row.id) < 0; });
 
@@ -36663,14 +36678,15 @@ window.saveAdjModal = async function() {
       // being emptied of its leftover first, so its whole capacity is available.
       function vesselFreeCapacity(vesselId, isSource) {
         if (isSource) {
-          var cap = contRows[idxOfSource(vesselId)] ? contRows[idxOfSource(vesselId)].capacity : 0;
-          return cap > 0 ? window._fillCeiling(cap) : Infinity; // cap +10% hard-fill ceiling
+          var srcRow = contRows[idxOfSource(vesselId)];
+          var cap = srcRow ? srcRow.capacity : 0;
+          return cap > 0 ? window._fillCeiling(cap, srcRow && srcRow.type) : Infinity; // IBC -> nominal, else +10%
         }
         var d = destConts.find(function(c){ return c.id === vesselId; });
         if (!d) return Infinity;
         var cap2 = parseFloat(d.capacity_litres || 0) || 0;
         if (cap2 <= 0) return Infinity;
-        return Math.max(0, window._fillCeiling(cap2) - parseFloat(d.current_litres || 0));
+        return Math.max(0, window._fillCeiling(cap2, d.type) - parseFloat(d.current_litres || 0));
       }
       function idxOfSource(vesselId) {
         for (var i = 0; i < contRows.length; i++) if (contRows[i].id === vesselId) return i;
@@ -36748,7 +36764,8 @@ window.saveAdjModal = async function() {
               // vessels are allowed, so skip the duplicate check.
               var capEl = document.getElementById('dl-dnv-cap-' + r.nvIdx);
               var nvCap = capEl ? (parseFloat(capEl.value) || 0) : 0;
-              var nvFree = nvCap > 0 ? window._fillCeiling(nvCap) : Infinity;
+              var nvTypeEl = document.getElementById('dl-dnv-type-' + r.nvIdx);
+              var nvFree = nvCap > 0 ? window._fillCeiling(nvCap, nvTypeEl && nvTypeEl.value) : Infinity;
               if (r.litres > nvFree + 0.5) { rowOk = false; rowMsg = 'allocation exceeds the new vessel\u2019s capacity'; }
               return;
             }
@@ -36972,7 +36989,7 @@ window.saveAdjModal = async function() {
               var t = _destTypeLbl[d.type] || d.type;
               var l = parseFloat(d.current_litres || 0);
               var cap = parseFloat(d.capacity_litres || 0) || 0;
-              var freeTxt = cap > 0 ? ' — free ' + Math.max(0, window._fillCeiling(cap) - l).toFixed(0) + 'L' : (l > 0 ? ' — ' + l.toFixed(0) + 'L' : ' — empty');
+              var freeTxt = cap > 0 ? ' — free ' + Math.max(0, window._fillCeiling(cap, d.type) - l).toFixed(0) + 'L' : (l > 0 ? ' — ' + l.toFixed(0) + 'L' : ' — empty');
               return '<option value="' + d.id + '">' + esc(d.reference) + ' [' + t + ']' + freeTxt + '</option>';
             }).join('')
           + '<option disabled style="color:#555;font-style:italic;background:#0d1b2a;">──── Or register a new vessel ────</option>'
@@ -37160,7 +37177,8 @@ window.saveAdjModal = async function() {
           if (sel.value === '__newvessel__') {
             var capEl = document.getElementById('dl-dnv-cap-' + rowEl.dataset.nvIdx);
             var nvCap = capEl ? (parseFloat(capEl.value) || 0) : 0;
-            free = nvCap > 0 ? window._fillCeiling(nvCap) : remaining; // no cap yet → take the rest
+            var nvTypeEl = document.getElementById('dl-dnv-type-' + rowEl.dataset.nvIdx);
+            free = nvCap > 0 ? window._fillCeiling(nvCap, nvTypeEl && nvTypeEl.value) : remaining; // IBC -> nominal; no cap yet -> take the rest
           } else if (sel.value) {
             free = vesselFreeCapacity(sel.value, false);
           } else {
@@ -37825,6 +37843,19 @@ window.saveAdjModal = async function() {
     var origL   = parseFloat(srcCont.current_litres||0);
     var origABV = parseFloat(srcCont.abv||0);
     var origLPA = parseFloat(srcCont.current_lpa||0) || (origL * origABV / 100);
+    // IBC hard cap: moving leftover (+ water) into a destination IBC must not exceed its
+    // nominal 1,000 L fill ceiling.
+    if (!inPlace) {
+      var _destChk = (window._lsoContainers||[]).find(function(c){ return c.id === destId; });
+      if (_destChk) {
+        var _dceil = window._fillCeiling(parseFloat(_destChk.capacity_litres||0), _destChk.type);
+        var _dfin  = origL + waterL + parseFloat(_destChk.current_litres||0);
+        if (_dceil !== Infinity && _dfin > _dceil + 0.01) {
+          window.toast && window.toast(_destChk.reference + ' would hold ' + _dfin.toFixed(0) + ' L — over its ' + _dceil.toFixed(0) + ' L limit. Use a different destination.', 'error');
+          return;
+        }
+      }
+    }
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
     var btn = document.getElementById('lso-dl-save-btn');
@@ -42590,13 +42621,17 @@ window.saveAdjModal = async function() {
     return 'partially_full';
   }
 
-  // Hard-fill ceiling: nominal capacity drives the "% full" display, but vessels
-  // physically hold more (e.g. a 1000 L IBC holds ~1100 L). Capacity BLOCKS use this
-  // ceiling, not the nominal rating. One constant to tune.
-  var _FILL_TOLERANCE = 1.10; // IBC 1000 -> 1100, drum 200 -> 220, tank 12500 -> 13750
-  window._fillCeiling = function(capacity) {
+  // Hard-fill ceiling: nominal capacity drives the "% full" display, but most vessels
+  // physically hold a little more, so capacity BLOCKS allow a small tolerance over the
+  // nominal rating. IBCs are the exception — they are capped at their nominal 1,000 L
+  // (no tolerance) so liquid is never filled/transferred past an IBC's working limit.
+  // Pass the vessel `type` so IBCs resolve to nominal; callers that omit it keep the
+  // tolerant behaviour for backward compatibility.
+  var _FILL_TOLERANCE = 1.10; // drum 200 -> 220, tank 12500 -> 13750 (IBCs: no tolerance)
+  window._fillCeiling = function(capacity, type) {
     var c = parseFloat(capacity || 0);
-    return c > 0 ? c * _FILL_TOLERANCE : Infinity;
+    if (c <= 0) return Infinity;
+    return type === 'ibc' ? c : c * _FILL_TOLERANCE;
   };
 
   // ── LPA METHODOLOGY STANDARD ─────────────────────────────────────────────────
@@ -43103,6 +43138,14 @@ window.saveAdjModal = async function() {
     var capacity = CAPS[type] !== undefined ? CAPS[type] : (parseFloat(gv('blac-capacity')) || null);
     var isCask = type === 'cask';
     var litres = isCask ? (parseFloat(gv('blac-cask-litres')) || 0) : (parseFloat(gv('blac-litres')) || 0);
+    // IBC hard cap: an IBC holds a nominal 1,000 L — block adding more than its fill ceiling.
+    if (type === 'ibc') {
+      var _ibcCeil = window._fillCeiling(capacity, 'ibc');
+      if (_ibcCeil !== Infinity && litres > _ibcCeil + 0.01) {
+        window.toast && window.toast('An IBC holds at most ' + _ibcCeil.toFixed(0) + ' L — reduce the volume.', 'error');
+        return;
+      }
+    }
     var abv    = parseFloat(gv('blac-abv')) || null;
     var ola    = isCask ? (parseFloat(gv('blac-ola')) || null) : null;
     var lpa    = isCask
@@ -43862,7 +43905,7 @@ window.saveAdjModal = async function() {
     if (cont) {
       var cap   = parseFloat(cont.capacity_litres||0);
       var inC   = parseFloat(cont.current_litres||0);
-      var space = cap > 0 ? window._fillCeiling(cap) - inC : null;
+      var space = cap > 0 ? window._fillCeiling(cap, cont.type) - inC : null;
       availEl.textContent = space !== null ? Math.max(0, space).toFixed(0) + 'L free' : inC.toFixed(0) + 'L in';
       availEl.style.color = (space !== null && space <= 0) ? 'var(--red)' : 'var(--green)';
     } else {
@@ -44070,11 +44113,11 @@ window.saveAdjModal = async function() {
 
     var capErr = false;
     dests.forEach(function(d){
-      var ceil = window._fillCeiling(d.cont.capacity_litres);
+      var ceil = window._fillCeiling(d.cont.capacity_litres, d.cont.type);
       var inC  = parseFloat(d.cont.current_litres||0);
       if (ceil !== Infinity && inC + d.litres > ceil + 0.01) capErr = true;
     });
-    if (capErr) { window.toast && window.toast('Disgorge volume would exceed a destination vessel max fill (capacity +10%).', 'error'); return; }
+    if (capErr) { window.toast && window.toast('Disgorge volume would exceed a destination vessel fill limit (IBCs cap at 1,000 L; other vessels capacity +10%).', 'error'); return; }
 
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
@@ -44270,7 +44313,7 @@ window.saveAdjModal = async function() {
         var roomTxt;
         if (nominal <= 0)         roomTxt = 'reuse in-place';
         else if (effCur <= 0.01)  roomTxt = 'drawn empty · ' + nominal.toFixed(0) + 'L capacity';
-        else                      roomTxt = effCur.toFixed(0) + 'L stays · ' + Math.max(0, window._fillCeiling(nominal) - effCur).toFixed(0) + 'L room';
+        else                      roomTxt = effCur.toFixed(0) + 'L stays · ' + Math.max(0, window._fillCeiling(nominal, c.type) - effCur).toFixed(0) + 'L room';
         var lbl = ref + '  [' + tLbl + ']  ' + roomTxt;
         html += '<option value="' + c.id + '" style="background:#0d1b2a;color:#e8edf2;">' + window.escapeHtml(lbl) + '</option>';
       });
@@ -44564,7 +44607,7 @@ window.saveAdjModal = async function() {
     if (sel && capEl) {
       var cont = sel.value && !isNew ? _bl.find(function(c){ return c.id === sel.value; }) : null;
       if (cont) {
-        var ceil = window._fillCeiling(cont.capacity_litres);
+        var ceil = window._fillCeiling(cont.capacity_litres, cont.type);
         var cur  = parseFloat(cont.current_litres||0);
         var effCur = cur - _dlDrawnFromContainer(cont.id); // liquid drawn out empties first (in-place)
         var avail = ceil !== Infinity ? (ceil - effCur) : null;
@@ -44829,7 +44872,7 @@ window.saveAdjModal = async function() {
       if (cont) {
         var cap   = parseFloat(cont.capacity_litres||0);
         var cur   = parseFloat(cont.current_litres||0);
-        var avail = cap > 0 ? (window._fillCeiling(cap) - cur) : null;
+        var avail = cap > 0 ? (window._fillCeiling(cap, cont.type) - cur) : null;
         capEl.textContent = avail !== null ? ('Avail cap: ' + Math.max(0, avail).toFixed(0) + 'L') : ('Current: ' + cur.toFixed(0) + 'L');
         capEl.style.color = (avail !== null && avail <= 0) ? 'var(--red)' : 'var(--muted)';
       } else {
@@ -45036,7 +45079,7 @@ window.saveAdjModal = async function() {
         if (cont) {
           var cap   = parseFloat(cont.capacity_litres||0);
           var cur   = parseFloat(cont.current_litres||0);
-          var avail = cap > 0 ? window._fillCeiling(cap) - cur : Infinity;
+          var avail = cap > 0 ? window._fillCeiling(cap, cont.type) - cur : Infinity;
           if (l > avail + 0.01) {
             capWarns.push(window.escapeHtml(cont.reference) + ': needs ' + l.toFixed(0) + 'L, ' + (avail === Infinity ? '∞' : Math.max(0, avail).toFixed(0)) + 'L available');
             if (litEl) litEl.style.borderColor = 'var(--red)';
@@ -45122,8 +45165,8 @@ window.saveAdjModal = async function() {
       var destCont = _bl.find(function(c){ return c.id === base.id; });
       if (!destCont) { window.toast && window.toast('Base vessel not found.', 'error'); return; }
       var destCap  = parseFloat(destCont.capacity_litres||0);
-      if (destCap > 0 && totalL > window._fillCeiling(destCap) + 0.01) {
-        window.toast && window.toast('Blend total ' + totalL.toFixed(1) + 'L exceeds base vessel fill ceiling of ' + window._fillCeiling(destCap).toFixed(0) + 'L (' + destCap.toFixed(0) + 'L nominal).', 'error'); return;
+      if (destCap > 0 && totalL > window._fillCeiling(destCap, destCont.type) + 0.01) {
+        window.toast && window.toast('Blend total ' + totalL.toFixed(1) + 'L exceeds base vessel fill ceiling of ' + window._fillCeiling(destCap, destCont.type).toFixed(0) + 'L (' + destCap.toFixed(0) + 'L nominal).', 'error'); return;
       }
       // LH → Client gatekeeper: if LH liquid is heading into a client-owned base vessel, confirm it's a sale.
       var _okOutflow = await window._confirmLhOutflowIfNeeded(
@@ -45216,7 +45259,7 @@ window.saveAdjModal = async function() {
     var capBad = dests.filter(function(d){
       var cap = parseFloat(d.cont.capacity_litres||0);
       var cur = parseFloat(d.cont.current_litres||0);
-      return cap > 0 && (d.litres + cur) > window._fillCeiling(cap) + 0.01;
+      return cap > 0 && (d.litres + cur) > window._fillCeiling(cap, d.cont.type) + 0.01;
     });
     if (capBad.length) {
       window.toast && window.toast('Destination capacity exceeded: ' + capBad.map(function(d){ return d.cont.reference; }).join(', '), 'error'); return;
@@ -45606,7 +45649,8 @@ window.saveAdjModal = async function() {
       if (sel && sel.value && l > 0) {
         if (sel.value === '__newvessel__') {
           var nvCap = parseFloat((document.getElementById('dl-dnv-cap-' + idx) || {}).value) || 0;
-          var nvAvail = window._fillCeiling(nvCap); // cap +10% headroom
+          var nvTypeEl = document.getElementById('dl-dnv-type-' + idx);
+          var nvAvail = window._fillCeiling(nvCap, nvTypeEl && nvTypeEl.value); // IBC -> nominal, else +10%
           var nvCodeEl = document.getElementById('dl-dnv-code-' + idx);
           var nvCvEl   = document.getElementById('dl-dnv-cvref-' + idx);
           var nvLabel  = (nvCodeEl && nvCodeEl.value) || (nvCvEl && nvCvEl.textContent) || 'New vessel';
@@ -45620,7 +45664,7 @@ window.saveAdjModal = async function() {
         } else {
           var cont = _bl.find(function(c){ return c.id === sel.value; });
           if (cont) {
-            var ceil = window._fillCeiling(cont.capacity_litres);
+            var ceil = window._fillCeiling(cont.capacity_litres, cont.type);
             var cur  = parseFloat(cont.current_litres||0);
             var effCur = cur - _dlDrawnFromContainer(cont.id); // in-place: draw empties first
             var avail = ceil !== Infinity ? ceil - effCur : Infinity;
@@ -45922,13 +45966,13 @@ window.saveAdjModal = async function() {
       var _capBad = [];
       Object.keys(netMap).forEach(function(id){
         var n = netMap[id];
-        var ceil = window._fillCeiling(n.cont.capacity_litres);
+        var ceil = window._fillCeiling(n.cont.capacity_litres, n.cont.type);
         var orig = parseFloat(n.cont.current_litres||0);
         var newL = orig - n.deductL + n.addL;
         if (ceil !== Infinity && newL > ceil + 0.01) _capBad.push(n.cont.reference);
       });
       if (_capBad.length) {
-        await _failDest('Destination over max fill (capacity +10%): ' + _capBad.join(', ')); return;
+        await _failDest('Destination over fill limit (IBCs cap at 1,000 L; other vessels capacity +10%): ' + _capBad.join(', ')); return;
       }
 
       // LPA reconciliation guard: output LPA should match the expected (or measured) figure.
