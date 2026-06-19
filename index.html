@@ -1040,6 +1040,10 @@ window.FINANCE_NAV_ROLES         = ['managing_director','operations_director','f
 window.FIN_CREDS_ROLES           = ['managing_director','operations_director','financial_controller'];
 window.LH_NOTIFY_ROLES           = ['client_coordinator','quality_compliance','managing_director'];
 window.MANAGER_ROLES             = ['managing_director','operations_director','business_analyst','production_manager','ecommerce_manager','commercial_manager','financial_controller','quality_compliance','warehouse_liquid'];
+// Senior management who may view every task across the business (the "All open"
+// tab on My Tasks). Everyone else only loads/sees their own assigned, created,
+// and watched tasks.
+window.TASKS_VIEW_ALL_ROLES      = ['managing_director','operations_director','commercial_manager','quality_compliance','business_analyst'];
 
 // Staff-broadcast group memberships, keyed by group name. Populated by
 // loadRoles() from each role's sb_groups array. Kept here as a seed so
@@ -1060,6 +1064,7 @@ window.isPulseAdmin   = function(role) { role = role || (window.CURRENT_USER && 
 window.isExec         = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.EXEC_ROLES.indexOf(role) >= 0; };
 window.isHRAdmin      = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.HR_ADMIN_ROLES.indexOf(role) >= 0; };
 window.canEditClients = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.CLIENT_EDIT_ROLES.indexOf(role) >= 0; };
+window.canViewAllTasks = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.TASKS_VIEW_ALL_ROLES.indexOf(role) >= 0; };
 
 // ── DB-driven role load ──────────────────────────────────────────────────────
 // Pulls every role row from /rest/v1/roles and rebuilds the in-memory
@@ -17244,14 +17249,26 @@ window.loadBoms = async function initBoms() {
   // ── Tasks: load + cache ───────────────────────────────────────────────
   async function reloadTasks(){
     var authUuid = window.CURRENT_USER && window.CURRENT_USER.id;
+    var me = meId();
+    // Senior management load every CRM task; everyone else only loads tasks they
+    // are assigned to, created, or are watching — so other users' tasks never
+    // reach their browser.
+    var crmScope = '';
+    if (!window.canViewAllTasks()) {
+      if (!me) crmScope = null; // no app_user_id — don't fall back to all tasks
+      else crmScope = '&or=(assignee_id.eq.' + encodeURIComponent(me)
+                    + ',created_by.eq.' + encodeURIComponent(me)
+                    + ',watchers.cs.{' + encodeURIComponent(me) + '})';
+    }
 
     var crmP = (async function(){
+      if (crmScope === null) return [];
       try {
-        var rows = await db.select('job_tasks', '?task_type=eq.crm&order=due_at.asc.nullslast,created_at.desc&limit=500');
+        var rows = await db.select('job_tasks', '?task_type=eq.crm' + crmScope + '&order=due_at.asc.nullslast,created_at.desc&limit=500');
         return rows || [];
       } catch(e) {
         try {
-          var r2 = await db.select('job_tasks', '?task_type=eq.crm&order=created_at.desc&limit=500');
+          var r2 = await db.select('job_tasks', '?task_type=eq.crm' + crmScope + '&order=created_at.desc&limit=500');
           return r2 || [];
         } catch(e2){ window.logError && window.logError('reloadTasks', e2); return []; }
       }
@@ -17866,7 +17883,10 @@ window.loadBoms = async function initBoms() {
       case 'watching':  list = list.filter(function(t){ return !t.completed_at && (t.watchers||[]).indexOf(me) >= 0; }); break;
       case 'created':   list = list.filter(function(t){ return !t.completed_at && t.created_by === me; }); break;
       case 'completed': list = list.filter(function(t){ return t.completed_at && (t.assignee_id === me || t.created_by === me || (t.watchers||[]).indexOf(me)>=0); }); break;
-      case 'all':       list = list.filter(function(t){ return !t.completed_at; }); break;
+      case 'all':       list = window.canViewAllTasks()
+                          ? list.filter(function(t){ return !t.completed_at; })
+                          : list.filter(function(t){ return !t.completed_at && (t.assignee_id === me || t.created_by === me || (t.watchers||[]).indexOf(me)>=0); });
+                        break;
     }
     if (_mtState.priority) list = list.filter(function(t){ return (t.priority||'normal') === _mtState.priority; });
     if (_mtState.date === 'overdue') list = list.filter(function(t){ return t.due_at && new Date(t.due_at) < now; });
@@ -18024,6 +18044,12 @@ window.loadBoms = async function initBoms() {
     var page = document.getElementById('page-my-tasks'); if (!page) return;
     if (page.dataset.mtBound === '1') return;
     page.dataset.mtBound = '1';
+
+    // "All open" shows every task across the business — senior management only.
+    if (!window.canViewAllTasks()) {
+      var allTab = page.querySelector('.mt-tab[data-view="all"]');
+      if (allTab) allTab.style.display = 'none';
+    }
 
     page.querySelectorAll('.mt-tab').forEach(function(btn){
       btn.addEventListener('click', function(){
