@@ -27302,26 +27302,38 @@ window.onTfDstChange = function(idx) {
   if (litEl) showWaste(litEl);
 };
 
+// Free capacity (litres) a destination container can still receive, respecting the
+// IBC 1,000 L cap (other vessels keep +10% headroom). Empty/uncapped selection = no limit.
+function _tfDestFreeCapacity(ridx) {
+  var sel  = document.getElementById('tf-dst-container-' + ridx);
+  var cont = sel && sel.value ? _liquid.find(function(c){ return c.id === sel.value; }) : null;
+  if (!cont) return Infinity;
+  var cap = parseFloat(cont.capacity_litres||0);
+  if (cap <= 0) return Infinity;
+  return Math.max(0, window._fillCeiling(cap, cont.type) - parseFloat(cont.current_litres||0));
+}
+
 function recalcDest() {
   var totalL   = 0;
-  var totalLPA = 0;
   document.querySelectorAll('[id^="tf-src-act-"]').forEach(function(inp) {
     totalL += parseFloat(inp.value)||0;
   });
-  document.querySelectorAll('[id^="tf-src-lpa-"]').forEach(function(inp) {
-    totalLPA += parseFloat(inp.value)||0;
-  });
   if (totalL <= 0) return;
 
-  // Autofill single dest; for multiple dests split evenly only if empty
+  // Distribute the source total across destinations by each vessel's free capacity,
+  // top to bottom. A destination is never auto-filled past its fill ceiling (IBCs cap
+  // at 1,000 L); any volume that won't fit is left unallocated and surfaced by showWaste
+  // as "add a destination" — never silently treated as waste.
   var dests = document.querySelectorAll('[id^="tf-dst-litres-"]');
-  if (dests.length === 1) {
-    dests[0].value = totalL.toFixed(1);
-  } else {
-    var perDest = (totalL / dests.length).toFixed(1);
-    dests.forEach(function(d){ if (!d.value) d.value = perDest; });
-  }
-  // showWaste on any dest input — it updates all rows internally
+  var remaining = totalL;
+  dests.forEach(function(inp) {
+    var ridx = inp.id.replace('tf-dst-litres-','');
+    var free = _tfDestFreeCapacity(ridx);
+    var give = free === Infinity ? remaining : Math.min(remaining, free);
+    give = Math.max(0, Math.round(give * 1e4) / 1e4);
+    inp.value = give > 0 ? give.toFixed(1) : '';
+    remaining = Math.round((remaining - give) * 1e4) / 1e4;
+  });
   if (dests.length > 0) showWaste(dests[0]);
 }
 
@@ -27334,23 +27346,37 @@ window.showWaste = function(el) {
   var dstTotal = 0;
   document.querySelectorAll('[id^="tf-dst-litres-"]').forEach(function(i){ dstTotal += parseFloat(i.value)||0; });
 
-  var totalWaste = Math.max(0, srcTotal - dstTotal);
+  // Split the shortfall between two distinct concepts:
+  //  - unallocated: source liquid that physically won't fit in the chosen destinations
+  //    (their combined free capacity is too small) → the user should add a destination.
+  //  - waste/loss: liquid that COULD fit but the user has deliberately not allocated.
+  var dstInputs = document.querySelectorAll('[id^="tf-dst-litres-"]');
+  var totalFreeCap = 0; var anyUncapped = false;
+  dstInputs.forEach(function(inp){
+    var free = _tfDestFreeCapacity(inp.id.replace('tf-dst-litres-',''));
+    if (free === Infinity) anyUncapped = true; else totalFreeCap += free;
+  });
+  var unallocated = anyUncapped ? 0 : Math.max(0, srcTotal - totalFreeCap);
+  var totalWaste  = Math.max(0, srcTotal - dstTotal - unallocated);
   var avgAbv = srcTotal > 0 && srcLPA > 0 ? (srcLPA / srcTotal * 100) : 0;
 
   // Update waste note on every dest row — show only on last row, clear others
-  var dstInputs = document.querySelectorAll('[id^="tf-dst-litres-"]');
   dstInputs.forEach(function(inp, i) {
     var ridx = inp.id.replace('tf-dst-litres-','');
     var info = document.getElementById('tf-dst-info-' + ridx);
     if (!info) return;
 
-    // Waste note: only show on the last destination row
+    // Waste / unallocated note: only show on the last destination row
     var wn = info.querySelector('.waste-note');
     if (!wn) { wn = document.createElement('span'); wn.className='waste-note'; info.appendChild(wn); }
-    wn.style.cssText = 'font-size:11px;color:var(--amber);margin-left:6px;';
     if (i === dstInputs.length - 1) {
-      wn.textContent = totalWaste > 0.05 ? 'Total waste / loss: ' + totalWaste.toFixed(1) + ' L' : '';
+      var parts = [];
+      if (unallocated > 0.05) parts.push('<span style="color:var(--red);">' + unallocated.toFixed(1) + ' L unallocated — add a destination</span>');
+      if (totalWaste  > 0.05) parts.push('<span style="color:var(--amber);">Waste / loss: ' + totalWaste.toFixed(1) + ' L</span>');
+      wn.style.cssText = 'font-size:11px;margin-left:6px;';
+      wn.innerHTML = parts.join(' · ');
     } else {
+      wn.style.cssText = 'font-size:11px;margin-left:6px;';
       wn.textContent = '';
     }
 
