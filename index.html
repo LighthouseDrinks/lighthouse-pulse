@@ -17092,6 +17092,7 @@ window.loadBoms = async function initBoms() {
     if (diff < 604800) return Math.floor(diff/86400) + 'd ago';
     return d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
   }
+  window.fmtRelative = fmtRelative;
   function priorityPill(p){
     var cfg = {high:{c:'#ef5350',bg:'rgba(239,83,80,0.15)',bd:'rgba(239,83,80,0.4)',l:'High'},low:{c:'var(--muted)',bg:'rgba(255,255,255,0.03)',bd:'var(--navy-border)',l:'Low'},normal:{c:'var(--text)',bg:'rgba(255,255,255,0.03)',bd:'var(--navy-border)',l:'Normal'}};
     var x = cfg[p] || cfg.normal;
@@ -17959,6 +17960,7 @@ window.loadBoms = async function initBoms() {
       +   '<div style="font-size:11px;color:var(--muted);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">'
       +     (ctxLinks.length ? ctxLinks.join(' <span style=\"opacity:0.4;\">·</span> ') + ' <span style="opacity:0.4;">·</span> ' : '')
       +     dueBadge(t.due_at, done)
+      +     (t.created_at ? ' <span style="opacity:0.4;">·</span> <span style="color:var(--muted);">Sent ' + fmtRelative(t.created_at) + '</span>' : '')
       +   '</div>'
       + '</div>'
       + '<div style="display:flex;gap:6px;align-items:center;flex:0 0 auto;">'
@@ -17991,6 +17993,7 @@ window.loadBoms = async function initBoms() {
       +   '<div style="font-size:11px;color:var(--muted);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">'
       +     '<span style="background:rgba(214,185,90,0.12);color:var(--gold);padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;">' + esc(typeLabel) + '</span>'
       +     (ctx.length ? '<span style="opacity:0.4;">·</span> ' + ctx.join(' <span style=\"opacity:0.4;\">·</span> ') : '')
+      +     (t.created_at ? ' <span style="opacity:0.4;">·</span> <span style="color:var(--muted);">Sent ' + fmtRelative(t.created_at) + '</span>' : '')
       +   '</div>'
       +   notes
       + '</div>'
@@ -23622,6 +23625,144 @@ function _soFinal(lso) {
 }
 window._soWater = _soWater;
 window._soFinal = _soFinal;
+
+// ── Dilution plan ──────────────────────────────────────────────────────────
+// Build a physical, per-container dilution plan. Rather than blending every
+// linked container to one weighted-average ABV and drawing proportionally from
+// all of them, this keeps the LOWEST-ABV container as the receiving vessel,
+// draws only the cask-strength litres needed from the named donor container(s)
+// into it, then adds water to that same vessel. The remainder stays at cask
+// strength in the donor(s).
+//   containers: [{reference, litres|current_litres, abv, lpa|current_lpa}]
+//   mode:       'requirement' (make only the job volume) | 'all' (dilute everything)
+//   tol:        ABV tolerance for "needs dilution" (default 0.5; not LSO_ABV_TOL,
+//               which is out of scope here)
+// Returns a pure-data plan; callers render their own strings.
+function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
+  tol  = (tol == null) ? 0.5 : tol;
+  mode = (mode === 'requirement') ? 'requirement' : 'all';
+  reqLitres = parseFloat(reqLitres) || 0;
+  reqAbv    = parseFloat(reqAbv) || 0;
+
+  var conts = (containers || []).map(function(c) {
+    var litres = parseFloat(c.litres != null ? c.litres : c.current_litres) || 0;
+    var abv    = parseFloat(c.abv) || 0;
+    var lpa    = (c.lpa != null ? parseFloat(c.lpa)
+                 : (c.current_lpa != null ? parseFloat(c.current_lpa) : NaN));
+    if (!(lpa > 0)) lpa = litres * abv / 100;
+    return { reference: c.reference || '', litres: litres, abv: abv, lpa: lpa };
+  }).filter(function(c) { return c.litres > 0; });
+
+  var totalLitres = conts.reduce(function(s, c) { return s + c.litres; }, 0);
+  var totalLPA    = conts.reduce(function(s, c) { return s + c.lpa; }, 0);
+  var avgAbv      = totalLitres > 0 ? (totalLPA / totalLitres * 100) : 0;
+
+  var out = {
+    dilutionNeeded: reqAbv > 0 && avgAbv > reqAbv + tol,
+    mode: mode, avgAbv: avgAbv, totalLitres: totalLitres, totalLPA: totalLPA,
+    receiver: null, donors: [], singleSource: null,
+    drawLitres: 0, water: 0, finalLitres: 0, warnings: []
+  };
+  if (!conts.length) return out;
+
+  // Receiver = lowest-ABV container (closest to / at the target).
+  var receiver = conts.slice().sort(function(a, b) { return a.abv - b.abv; })[0];
+  var donors   = conts.filter(function(c) { return c !== receiver; });
+  out.receiver = receiver;
+
+  var donorLitres = donors.reduce(function(s, c) { return s + c.litres; }, 0);
+  var donorLPA    = donors.reduce(function(s, c) { return s + c.lpa; }, 0);
+  var donorAvgAbv = donorLitres > 0 ? (donorLPA / donorLitres * 100) : 0;
+
+  function fullDonors() {
+    return donors.map(function(c) {
+      return { reference: c.reference, abv: c.abv, litres: c.litres,
+               drawLitres: c.litres, remainderLitres: 0 };
+    });
+  }
+
+  if (!out.dilutionNeeded) {
+    out.finalLitres = (mode === 'requirement' && reqLitres > 0)
+      ? Math.min(reqLitres, totalLitres) : totalLitres;
+    out.donors     = fullDonors();
+    out.drawLitres = donorLitres;
+    return out;
+  }
+
+  // "All" mode: combine everything into the receiver, then add water to target ABV.
+  if (mode === 'all') {
+    out.finalLitres = totalLPA / (reqAbv / 100);
+    out.water       = Math.max(0, out.finalLitres - totalLitres);
+    out.donors      = fullDonors();
+    out.drawLitres  = donorLitres;
+    return out;
+  }
+
+  // "Requirement" mode: make only the job volume.
+  out.finalLitres = reqLitres;
+  if (!(reqLitres > 0)) { out.warnings.push('no-required-volume'); return out; }
+  var targetLPA = reqLitres * reqAbv / 100;
+
+  // Single container: draw what the job needs from that one vessel.
+  if (!donors.length) {
+    var draw = receiver.abv > 0 ? targetLPA / (receiver.abv / 100) : 0;
+    if (draw > receiver.litres + 1e-4) { out.warnings.push('insufficient-alcohol'); draw = receiver.litres; }
+    out.drawLitres   = draw;
+    out.water        = Math.max(0, reqLitres - draw);
+    out.singleSource = { reference: receiver.reference, abv: receiver.abv,
+                         drawLitres: draw, remainderLitres: Math.max(0, receiver.litres - draw) };
+    return out;
+  }
+
+  // Keep ALL of the receiver; draw the LPA shortfall from the donor(s).
+  if (receiver.litres >= reqLitres - 1e-4) out.warnings.push('receiver-exceeds-required');
+
+  var drawLPA    = Math.max(0, targetLPA - receiver.lpa);
+  var drawLitres = donorAvgAbv > 0 ? drawLPA / (donorAvgAbv / 100) : 0;
+  if (drawLitres > donorLitres + 1e-4) { out.warnings.push('insufficient-donor-alcohol'); drawLitres = donorLitres; }
+  out.drawLitres = drawLitres;
+
+  // Allocate the draw across donors proportional to available litres.
+  out.donors = donors.map(function(c) {
+    var d = donorLitres > 0 ? drawLitres * (c.litres / donorLitres) : 0;
+    return { reference: c.reference, abv: c.abv, litres: c.litres,
+             drawLitres: d, remainderLitres: Math.max(0, c.litres - d) };
+  });
+
+  if (reqLitres - receiver.litres - drawLitres < -1e-4) out.warnings.push('negative-water');
+  out.water = Math.max(0, reqLitres - receiver.litres - drawLitres);
+  return out;
+}
+window._dilutionPlan = _dilutionPlan;
+
+// Build the muted HTML instruction sentence used by the Liquid Sign-Off UI
+// (dilution scope radios + calc note). Names the receiver and donor containers.
+window._dilutionNoteHtml = function(plan, mode) {
+  if (!plan || !plan.receiver) return '';
+  var ref = function(r){ return (window.escapeHtml ? window.escapeHtml(r || '—') : (r || '—')); };
+  var f1  = function(n){ return (parseFloat(n) || 0).toFixed(1); };
+  if (mode === 'requirement') {
+    if (plan.warnings.length) {
+      return 'Draw ~' + f1(plan.drawLitres) + ' L from container(s), add ~' + f1(plan.water)
+        + ' L water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong>. Remainder stays in vessel(s) at cask strength.';
+    }
+    if (plan.singleSource) {
+      var ss = plan.singleSource;
+      return 'Draw ~<strong>' + f1(ss.drawLitres) + ' L</strong> from ' + ref(ss.reference)
+        + ', add ~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong>.'
+        + (ss.remainderLitres > 0.5 ? ' Remaining ~' + f1(ss.remainderLitres) + ' L stays in ' + ref(ss.reference) + ' at cask strength.' : '');
+    }
+    var draws = plan.donors.filter(function(d){ return d.drawLitres > 0.05; })
+      .map(function(d){ return '~' + f1(d.drawLitres) + ' L from ' + ref(d.reference); });
+    return 'Keep ' + f1(plan.receiver.litres) + ' L in <strong>' + ref(plan.receiver.reference) + '</strong>, draw '
+      + draws.join(' + ') + ' into it, add ~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>'
+      + f1(plan.finalLitres) + ' L</strong>. Donor remainder stays at cask strength.';
+  }
+  var comb = plan.donors.filter(function(d){ return d.drawLitres > 0.05; })
+    .map(function(d){ return ref(d.reference) + ' (' + f1(d.drawLitres) + ' L)'; });
+  return (comb.length ? 'Combine ' + comb.join(' + ') + ' into <strong>' + ref(plan.receiver.reference) + '</strong>, add ' : 'Add ')
+    + '~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong> at target ABV.';
+};
 
 // Keep a vessel's status in sync with whether any linked batch still holds liquid.
 // Only ever toggles available <-> in_use; manual states (maintenance / decommissioned
@@ -35083,22 +35224,28 @@ window.saveAdjModal = async function() {
 
       var _linkedAvgAbv  = _linkedTotalLitres > 0 ? (_linkedWeightedLPA / _linkedTotalLitres * 100) : 0;
       var _dilutionNeeded = _bottlingAbv > 0 && _linkedAvgAbv > _bottlingAbv + LSO_ABV_TOL;
+
+      // Per-container dilution plans (keep lowest-ABV vessel, draw from named donors).
+      var _planConts = _linkedConts.map(function(lc) {
+        var cont = _allConts.find(function(c){ return c.id === lc.id; }) || {};
+        return {
+          reference: cont.reference || lc.reference || '',
+          litres:    parseFloat((cont.current_litres != null ? cont.current_litres : lc.litres) || 0),
+          abv:       parseFloat((cont.abv != null ? cont.abv : lc.abv) || 0),
+          lpa:       (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null))
+        };
+      });
+      var _planReq = window._dilutionPlan(_planConts, _reqLitres, _bottlingAbv, 'requirement', LSO_ABV_TOL);
+      var _planAll = window._dilutionPlan(_planConts, _reqLitres, _bottlingAbv, 'all', LSO_ABV_TOL);
+
       var _dilWater = 0, _dilFinal = 0, _dilSrcNeeded = 0;
       var _dilAllWater = 0, _dilAllFinal = 0;
       if (_dilutionNeeded) {
-        // "Requirement" mode: dilute only what the job needs
-        if (_reqLitres > 0 && _linkedAvgAbv > 0) {
-          _dilSrcNeeded = _reqLitres * (_bottlingAbv / _linkedAvgAbv);
-          _dilWater     = Math.max(0, _reqLitres - _dilSrcNeeded);
-          _dilFinal     = _reqLitres;
-        } else {
-          _dilFinal     = _linkedWeightedLPA / (_bottlingAbv / 100);
-          _dilWater     = Math.max(0, _dilFinal - _linkedTotalLitres);
-          _dilSrcNeeded = _linkedTotalLitres;
-        }
-        // "All" mode: dilute full container contents
-        _dilAllFinal = _linkedWeightedLPA / (_bottlingAbv / 100);
-        _dilAllWater = Math.max(0, _dilAllFinal - _linkedTotalLitres);
+        _dilSrcNeeded = _planReq.drawLitres;
+        _dilWater     = _planReq.water;
+        _dilFinal     = _planReq.finalLitres;
+        _dilAllFinal  = _planAll.finalLitres;
+        _dilAllWater  = _planAll.water;
       }
 
       var bomAbvNum = j && j.abv_in ? parseFloat(j.abv_in) : null;
@@ -35296,11 +35443,11 @@ window.saveAdjModal = async function() {
         // toggle/update it live as containers are added or removed in-session.
         var _prevMode    = window._lsoDilutionMode || 'all';
         var _showScope   = _linkedConts.length > 0 && _dilutionNeeded;
-        var _initReqDesc = (_reqLitres > 0 && _dilSrcNeeded > 0)
-          ? 'Draw ~' + _dilSrcNeeded.toFixed(1) + ' L from container(s), add ~' + _dilWater.toFixed(1) + ' L water &rarr; <strong>' + _dilFinal.toFixed(1) + ' L</strong> at ' + _bottlingAbv.toFixed(1) + '% ABV. Remainder stays in vessel(s) at cask strength.'
+        var _initReqDesc = (_dilutionNeeded && _planReq.receiver)
+          ? window._dilutionNoteHtml(_planReq, 'requirement')
           : 'Draw only enough to meet the job volume. Remainder stays in vessel(s) at cask strength.';
-        var _initAllDesc = _linkedTotalLitres > 0
-          ? 'Draw full <strong>' + _linkedTotalLitres.toFixed(1) + ' L</strong> from container(s), add ~' + _dilAllWater.toFixed(1) + ' L water &rarr; <strong>' + _dilAllFinal.toFixed(1) + ' L</strong> at ' + _bottlingAbv.toFixed(1) + '% ABV.'
+        var _initAllDesc = (_dilutionNeeded && _planAll.receiver)
+          ? window._dilutionNoteHtml(_planAll, 'all')
           : 'Draw all linked container contents and add water to reach the target ABV.';
         html += '<div id="lso-dil-scope-wrap" style="' + (_showScope ? '' : 'display:none;') + 'background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.3);border-radius:5px;padding:14px 16px;margin-bottom:12px;">'
           + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Dilution Scope</div>'
@@ -35331,8 +35478,10 @@ window.saveAdjModal = async function() {
           html += frow('Dilution', '<span style="color:var(--green);font-weight:700;">&#10003; Recorded via Liquid tab</span>');
         } else {
           if (_dilutionNeeded && _dilWater > 0) {
+            var _initMode = (window._lsoDilutionMode === 'requirement') ? 'requirement' : 'all';
+            var _initNote = (_initMode === 'requirement') ? window._lsoDilReqNote : window._lsoDilAllNote;
             html += '<div id="lso-dil-calc-note" style="background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.2);border-radius:4px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--amber);">'
-              + '&#9432; Calculated: use ~<strong>' + _dilSrcNeeded.toFixed(1) + ' L</strong> from linked container(s) + add ~<strong>' + _dilWater.toFixed(1) + ' L</strong> RO water → final ~<strong>' + _dilFinal.toFixed(1) + ' L</strong> at ' + _bottlingAbv.toFixed(1) + '% ABV'
+              + '&#9432; Calculated: ' + (_initNote || ('use ~<strong>' + _dilSrcNeeded.toFixed(1) + ' L</strong> from linked container(s) + add ~<strong>' + _dilWater.toFixed(1) + ' L</strong> RO water → final ~<strong>' + _dilFinal.toFixed(1) + ' L</strong> at ' + _bottlingAbv.toFixed(1) + '% ABV'))
               + '</div>';
           }
           // Actual water added / final volumes are captured later in the job
@@ -35462,6 +35611,9 @@ window.saveAdjModal = async function() {
       window._lsoDilAllWater      = _dilAllWater;
       window._lsoDilAllFinal      = _dilAllFinal;
       window._lsoDilAllSrc        = _linkedTotalLitres;
+      // Prebuilt per-container instruction notes for the calc callout (named vessels)
+      window._lsoDilReqNote       = (_dilutionNeeded && _planReq.receiver) ? window._dilutionNoteHtml(_planReq, 'requirement') : '';
+      window._lsoDilAllNote       = (_dilutionNeeded && _planAll.receiver) ? window._dilutionNoteHtml(_planAll, 'all') : '';
 
       if (!isLocked) {
         // Trigger selector to show info card for already-selected item
@@ -35734,19 +35886,16 @@ window.saveAdjModal = async function() {
     if (_dilModeEl) { _dilMode = _dilModeEl.value; }
     else if (window._lsoDilutionMode) { _dilMode = window._lsoDilutionMode; }
 
+    // Build a physical, per-container dilution plan (keeps the lowest-ABV vessel,
+    // draws only the needed cask strength from the named donor(s), then waters).
+    var _woTol  = (typeof LSO_ABV_TOL!=='undefined'?LSO_ABV_TOL:0.5);
+    var _woPlan = window._dilutionPlan(linkedContainers, reqLitres, reqAbv, _dilMode, _woTol);
+
     var _calcFinalLitres, _calcWater, _calcSourceNeeded;
     if (dilution) {
-      if (_dilMode === 'requirement' && reqLitres > 0 && _contWeightedAvgAbv > 0) {
-        // Dilute only what the job requires
-        _calcSourceNeeded = reqLitres * (reqAbv / _contWeightedAvgAbv);
-        _calcWater        = Math.max(0, reqLitres - _calcSourceNeeded);
-        _calcFinalLitres  = reqLitres;
-      } else {
-        // Dilute all linked container contents
-        _calcFinalLitres  = _contWeightedLPA / (reqAbv / 100);
-        _calcWater        = Math.max(0, _calcFinalLitres - totalLinkedLitres);
-        _calcSourceNeeded = totalLinkedLitres;
-      }
+      _calcFinalLitres  = _woPlan.finalLitres;
+      _calcWater        = _woPlan.water;
+      _calcSourceNeeded = _woPlan.drawLitres;
     } else {
       _calcFinalLitres  = totalLinkedLitres;
       _calcWater        = 0;
@@ -35865,13 +36014,54 @@ window.saveAdjModal = async function() {
       var scopeLabel  = _dilMode === 'requirement'
                           ? '<span style="display:inline-block;background:#e8f5e9;color:#1b5e20;border:1px solid #a5d6a7;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIREMENT ONLY</span>'
                           : '<span style="display:inline-block;background:#fff3e0;color:#e65100;border:1px solid #ffcc80;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">FULL CONTAINERS</span>';
-      var srcNote = (_dilMode === 'requirement' && _calcSourceNeeded > 0 && totalLinkedLitres > _calcSourceNeeded + 0.5)
+
+      // Per-container instruction from the dilution plan; falls back to a generic
+      // note if the plan hit a feasibility edge (warnings present).
+      var _planUsable = _woPlan && !_woPlan.warnings.length && _woPlan.receiver;
+      var bodyMain, srcNote = '';
+      if (_planUsable && _dilMode === 'requirement' && _woPlan.singleSource) {
+        var _ss = _woPlan.singleSource;
+        bodyMain = abvNote
+          + 'Draw <strong>' + _ss.drawLitres.toFixed(1) + ' L</strong> from <strong>' + esc(_ss.reference || '—') + '</strong>'
+          + (_ss.abv > 0 ? ' (' + _ss.abv.toFixed(1) + '%)' : '')
+          + ', then add <strong>' + waterToAdd + '</strong> of RO water to reach a final volume of approximately <strong>' + targetFinal + '</strong>. '
+          + 'Verify ABV before proceeding. Record actual quantities below.';
+        if (_ss.remainderLitres > 0.5) srcNote = '<br><span style="color:#856404;font-size:10px;">&#9432; Remaining ~<strong>' + _ss.remainderLitres.toFixed(1) + ' L</strong> stays in <strong>' + esc(_ss.reference || '—') + '</strong> at cask strength.</span>';
+      } else if (_planUsable && _dilMode === 'requirement' && _woPlan.donors.length) {
+        var _rcv = _woPlan.receiver;
+        var _rcvRef = esc(_rcv.reference || '—');
+        var _drawParts = _woPlan.donors.filter(function(d){ return d.drawLitres > 0.05; }).map(function(d){
+          return '~<strong>' + d.drawLitres.toFixed(1) + ' L</strong> from <strong>' + esc(d.reference || '—') + '</strong>' + (d.abv > 0 ? ' (' + d.abv.toFixed(1) + '%)' : '');
+        });
+        bodyMain = abvNote
+          + 'Keep all <strong>' + _rcv.litres.toFixed(1) + ' L</strong> in <strong>' + _rcvRef + '</strong>' + (_rcv.abv > 0 ? ' (' + _rcv.abv.toFixed(1) + '%)' : '') + '. '
+          + 'Draw ' + _drawParts.join(' and ') + ' into <strong>' + _rcvRef + '</strong>, '
+          + 'then add <strong>' + waterToAdd + '</strong> of RO water to <strong>' + _rcvRef + '</strong> to reach approximately <strong>' + targetFinal + '</strong>'
+          + (reqAbv > 0 ? ' at ' + reqAbv.toFixed(1) + '%' : '') + '. '
+          + 'Verify ABV before proceeding. Record actual quantities below.';
+        var _rem = _woPlan.donors.filter(function(d){ return d.remainderLitres > 0.5; }).map(function(d){
+          return '~' + d.remainderLitres.toFixed(1) + ' L in ' + esc(d.reference || '—');
+        });
+        if (_rem.length) srcNote = '<br><span style="color:#856404;font-size:10px;">&#9432; Remaining ' + _rem.join(', ') + ' stays at cask strength.</span>';
+      } else if (_planUsable && _dilMode === 'all' && _woPlan.donors.length) {
+        var _rcvA = esc(_woPlan.receiver.reference || '—');
+        var _combParts = _woPlan.donors.filter(function(d){ return d.drawLitres > 0.05; }).map(function(d){
+          return '<strong>' + esc(d.reference || '—') + '</strong> (' + d.drawLitres.toFixed(1) + ' L)';
+        });
+        bodyMain = abvNote
+          + 'Combine ' + _combParts.join(' and ') + ' into <strong>' + _rcvA + '</strong>, then add <strong>' + waterToAdd + '</strong> of RO water to reach a final volume of approximately <strong>' + targetFinal + '</strong>'
+          + (reqAbv > 0 ? ' at ' + reqAbv.toFixed(1) + '%' : '') + '. '
+          + 'Verify ABV before proceeding. Record actual quantities below.';
+      } else {
+        bodyMain = abvNote
+          + 'Add <strong>' + waterToAdd + '</strong> of RO water to reach a final volume of approximately <strong>' + targetFinal + '</strong>. '
+          + 'Verify ABV before proceeding. Record actual quantities below.';
+        srcNote = (_dilMode === 'requirement' && _calcSourceNeeded > 0 && totalLinkedLitres > _calcSourceNeeded + 0.5)
                       ? '<br><span style="color:#856404;font-size:10px;">&#9432; Draw ~<strong>' + _calcSourceNeeded.toFixed(1) + ' L</strong> from linked container(s) — remaining volume stays in vessel(s) at cask strength.</span>'
                       : (_dilMode === 'all' ? '<br><span style="color:#856404;font-size:10px;">&#9432; Full contents of all linked containers are being diluted.</span>' : '');
+      }
       h += step(stepNum++, 'Dilution — RO Water Addition <span style="display:inline-block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIRED</span>' + scopeLabel,
-        abvNote
-        + 'Add <strong>' + waterToAdd + '</strong> of RO water to reach a final volume of approximately <strong>' + targetFinal + '</strong>. '
-        + 'Verify ABV before proceeding. Record actual quantities below.' + srcNote + '<br>'
+        bodyMain + srcNote + '<br>'
         + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">'
         + '<div><div style="' + S.label + '">Actual Water Added (L)</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
         + '<div><div style="' + S.label + '">Actual Final Litres</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
@@ -36124,12 +36314,13 @@ window.saveAdjModal = async function() {
       fEl.style.borderColor = 'var(--gold)';
     }
 
-    // Also update the info callout text
+    // Also update the info callout text (named per-container note)
     var src  = isReq ? (window._lsoDilReqSrc  || 0) : (window._lsoDilAllSrc  || 0);
     var abv  = window._lsoBottlingAbv || 0;
+    var note = isReq ? window._lsoDilReqNote : window._lsoDilAllNote;
     var wrap = document.getElementById('lso-dil-calc-note');
     if (wrap && src > 0 && water > 0 && final_l > 0) {
-      wrap.innerHTML = '&#9432; Calculated: use ~<strong>' + src.toFixed(1) + ' L</strong> from linked container(s) + add ~<strong>' + water.toFixed(1) + ' L</strong> RO water &rarr; final ~<strong>' + final_l.toFixed(1) + ' L</strong> at ' + abv.toFixed(1) + '% ABV';
+      wrap.innerHTML = '&#9432; Calculated: ' + (note || ('use ~<strong>' + src.toFixed(1) + ' L</strong> from linked container(s) + add ~<strong>' + water.toFixed(1) + ' L</strong> RO water &rarr; final ~<strong>' + final_l.toFixed(1) + ' L</strong> at ' + abv.toFixed(1) + '% ABV'));
     }
   };
 
@@ -36316,36 +36507,42 @@ window.saveAdjModal = async function() {
       var _dilNeededLive = _bottAbv > 0 && linked.length > 0 && _avgAbvLive > _bottAbv + _tol;
       if (_dilNeededLive) {
         var _rL = window._lsoReqLitres || 0;
-        var _rSrc, _rWater, _rFinal;
-        if (_rL > 0 && _avgAbvLive > 0) {
-          _rSrc   = _rL * (_bottAbv / _avgAbvLive);
-          _rWater = Math.max(0, _rL - _rSrc);
-          _rFinal = _rL;
-        } else {
-          _rFinal = linkedLPA / (_bottAbv / 100);
-          _rWater = Math.max(0, _rFinal - totalLinked);
-          _rSrc   = totalLinked;
-        }
-        var _aFinal = linkedLPA / (_bottAbv / 100);
-        var _aWater = Math.max(0, _aFinal - totalLinked);
 
-        // Store updated calc values for lsoDilutionModeChange + printLiquidSignoff
+        // Per-container plans (keep lowest-ABV vessel, draw from named donors).
+        var _livePlanConts = linked.map(function(lc) {
+          var cont = allConts.find(function(c){ return c.id === lc.id; }) || {};
+          return {
+            reference: cont.reference || lc.reference || '',
+            litres:    parseFloat((cont.current_litres != null ? cont.current_litres : lc.litres) || 0),
+            abv:       parseFloat((cont.abv != null ? cont.abv : lc.abv) || 0),
+            lpa:       (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null))
+          };
+        });
+        var _livePlanReq = window._dilutionPlan(_livePlanConts, _rL, _bottAbv, 'requirement', _tol);
+        var _livePlanAll = window._dilutionPlan(_livePlanConts, _rL, _bottAbv, 'all', _tol);
+
+        var _rSrc = _livePlanReq.drawLitres, _rWater = _livePlanReq.water, _rFinal = _livePlanReq.finalLitres;
+        var _aFinal = _livePlanAll.finalLitres, _aWater = _livePlanAll.water;
+
+        // Store updated calc values + named notes for lsoDilutionModeChange + printLiquidSignoff
         window._lsoDilReqWater = _rWater;
         window._lsoDilReqFinal = _rFinal;
         window._lsoDilReqSrc   = _rSrc;
         window._lsoDilAllWater = _aWater;
         window._lsoDilAllFinal = _aFinal;
         window._lsoDilAllSrc   = totalLinked;
+        window._lsoDilReqNote  = _livePlanReq.receiver ? window._dilutionNoteHtml(_livePlanReq, 'requirement') : '';
+        window._lsoDilAllNote  = _livePlanAll.receiver ? window._dilutionNoteHtml(_livePlanAll, 'all') : '';
 
         var reqDescEl = document.getElementById('lso-dil-req-desc');
         if (reqDescEl) {
-          reqDescEl.innerHTML = (_rL > 0 && _rSrc > 0)
-            ? 'Draw ~' + _rSrc.toFixed(1) + ' L from container(s), add ~' + _rWater.toFixed(1) + ' L water &rarr; <strong>' + _rFinal.toFixed(1) + ' L</strong> at ' + _bottAbv.toFixed(1) + '% ABV. Remainder stays in vessel(s) at cask strength.'
-            : 'Draw only enough to meet the job volume. Remainder stays in vessel(s) at cask strength.';
+          reqDescEl.innerHTML = window._lsoDilReqNote
+            || 'Draw only enough to meet the job volume. Remainder stays in vessel(s) at cask strength.';
         }
         var allDescEl = document.getElementById('lso-dil-all-desc');
         if (allDescEl) {
-          allDescEl.innerHTML = 'Draw full <strong>' + totalLinked.toFixed(1) + ' L</strong> from container(s), add ~' + _aWater.toFixed(1) + ' L water &rarr; <strong>' + _aFinal.toFixed(1) + ' L</strong> at ' + _bottAbv.toFixed(1) + '% ABV.';
+          allDescEl.innerHTML = window._lsoDilAllNote
+            || ('Draw full <strong>' + totalLinked.toFixed(1) + ' L</strong> from container(s), add ~' + _aWater.toFixed(1) + ' L water &rarr; <strong>' + _aFinal.toFixed(1) + ' L</strong> at ' + _bottAbv.toFixed(1) + '% ABV.');
         }
 
         scopeWrap.style.display = '';
@@ -39966,6 +40163,7 @@ window.saveAdjModal = async function() {
         + '<div style="font-size:10px;color:var(--muted);">'
         + (t.task_type === 'hr_profile_setup' ? '' : 'Job: <strong style="color:var(--gold);">' + (t.job_id||'—') + '</strong>')
         + (t.due_date ? ' · Due ' + t.due_date : '')
+        + (t.created_at && window.fmtRelative ? ' · Sent ' + window.fmtRelative(t.created_at) : '')
         + '</div></div>'
         + '<span style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:4px 10px;border-radius:3px;white-space:nowrap;flex-shrink:0;' + ts + '">' + t.status + '</span>';
       card.appendChild(top);
@@ -49207,7 +49405,7 @@ async function loadRoster(){
   var days=wdays(_wo),ws=ds(days[0]),we=ds(days[6]);
   var lbl=document.getElementById('roster-week-label');
   if(lbl) lbl.textContent=days[0].toLocaleDateString('en-IE',{day:'numeric',month:'short'})+' \u2013 '+days[6].toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'});
-  if(!_emps.length){var u=await get('app_users?status=eq.active&order=display_name.asc&select=id,auth_user_id,display_name,role');_emps=u.filter(function(x){return x.role!=='client';});}
+  if(!_emps.length){var u=await get('app_users?status=eq.active&order=display_name.asc&select=id,auth_user_id,display_name,role');_emps=u.filter(function(x){return x.role!=='client' && (x.display_name||'').trim().toLowerCase()!=='plant display';});}
   try{ _shiftTemplates=await get('shift_templates?active=eq.true&order=name.asc')||[]; }
   catch(stErr){ _shiftTemplates=[]; window.logError&&window.logError('load shift_templates',stErr); }
   var sh=await get('roster_shifts?week_start=eq.'+ws+'&order=shift_date.asc');
@@ -57347,8 +57545,8 @@ window.loadAttendanceReport=async function(){
 
   try{
     var emps=await get('app_users?select=id,auth_user_id,display_name,email,role,status&order=display_name.asc');
-    // Exclude clients.
-    emps=(emps||[]).filter(function(e){return e.role!=='client';});
+    // Exclude clients and the kiosk "Plant Display" account (a shared login that never clocks in/out).
+    emps=(emps||[]).filter(function(e){return e.role!=='client' && (e.display_name||'').trim().toLowerCase()!=='plant display';});
 
     var evts=await get('clock_events?timestamp=gte.'+encodeURIComponent(startIso)+'&timestamp=lt.'+encodeURIComponent(endIso)+'&order=timestamp.asc&limit=5000');
     var shifts=await get('roster_shifts?shift_date=gte.'+monday+'&shift_date=lte.'+sunday+'&limit=2000');
