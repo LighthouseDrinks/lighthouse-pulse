@@ -30333,11 +30333,17 @@ window.saveAdjModal = async function() {
   })();
 
   async function _doLoadJobs() {
-    // Load staff map for name lookups
+    // Load staff map for name lookups. Key by BOTH auth_user_id and the
+    // app_users.id so name resolution works regardless of which id a row stored
+    // in its changed_by/owner field (legacy rows used app_user_id).
     if (!Object.keys(_staffMap).length) {
       try {
-        var staff = await supaGet('app_users?select=auth_user_id,display_name');
-        staff.forEach(function(u){ _staffMap[u.auth_user_id] = u.display_name || u.auth_user_id.substring(0,8); });
+        var staff = await supaGet('app_users?select=id,auth_user_id,display_name');
+        staff.forEach(function(u){
+          var name = u.display_name || (u.auth_user_id ? u.auth_user_id.substring(0,8) : (u.id ? u.id.substring(0,8) : '?'));
+          if (u.auth_user_id) _staffMap[u.auth_user_id] = name;
+          if (u.id) _staffMap[u.id] = name;
+        });
       } catch(e) { window.logError('load staff map', e); }
     }
     // Fire all queries in parallel; allSettled means one inaccessible table never
@@ -32709,6 +32715,18 @@ window.saveAdjModal = async function() {
     if (!el) return;
     el.innerHTML = '<div style="font-size:11px;color:var(--muted);">Loading history…</div>';
     try {
+      // Ensure the staff name map is populated — the detail view can open before
+      // the jobs list has finished loading it, which would leave names as ids.
+      if (!Object.keys(_staffMap).length) {
+        try {
+          var _staff = await supaGet('app_users?select=id,auth_user_id,display_name');
+          _staff.forEach(function(u){
+            var name = u.display_name || (u.auth_user_id ? u.auth_user_id.substring(0,8) : (u.id ? u.id.substring(0,8) : '?'));
+            if (u.auth_user_id) _staffMap[u.auth_user_id] = name;
+            if (u.id) _staffMap[u.id] = name;
+          });
+        } catch(_e) { /* fall through — renderer degrades to id prefix */ }
+      }
       var logs = await supaGet('job_audit_log?job_id=eq.' + jobId + '&order=changed_at.asc');
       if (!logs || !logs.length) {
         el.innerHTML = '<div style="font-size:11px;color:var(--muted);">No stage history recorded yet.</div>';
