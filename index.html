@@ -23650,7 +23650,9 @@ function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
     var lpa    = (c.lpa != null ? parseFloat(c.lpa)
                  : (c.current_lpa != null ? parseFloat(c.current_lpa) : NaN));
     if (!(lpa > 0)) lpa = litres * abv / 100;
-    return { reference: c.reference || '', litres: litres, abv: abv, lpa: lpa };
+    var cap    = parseFloat(c.capacity != null ? c.capacity : c.capacity_litres) || 0;
+    return { reference: c.reference || '', litres: litres, abv: abv, lpa: lpa,
+             capacity: cap, type: c.type || '' };
   }).filter(function(c) { return c.litres > 0; });
 
   var totalLitres = conts.reduce(function(s, c) { return s + c.litres; }, 0);
@@ -23661,7 +23663,8 @@ function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
     dilutionNeeded: reqAbv > 0 && avgAbv > reqAbv + tol,
     mode: mode, avgAbv: avgAbv, totalLitres: totalLitres, totalLPA: totalLPA,
     receiver: null, donors: [], singleSource: null,
-    drawLitres: 0, water: 0, finalLitres: 0, warnings: []
+    drawLitres: 0, water: 0, finalLitres: 0, warnings: [],
+    overflow: false, receiverCapacity: 0, vesselsNeeded: 1
   };
   if (!conts.length) return out;
 
@@ -23681,6 +23684,19 @@ function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
     });
   }
 
+  // Flag when the final batch can't fit the receiving vessel. Uses the receiver's
+  // recorded capacity, falling back to a standard 1000 L IBC when unknown.
+  function done() {
+    var cap = receiver.capacity > 0 ? receiver.capacity
+            : (receiver.type === 'ibc' || receiver.type === '' ? 1000 : 0);
+    out.receiverCapacity = cap;
+    if (cap > 0 && out.finalLitres > cap + 1) {
+      out.overflow = true;
+      out.vesselsNeeded = Math.ceil(out.finalLitres / cap);
+    }
+    return out;
+  }
+
   if (!out.dilutionNeeded) {
     out.finalLitres = (mode === 'requirement' && reqLitres > 0)
       ? Math.min(reqLitres, totalLitres) : totalLitres;
@@ -23695,7 +23711,7 @@ function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
     out.water       = Math.max(0, out.finalLitres - totalLitres);
     out.donors      = fullDonors();
     out.drawLitres  = donorLitres;
-    return out;
+    return done();
   }
 
   // "Requirement" mode: make only the job volume.
@@ -23711,7 +23727,7 @@ function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
     out.water        = Math.max(0, reqLitres - draw);
     out.singleSource = { reference: receiver.reference, abv: receiver.abv,
                          drawLitres: draw, remainderLitres: Math.max(0, receiver.litres - draw) };
-    return out;
+    return done();
   }
 
   // Keep ALL of the receiver; draw the LPA shortfall from the donor(s).
@@ -23731,7 +23747,7 @@ function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
 
   if (reqLitres - receiver.litres - drawLitres < -1e-4) out.warnings.push('negative-water');
   out.water = Math.max(0, reqLitres - receiver.litres - drawLitres);
-  return out;
+  return done();
 }
 window._dilutionPlan = _dilutionPlan;
 
@@ -23741,27 +23757,35 @@ window._dilutionNoteHtml = function(plan, mode) {
   if (!plan || !plan.receiver) return '';
   var ref = function(r){ return (window.escapeHtml ? window.escapeHtml(r || '—') : (r || '—')); };
   var f1  = function(n){ return (parseFloat(n) || 0).toFixed(1); };
+  var msg;
   if (mode === 'requirement') {
     if (plan.warnings.length) {
-      return 'Draw ~' + f1(plan.drawLitres) + ' L from container(s), add ~' + f1(plan.water)
+      msg = 'Draw ~' + f1(plan.drawLitres) + ' L from container(s), add ~' + f1(plan.water)
         + ' L water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong>. Remainder stays in vessel(s) at cask strength.';
-    }
-    if (plan.singleSource) {
+    } else if (plan.singleSource) {
       var ss = plan.singleSource;
-      return 'Draw ~<strong>' + f1(ss.drawLitres) + ' L</strong> from ' + ref(ss.reference)
+      msg = 'Draw ~<strong>' + f1(ss.drawLitres) + ' L</strong> from ' + ref(ss.reference)
         + ', add ~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong>.'
         + (ss.remainderLitres > 0.5 ? ' Remaining ~' + f1(ss.remainderLitres) + ' L stays in ' + ref(ss.reference) + ' at cask strength.' : '');
+    } else {
+      var draws = plan.donors.filter(function(d){ return d.drawLitres > 0.05; })
+        .map(function(d){ return '~' + f1(d.drawLitres) + ' L from ' + ref(d.reference); });
+      msg = 'Keep ' + f1(plan.receiver.litres) + ' L in <strong>' + ref(plan.receiver.reference) + '</strong>, draw '
+        + draws.join(' + ') + ' into it, add ~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>'
+        + f1(plan.finalLitres) + ' L</strong>. Donor remainder stays at cask strength.';
     }
-    var draws = plan.donors.filter(function(d){ return d.drawLitres > 0.05; })
-      .map(function(d){ return '~' + f1(d.drawLitres) + ' L from ' + ref(d.reference); });
-    return 'Keep ' + f1(plan.receiver.litres) + ' L in <strong>' + ref(plan.receiver.reference) + '</strong>, draw '
-      + draws.join(' + ') + ' into it, add ~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>'
-      + f1(plan.finalLitres) + ' L</strong>. Donor remainder stays at cask strength.';
+  } else {
+    var comb = plan.donors.filter(function(d){ return d.drawLitres > 0.05; })
+      .map(function(d){ return ref(d.reference) + ' (' + f1(d.drawLitres) + ' L)'; });
+    msg = (comb.length ? 'Combine ' + comb.join(' + ') + ' into <strong>' + ref(plan.receiver.reference) + '</strong>, add ' : 'Add ')
+      + '~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong> at target ABV.';
   }
-  var comb = plan.donors.filter(function(d){ return d.drawLitres > 0.05; })
-    .map(function(d){ return ref(d.reference) + ' (' + f1(d.drawLitres) + ' L)'; });
-  return (comb.length ? 'Combine ' + comb.join(' + ') + ' into <strong>' + ref(plan.receiver.reference) + '</strong>, add ' : 'Add ')
-    + '~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong> at target ABV.';
+  if (plan.overflow) {
+    msg += '<br><span style="color:var(--amber);">&#9888; Final ~' + f1(plan.finalLitres) + ' L won\'t fit one IBC'
+      + (plan.receiverCapacity ? ' (~' + Math.round(plan.receiverCapacity) + ' L)' : '')
+      + ' — split across ~' + plan.vesselsNeeded + ' vessels. Actual containers used are logged at job close.</span>';
+  }
+  return msg;
 };
 
 // Keep a vessel's status in sync with whether any linked batch still holds liquid.
@@ -35250,7 +35274,9 @@ window.saveAdjModal = async function() {
           reference: cont.reference || lc.reference || '',
           litres:    parseFloat((cont.current_litres != null ? cont.current_litres : lc.litres) || 0),
           abv:       parseFloat((cont.abv != null ? cont.abv : lc.abv) || 0),
-          lpa:       (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null))
+          lpa:       (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null)),
+          capacity:  parseFloat(cont.capacity_litres || lc.capacity_litres || 0) || 0,
+          type:      cont.type || lc.type || ''
         };
       });
       var _planReq = window._dilutionPlan(_planConts, _reqLitres, _bottlingAbv, 'requirement', LSO_ABV_TOL);
@@ -36078,8 +36104,14 @@ window.saveAdjModal = async function() {
                       ? '<br><span style="color:#856404;font-size:10px;">&#9432; Draw ~<strong>' + _calcSourceNeeded.toFixed(1) + ' L</strong> from linked container(s) — remaining volume stays in vessel(s) at cask strength.</span>'
                       : (_dilMode === 'all' ? '<br><span style="color:#856404;font-size:10px;">&#9432; Full contents of all linked containers are being diluted.</span>' : '');
       }
+      // Capacity caution — the final batch may not fit a single IBC.
+      var capNote = (_woPlan && _woPlan.overflow)
+        ? '<br><span style="display:inline-block;margin-top:6px;color:#b71c1c;background:#fdecea;border:1px solid #f5c6cb;border-radius:3px;padding:4px 8px;font-size:10px;">&#9888; <strong>Final volume ~' + _woPlan.finalLitres.toFixed(1) + ' L will not fit in one IBC'
+            + (_woPlan.receiverCapacity ? ' (~' + Math.round(_woPlan.receiverCapacity) + ' L)' : '') + '.</strong> '
+            + 'Split across additional vessels as needed (~' + _woPlan.vesselsNeeded + ' IBCs). The actual containers used will be logged when you close the job.</span>'
+        : '';
       h += step(stepNum++, 'Dilution — RO Water Addition <span style="display:inline-block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIRED</span>' + scopeLabel,
-        bodyMain + srcNote + '<br>'
+        bodyMain + srcNote + capNote + '<br>'
         + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">'
         + '<div><div style="' + S.label + '">Actual Water Added (L)</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
         + '<div><div style="' + S.label + '">Actual Final Litres</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
@@ -36533,7 +36565,9 @@ window.saveAdjModal = async function() {
             reference: cont.reference || lc.reference || '',
             litres:    parseFloat((cont.current_litres != null ? cont.current_litres : lc.litres) || 0),
             abv:       parseFloat((cont.abv != null ? cont.abv : lc.abv) || 0),
-            lpa:       (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null))
+            lpa:       (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null)),
+            capacity:  parseFloat(cont.capacity_litres || lc.capacity_litres || 0) || 0,
+            type:      cont.type || lc.type || ''
           };
         });
         var _livePlanReq = window._dilutionPlan(_livePlanConts, _rL, _bottAbv, 'requirement', _tol);
@@ -58482,9 +58516,10 @@ window.attendanceReject=async function(reqId,btn){
     var status = latest ? (latest.status || computeRag(kpi, latest.numeric_value)) : null;
     var m = ragMeta(status);
     var valTxt = latest ? (latest.value || latest.numeric_value || '') : '';
+    var ownTxt=kpiOwnerLabel(kpi);
     return '<div class="mh-kpi" style="border-left:4px solid '+m.c+';">'
       + '<div class="nm">'+esc(kpi.name)+'</div>'
-      + (kpi.owner_role?'<div class="own">'+esc(kpi.owner_role)+'</div>':'')
+      + (ownTxt?'<div class="own">'+esc(ownTxt)+'</div>':'')
       + ((valTxt!==''&&valTxt!=null)?'<div class="val">'+esc(valTxt)+'</div>':'')
       + ragBadge(status)
       + '<div class="rule">'+(kpi.target?('Target: '+esc(kpi.target)):(kpi.rag_rule?esc(kpi.rag_rule):'\u2014'))+'</div>'
@@ -58731,9 +58766,13 @@ window.attendanceReject=async function(reqId,btn){
       + ragBadge(status)
       + sparkline(es)
       + '<div style="font-size:11px;color:var(--muted);">'+meta+'</div>'
-      + (k.owner_role?('<div style="font-size:11px;color:var(--muted);">Owner: '+esc(roleLabel(k.owner_role))+'</div>'):'')
+      + (function(){ var o=kpiOwnerLabel(k); return o?('<div style="font-size:11px;color:var(--muted);">Owner: '+esc(o)+'</div>'):''; })()
       + (latest&&latest.period_start?('<div style="font-size:10px;color:var(--muted);">Last: '+esc(new Date(latest.period_start).toLocaleDateString('en-GB'))+'</div>'):'')
-      + ((admin&&!inactive)?'<button class="mh-btn" style="padding:5px 8px;font-size:11px;" onclick="MH.kpiEntryStandalone(\''+k.id+'\')">+ Reading</button>':'')
+      + (admin?('<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">'
+          + (!inactive?'<button class="mh-btn" style="padding:5px 8px;font-size:11px;" onclick="MH.kpiEntryStandalone(\''+k.id+'\')">+ Reading</button>':'')
+          + '<button class="mh-btn" style="padding:5px 8px;font-size:11px;" onclick="MH.kpiEdit(\''+k.id+'\')">Edit</button>'
+          + '<button class="mh-btn" style="padding:5px 8px;font-size:11px;" onclick="MH.kpiDelete(\''+k.id+'\')">Delete</button>'
+          + '</div>'):'')
       + '</div>';
   }
   function kpiGroup(label, list, entries, admin){
@@ -58749,6 +58788,7 @@ window.attendanceReject=async function(reqId,btn){
       kpis = await db.select('kpis','?order=kpi_set.asc,position.asc');
       entries = await db.select('kpi_entries','?order=period_start.desc,recorded_at.desc&limit=1000');
     } catch(e){ v.innerHTML='<div class="mh-card" style="padding:20px;color:var(--red);">Could not load KPIs: '+esc((e&&e.message)||e)+'</div>'; return; }
+    await ensureUsers();
     var admin=S.isAdmin || (window.canDo&&window.canDo('meetings_admin'));
     S._kpis=kpis;
     if (DEPTS.indexOf(S.kpiCat)<0) S.kpiCat='Operations';
@@ -58774,9 +58814,12 @@ window.attendanceReject=async function(reqId,btn){
       subs.forEach(function(s){ bodyHtml += kpiGroup(s, dept.filter(function(k){return (k.subcategory||'Other')===s;}), entries, admin); });
       if(!dept.length) bodyHtml+='<div class="mh-muted" style="padding:24px;">No KPIs in this department.</div>';
     }
-    v.innerHTML=setSeg+bodyHtml;
+    v.innerHTML=setSeg+addBar+bodyHtml;
   }
   function roleLabel(key){ var r=window.ROLES_BY_KEY&&window.ROLES_BY_KEY[key]; return r?(r.label||key):key; }
+  // Accountable person: prefer the linked staff member (owner_id), fall back to
+  // the legacy free-text owner_role until a KPI is reassigned.
+  function kpiOwnerLabel(k){ if(!k) return ''; if(k.owner_id){ var n=userName(k.owner_id); if(n) return n; } return k.owner_role?roleLabel(k.owner_role):''; }
   function sparkline(es){
     var pts=es.slice(0,12).reverse().map(function(e){ return (e.numeric_value!=null)?e.numeric_value:null; }).filter(function(x){return x!=null;});
     if(pts.length<2) return '<div style="height:24px;"></div>';
@@ -58799,6 +58842,103 @@ window.attendanceReject=async function(reqId,btn){
       try { await db.insert('kpi_entries',{ id:uuid(), kpi_id:kpiId, period_start:document.getElementById('mh-kp').value, value:raw||null, numeric_value:(numeric&&isFinite(nv))?nv:null, status:st||null, note:document.getElementById('mh-kn').value||null, meeting_id:null, recorded_by:meId() });
         window.toast&&window.toast('Reading saved.','success'); render();
       } catch(e){ window.toast&&window.toast('Save failed (note: standalone readings need the meetings_admin permission): '+((e&&e.message)||e),'error'); }
+      return true;
+    });
+  };
+
+  // ── KPI definition editor (admin add / edit / delete) ──
+  function kpiCatOptions(set, sel){
+    var list=(set==='management')?MGMT_HEADINGS:DEPTS;
+    return list.map(function(c){ return '<option value="'+esc(c)+'"'+(c===sel?' selected':'')+'>'+esc(c)+'</option>'; }).join('');
+  }
+  function kpiFormBody(k){
+    k=k||{};
+    var set=k.kpi_set||S.kpiSet||'department';
+    var cat=k.category||((set==='management')?MGMT_HEADINGS[0]:(S.kpiCat||DEPTS[0]));
+    var numeric=(k.kpi_type==='numeric');
+    var th=k.rag_thresholds||{};
+    return '<div style="display:flex;flex-direction:column;gap:10px;">'
+      + '<div><span class="mh-lbl">Name</span><input id="mh-f-name" class="mh-in" value="'+esc(k.name||'')+'" placeholder="KPI name"></div>'
+      + '<div style="display:flex;gap:10px;flex-wrap:wrap;">'
+      +   '<div style="flex:1;min-width:160px;"><span class="mh-lbl">Set</span><select id="mh-f-set" class="mh-in" onchange="MH.kpiSetChanged()"><option value="department"'+(set==='department'?' selected':'')+'>Departments</option><option value="management"'+(set==='management'?' selected':'')+'>Management Objectives</option></select></div>'
+      +   '<div style="flex:1;min-width:160px;"><span class="mh-lbl">Category</span><select id="mh-f-cat" class="mh-in">'+kpiCatOptions(set,cat)+'</select></div>'
+      + '</div>'
+      + '<div><span class="mh-lbl">Subcategory (grouping, optional)</span><input id="mh-f-sub" class="mh-in" value="'+esc(k.subcategory||'')+'" placeholder="e.g. Production"></div>'
+      + '<div><span class="mh-lbl">Accountable person</span><select id="mh-f-owner" class="mh-in">'+userOptions(k.owner_id||'')+'</select></div>'
+      + '<div style="display:flex;gap:10px;flex-wrap:wrap;">'
+      +   '<div style="flex:1;min-width:160px;"><span class="mh-lbl">Type</span><select id="mh-f-type" class="mh-in" onchange="MH.kpiTypeChanged()"><option value="status"'+(!numeric?' selected':'')+'>Status (red/amber/green)</option><option value="numeric"'+(numeric?' selected':'')+'>Numeric</option></select></div>'
+      +   '<div style="flex:1;min-width:160px;"><span class="mh-lbl">Cadence (optional)</span><input id="mh-f-cad" class="mh-in" value="'+esc(k.cadence||'')+'" placeholder="e.g. Weekly"></div>'
+      + '</div>'
+      + '<div><span class="mh-lbl">Target (optional)</span><input id="mh-f-target" class="mh-in" value="'+esc(k.target||'')+'" placeholder="e.g. 95%"></div>'
+      + '<div id="mh-f-status-wrap" style="'+(numeric?'display:none;':'')+'"><span class="mh-lbl">RAG rule (optional)</span><input id="mh-f-ragrule" class="mh-in" value="'+esc(k.rag_rule||'')+'" placeholder="How red/amber/green is judged"></div>'
+      + '<div id="mh-f-num-wrap" style="'+(numeric?'':'display:none;')+'">'
+      +   '<span class="mh-lbl">Numeric RAG thresholds (optional)</span>'
+      +   '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">'
+      +     '<select id="mh-f-dir" class="mh-in" style="flex:1;min-width:150px;"><option value="higher"'+((th.dir||'higher')==='higher'?' selected':'')+'>Higher is better</option><option value="lower"'+(th.dir==='lower'?' selected':'')+'>Lower is better</option></select>'
+      +     '<input id="mh-f-green" class="mh-in" style="width:120px;flex:none;" inputmode="decimal" value="'+(th.green==null?'':esc(String(th.green)))+'" placeholder="Green cutoff">'
+      +     '<input id="mh-f-amber" class="mh-in" style="width:120px;flex:none;" inputmode="decimal" value="'+(th.amber==null?'':esc(String(th.amber)))+'" placeholder="Amber cutoff">'
+      +   '</div>'
+      +   '<div class="mh-muted" style="font-size:10px;margin-top:4px;">Higher is better: value \u2265 Green = green, \u2265 Amber = amber, else red. Lower is better reverses it.</div>'
+      + '</div>'
+      + '<label style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text);"><input type="checkbox" id="mh-f-active" '+((k.active===false)?'':'checked')+'> Active (untick to put on hold)</label>'
+      + '</div>';
+  }
+  MH.kpiSetChanged=function(){ var s=document.getElementById('mh-f-set'); var c=document.getElementById('mh-f-cat'); if(s&&c){ c.innerHTML=kpiCatOptions(s.value, c.value); } };
+  MH.kpiTypeChanged=function(){ var numeric=(document.getElementById('mh-f-type')||{}).value==='numeric'; var sw=document.getElementById('mh-f-status-wrap'), nw=document.getElementById('mh-f-num-wrap'); if(sw) sw.style.display=numeric?'none':''; if(nw) nw.style.display=numeric?'':'none'; };
+  function kpiReadForm(){
+    var name=(document.getElementById('mh-f-name').value||'').trim();
+    if(!name){ window.toast&&window.toast('Name is required.','error'); return null; }
+    var set=document.getElementById('mh-f-set').value;
+    var type=document.getElementById('mh-f-type').value;
+    var rec={
+      name:name,
+      kpi_set:set,
+      category:document.getElementById('mh-f-cat').value||null,
+      subcategory:(document.getElementById('mh-f-sub').value||'').trim()||null,
+      owner_id:document.getElementById('mh-f-owner').value||null,
+      owner_role:null,
+      kpi_type:type,
+      target:(document.getElementById('mh-f-target').value||'').trim()||null,
+      cadence:(document.getElementById('mh-f-cad').value||'').trim()||null,
+      rag_rule:(type==='numeric')?null:((document.getElementById('mh-f-ragrule').value||'').trim()||null),
+      active:document.getElementById('mh-f-active').checked
+    };
+    if(type==='numeric'){
+      var g=parseFloat(document.getElementById('mh-f-green').value), a=parseFloat(document.getElementById('mh-f-amber').value);
+      rec.rag_thresholds=(isFinite(g)&&isFinite(a))?{ dir:document.getElementById('mh-f-dir').value||'higher', green:g, amber:a }:null;
+    } else { rec.rag_thresholds=null; }
+    return rec;
+  }
+  MH.kpiCreate=async function(){
+    await ensureUsers();
+    modal('Add KPI', kpiFormBody({ kpi_set:S.kpiSet, category:(S.kpiSet==='management'?null:S.kpiCat) }), 'Create', async function(){
+      var rec=kpiReadForm(); if(!rec) return false;
+      rec.id=uuid();
+      var same=(S._kpis||[]).filter(function(x){return x.kpi_set===rec.kpi_set;});
+      rec.position=same.reduce(function(mx,x){return Math.max(mx,(x.position||0));},-1)+1;
+      try { await db.insert('kpis', rec); window.toast&&window.toast('KPI added.','success'); render(); }
+      catch(e){ window.toast&&window.toast('Could not add KPI: '+((e&&e.message)||e),'error'); return false; }
+      return true;
+    });
+  };
+  MH.kpiEdit=async function(id){
+    await ensureUsers();
+    var k=(S._kpis||[]).find(function(x){return x.id===id;}); if(!k){ window.toast&&window.toast('KPI not found \u2014 try refreshing.','error'); return; }
+    modal('Edit KPI', kpiFormBody(k), 'Save', async function(){
+      var rec=kpiReadForm(); if(!rec) return false;
+      try { await db.update('kpis','?id=eq.'+id, rec); window.toast&&window.toast('KPI updated.','success'); render(); }
+      catch(e){ window.toast&&window.toast('Could not save KPI: '+((e&&e.message)||e),'error'); return false; }
+      return true;
+    });
+  };
+  MH.kpiDelete=function(id){
+    var k=(S._kpis||[]).find(function(x){return x.id===id;}); var nm=k?k.name:'this KPI';
+    var body='<p style="margin:0 0 10px;color:var(--text);">Delete <strong>'+esc(nm)+'</strong>?</p>'
+      + '<p class="mh-muted" style="margin:0 0 10px;">This permanently removes the KPI <strong>and its entire reading history</strong>, and unlinks it from any meeting series. This cannot be undone.</p>'
+      + '<p class="mh-muted" style="margin:0;">Want to keep the history instead? Cancel, then use <strong>Edit</strong> and untick <strong>Active</strong> to put it on hold.</p>';
+    modal('Delete KPI', body, 'Delete permanently', async function(){
+      try { await db.delete('kpis','?id=eq.'+id); window.toast&&window.toast('KPI deleted.','success'); render(); }
+      catch(e){ window.toast&&window.toast('Could not delete: '+((e&&e.message)||e),'error'); return false; }
       return true;
     });
   };
