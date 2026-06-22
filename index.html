@@ -32739,25 +32739,31 @@ window.saveAdjModal = async function() {
     if (!el) return;
     el.innerHTML = '<div style="font-size:11px;color:var(--muted);">Loading history…</div>';
     try {
-      // Ensure the staff name map is populated — the detail view can open before
-      // the jobs list has finished loading it, which would leave names as ids.
-      if (!Object.keys(_staffMap).length) {
-        try {
-          var _staff = await supaGet('app_users?select=id,auth_user_id,display_name');
-          _staff.forEach(function(u){
-            var name = u.display_name || (u.auth_user_id ? u.auth_user_id.substring(0,8) : (u.id ? u.id.substring(0,8) : '?'));
-            if (u.auth_user_id) _staffMap[u.auth_user_id] = name;
-            if (u.id) _staffMap[u.id] = name;
-          });
-        } catch(_e) { /* fall through — renderer degrades to id prefix */ }
-      }
       var logs = await supaGet('job_audit_log?job_id=eq.' + jobId + '&order=changed_at.asc');
       if (!logs || !logs.length) {
         el.innerHTML = '<div style="font-size:11px;color:var(--muted);">No stage history recorded yet.</div>';
         return;
       }
+      // Resolve names directly for the exact ids referenced by these logs. We
+      // can't rely on _staffMap alone because RLS may limit which app_users rows
+      // are visible, and changed_by may hold either an auth_user_id or an
+      // app_users.id (legacy rows). Query both id columns for just these ids.
+      var nameById = {};
+      try {
+        var ids = logs.map(function(l){ return l.changed_by; })
+                      .filter(function(v, i, a){ return v && a.indexOf(v) === i; });
+        if (ids.length) {
+          var inList = '(' + ids.map(function(v){ return '"' + v + '"'; }).join(',') + ')';
+          var rows = await supaGet('app_users?select=id,auth_user_id,display_name&or=(id.in.' + inList + ',auth_user_id.in.' + inList + ')');
+          (rows || []).forEach(function(u){
+            var name = u.display_name || (u.auth_user_id ? u.auth_user_id.substring(0,8) : (u.id ? u.id.substring(0,8) : '?'));
+            if (u.auth_user_id) nameById[u.auth_user_id] = name;
+            if (u.id) nameById[u.id] = name;
+          });
+        }
+      } catch(_e) { /* fall through — degrade to _staffMap / id prefix */ }
       el.innerHTML = logs.map(function(l) {
-        var who  = _staffMap[l.changed_by] || (l.changed_by ? l.changed_by.substring(0,8) + '…' : 'System');
+        var who  = nameById[l.changed_by] || _staffMap[l.changed_by] || (l.changed_by ? l.changed_by.substring(0,8) + '…' : 'System');
         var when = l.changed_at ? new Date(l.changed_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
         var from = STAGE_LABEL[l.from_stage] || l.from_stage || '—';
         var to   = STAGE_LABEL[l.to_stage]   || l.to_stage   || '—';
