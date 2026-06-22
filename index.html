@@ -32753,9 +32753,12 @@ window.saveAdjModal = async function() {
         var ids = logs.map(function(l){ return l.changed_by; })
                       .filter(function(v, i, a){ return v && a.indexOf(v) === i; });
         if (ids.length) {
-          var inList = '(' + ids.map(function(v){ return '"' + v + '"'; }).join(',') + ')';
-          var rows = await supaGet('app_users?select=id,auth_user_id,display_name&or=(id.in.' + inList + ',auth_user_id.in.' + inList + ')');
-          (rows || []).forEach(function(u){
+          var inList = '(' + ids.join(',') + ')';
+          // Two simple in.() queries (proven pattern in this codebase) — one per
+          // id column — avoids the comma-ambiguity of in.() nested inside or().
+          var byId   = await supaGet('app_users?select=id,auth_user_id,display_name&id=in.' + inList);
+          var byAuth = await supaGet('app_users?select=id,auth_user_id,display_name&auth_user_id=in.' + inList);
+          (byId || []).concat(byAuth || []).forEach(function(u){
             var name = u.display_name || (u.auth_user_id ? u.auth_user_id.substring(0,8) : (u.id ? u.id.substring(0,8) : '?'));
             if (u.auth_user_id) nameById[u.auth_user_id] = name;
             if (u.id) nameById[u.id] = name;
@@ -36093,13 +36096,17 @@ window.saveAdjModal = async function() {
           return '~' + d.remainderLitres.toFixed(1) + ' L in ' + esc(d.reference || '—');
         });
         if (_rem.length) srcNote = '<br><span style="color:#856404;font-size:10px;">&#9432; Remaining ' + _rem.join(', ') + ' stays at cask strength.</span>';
-      } else if (_planUsable && _dilMode === 'all' && _woPlan.donors.length) {
+      } else if (_planUsable && _dilMode === 'all' && _woPlan.receiver) {
         var _rcvA = esc(_woPlan.receiver.reference || '—');
+        var _rcvAbvA = _woPlan.receiver.abv > 0 ? ' (' + _woPlan.receiver.abv.toFixed(1) + '%)' : '';
         var _combParts = _woPlan.donors.filter(function(d){ return d.drawLitres > 0.05; }).map(function(d){
           return '<strong>' + esc(d.reference || '—') + '</strong> (' + d.drawLitres.toFixed(1) + ' L)';
         });
         bodyMain = abvNote
-          + 'Combine ' + _combParts.join(' and ') + ' into <strong>' + _rcvA + '</strong>, then add <strong>' + waterToAdd + '</strong> of RO water to reach a final volume of approximately <strong>' + targetFinal + '</strong>'
+          + (_combParts.length
+              ? 'Combine ' + _combParts.join(' and ') + ' into <strong>' + _rcvA + '</strong>, then add '
+              : 'Dilute the full contents of <strong>' + _rcvA + '</strong>' + _rcvAbvA + ' — add ')
+          + '<strong>' + waterToAdd + '</strong> of RO water to reach a final volume of approximately <strong>' + targetFinal + '</strong>'
           + (reqAbv > 0 ? ' at ' + reqAbv.toFixed(1) + '%' : '') + '. '
           + 'Verify ABV before proceeding. Record actual quantities below.';
       } else {
@@ -36110,11 +36117,16 @@ window.saveAdjModal = async function() {
                       ? '<br><span style="color:#856404;font-size:10px;">&#9432; Draw ~<strong>' + _calcSourceNeeded.toFixed(1) + ' L</strong> from linked container(s) — remaining volume stays in vessel(s) at cask strength.</span>'
                       : (_dilMode === 'all' ? '<br><span style="color:#856404;font-size:10px;">&#9432; Full contents of all linked containers are being diluted.</span>' : '');
       }
-      // Capacity caution — the final batch may not fit a single IBC.
+      // Capacity caution — the final batch may not fit a single IBC. Rendered as a
+      // prominent, hard-to-miss banner so floor staff plan extra vessels up front.
       var capNote = (_woPlan && _woPlan.overflow)
-        ? '<br><span style="display:inline-block;margin-top:6px;color:#b71c1c;background:#fdecea;border:1px solid #f5c6cb;border-radius:3px;padding:4px 8px;font-size:10px;">&#9888; <strong>Final volume ~' + _woPlan.finalLitres.toFixed(1) + ' L will not fit in one IBC'
-            + (_woPlan.receiverCapacity ? ' (~' + Math.round(_woPlan.receiverCapacity) + ' L)' : '') + '.</strong> '
-            + 'Split across additional vessels as needed (~' + _woPlan.vesselsNeeded + ' IBCs). The actual containers used will be logged when you close the job.</span>'
+        ? '<div style="margin-top:10px;padding:10px 12px;background:#fdecea;border:2px solid #d32f2f;border-radius:4px;color:#b71c1c;font-size:11.5px;line-height:1.45;">'
+            + '<span style="font-weight:800;text-transform:uppercase;letter-spacing:0.04em;">&#9888; Caution — will not fit one IBC.</span> '
+            + 'Final volume is approximately <strong>' + _woPlan.finalLitres.toFixed(1) + ' L</strong>'
+            + (_woPlan.receiverCapacity ? ', which exceeds a single IBC (~' + Math.round(_woPlan.receiverCapacity) + ' L)' : '') + '. '
+            + 'You will need roughly <strong>' + _woPlan.vesselsNeeded + ' IBCs</strong> — split the batch across additional vessels as needed. '
+            + 'The actual containers used will be logged when you close the job.'
+            + '</div>'
         : '';
       h += step(stepNum++, 'Dilution — RO Water Addition <span style="display:inline-block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIRED</span>' + scopeLabel,
         bodyMain + srcNote + capNote + '<br>'
@@ -58806,6 +58818,7 @@ window.attendanceReject=async function(reqId,btn){
       + '<button class="'+(S.kpiSet==='management'?'on':'')+'" onclick="MH.setKpiSet(\'management\')">Management Objectives</button>'
       + '<button class="'+(S.kpiSet==='department'?'on':'')+'" onclick="MH.setKpiSet(\'department\')">Departments</button>'
       + '</div></div>') : '';
+    var addBar = admin ? ('<div class="mh-bar" style="margin-bottom:10px;"><button class="mh-btn gold" onclick="MH.kpiCreate()">+ Add KPI</button></div>') : '';
 
     var bodyHtml='';
     if (S.kpiSet==='management'){
