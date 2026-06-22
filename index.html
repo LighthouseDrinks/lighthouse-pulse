@@ -2148,6 +2148,10 @@ async function showDashboard(user) {
 
   // Apply HR permissions immediately on login
   setTimeout(function(){ if(window.applyHRPermissions) window.applyHRPermissions(); }, 600);
+  // Load the manager/reports scope so line managers can manage their team's leave
+  if (user.role !== 'client') {
+    setTimeout(function(){ if(window.lvInitScope) window.lvInitScope(); }, 700);
+  }
   // HR first-login check — non-admin staff only
   if (!window.isHRAdmin(user.role) && user.role !== 'client') {
     setTimeout(function(){ window.checkHRFirstLogin && window.checkHRFirstLogin(); }, 1000);
@@ -8171,9 +8175,15 @@ window.copyInviteLink = function() {
   function applyHRPermissions(isTerminated) {
     var admin = isAdmin();
     isTerminated = !!isTerminated;
-    // Show/hide Management tab
+    // Show/hide Management tab. Senior management (Pulse admins) always; line
+    // managers with at least one direct report also get in (scope cache set by
+    // window.lvInitScope, which re-runs this function once it resolves).
+    var isManager = !!(window._lvScope && window._lvScope.isManager);
     var mgmtBtn = document.getElementById('people-tab-mgmt');
-    if (mgmtBtn) mgmtBtn.style.display = admin ? '' : 'none';
+    if (mgmtBtn) mgmtBtn.style.display = (admin || isManager) ? '' : 'none';
+    // Entitlement setting stays senior-only even when a manager can see the tab.
+    var entCard = document.getElementById('mgmt-entitlement-card');
+    if (entCard) entCard.style.display = admin ? '' : 'none';
     var calBtn = document.getElementById('people-tab-cal');
     if (calBtn) calBtn.style.display = admin ? '' : 'none';
     // Legacy search bar is now hidden in the new layout; directory panel visibility
@@ -23483,7 +23493,7 @@ window.ccxPrintRecord = function() {
     </div>
 
     <!-- Leave entitlement admin (set per employee) -->
-    <div class="card" style="padding:22px;">
+    <div class="card" id="mgmt-entitlement-card" style="padding:22px;">
       <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:16px;">&#9998; Set Annual Leave Entitlement</div>
       <p style="font-size:12px;color:var(--muted);margin:0 0 14px;">Set or adjust the annual leave entitlement for any employee. Full-time employees use a fixed day allowance; part-time employees accrue 8% of hours worked automatically.</p>
       <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end;max-width:520px;">
@@ -48023,6 +48033,41 @@ function isLvAdmin(){
          !!(window.CURRENT_PERMISSIONS&&window.CURRENT_PERMISSIONS[role]&&window.CURRENT_PERMISSIONS[role].hr_view_all);
 }
 
+/* ── Manager / reports scope ──────────────────────────────────────────────────
+   Senior management (Pulse admins: MD / Ops Director / Business Analyst) can
+   manage everyone's leave. Everyone else can only manage the leave of their
+   direct reports (employees whose hr_profiles.reports_to == their app id).
+   The report set is loaded once after login and cached here. */
+var _lvScope={ ready:false, isManager:false, reportIds:{} };
+window._lvScope=_lvScope;
+
+function lvIsSenior(){ return !!(window.isPulseAdmin && window.isPulseAdmin()); }
+
+window.lvInitScope = async function(){
+  var cu=window.CURRENT_USER;
+  var myId=cu&&(cu.app_user_id||cu.id);
+  if(!myId) return; // not ready yet; login init / ensureScope will retry
+  try {
+    var rows=await get('hr_profiles?reports_to=eq.'+myId+'&select=user_id&limit=200');
+    var ids={}; (rows||[]).forEach(function(r){ if(r.user_id) ids[r.user_id]=true; });
+    _lvScope.reportIds=ids;
+    _lvScope.isManager=!!(rows&&rows.length);
+  } catch(e){
+    _lvScope.reportIds={}; _lvScope.isManager=false;
+  }
+  _lvScope.ready=true;
+  // Re-run HR permission gating now that we know whether this user manages anyone
+  try { window.applyHRPermissions && window.applyHRPermissions(); } catch(e){}
+};
+
+async function ensureScope(){ if(!_lvScope.ready) { try { await window.lvInitScope(); } catch(e){} } }
+
+// True if the current user may edit/delete leave for the given employee.
+window.lvCanManage = function(targetUserId){
+  if(lvIsSenior()) return true;
+  return !!(targetUserId && _lvScope.reportIds[targetUserId]);
+};
+
 /* ── Count weekdays (Mon-Fri) between two dates inclusive ── */
 function countWeekdays(from, to, isHalf){
   var d=new Date(from), end=new Date(to), count=0;
@@ -48470,9 +48515,12 @@ window.mgmtLoadLeaveOverview = async function(){
     var users=results[0], profiles=results[1], requests=results[2];
     // Track which non-annual categories have any data (to hide empty columns)
     var activeCats={};
+    var canSeeAll=lvIsSenior();
+    if(!canSeeAll) await ensureScope();
     var rows=profiles.filter(function(p){ return p.leave_entitlement!=null; }).map(function(p){
       var u=users.find(function(x){ return x.id===p.user_id; })||{};
       if(u.role==='client') return null;
+      if(!canSeeAll && !window.lvCanManage(p.user_id)) return null;
       var reqs=requests.filter(function(r){ return r.user_id===p.user_id; });
       var annUsed=0, annPend=0;
       var catDays={};
@@ -48552,11 +48600,12 @@ window.mgmtLoadLeaveOverview = async function(){
 
 /* ── Employee Leave History ── */
 window.mgmtInitHistory = async function(){
-  // Populate employee dropdown
+  if(!lvIsSenior()) await ensureScope();
+  // Populate employee dropdown (non-senior managers see only their direct reports)
   var empSel=document.getElementById('mgmt-hist-emp');
   if(empSel&&empSel.options.length<=1){
     var users=await get('app_users?status=eq.active&order=display_name.asc&select=id,display_name,role&limit=200');
-    users.filter(function(u){return u.role!=='client';}).forEach(function(u){
+    users.filter(function(u){return u.role!=='client' && window.lvCanManage(u.id);}).forEach(function(u){
       var o=document.createElement('option'); o.value=u.id;
       o.textContent=u.display_name||u.id.slice(0,8); empSel.appendChild(o);
     });
@@ -48582,6 +48631,7 @@ window.mgmtLoadEmpHistory = async function(){
   try {
     var reqs=await get('leave_requests?user_id=eq.'+empId+'&status=neq.cancelled&start_date=gte.'+yr+'-01-01&start_date=lte.'+yr+'-12-31&order=start_date.desc&limit=200');
     if(!reqs.length){el.innerHTML='<span style="color:var(--muted);">No leave records for this employee in '+yr+'.</span>';return;}
+    var canMng=window.lvCanManage(empId);
     var fmtD=function(s){if(!s)return '';return new Date(s+'T00:00:00').toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'});};
     var fmt=function(n){n=parseFloat(n)||0;return n%1===0?n:n.toFixed(1);};
     var statusColor=function(s){return s==='approved'?'var(--green)':s==='pending'?'var(--amber)':(s==='rejected'||s==='declined')?'var(--red)':'var(--muted)';};
@@ -48595,6 +48645,7 @@ window.mgmtLoadEmpHistory = async function(){
       +'<th style="'+thS+'">Notes</th>'
       +'<th style="'+thS+'">Source</th>'
       +'<th style="text-align:right;'+thS+'">Status</th>'
+      +(canMng?'<th style="text-align:right;'+thS+'">Actions</th>':'')
       +'</tr></thead><tbody>';
     reqs.forEach(function(r){
       var dateStr=r.end_date&&r.end_date!==r.start_date?fmtD(r.start_date)+' \u2013 '+fmtD(r.end_date):fmtD(r.start_date);
@@ -48609,14 +48660,166 @@ window.mgmtLoadEmpHistory = async function(){
         +'<td style="padding:8px 6px;color:var(--muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(r.notes?window.escapeHtml(r.notes):'\u2014')+'</td>'
         +'<td style="padding:8px 6px;color:var(--muted);">'+src+'</td>'
         +'<td style="text-align:right;padding:8px 6px;"><span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:'+statusColor(r.status)+';">'+window.escapeHtml(r.status||'')+'</span></td>'
+        +(canMng?('<td style="text-align:right;padding:8px 6px;white-space:nowrap;">'
+          +'<button data-id="'+window.escapeHtml(r.id)+'" class="lv-edit-btn" style="background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.3);color:var(--gold);font-size:10px;padding:4px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;margin-right:4px;">Edit</button>'
+          +'<button data-id="'+window.escapeHtml(r.id)+'" class="lv-del-btn" style="background:rgba(224,87,87,0.1);border:1px solid rgba(224,87,87,0.25);color:var(--red);font-size:10px;padding:4px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">Delete</button>'
+          +'</td>'):'')
         +'</tr>';
     });
     html+='</tbody></table>';
     el.innerHTML=html;
+    el.querySelectorAll('.lv-edit-btn').forEach(function(btn){
+      btn.addEventListener('click', function(){ window.lvEditRecord(this.dataset.id); });
+    });
+    el.querySelectorAll('.lv-del-btn').forEach(function(btn){
+      btn.addEventListener('click', function(){ window.lvDeleteRecord(this.dataset.id); });
+    });
   } catch(e){
     el.innerHTML='<span style="color:var(--red);font-size:11px;">Error loading history.</span>';
     window.logError&&window.logError('mgmtLoadEmpHistory',e);
   }
+};
+
+/* ── Refresh the management leave views after an edit/delete ── */
+function lvRefreshMgmtViews(){
+  window.mgmtLoadEmpHistory && window.mgmtLoadEmpHistory();
+  window.mgmtLoadLeaveOverview && window.mgmtLoadLeaveOverview();
+  window.lvCalRenderCurrent && window.lvCalRenderCurrent();
+}
+
+/* ── Notify the employee when a manager edits/removes their leave ── */
+async function lvSendLeaveChangeEmail(userId, action, info){
+  try {
+    if(!window.sendEmail || !(window._resendKey||'').trim()) return;
+    var empRows=await get('app_users?id=eq.'+userId+'&select=email,display_name&limit=1');
+    var emp=empRows&&empRows[0]; if(!emp||!emp.email) return;
+    var fmtD=function(s){ if(!s) return ''; return new Date(s+'T00:00:00').toLocaleDateString('en-IE',{day:'numeric',month:'long',year:'numeric'}); };
+    var dateStr=(info.to&&info.to!==info.from)?fmtD(info.from)+' \u2013 '+fmtD(info.to):fmtD(info.from);
+    var catLabel=window.lvCatLabel?window.lvCatLabel(info.cat||'annual'):'Annual Leave';
+    var removed=(action==='removed');
+    var colour=removed?'#e05757':'#c9a84c';
+    var word=removed?'Leave Removed':'Leave Updated';
+    var msg=removed
+      ? 'A leave record on your account has been removed by your manager. Details of the removed leave are below. Please speak to your manager if you have any questions.'
+      : 'A leave record on your account has been updated by your manager. The current details are below. Please speak to your manager if you have any questions.';
+    var days=(info.days!=null && info.days!=='')?parseFloat(info.days):null;
+    var html='<div style="font-family:sans-serif;max-width:500px;margin:0 auto;padding:32px 20px;background:#0d1b2a;color:#e8edf2;border-radius:8px;">'
+      +'<h2 style="color:#c9a84c;font-size:17px;font-family:Georgia,serif;margin:0 0 20px;">Lighthouse Drinks</h2>'
+      +'<div style="display:inline-block;background:'+colour+';color:#fff;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:5px 12px;border-radius:3px;margin-bottom:18px;">'+word+'</div>'
+      +'<p style="font-size:13px;margin:0 0 12px;">Hi '+(window.escapeHtml?window.escapeHtml(emp.display_name||'there'):(emp.display_name||'there'))+',</p>'
+      +'<p style="font-size:13px;color:#7a93a8;margin:0 0 18px;">'+msg+'</p>'
+      +'<div style="background:rgba(255,255,255,0.05);border-radius:6px;padding:14px 18px;margin-bottom:20px;">'
+      +'<div style="font-size:11px;color:#7a93a8;margin-bottom:3px;">CATEGORY</div>'
+      +'<div style="font-size:13px;font-weight:600;margin-bottom:10px;">'+catLabel+'</div>'
+      +'<div style="font-size:11px;color:#7a93a8;margin-bottom:3px;">DATES</div>'
+      +'<div style="font-size:14px;font-weight:600;">'+dateStr+'</div>'
+      +(days!=null?'<div style="font-size:11px;color:#7a93a8;margin-top:5px;">'+(days%1===0?days:days.toFixed(1))+' working day'+(days!==1?'s':'')+'</div>':'')
+      +(!removed&&info.status?'<div style="font-size:11px;color:#7a93a8;margin-top:8px;">Status: '+window.escapeHtml(info.status)+'</div>':'')
+      +'</div>'
+      +'<p style="font-size:11px;color:#7a93a8;margin:0;">Pulse \u00b7 Lighthouse Drinks Operations</p>'
+      +'</div>';
+    await window.sendEmail({to:[emp.email],subject:word+' \u2013 '+dateStr,html:html});
+  } catch(e){ console.warn('Leave change email failed (non-critical):', e.message); }
+}
+
+/* ── Edit / alter an existing leave record ── */
+window.lvEditRecord = async function(id){
+  var rows; try { rows=await get('leave_requests?id=eq.'+id+'&limit=1'); }
+  catch(e){ window.toast&&window.toast('Could not load that record.','error'); return; }
+  var r=rows&&rows[0];
+  if(!r){ window.toast&&window.toast('Record not found.','error'); return; }
+  if(!window.lvCanManage(r.user_id)){ window.toast&&window.toast('You can only edit leave for your direct reports.','error'); return; }
+
+  var cats=[['annual','Annual Leave'],['sick','Sick Leave'],['maternity_paternity','Maternity / Paternity'],['compassionate','Compassionate Leave'],['unpaid','Unpaid Leave'],['other','Other']];
+  var statuses=[['pending','Pending'],['approved','Approved'],['rejected','Rejected'],['cancelled','Cancelled']];
+  var curCat=r.leave_category||'annual';
+  var curType=r.leave_type||'full_day';
+  var curStatus=r.status||'approved';
+  var catOpts=cats.map(function(c){return '<option value="'+c[0]+'"'+(c[0]===curCat?' selected':'')+'>'+c[1]+'</option>';}).join('');
+  var statusOpts=statuses.map(function(s){return '<option value="'+s[0]+'"'+(s[0]===curStatus?' selected':'')+'>'+s[1]+'</option>';}).join('');
+  var inStyle='width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;border-radius:4px;font-size:13px;font-family:Lato,sans-serif;box-sizing:border-box;color-scheme:dark;';
+  var lblStyle='font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px;';
+
+  var ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(5,12,20,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML='<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:26px 26px 20px;max-width:440px;width:100%;">'
+    +'<div style="font-size:14px;font-weight:700;color:var(--white);margin-bottom:16px;">Edit Leave Record</div>'
+    +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">'
+    +'<div><label style="'+lblStyle+'">Category</label><select id="_lvEdCat" style="'+inStyle+'">'+catOpts+'</select></div>'
+    +'<div><label style="'+lblStyle+'">Duration</label><select id="_lvEdType" style="'+inStyle+'"><option value="full_day"'+(curType!=='half_day'?' selected':'')+'>Full Day</option><option value="half_day"'+(curType==='half_day'?' selected':'')+'>Half Day</option></select></div>'
+    +'<div><label style="'+lblStyle+'">From</label><input type="date" id="_lvEdFrom" value="'+window.escapeHtml(r.start_date||'')+'" style="'+inStyle+'"></div>'
+    +'<div id="_lvEdToWrap"><label style="'+lblStyle+'">To</label><input type="date" id="_lvEdTo" value="'+window.escapeHtml(r.end_date||r.start_date||'')+'" style="'+inStyle+'"></div>'
+    +'<div><label style="'+lblStyle+'">Status</label><select id="_lvEdStatus" style="'+inStyle+'">'+statusOpts+'</select></div>'
+    +'</div>'
+    +'<div id="_lvEdMsg" style="font-size:11px;min-height:16px;margin-bottom:8px;color:var(--muted);"></div>'
+    +'<div style="display:flex;gap:10px;justify-content:flex-end;">'
+    +'<button id="_lvEdX" style="padding:8px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">Cancel</button>'
+    +'<button id="_lvEdSave" style="padding:8px 18px;background:var(--gold);border:none;border-radius:4px;color:var(--navy-dark);cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">Save Changes</button>'
+    +'</div></div>';
+  document.body.appendChild(ov);
+
+  var typeEl=ov.querySelector('#_lvEdType');
+  var toWrap=ov.querySelector('#_lvEdToWrap');
+  function syncDuration(){ if(toWrap) toWrap.style.display=(typeEl.value==='half_day')?'none':''; }
+  typeEl.addEventListener('change', syncDuration); syncDuration();
+
+  ov.querySelector('#_lvEdX').onclick=function(){ ov.remove(); };
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#_lvEdSave').onclick=async function(){
+    var m=ov.querySelector('#_lvEdMsg'); m.style.color='var(--muted)';
+    var typ=ov.querySelector('#_lvEdType').value;
+    var from=ov.querySelector('#_lvEdFrom').value;
+    var toElV=ov.querySelector('#_lvEdTo');
+    var to=(typ==='half_day'||!toElV.value)?from:toElV.value;
+    var cat=ov.querySelector('#_lvEdCat').value;
+    var status=ov.querySelector('#_lvEdStatus').value;
+    if(!from){ m.textContent='Select a start date.'; m.style.color='var(--red)'; return; }
+    if(new Date(to)<new Date(from)){ m.textContent='End date must be after start date.'; m.style.color='var(--red)'; return; }
+    var days=countWeekdays(from,to,typ==='half_day');
+    if(days===0){ m.textContent='No working days in that range.'; m.style.color='var(--amber)'; return; }
+    m.textContent='Saving\u2026';
+    try {
+      await patch('leave_requests?id=eq.'+id,{start_date:from,end_date:to,leave_type:typ,leave_category:cat,status:status,days:days,days_requested:days});
+    } catch(e){ m.textContent='Error: '+((e&&e.message)||e).toString().slice(0,80); m.style.color='var(--red)'; return; }
+    ov.remove();
+    window.toast&&window.toast('Leave updated \u2713','success');
+    lvSendLeaveChangeEmail(r.user_id,'updated',{from:from,to:to,days:days,cat:cat,status:status});
+    lvRefreshMgmtViews();
+  };
+};
+
+/* ── Delete an existing leave record (hard delete + notify employee) ── */
+window.lvDeleteRecord = async function(id){
+  var rows; try { rows=await get('leave_requests?id=eq.'+id+'&limit=1'); }
+  catch(e){ window.toast&&window.toast('Could not load that record.','error'); return; }
+  var r=rows&&rows[0];
+  if(!r){ window.toast&&window.toast('Record not found.','error'); return; }
+  if(!window.lvCanManage(r.user_id)){ window.toast&&window.toast('You can only delete leave for your direct reports.','error'); return; }
+
+  var dateStr=(r.end_date&&r.end_date!==r.start_date)?fmtDate(r.start_date)+' \u2013 '+fmtDate(r.end_date):fmtDate(r.start_date);
+  var catLabel=window.lvCatLabel?window.lvCatLabel(r.leave_category||'annual'):'Annual Leave';
+
+  var ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(5,12,20,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML='<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--red);border-radius:8px;padding:28px 28px 22px;max-width:400px;width:100%;">'
+    +'<div style="font-size:14px;font-weight:700;color:var(--white);margin-bottom:10px;">Delete Leave Record</div>'
+    +'<div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:22px;">This will permanently remove the <strong style="color:var(--white);">'+window.escapeHtml(catLabel)+'</strong> record for <strong style="color:var(--white);">'+window.escapeHtml(dateStr)+'</strong>. The employee will be notified by email. This cannot be undone.</div>'
+    +'<div style="display:flex;gap:10px;justify-content:flex-end;">'
+    +'<button id="_lvDelX" style="padding:8px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">Keep</button>'
+    +'<button id="_lvDelOK" style="padding:8px 18px;background:var(--red);border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">Delete Leave</button>'
+    +'</div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#_lvDelX').onclick=function(){ ov.remove(); };
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#_lvDelOK').onclick=async function(){
+    ov.remove();
+    try {
+      await window.db.delete('leave_requests','?id=eq.'+id);
+    } catch(e){ window.logError&&window.logError('delete leave',e); window.toast&&window.toast('Error deleting leave. Please try again.','error'); return; }
+    window.toast&&window.toast('Leave deleted.','success');
+    lvSendLeaveChangeEmail(r.user_id,'removed',{from:r.start_date,to:r.end_date,days:(r.days!=null?r.days:r.days_requested),cat:r.leave_category||'annual'});
+    lvRefreshMgmtViews();
+  };
 };
 
 /* ── Your Reports ── */
@@ -48767,8 +48970,9 @@ window.lvCatLabel = function(cat){
 window.mgmtPopulateApplyEmps = async function(){
   var sel=document.getElementById('mgmt-apply-emp');
   if(!sel||sel.options.length>1) return;
+  if(!lvIsSenior()) await ensureScope();
   var users=await get('app_users?status=eq.active&order=display_name.asc&select=id,display_name,role&limit=200');
-  users.filter(function(u){return u.role!=='client';}).forEach(function(u){
+  users.filter(function(u){return u.role!=='client' && window.lvCanManage(u.id);}).forEach(function(u){
     var o=document.createElement('option'); o.value=u.id;
     o.textContent=u.display_name||u.id.slice(0,8); sel.appendChild(o);
   });
@@ -57863,6 +58067,32 @@ window.attendanceReject=async function(reqId,btn){
     return html;
   }
 
+  // ── Action carry-over across grouped series ────────────
+  // Several distinct Google series (different google_recurring_id) can be tied
+  // together as one logical meeting via meeting_series_groups, so open actions
+  // roll forward across the whole group (e.g. Mon -> Wed -> Fri) and not just
+  // within a single series. Ungrouped series fall back to themselves.
+  async function seriesGroupRecIds(recId){
+    if (!recId) return [];
+    try {
+      var grp = await db.select('meeting_series_groups','?google_recurring_id=eq.'+encodeURIComponent(recId)+'&limit=1');
+      if (grp && grp.length){
+        var members = await db.select('meeting_series_groups','?group_id=eq.'+encodeURIComponent(grp[0].group_id)+'&select=google_recurring_id');
+        var ids = (members||[]).map(function(m){return m.google_recurring_id;}).filter(Boolean);
+        if (ids.indexOf(recId)<0) ids.push(recId);
+        return ids;
+      }
+    } catch(e){ /* fall back to the series itself */ }
+    return [recId];
+  }
+  function recIdInList(ids){ return 'in.('+ids.map(function(id){return '"'+String(id).replace(/"/g,'')+'"';}).join(',')+')'; }
+  async function prevGroupMeeting(recIds, beforeStartsAt, excludeMeetingId){
+    if (!recIds || !recIds.length || !beforeStartsAt) return null;
+    var rows = await db.select('meetings','?google_recurring_id='+recIdInList(recIds)+'&starts_at=lt.'+encodeURIComponent(beforeStartsAt)+'&order=starts_at.desc&limit=5');
+    rows = (rows||[]).filter(function(m){ return m.id!==excludeMeetingId; });
+    return rows.length ? rows[0] : null;
+  }
+
   // ── Meeting detail ─────────────────────────────────────
   MH.open = async function(meetingId){
     if (!meetingId) return;
@@ -57902,9 +58132,10 @@ window.attendanceReject=async function(reqId,btn){
             }
           }
           if (!actions.length){
-            var prevM = await db.select('meetings','?google_recurring_id=eq.'+encodeURIComponent(meeting.google_recurring_id)+'&starts_at=lt.'+encodeURIComponent(meeting.starts_at)+'&order=starts_at.desc&limit=1');
-            if (prevM.length){
-              var prevAc = await db.select('meeting_actions','?meeting_id=eq.'+prevM[0].id+'&done=eq.false');
+            var grpIds = await seriesGroupRecIds(meeting.google_recurring_id);
+            var prevM = await prevGroupMeeting(grpIds, meeting.starts_at, meeting.id);
+            if (prevM){
+              var prevAc = await db.select('meeting_actions','?meeting_id=eq.'+prevM.id+'&done=eq.false');
               if (prevAc.length){
                 var carryRows = prevAc.map(function(a){ return { id:uuid(), meeting_id:meeting.id, text:a.text, assigned_to:a.assigned_to, due_date:a.due_date, created_by:meId() }; });
                 var carried = await db.insert('meeting_actions', carryRows);
@@ -57935,7 +58166,7 @@ window.attendanceReject=async function(reqId,btn){
       +   '<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start;">'
       +     '<div><div style="font-size:20px;font-weight:800;color:var(--white);">'+esc(m.title||'Meeting')+'</div>'
       +     '<div class="mh-muted" style="margin-top:4px;">'+esc(fmtDayLong(m.starts_at))+' \u00B7 '+fmtTime(m.starts_at)+'\u2013'+fmtTime(m.ends_at)+' \u00B7 '+esc((m.location||''))+'</div></div>'
-      +     (admin?'<button class="mh-btn" onclick="MH.adminPanel()">\u2699 Series setup</button>':'')
+      +     (admin?'<div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="mh-btn" onclick="MH.groupSetup()">\u2699 Action carry-over</button><button class="mh-btn" onclick="MH.adminPanel()">\u2699 Series setup</button></div>':'')
       +   '</div>'
       +   '<div style="margin-top:12px;">'+(att||'<span class="mh-muted">No attendees recorded.</span>')+'</div>'
       + '</div>';
@@ -57954,7 +58185,10 @@ window.attendanceReject=async function(reqId,btn){
       + '<div class="mh-card" style="padding:16px 18px;margin-top:16px;">'
       +   '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">'
       +     '<div style="font-size:15px;font-weight:800;color:var(--white);">Action items</div>'
-      +     '<button class="mh-btn gold" onclick="MH.addAction()">+ Action</button>'
+      +     '<div style="display:flex;gap:8px;">'
+      +       (admin?'<button class="mh-btn" onclick="MH.pullActions()" title="Pull any open actions from the previous meeting in this group">Pull open actions</button>':'')
+      +       '<button class="mh-btn gold" onclick="MH.addAction()">+ Action</button>'
+      +     '</div>'
       +   '</div>'
       +   '<div id="mh-actions">'+renderActions(d.actions)+'</div>'
       + '</div>';
@@ -58167,6 +58401,73 @@ window.attendanceReject=async function(reqId,btn){
       } catch(e){ window.toast&&window.toast('Save failed: '+((e&&e.message)||e),'error'); }
       return true;
     });
+  };
+
+  // Action carry-over group (admin): tie several distinct recurring series
+  // together so their open actions roll forward across the whole group.
+  MH.groupSetup = async function(){
+    var m=S.detail.meeting;
+    if(!m.google_recurring_id){ window.toast&&window.toast('This is a one-off meeting (no recurring series to group).'); return; }
+    var rec=m.google_recurring_id;
+    var mtgs = await db.select('meetings','?select=google_recurring_id,title,starts_at&google_recurring_id=not.is.null&order=starts_at.desc&limit=3000');
+    var seen={}, series=[];
+    (mtgs||[]).forEach(function(x){ var id=x.google_recurring_id; if(!id||seen[id]) return; seen[id]=1; series.push({ id:id, title:x.title||'(untitled)' }); });
+    var groups = await db.select('meeting_series_groups','?select=google_recurring_id,group_id,group_name');
+    var byRec={}; (groups||[]).forEach(function(g){ byRec[g.google_recurring_id]=g; });
+    var curG=byRec[rec];
+    var curGroupId=curG?curG.group_id:null;
+    var curGroupName=curG?(curG.group_name||''):(m.title||'');
+    series.sort(function(a,b){ return String(a.title||'').localeCompare(String(b.title||'')); });
+    function row(s){
+      var isCurrent=(s.id===rec);
+      var inThisGroup=curGroupId && byRec[s.id] && byRec[s.id].group_id===curGroupId;
+      var otherG=(!isCurrent && byRec[s.id] && (!curGroupId || byRec[s.id].group_id!==curGroupId)) ? byRec[s.id] : null;
+      var note=isCurrent ? ' <span style="color:var(--muted);">\u00B7 this meeting</span>'
+        : (otherG ? ' <span style="color:var(--muted);">\u00B7 in \u201C'+esc(otherG.group_name||'another group')+'\u201D</span>' : '');
+      return '<label style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text);padding:4px 0;cursor:pointer;">'
+        + '<input type="checkbox" class="mh-gchk" value="'+esc(s.id)+'" '+((inThisGroup||isCurrent)?'checked':'')+(isCurrent?' disabled':'')+'>'
+        + esc(s.title)+note+'</label>';
+    }
+    var body='<p class="mh-muted" style="margin:0 0 10px;">Tick the meeting series that should share open action items. When one occurrence finishes, its open actions roll forward to the next meeting in this group (e.g. Mon \u2192 Wed \u2192 Fri). KPIs are configured separately under \u201CSeries setup\u201D.</p>'
+      + '<div><span class="mh-lbl">Group name</span><input id="mh-gname" class="mh-in" value="'+esc(curGroupName)+'" placeholder="e.g. Supply Chain / Scheduling"></div>'
+      + '<div style="font-size:12px;font-weight:800;color:var(--white);margin:14px 0 4px;text-transform:uppercase;letter-spacing:.08em;">Meetings in this group</div>'
+      + '<div style="max-height:42vh;overflow:auto;">'+series.map(row).join('')+'</div>';
+    modal('Action carry-over group', body, 'Save', async function(){
+      var groupName=(document.getElementById('mh-gname').value||'').trim()||(m.title||'Meeting group');
+      var chosen=Array.prototype.map.call(document.querySelectorAll('.mh-gchk:checked'),function(c){return c.value;});
+      if(chosen.indexOf(rec)<0) chosen.push(rec);
+      var groupId=curGroupId||uuid();
+      try {
+        await db.delete('meeting_series_groups','?group_id=eq.'+encodeURIComponent(groupId));
+        if(chosen.length>1){ await db.upsert('meeting_series_groups', chosen.map(function(rid){ return { google_recurring_id:rid, group_id:groupId, group_name:groupName }; })); }
+        window.toast&&window.toast(chosen.length>1?('Group saved \u2014 '+chosen.length+' meetings linked.'):'Group cleared.','success');
+      } catch(e){ window.toast&&window.toast('Save failed: '+((e&&e.message)||e),'error'); }
+      return true;
+    });
+  };
+
+  // Manual pull: bring open actions from the previous group meeting into this
+  // one on demand, de-duplicated by text + assignee.
+  MH.pullActions = async function(){
+    var d=S.detail; if(!d||!d.meeting) return;
+    var m=d.meeting;
+    if(!m.google_recurring_id){ window.toast&&window.toast('This is a one-off meeting \u2014 nothing to pull from.'); return; }
+    try {
+      var grpIds = await seriesGroupRecIds(m.google_recurring_id);
+      var prevM = await prevGroupMeeting(grpIds, m.starts_at, m.id);
+      if(!prevM){ window.toast&&window.toast('No earlier meeting found in this group.'); return; }
+      var prevAc = await db.select('meeting_actions','?meeting_id=eq.'+prevM.id+'&done=eq.false');
+      if(!prevAc.length){ window.toast&&window.toast('No open actions to pull from the previous meeting.'); return; }
+      var key=function(a){ return String(a.text||'').trim().toLowerCase()+'|'+(a.assigned_to||''); };
+      var existing={}; (d.actions||[]).forEach(function(a){ if(!a.done) existing[key(a)]=1; });
+      var toAdd=prevAc.filter(function(a){ return !existing[key(a)]; });
+      if(!toAdd.length){ window.toast&&window.toast('Already up to date \u2014 no new open actions.'); return; }
+      var rows=toAdd.map(function(a){ return { id:uuid(), meeting_id:m.id, text:a.text, assigned_to:a.assigned_to, due_date:a.due_date, created_by:meId() }; });
+      var added=await db.insert('meeting_actions', rows);
+      d.actions=(d.actions||[]).concat(added||rows);
+      var ael=document.getElementById('mh-actions'); if(ael) ael.innerHTML=renderActions(d.actions);
+      window.toast&&window.toast('Pulled '+rows.length+' open action'+(rows.length>1?'s':'')+'.','success');
+    } catch(e){ window.toast&&window.toast('Pull failed: '+((e&&e.message)||e),'error'); }
   };
 
   // KPI reading entry (from a meeting; meeting_id ties RLS access)
