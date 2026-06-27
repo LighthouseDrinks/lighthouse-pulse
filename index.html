@@ -7221,6 +7221,18 @@ window.copyInviteLink = function() {
       </div>
     </div>
 
+    <!-- SECTION 2b: Blend Recipe (optional, multi-spirit blends) -->
+    <div class="modal-section-title">Blend Recipe <span style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--muted);font-size:11px;">— optional, multi-spirit blends</span></div>
+    <div style="background:rgba(13,27,42,0.5);border:1px solid var(--navy-border);border-radius:5px;padding:16px 20px;margin-bottom:8px;">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;">Define the proportion of each spirit type in the finished blend, <strong style="color:var(--white);">by LPA (pure alcohol)</strong>. Leave empty for single-spirit products. Percentages are normalised to 100%. These load as defaults at liquid sign-off, where they can be adjusted per job.</div>
+      <div id="bm-blend-recipe-rows"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:6px;">
+        <button type="button" onclick="window.bmAddBlendRow()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;">+ Add Spirit Component</button>
+        <div id="bm-blend-recipe-total" style="font-size:11px;color:var(--muted);"></div>
+      </div>
+      <datalist id="bm-spirit-type-list"></datalist>
+    </div>
+
     <!-- SECTION 3: Bottle -->
     <div class="modal-section-title">Bottle</div>
     <div class="modal-grid">
@@ -11348,6 +11360,10 @@ async function openBomModal(editId) {
   window._bmLabelPhotos = {};
   if (typeof window._bmRenderLabelPhotos === 'function') window._bmRenderLabelPhotos();
 
+  // Reset blend recipe rows (edit branch re-hydrates below) + load spirit datalist.
+  if (window.bmResetBlendRecipe) window.bmResetBlendRecipe([]);
+  if (window.bmPopulateSpiritTypes) window.bmPopulateSpiritTypes();
+
   // Default the Lighthouse-stock toggle off — the edit branch re-detects below.
   window._bomIncludeLhStock = false;
   if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
@@ -11396,6 +11412,9 @@ async function openBomModal(editId) {
       // Hydrate label master photos from the stored BOM
       window._bmLabelPhotos = Object.assign({}, b.labelMasterPhotos || {});
       if (typeof window._bmRenderLabelPhotos === 'function') window._bmRenderLabelPhotos();
+
+      // Hydrate blend recipe rows from the stored BOM
+      if (window.bmResetBlendRecipe) window.bmResetBlendRecipe(b.blendRecipe || []);
 
       // Detect whether this draft uses any shared Lighthouse (CLI-000) stock. If
       // so, auto-enable the toggle so onBomClientChange loads those goods into the
@@ -11899,6 +11918,75 @@ function closeBomModal() {
   }
 }
 
+// ── BOM Blend Recipe (optional multi-spirit %, by LPA) ──────────────────────
+// Spirit-type names are entered freely (with a datalist of existing
+// liquid_containers.spirit_type values) and never renamed. Stored on the BOM in
+// additional_info.blendRecipe as [{spirit_type, pct}].
+window.bmAddBlendRow = function(spirit, pct) {
+  var wrap = el('bm-blend-recipe-rows');
+  if (!wrap) return;
+  var inStyle = 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;box-sizing:border-box;width:100%;';
+  var sv = (spirit != null) ? String(spirit).replace(/"/g,'&quot;') : '';
+  var pv = (pct != null && pct !== '') ? String(pct).replace(/"/g,'&quot;') : '';
+  var row = document.createElement('div');
+  row.className = 'bm-blend-row';
+  row.style.cssText = 'display:grid;grid-template-columns:1fr 110px 36px;gap:8px;align-items:center;margin-bottom:8px;';
+  row.innerHTML =
+      '<input type="text" class="bm-blend-spirit" list="bm-spirit-type-list" placeholder="Spirit type (e.g. Single Grain ex Bourbon)" value="' + sv + '" oninput="window.bmUpdateBlendTotal()" style="' + inStyle + '">'
+    + '<input type="number" class="bm-blend-pct" min="0" max="100" step="0.1" placeholder="%" value="' + pv + '" oninput="window.bmUpdateBlendTotal()" style="' + inStyle + 'text-align:right;">'
+    + '<button type="button" onclick="window.bmRemoveBlendRow(this)" title="Remove component" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:12px;height:34px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">&#10005;</button>';
+  wrap.appendChild(row);
+  window.bmUpdateBlendTotal();
+};
+window.bmRemoveBlendRow = function(btn) {
+  var row = btn && btn.closest ? btn.closest('.bm-blend-row') : null;
+  if (row && row.parentNode) row.parentNode.removeChild(row);
+  window.bmUpdateBlendTotal();
+};
+window.bmReadBlendRecipe = function() {
+  var rows = document.querySelectorAll('#bm-blend-recipe-rows .bm-blend-row');
+  var out = [];
+  Array.prototype.forEach.call(rows, function(r) {
+    var s = r.querySelector('.bm-blend-spirit');
+    var p = r.querySelector('.bm-blend-pct');
+    var spirit = s ? s.value.trim() : '';
+    var pct = p ? parseFloat(p.value) : NaN;
+    if (spirit && pct > 0) out.push({ spirit_type: spirit, pct: pct });
+  });
+  return out;
+};
+window.bmUpdateBlendTotal = function() {
+  var totEl = el('bm-blend-recipe-total');
+  if (!totEl) return;
+  var rec = window.bmReadBlendRecipe();
+  if (!rec.length) { totEl.textContent = ''; return; }
+  var sum = rec.reduce(function(s, r) { return s + (parseFloat(r.pct) || 0); }, 0);
+  var off = Math.abs(sum - 100) > 0.5;
+  totEl.innerHTML = 'Total: <strong style="color:' + (off ? 'var(--amber)' : 'var(--green)') + ';">' + (Math.round(sum * 10) / 10) + '%</strong>'
+    + (off ? ' <span style="color:var(--muted);">(normalised to 100% at sign-off)</span>' : '');
+};
+window.bmResetBlendRecipe = function(recipe) {
+  var wrap = el('bm-blend-recipe-rows');
+  if (wrap) wrap.innerHTML = '';
+  (recipe || []).forEach(function(r) { window.bmAddBlendRow(r.spirit_type, r.pct); });
+  window.bmUpdateBlendTotal();
+};
+// Populate the spirit-type datalist from existing containers (best-effort).
+window.bmPopulateSpiritTypes = async function() {
+  var dl = el('bm-spirit-type-list');
+  if (!dl) return;
+  try {
+    var rows = await window.db.select('liquid_containers', '?select=spirit_type&spirit_type=not.is.null');
+    var seen = {}, opts = [];
+    (rows || []).forEach(function(r) {
+      var v = (r.spirit_type || '').trim();
+      if (v && !seen[v.toLowerCase()]) { seen[v.toLowerCase()] = 1; opts.push(v); }
+    });
+    opts.sort();
+    dl.innerHTML = opts.map(function(v) { return '<option value="' + String(v).replace(/"/g,'&quot;') + '"></option>'; }).join('');
+  } catch(e) { /* non-critical: free-text entry still works */ }
+};
+
 async function saveBomDraft() {
   var product  = gv('bm-product');
   var clientId = gv('bm-client');
@@ -11925,13 +12013,15 @@ async function saveBomDraft() {
   var volume = gv('bm-volume');
   var abv    = gv('bm-abv');
 
+  var _blendRecipe = window.bmReadBlendRecipe ? window.bmReadBlendRecipe() : [];
   var additionalInfo = {
     labelBarcode:  gv('bm-label-barcode')   || null, shipperBarcode: gv('bm-shipper-barcode') || null,
     intendedMarket:gv('bm-intended-market') || null, dutyStamp:      gv('bm-duty-stamp')      || null,
     annex2:        gv('bm-annex2')          || null, lotNumber:      gv('bm-lot-number')       || null,
     pallet:        gv('bm-pallet')          || null, casesLayer:     gv('bm-cases-layer')      || null,
     layersPallet:  gv('bm-layers-pallet')   || null, labelPosition:  gv('bm-label-position')   || null,
-    notes:         gv('bm-notes')           || null
+    notes:         gv('bm-notes')           || null,
+    blendRecipe:   _blendRecipe.length ? _blendRecipe : null
   };
 
   var dbPayload = {
@@ -11995,6 +12085,7 @@ async function saveBomDraft() {
       bottlesPerShipper: gv('bm-bottles-per-shipper'),
       bph: gv('bm-bph'), bottlingAbv: abv,
       chill: gv('bm-chill-bom'), colour: gv('bm-colouring-bom'), colourSpec: gv('bm-colour-spec-bom'),
+      blendRecipe: _blendRecipe.slice(),
       labelBarcode: gv('bm-label-barcode'), shipperBarcode: gv('bm-shipper-barcode'),
       intendedMarket: gv('bm-intended-market'), dutyStamp: gv('bm-duty-stamp'),
       annex2: gv('bm-annex2'), lotNumber: gv('bm-lot-number'),
@@ -12070,13 +12161,15 @@ async function saveBom() {
     return opt ? (opt.getAttribute('data-desc') || opt.text.split(' — ')[0].trim()) : null;
   }
 
+  var _blendRecipe = window.bmReadBlendRecipe ? window.bmReadBlendRecipe() : [];
   var additionalInfo = {
     labelBarcode:  gv('bm-label-barcode')   || null, shipperBarcode: gv('bm-shipper-barcode') || null,
     intendedMarket:gv('bm-intended-market') || null, dutyStamp:      gv('bm-duty-stamp')      || null,
     annex2:        gv('bm-annex2')          || null, lotNumber:      gv('bm-lot-number')       || null,
     pallet:        gv('bm-pallet')          || null, casesLayer:     gv('bm-cases-layer')      || null,
     layersPallet:  gv('bm-layers-pallet')   || null, labelPosition:  gv('bm-label-position')   || null,
-    notes:         gv('bm-notes')           || null
+    notes:         gv('bm-notes')           || null,
+    blendRecipe:   _blendRecipe.length ? _blendRecipe : null
   };
 
   var dbPayload = {
@@ -12142,6 +12235,7 @@ async function saveBom() {
       chill: gv('bm-chill-bom'),
       colour: gv('bm-colouring-bom'),
       colourSpec: gv('bm-colour-spec-bom'),
+      blendRecipe: _blendRecipe.slice(),
       labelBarcode: gv('bm-label-barcode'), shipperBarcode: gv('bm-shipper-barcode'),
       intendedMarket: gv('bm-intended-market'), dutyStamp: gv('bm-duty-stamp'),
       annex2: gv('bm-annex2'), lotNumber: gv('bm-lot-number'),
@@ -12947,6 +13041,7 @@ window.loadBoms = async function initBoms() {
         chill:            r.chill_filtration ? 'yes' : 'no',
         colour:           r.colouring ? 'yes' : 'no',
         colourSpec:       r.colour_spec || '',
+        blendRecipe:      Array.isArray(ai.blendRecipe) ? ai.blendRecipe : [],
         labelBarcode:     ai.labelBarcode   || '',
         shipperBarcode:   ai.shipperBarcode || '',
         intendedMarket:   ai.intendedMarket || '',
@@ -23684,11 +23779,14 @@ window._soFinal = _soFinal;
 //   tol:        ABV tolerance for "needs dilution" (default 0.5; not LSO_ABV_TOL,
 //               which is out of scope here)
 // Returns a pure-data plan; callers render their own strings.
-function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
+function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol, bufferPct) {
   tol  = (tol == null) ? 0.5 : tol;
   mode = (mode === 'requirement') ? 'requirement' : 'all';
   reqLitres = parseFloat(reqLitres) || 0;
   reqAbv    = parseFloat(reqAbv) || 0;
+  // Optional filler/waste overage for "requirement" mode — defaults to 0 so the
+  // function contract is unchanged for any caller that does not opt in.
+  bufferPct = parseFloat(bufferPct) || 0;
 
   var conts = (containers || []).map(function(c) {
     var litres = parseFloat(c.litres != null ? c.litres : c.current_litres) || 0;
@@ -23760,24 +23858,25 @@ function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
     return done();
   }
 
-  // "Requirement" mode: make only the job volume.
-  out.finalLitres = reqLitres;
-  if (!(reqLitres > 0)) { out.warnings.push('no-required-volume'); return out; }
-  var targetLPA = reqLitres * reqAbv / 100;
+  // "Requirement" mode: make only the job volume (plus optional filler overage).
+  if (!(reqLitres > 0)) { out.finalLitres = reqLitres; out.warnings.push('no-required-volume'); return out; }
+  var prepLitres = bufferPct > 0 ? reqLitres * (1 + bufferPct) : reqLitres;
+  out.finalLitres = prepLitres;
+  var targetLPA = prepLitres * reqAbv / 100;
 
   // Single container: draw what the job needs from that one vessel.
   if (!donors.length) {
     var draw = receiver.abv > 0 ? targetLPA / (receiver.abv / 100) : 0;
     if (draw > receiver.litres + 1e-4) { out.warnings.push('insufficient-alcohol'); draw = receiver.litres; }
     out.drawLitres   = draw;
-    out.water        = Math.max(0, reqLitres - draw);
+    out.water        = Math.max(0, prepLitres - draw);
     out.singleSource = { reference: receiver.reference, abv: receiver.abv,
                          drawLitres: draw, remainderLitres: Math.max(0, receiver.litres - draw) };
     return done();
   }
 
   // Keep ALL of the receiver; draw the LPA shortfall from the donor(s).
-  if (receiver.litres >= reqLitres - 1e-4) out.warnings.push('receiver-exceeds-required');
+  if (receiver.litres >= prepLitres - 1e-4) out.warnings.push('receiver-exceeds-required');
 
   var drawLPA    = Math.max(0, targetLPA - receiver.lpa);
   var drawLitres = donorAvgAbv > 0 ? drawLPA / (donorAvgAbv / 100) : 0;
@@ -23791,8 +23890,8 @@ function _dilutionPlan(containers, reqLitres, reqAbv, mode, tol) {
              drawLitres: d, remainderLitres: Math.max(0, c.litres - d) };
   });
 
-  if (reqLitres - receiver.litres - drawLitres < -1e-4) out.warnings.push('negative-water');
-  out.water = Math.max(0, reqLitres - receiver.litres - drawLitres);
+  if (prepLitres - receiver.litres - drawLitres < -1e-4) out.warnings.push('negative-water');
+  out.water = Math.max(0, prepLitres - receiver.litres - drawLitres);
   return done();
 }
 window._dilutionPlan = _dilutionPlan;
@@ -23832,6 +23931,156 @@ window._dilutionNoteHtml = function(plan, mode) {
       + ' — split across ~' + plan.vesselsNeeded + ' vessels. Actual containers used are logged at job close.</span>';
   }
   return msg;
+};
+
+// ── Multi-component blend recipe ───────────────────────────────────────────
+// A blend recipe is a list of {spirit_type, pct} where pct is a proportion of
+// the finished blend BY LPA (pure alcohol). Defaults live on the BOM
+// (additional_info.blendRecipe) and may be overridden per job
+// (job_liquid_signoff.blend_recipe_json). Spirit-type names are matched against
+// the linked containers' own spirit_type — never renamed.
+function _normSpirit(s) { return String(s == null ? '' : s).trim().toLowerCase(); }
+window._normalizeBlendRecipe = function(recipe) {
+  var rows = (recipe || []).map(function(r) {
+    return { spirit_type: String((r && r.spirit_type) || '').trim(), pct: parseFloat(r && r.pct) || 0 };
+  }).filter(function(r) { return r.spirit_type && r.pct > 0; });
+  var sum = rows.reduce(function(s, r) { return s + r.pct; }, 0);
+  return { rows: rows, sum: sum };
+};
+
+// Build a per-spirit-type blend plan. For each recipe row we target that row's
+// share (normalised to 100%) of the required LPA, drawing it from the linked
+// vessels of that spirit type (proportional to each vessel's available LPA).
+// Combines into the lowest-ABV linked vessel, then waters to the prep volume.
+//   containers: [{reference, litres|current_litres, abv, lpa|current_lpa, spirit_type, capacity|capacity_litres, type}]
+//   bufferPct:  filler overage applied to the prep volume (e.g. 0.02)
+// Returns a pure-data plan; callers render their own strings. Returns ok:false
+// when there is no usable recipe so callers fall back to _dilutionPlan.
+window._blendRecipePlan = function(containers, recipe, reqLitres, reqAbv, tol, bufferPct) {
+  tol       = (tol == null) ? 0.5 : tol;
+  bufferPct = parseFloat(bufferPct) || 0;
+  reqLitres = parseFloat(reqLitres) || 0;
+  reqAbv    = parseFloat(reqAbv) || 0;
+
+  var norm = window._normalizeBlendRecipe(recipe);
+  var out = {
+    ok: false, groups: [], receiver: null, water: 0, finalLitres: 0, prepLitres: 0,
+    totalDraw: 0, overflow: false, receiverCapacity: 0, vesselsNeeded: 1,
+    warnings: [], recipeSum: norm.sum
+  };
+  if (!norm.rows.length) return out;
+
+  var conts = (containers || []).map(function(c) {
+    var litres = parseFloat(c.litres != null ? c.litres : c.current_litres) || 0;
+    var abv    = parseFloat(c.abv) || 0;
+    var lpa    = (c.lpa != null ? parseFloat(c.lpa)
+                 : (c.current_lpa != null ? parseFloat(c.current_lpa) : NaN));
+    if (!(lpa > 0)) lpa = litres * abv / 100;
+    var cap    = parseFloat(c.capacity != null ? c.capacity : c.capacity_litres) || 0;
+    return { reference: c.reference || '', litres: litres, abv: abv, lpa: lpa,
+             capacity: cap, type: c.type || '', spirit_type: c.spirit_type || '' };
+  }).filter(function(c) { return c.litres > 0; });
+  if (!conts.length) return out;
+
+  var prepLitres = reqLitres > 0 ? (bufferPct > 0 ? reqLitres * (1 + bufferPct) : reqLitres) : 0;
+  out.prepLitres = prepLitres;
+  out.finalLitres = prepLitres;
+  if (!(prepLitres > 0) || !(reqAbv > 0)) { out.warnings.push('no-required-volume'); return out; }
+  var prepLPA = prepLitres * reqAbv / 100;
+
+  // Group linked vessels by their own spirit_type.
+  var groupsByKey = {};
+  conts.forEach(function(c) {
+    var k = _normSpirit(c.spirit_type);
+    if (!groupsByKey[k]) groupsByKey[k] = { spirit_type: c.spirit_type, containers: [], litres: 0, lpa: 0 };
+    groupsByKey[k].containers.push(c);
+    groupsByKey[k].litres += c.litres;
+    groupsByKey[k].lpa    += c.lpa;
+  });
+
+  var totalDraw = 0;
+  out.groups = norm.rows.map(function(r) {
+    var share     = norm.sum > 0 ? (r.pct / norm.sum) : 0;
+    var targetLPA = share * prepLPA;
+    var g = groupsByKey[_normSpirit(r.spirit_type)];
+    var grp = { spirit_type: r.spirit_type, pct: r.pct, share: share, targetLPA: targetLPA,
+                drawLitres: 0, availLitres: g ? g.litres : 0, availLPA: g ? g.lpa : 0, containers: [] };
+    if (!g) { out.warnings.push('missing-spirit:' + r.spirit_type); return grp; }
+    var groupDrawLPA = Math.min(targetLPA, g.lpa);
+    if (groupDrawLPA < targetLPA - 1e-6) out.warnings.push('insufficient:' + r.spirit_type);
+    g.containers.forEach(function(c) {
+      var contShare  = g.lpa > 0 ? (c.lpa / g.lpa) : 0;
+      var drawLPA    = groupDrawLPA * contShare;
+      var drawLitres = c.abv > 0 ? drawLPA / (c.abv / 100) : 0;
+      if (drawLitres > c.litres) drawLitres = c.litres;
+      grp.containers.push({ reference: c.reference, abv: c.abv, litres: c.litres,
+                            drawLitres: drawLitres, remainderLitres: Math.max(0, c.litres - drawLitres) });
+      grp.drawLitres += drawLitres;
+    });
+    totalDraw += grp.drawLitres;
+    return grp;
+  });
+  out.totalDraw = totalDraw;
+
+  // Receiver = lowest-ABV linked vessel (consistent with _dilutionPlan).
+  var receiver = conts.slice().sort(function(a, b) { return a.abv - b.abv; })[0];
+  out.receiver = receiver;
+  out.water = Math.max(0, prepLitres - totalDraw);
+
+  var cap = receiver.capacity > 0 ? receiver.capacity
+          : (receiver.type === 'ibc' || receiver.type === '' ? 1000 : 0);
+  out.receiverCapacity = cap;
+  if (cap > 0 && out.finalLitres > cap + 1) {
+    out.overflow = true;
+    out.vesselsNeeded = Math.ceil(out.finalLitres / cap);
+  }
+  out.ok = true;
+  return out;
+};
+
+// Render the muted HTML instruction sentence for a blend-recipe plan, grouped by
+// spirit type. Used by the Liquid Sign-Off UI calc note + Work Order / Run Sheet.
+window._blendRecipeNoteHtml = function(plan, reqAbv) {
+  if (!plan || !plan.ok || !plan.groups.length) return '';
+  var ref = function(r) { return (window.escapeHtml ? window.escapeHtml(r || '—') : (r || '—')); };
+  var f1  = function(n) { return (parseFloat(n) || 0).toFixed(1); };
+  var parts = plan.groups.map(function(g) {
+    var draws = g.containers.filter(function(c) { return c.drawLitres > 0.05; })
+      .map(function(c) { return '~' + f1(c.drawLitres) + ' L from ' + ref(c.reference); });
+    var head = '<strong>' + ref(g.spirit_type || '?') + ' (' + (parseFloat(g.pct) || 0) + '%)</strong>: ';
+    return head + (draws.length ? 'draw ' + draws.join(' + ') : '<span style="color:var(--amber);">no vessel linked</span>');
+  });
+  var msg = 'Blend to recipe — ' + parts.join('; ')
+    + '. Combine into <strong>' + ref(plan.receiver && plan.receiver.reference) + '</strong>, add ~<strong>'
+    + f1(plan.water) + ' L</strong> RO water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong>'
+    + (reqAbv > 0 ? ' at ' + parseFloat(reqAbv).toFixed(1) + '%' : '') + '.';
+  if (plan.recipeSum && Math.abs(plan.recipeSum - 100) > 0.5) {
+    msg += '<br><span style="color:var(--amber);">&#9432; Recipe percentages total ' + (parseFloat(plan.recipeSum) || 0) + '% — normalised to 100%.</span>';
+  }
+  var shorts = (plan.warnings || []).filter(function(w) { return w.indexOf('insufficient:') === 0 || w.indexOf('missing-spirit:') === 0; });
+  if (shorts.length) {
+    msg += '<br><span style="color:var(--amber);">&#9888; Not enough linked liquid for: '
+      + shorts.map(function(w) { return ref(w.split(':')[1]); }).join(', ') + '.</span>';
+  }
+  if (plan.overflow) {
+    msg += '<br><span style="color:var(--amber);">&#9888; Final ~' + f1(plan.finalLitres) + ' L won\'t fit one IBC'
+      + (plan.receiverCapacity ? ' (~' + Math.round(plan.receiverCapacity) + ' L)' : '')
+      + ' — split across ~' + plan.vesselsNeeded + ' vessels. Actual containers used are logged at job close.</span>';
+  }
+  return msg;
+};
+
+// Resolve the active blend recipe for a job: per-job override (signoff JSON)
+// takes precedence over the BOM default (additional_info.blendRecipe).
+window._resolveBlendRecipe = function(bomAdditionalInfo, signoffOverrideJson) {
+  var override = null;
+  if (signoffOverrideJson) {
+    try { override = JSON.parse(signoffOverrideJson); } catch(e) { override = null; }
+  }
+  if (Array.isArray(override) && override.length) return override;
+  var bomRecipe = bomAdditionalInfo && bomAdditionalInfo.blendRecipe;
+  if (Array.isArray(bomRecipe) && bomRecipe.length) return bomRecipe;
+  return [];
 };
 
 // Keep a vessel's status in sync with whether any linked batch still holds liquid.
@@ -35167,6 +35416,12 @@ window.saveAdjModal = async function() {
   // Single ABV tolerance for "matches bottling ABV" decisions and balance checks
   // (replaces the old mix of +0.1 / +0.2 / +2 thresholds).
   var LSO_ABV_TOL = 0.5;
+  // Filler/waste overage applied to "dilute to required" prep volume so we never
+  // under-prepare liquid (line hold-up, hydrometer variance, filler losses). Only
+  // affects the planned prep volume on the Work Order / Run Sheet — never the
+  // job-close reconciliation, which works off measured actuals.
+  var LSO_PREP_BUFFER = 0.02;
+  window.LSO_PREP_BUFFER = LSO_PREP_BUFFER;
   // Effective ABV: alcohol-accurate strength derived from the authoritative
   // stored LPA balance (current_lpa). Casks store full litres + angel-share
   // decayed LPA, so nominal `abv` over-states their strength — always prefer
