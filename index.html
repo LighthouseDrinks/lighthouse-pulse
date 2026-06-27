@@ -17321,6 +17321,7 @@ window.loadBoms = async function initBoms() {
       task_assigned:  'assigned you a task',
       task_mention:   'mentioned you',
       task_completed: 'completed a task',
+      task_reopened:  'reopened a task',
       task_commented: 'commented on a task',
       deal_stage:     'moved a deal stage',
       deal_won:       'won a deal',
@@ -17641,7 +17642,10 @@ window.loadBoms = async function initBoms() {
       // CRM tasks are assigned to a person, not a role, but the DB column is
       // NOT NULL (inherited from operational job tasks). 'crm' keeps it consistent.
       assigned_role: 'crm',
-      status: 'pending',
+      // NB: status / completed_at are deliberately NOT set here. Editing a task
+      // must never disturb its completion state — otherwise saving an edit to an
+      // already-completed task would silently flip it back to outstanding. New
+      // tasks get status:'pending' explicitly in the insert branch below.
       assignee_id: assignee_id,
       watchers: _tmWatchers,
       priority: priority,
@@ -17663,6 +17667,7 @@ window.loadBoms = async function initBoms() {
         if (idx >= 0) TASKS[idx] = savedTask;
       } else {
         payload.id = taskKey;
+        payload.status = 'pending';
         payload.created_by = meId();
         payload.created_at = new Date().toISOString();
         await db.insert('job_tasks', payload);
@@ -17724,12 +17729,21 @@ window.loadBoms = async function initBoms() {
     if (_taskToggleInFlight[taskId]) return;
     _taskToggleInFlight[taskId] = true;
     var done = !t.completed_at;
+    // Reopening a completed task is deliberate + audited: confirm first so an
+    // accidental tap on the completion circle can't silently undo completion.
+    if (!done) {
+      var okReopen = window.lpConfirm
+        ? await window.lpConfirm('Reopen this completed task? It will count as outstanding again, and the task creator will be notified.', { title: 'Reopen task', confirmLabel: 'Reopen' })
+        : true;
+      if (!okReopen) { delete _taskToggleInFlight[taskId]; return; }
+    }
+    var nowIso = new Date().toISOString();
     var patch = done
-      ? { completed_at: new Date().toISOString(), status: 'completed' }
+      ? { completed_at: nowIso, status: 'completed', completed_by: (window.CURRENT_USER && window.CURRENT_USER.email) || meId() || null }
       : { completed_at: null, status: 'pending' };
     // Snapshot for rollback, then apply optimistically BEFORE the await so any
     // bypassed re-entry reads the updated state.
-    var prevState = { completed_at: t.completed_at, status: t.status };
+    var prevState = { completed_at: t.completed_at, status: t.status, completed_by: t.completed_by };
     Object.assign(t, patch);
     try {
       await db.update('job_tasks', '?id=eq.'+encodeURIComponent(taskId), patch);
@@ -17795,6 +17809,28 @@ window.loadBoms = async function initBoms() {
             }
           } catch(_) {}
         }
+      } else {
+        // Reopen is otherwise invisible (no completion notification, no record),
+        // which is exactly what makes a reopened task confusing. Drop an audit
+        // comment and ping the people involved so it can never quietly slip back
+        // to outstanding without anyone knowing.
+        try {
+          await db.insert('crm_task_comments', {
+            id: uuid(), task_id: taskId, author_id: meId(),
+            body: 'Reopened this task (it had been marked complete).', created_at: nowIso
+          });
+        } catch(_) {}
+        var reReceps = [];
+        if (t.created_by && t.created_by !== meId()) reReceps.push(t.created_by);
+        if (t.assignee_id && t.assignee_id !== meId() && reReceps.indexOf(t.assignee_id)<0) reReceps.push(t.assignee_id);
+        (t.watchers||[]).forEach(function(w){ if (w && w !== meId() && reReceps.indexOf(w)<0) reReceps.push(w); });
+        reReceps.forEach(function(uid){
+          createNotification({
+            user_id: uid, type: 'task_reopened', task_id: taskId,
+            deal_id: t.deal_id||null, client_id: t.client_id||null,
+            body: meDisplay() + ' reopened the task: ' + (t.title||'')
+          });
+        });
       }
     } catch(e) {
       Object.assign(t, prevState); // roll back optimistic patch
@@ -35589,23 +35625,41 @@ window.saveAdjModal = async function() {
       var _planConts = _linkedConts.map(function(lc) {
         var cont = _allConts.find(function(c){ return c.id === lc.id; }) || {};
         return {
-          reference: cont.reference || lc.reference || '',
-          litres:    parseFloat((cont.current_litres != null ? cont.current_litres : lc.litres) || 0),
-          abv:       parseFloat((cont.abv != null ? cont.abv : lc.abv) || 0),
-          lpa:       (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null)),
-          capacity:  parseFloat(cont.capacity_litres || lc.capacity_litres || 0) || 0,
-          type:      cont.type || lc.type || ''
+          reference:   cont.reference || lc.reference || '',
+          litres:      parseFloat((cont.current_litres != null ? cont.current_litres : lc.litres) || 0),
+          abv:         parseFloat((cont.abv != null ? cont.abv : lc.abv) || 0),
+          lpa:         (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null)),
+          capacity:    parseFloat(cont.capacity_litres || lc.capacity_litres || 0) || 0,
+          type:        cont.type || lc.type || '',
+          spirit_type: cont.spirit_type || lc.spirit_type || ''
         };
       });
-      var _planReq = window._dilutionPlan(_planConts, _reqLitres, _bottlingAbv, 'requirement', LSO_ABV_TOL);
+      // "Requirement" plan carries the filler overage so we never under-prepare.
+      var _planReq = window._dilutionPlan(_planConts, _reqLitres, _bottlingAbv, 'requirement', LSO_ABV_TOL, LSO_PREP_BUFFER);
       var _planAll = window._dilutionPlan(_planConts, _reqLitres, _bottlingAbv, 'all', LSO_ABV_TOL);
+
+      // Multi-component blend recipe: BOM default, overridable per job.
+      var _blendRecipe = window._resolveBlendRecipe(_bomAdditionalInfo, d.blend_recipe_json);
+      var _distinctSpirits = {};
+      _planConts.forEach(function(c){ if (c.litres > 0 && c.spirit_type) _distinctSpirits[c.spirit_type.trim().toLowerCase()] = 1; });
+      var _recipeActive = _blendRecipe.length > 0 && Object.keys(_distinctSpirits).length >= 2;
+      var _recipePlan = _recipeActive
+        ? window._blendRecipePlan(_planConts, _blendRecipe, _reqLitres, _bottlingAbv, LSO_ABV_TOL, LSO_PREP_BUFFER)
+        : null;
+      if (_recipePlan && !_recipePlan.ok) { _recipePlan = null; _recipeActive = false; }
 
       var _dilWater = 0, _dilFinal = 0, _dilSrcNeeded = 0;
       var _dilAllWater = 0, _dilAllFinal = 0;
       if (_dilutionNeeded) {
-        _dilSrcNeeded = _planReq.drawLitres;
-        _dilWater     = _planReq.water;
-        _dilFinal     = _planReq.finalLitres;
+        if (_recipeActive) {
+          _dilSrcNeeded = _recipePlan.totalDraw;
+          _dilWater     = _recipePlan.water;
+          _dilFinal     = _recipePlan.finalLitres;
+        } else {
+          _dilSrcNeeded = _planReq.drawLitres;
+          _dilWater     = _planReq.water;
+          _dilFinal     = _planReq.finalLitres;
+        }
         _dilAllFinal  = _planAll.finalLitres;
         _dilAllWater  = _planAll.water;
       }
@@ -35781,6 +35835,9 @@ window.saveAdjModal = async function() {
       });
       html += '</div>';
 
+      // ── Blend recipe editor (multi-spirit jobs) — populated by _lsoRenderBlendRecipe ─
+      html += '<div id="lso-blend-recipe-wrap" style="display:none;"></div>';
+
       if (!isLocked) {
         // Container selector for adding more
         var _alreadyLinkedIds = _linkedConts.map(function(lc){ return lc.id; });
@@ -35820,9 +35877,11 @@ window.saveAdjModal = async function() {
         // toggle/update it live as containers are added or removed in-session.
         var _prevMode    = window._lsoDilutionMode || 'all';
         var _showScope   = _linkedConts.length > 0 && _dilutionNeeded;
-        var _initReqDesc = (_dilutionNeeded && _planReq.receiver)
-          ? window._dilutionNoteHtml(_planReq, 'requirement')
-          : 'Draw only enough to meet the job volume. Remainder stays in vessel(s) at cask strength.';
+        var _initReqDesc = (_dilutionNeeded && _recipeActive)
+          ? window._blendRecipeNoteHtml(_recipePlan, _bottlingAbv)
+          : ((_dilutionNeeded && _planReq.receiver)
+              ? window._dilutionNoteHtml(_planReq, 'requirement')
+              : 'Draw only enough to meet the job volume. Remainder stays in vessel(s) at cask strength.');
         var _initAllDesc = (_dilutionNeeded && _planAll.receiver)
           ? window._dilutionNoteHtml(_planAll, 'all')
           : 'Draw all linked container contents and add water to reach the target ABV.';
@@ -35981,6 +36040,11 @@ window.saveAdjModal = async function() {
       window._lsoReqLitres        = _reqLitres;
       window._lsoAllLinkedConts   = _linkedConts.slice();
       window._lsoIsLocked         = isLocked;
+      // Blend recipe state (per-job override default-loaded from BOM)
+      window._lsoBlendRecipe      = _blendRecipe.slice();
+      window._lsoBlendRecipeBom   = (_bomAdditionalInfo && Array.isArray(_bomAdditionalInfo.blendRecipe)) ? _bomAdditionalInfo.blendRecipe.slice() : [];
+      window._lsoRecipeActive     = _recipeActive;
+      window._lsoRecipePlan       = _recipePlan;
       // Dilution calc values for live field updates when radio changes
       window._lsoDilReqWater      = _dilWater;
       window._lsoDilReqFinal      = _dilFinal;
@@ -35989,8 +36053,13 @@ window.saveAdjModal = async function() {
       window._lsoDilAllFinal      = _dilAllFinal;
       window._lsoDilAllSrc        = _linkedTotalLitres;
       // Prebuilt per-container instruction notes for the calc callout (named vessels)
-      window._lsoDilReqNote       = (_dilutionNeeded && _planReq.receiver) ? window._dilutionNoteHtml(_planReq, 'requirement') : '';
+      window._lsoDilReqNote       = (_dilutionNeeded && _recipeActive)
+        ? window._blendRecipeNoteHtml(_recipePlan, _bottlingAbv)
+        : ((_dilutionNeeded && _planReq.receiver) ? window._dilutionNoteHtml(_planReq, 'requirement') : '');
       window._lsoDilAllNote       = (_dilutionNeeded && _planAll.receiver) ? window._dilutionNoteHtml(_planAll, 'all') : '';
+
+      // Render the per-spirit-type recipe editor (shows only for multi-spirit jobs)
+      if (window._lsoRenderBlendRecipe) window._lsoRenderBlendRecipe();
 
       if (!isLocked) {
         // Trigger selector to show info card for already-selected item
@@ -36802,6 +36871,155 @@ window.saveAdjModal = async function() {
         _lsoAutoSaveContainers(window._lsoCurrentJobId);
       }
     });
+  };
+
+  // ── Blend recipe (multi-spirit %, by LPA) — per-job editor + persistence ────
+  // Reads the spirit types from the currently linked vessels and shows an
+  // editable % per spirit type, defaulting from the BOM recipe / prior override.
+  window._lsoReadRecipeFromInputs = function() {
+    var inputs = document.querySelectorAll('#lso-blend-recipe-wrap .lso-recipe-pct');
+    var out = [];
+    Array.prototype.forEach.call(inputs, function(i) {
+      var st = i.getAttribute('data-spirit') || '';
+      var pct = parseFloat(i.value);
+      if (st && pct > 0) out.push({ spirit_type: st, pct: pct });
+    });
+    return out;
+  };
+  window._lsoUpdateRecipeTotal = function() {
+    var totEl = document.getElementById('lso-recipe-total');
+    if (!totEl) return;
+    var rec = window._lsoReadRecipeFromInputs();
+    if (!rec.length) { totEl.innerHTML = 'Enter the % for each spirit type.'; return; }
+    var sum = rec.reduce(function(s, r) { return s + (parseFloat(r.pct) || 0); }, 0);
+    var off = Math.abs(sum - 100) > 0.5;
+    totEl.innerHTML = 'Total: <strong style="color:' + (off ? 'var(--amber)' : 'var(--green)') + ';">'
+      + (Math.round(sum * 10) / 10) + '%</strong>' + (off ? ' <span style="color:var(--muted);">— normalised to 100%</span>' : '');
+  };
+  window._lsoRenderBlendRecipe = function() {
+    var wrap = document.getElementById('lso-blend-recipe-wrap');
+    if (!wrap) return;
+    var linked   = window._lsoAllLinkedConts || [];
+    var allConts = window._lsoContainers || [];
+    var locked   = !!window._lsoIsLocked;
+    // Distinct spirit types among linked vessels (preserve first-seen casing).
+    var order = [], seen = {};
+    linked.forEach(function(lc) {
+      var cont = allConts.find(function(c){ return c.id === lc.id; });
+      var st = String((cont && cont.spirit_type) || lc.spirit_type || '').trim();
+      if (!st) return;
+      var k = st.toLowerCase();
+      if (!seen[k]) { seen[k] = st; order.push(st); }
+    });
+    if (order.length < 2) { wrap.style.display = 'none'; wrap.innerHTML = ''; window._lsoRecipeActive = false; return; }
+
+    function pctFor(st) {
+      var k = st.toLowerCase();
+      var src = (window._lsoBlendRecipe && window._lsoBlendRecipe.length) ? window._lsoBlendRecipe : (window._lsoBlendRecipeBom || []);
+      var m = src.find(function(r){ return String(r.spirit_type || '').trim().toLowerCase() === k; });
+      return (m && m.pct != null) ? m.pct : '';
+    }
+    var inStyle = 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;width:90px;text-align:right;box-sizing:border-box;';
+    var rowsH = order.map(function(st) {
+      var pv = pctFor(st); pv = (pv != null && pv !== '') ? pv : '';
+      return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 0;">'
+        + '<span style="font-size:12px;color:var(--white);">' + window.escapeHtml(st) + '</span>'
+        + '<span style="display:flex;align-items:center;gap:6px;">'
+        + '<input type="number" min="0" max="100" step="0.1" class="lso-recipe-pct" data-spirit="' + window.escapeHtml(st) + '" value="' + pv + '" '
+        + (locked ? 'readonly' : 'oninput="window._lsoOnRecipeChange()"') + ' style="' + inStyle + (locked ? 'opacity:0.7;' : '') + '">'
+        + '<span style="font-size:11px;color:var(--muted);">%</span></span>'
+        + '</div>';
+    }).join('');
+    wrap.style.display = '';
+    wrap.innerHTML = '<div style="background:rgba(96,165,250,0.06);border:1px solid rgba(96,165,250,0.25);border-radius:5px;padding:12px 16px;margin-bottom:12px;">'
+      + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:#60a5fa;font-weight:700;margin-bottom:4px;">Blend Recipe — % by LPA</div>'
+      + '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;">Proportion of the finished blend from each spirit type. Defaults from the BOM; adjust for this job if needed.</div>'
+      + rowsH
+      + '<div id="lso-recipe-total" style="font-size:11px;color:var(--muted);margin-top:8px;border-top:1px solid var(--navy-border);padding-top:8px;"></div>'
+      + '</div>';
+    window._lsoUpdateRecipeTotal();
+  };
+  window._lsoOnRecipeChange = function() {
+    window._lsoBlendRecipe = window._lsoReadRecipeFromInputs();
+    window._lsoRecipeOverridden = true;
+    window._lsoUpdateRecipeTotal();
+    if (window._lsoUpdateDilutionNotes) window._lsoUpdateDilutionNotes();
+    clearTimeout(window._lsoRecipeSaveTimer);
+    window._lsoRecipeSaveTimer = setTimeout(function() {
+      if (window._lsoCurrentJobId) _lsoSaveRecipeOverride(window._lsoCurrentJobId);
+    }, 600);
+  };
+  async function _lsoSaveRecipeOverride(jobId) {
+    if (!jobId) return;
+    var rec = window._lsoBlendRecipe || [];
+    try {
+      await _lsoUpsertByJob(jobId, { blend_recipe_json: rec.length ? JSON.stringify(rec) : null });
+    } catch(e) { console.warn('LSO recipe override save failed:', e.message); }
+  }
+  window._lsoSaveRecipeOverride = _lsoSaveRecipeOverride;
+
+  // Recompute requirement/all/recipe plans from the current linked set + recipe
+  // and refresh the Dilution Scope descriptions + calc note. Does NOT rebuild the
+  // recipe editor (so it can run on every % keystroke without losing focus).
+  window._lsoUpdateDilutionNotes = function() {
+    var linked   = window._lsoAllLinkedConts || [];
+    var allConts = window._lsoContainers || [];
+    var bottAbv  = window._lsoBottlingAbv || 0;
+    var tol      = (typeof LSO_ABV_TOL !== 'undefined') ? LSO_ABV_TOL : 0.5;
+    var buf      = window.LSO_PREP_BUFFER || 0;
+    var reqLitres = window._lsoReqLitres || 0;
+
+    var planConts = linked.map(function(lc) {
+      var cont = allConts.find(function(c){ return c.id === lc.id; }) || {};
+      return {
+        reference:   cont.reference || lc.reference || '',
+        litres:      parseFloat((cont.current_litres != null ? cont.current_litres : lc.litres) || 0),
+        abv:         parseFloat((cont.abv != null ? cont.abv : lc.abv) || 0),
+        lpa:         (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null)),
+        capacity:    parseFloat(cont.capacity_litres || lc.capacity_litres || 0) || 0,
+        type:        cont.type || lc.type || '',
+        spirit_type: cont.spirit_type || lc.spirit_type || ''
+      };
+    });
+    var planReq = window._dilutionPlan(planConts, reqLitres, bottAbv, 'requirement', tol, buf);
+    var planAll = window._dilutionPlan(planConts, reqLitres, bottAbv, 'all', tol);
+
+    // Recipe (prefer live editor inputs, else stored per-job/BOM recipe).
+    var recipe = document.querySelector('#lso-blend-recipe-wrap .lso-recipe-pct')
+      ? window._lsoReadRecipeFromInputs()
+      : (window._lsoBlendRecipe || []);
+    var distinct = {};
+    planConts.forEach(function(c){ if (c.litres > 0 && c.spirit_type) distinct[c.spirit_type.trim().toLowerCase()] = 1; });
+    var recipeActive = recipe.length > 0 && Object.keys(distinct).length >= 2;
+    var recipePlan = recipeActive ? window._blendRecipePlan(planConts, recipe, reqLitres, bottAbv, tol, buf) : null;
+    if (recipePlan && !recipePlan.ok) { recipePlan = null; recipeActive = false; }
+    window._lsoRecipeActive = recipeActive;
+    window._lsoRecipePlan   = recipePlan;
+
+    if (recipeActive) {
+      window._lsoDilReqWater = recipePlan.water;
+      window._lsoDilReqFinal = recipePlan.finalLitres;
+      window._lsoDilReqSrc   = recipePlan.totalDraw;
+      window._lsoDilReqNote  = window._blendRecipeNoteHtml(recipePlan, bottAbv);
+    } else {
+      window._lsoDilReqWater = planReq.water;
+      window._lsoDilReqFinal = planReq.finalLitres;
+      window._lsoDilReqSrc   = planReq.drawLitres;
+      window._lsoDilReqNote  = planReq.receiver ? window._dilutionNoteHtml(planReq, 'requirement') : '';
+    }
+    window._lsoDilAllWater = planAll.water;
+    window._lsoDilAllFinal = planAll.finalLitres;
+    window._lsoDilAllSrc   = planConts.reduce(function(s, c){ return s + c.litres; }, 0);
+    window._lsoDilAllNote  = planAll.receiver ? window._dilutionNoteHtml(planAll, 'all') : '';
+
+    var reqDescEl = document.getElementById('lso-dil-req-desc');
+    if (reqDescEl) reqDescEl.innerHTML = window._lsoDilReqNote
+      || 'Draw only enough to meet the job volume. Remainder stays in vessel(s) at cask strength.';
+    var allDescEl = document.getElementById('lso-dil-all-desc');
+    if (allDescEl) allDescEl.innerHTML = window._lsoDilAllNote
+      || 'Draw all linked container contents and add water to reach the target ABV.';
+
+    if (window.lsoDilutionModeChange) window.lsoDilutionModeChange();
   };
 
   window._lsoRenderLinkedList = function() {
