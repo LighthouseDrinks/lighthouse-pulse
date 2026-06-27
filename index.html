@@ -494,7 +494,7 @@
     </div>
   </div>
 
-  <!-- Portal: Profile -->
+  <!-- Portal: Ask Peat -->
   <div class="portal-page" id="portal-ask-peat">
     <div class="wrapper" style="max-width:760px;">
       <div class="peat-page-wrap" style="height:calc(100vh - 140px);">
@@ -2210,6 +2210,7 @@ function showPortal(user) {
   if (emailEl) emailEl.textContent = user.email;
   if (nameEl && user.client_name) nameEl.textContent = user.client_name + ' · Client Portal';
   loadPortalData(user.client_id);
+  _initPortalRealtime(user.client_id);
 
   // Restore last-visited tab across browser refreshes (sessionStorage is
   // cleared when the tab closes, so a fresh login always lands on Summary).
@@ -2340,7 +2341,32 @@ window.doLogin = async function() {
 };
 
 // ── Sign out ─────────────────────────────────────────────────────────────────
+// ── Client portal live updates ───────────────────────────────────────────────
+// Subscribe to this client's own jobs so stage changes, new approved jobs and
+// completions surface without a manual refresh. Scoped by client_id (and RLS),
+// debounced, and torn down on logout so it never leaks across sessions.
+function _initPortalRealtime(clientId) {
+  try {
+    if (!window._sb || !clientId) return;
+    _teardownPortalRealtime();
+    var _t;
+    function refresh() { clearTimeout(_t); _t = setTimeout(function(){ loadPortalData(clientId); }, 700); }
+    window._portalRtChannel = window._sb.channel('portal_jobs_' + clientId)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs', filter: 'client_id=eq.' + clientId }, refresh)
+      .subscribe();
+  } catch(e) { window.logError && window.logError('portal realtime init', e); }
+}
+function _teardownPortalRealtime() {
+  try {
+    if (window._portalRtChannel && window._sb) {
+      window._sb.removeChannel(window._portalRtChannel);
+      window._portalRtChannel = null;
+    }
+  } catch(_){}
+}
+
 window.doLogout = async function() {
+  _teardownPortalRealtime();
   await (window._sb && window._sb.auth.signOut()).catch(function(){});
   window.CURRENT_USER = null;
   // Clear hash and reset all page state so next login starts clean
@@ -2708,7 +2734,11 @@ async function loadPortalData(clientId) {
     });
     if (tb) tb.innerHTML = rows.length ? rows.join('')
       : '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No jobs on file. Click <strong>+ Request New Job</strong> to propose your first.</td></tr>';
-  } catch(e) { window.logError('loadPortalData:jobs', e); }
+  } catch(e) {
+    window.logError('loadPortalData:jobs', e);
+    if (tb) tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#ff9c9c;padding:24px;">Couldn\u2019t load your jobs just now. Please refresh \u2014 if it keeps happening, contact Lighthouse.</td></tr>';
+    window.toast && window.toast('Could not load your jobs. Please refresh.', 'error');
+  }
 
   // BOMs table — real approved + pending/rejected submissions
   try {
@@ -2795,7 +2825,7 @@ async function loadPortalData(clientId) {
 
   // Dry goods — grouped by category, showing LIVE on-site quantity only.
   // Client can enter their own cost price per SKU; prices are persisted in
-  // localStorage keyed to client_id so they never touch Lighthouse servers.
+  // the client_dg_cost_prices table, scoped to their client_id by RLS.
   try {
     await window.loadPortalDryGoods(clientId);
   } catch(e) { window.logError('loadPortalData:dryGoods', e); }
@@ -2829,10 +2859,13 @@ function _portalFmtDate(s) {
 
 async function loadPortalSummary(clientId) {
   if (!clientId) return;
-  // Refresh projected start times from the production queue (fire-and-forget)
-  if (typeof window._refreshProjectedStarts === 'function') {
-    window._refreshProjectedStarts().catch(function(){});
-  }
+  // NOTE: previously this fired window._refreshProjectedStarts(), which
+  // PATCHed scheduled_start for ALL clients' queued jobs from a client's
+  // summary load (a global write triggered by a read, with a silent catch
+  // and a race against the "Next Scheduled" KPI). Projection recompute now
+  // belongs to the staff/schedule side only; the "Next Scheduled" KPI below
+  // no longer depends on scheduled_start (it falls back to scheduled_date /
+  // bottling_date), so the portal no longer needs to mutate jobs here.
   var FROM = window.PORTAL_DATA_FROM;
 
   // Jobs Completed (all-time; stage written as 'complete' or 'Complete' depending on path)
@@ -2931,16 +2964,27 @@ async function loadPortalSummary(clientId) {
     }
 
     var nowIso = new Date().toISOString().slice(0,10);
-    var next = await db.select('jobs',
+    // Use the effective date (scheduled_start, else scheduled_date, else
+    // bottling_date) mirroring the jobs table, so an approved job that
+    // hasn't been picked up by the projection engine yet still shows here
+    // instead of "Nothing scheduled yet".
+    var upcoming = await db.select('jobs',
       '?client_id=eq.' + clientId
       + '&stage=not.in.(complete,Complete)'
-      + '&scheduled_start=not.is.null'
-      + '&scheduled_start=gte.' + nowIso
-      + '&order=scheduled_start.asc&limit=1&select=scheduled_start,product_name,bom_id');
-    if (next && next.length) {
-      if (next[0].bom_id) { try { await window._fetchBomMapFor([next[0].bom_id]); } catch(_e) {} }
-      _portalSet('portal-kpi-next', _portalFmtDate(next[0].scheduled_start));
-      _portalSet('portal-kpi-next-sub', (window.jobLabel && window.jobLabel(next[0])) || next[0].product_name || 'Upcoming bottling date');
+      + '&order=created_at.desc'
+      + '&select=scheduled_start,scheduled_date,bottling_date,product_name,bom_id') || [];
+    var nextJob = null, nextDate = null;
+    upcoming.forEach(function(uj){
+      var d = uj.scheduled_start || uj.scheduled_date || uj.bottling_date;
+      if (!d) return;
+      var dStr = String(d).slice(0,10);
+      if (dStr < nowIso) return;
+      if (!nextDate || dStr < nextDate) { nextDate = dStr; nextJob = uj; }
+    });
+    if (nextJob) {
+      if (nextJob.bom_id) { try { await window._fetchBomMapFor([nextJob.bom_id]); } catch(_e) {} }
+      _portalSet('portal-kpi-next', _portalFmtDate(nextDate));
+      _portalSet('portal-kpi-next-sub', (window.jobLabel && window.jobLabel(nextJob)) || nextJob.product_name || 'Upcoming bottling date');
     } else {
       _portalSet('portal-kpi-next', '—');
       _portalSet('portal-kpi-next-sub', 'Nothing scheduled yet');
@@ -2981,20 +3025,6 @@ async function loadPortalSummary(clientId) {
 // NOTE: The clients table uses `email` and `phone` (NOT `contact_email` /
 // `contact_phone`). Using the wrong column names silently broke sync back
 // to the staff side — be careful if you rename fields.
-window._PORTAL_INDUSTRY_OPTIONS = [
-  'Brand Owner',
-  'Importer / Distributor',
-  'Private Label',
-  'Multiples (Grocery Retail)',
-  'On-Trade (Bars, Hotels, Restaurants)',
-  'Off-Trade (Off-Licence)',
-  'Duty Free / Travel Retail',
-  'Hospitality Group',
-  'Peer Distillery',
-  'Bottler / Contract Packer',
-  'Agency / Broker'
-];
-
 window._portalProfileFields = [
   // Section: Account header (read-only reference block)
   { type: 'section', label: 'Your Lighthouse Account' },
@@ -3395,7 +3425,7 @@ window.openPortalJobModal = async function(reviseId) {
   sel.innerHTML = '<option value="">— Loading BOMs… —</option>';
   try {
     var boms = await db.select('boms',
-      '?client_id=eq.' + clientId + '&order=product_name.asc') || [];
+      '?client_id=eq.' + clientId + '&bom_status=eq.approved&order=product_name.asc') || [];
     if (!boms.length) {
       sel.innerHTML = '<option value="">— No approved BOMs on file —</option>';
       document.getElementById('pjm-status').innerHTML = '<span style="color:#ff9c9c;">Lighthouse must approve a BOM before you can request a job.</span>';
@@ -3903,12 +3933,14 @@ window.openPortalJobView = async function(jobId) {
   if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Loading…</div>';
 
   try {
-    // Try the already-loaded portal jobs first, otherwise fetch
-    var j = (window._portalJobs || []).find(function(x){ return x.id === jobId; });
-    if (!j) {
+    // Always fetch the authoritative job so the client never sees a stale
+    // stage; fall back to the already-loaded list only if the fetch fails.
+    var j = null;
+    try {
       var rows = await window.db.select('jobs', '?id=eq.' + jobId + '&limit=1');
       j = rows && rows[0];
-    }
+    } catch(_fe) {}
+    if (!j) j = (window._portalJobs || []).find(function(x){ return x.id === jobId; });
     if (!j) { if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Job not found.</div>'; return; }
 
     var esc = window.escapeHtml || function(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
@@ -17530,9 +17562,6 @@ window.loadBoms = async function initBoms() {
       var existing = id ? TASKS.find(function(x){ return x.id === id; }) : null;
       var savedTask;
       if (id) {
-        // Reassigning clears the old owner's manual ordering position so the task
-        // falls to the bottom of the new assignee's list instead of inheriting a stale index.
-        if (existing && existing.assignee_id !== assignee_id) payload.assignee_priority_index = null;
         await db.update('job_tasks', '?id=eq.'+encodeURIComponent(id), payload);
         savedTask = Object.assign({}, existing||{}, payload, {id:id});
         var idx = TASKS.findIndex(function(x){ return x.id === id; });
@@ -17934,28 +17963,14 @@ window.loadBoms = async function initBoms() {
 
     // Sort: by due date asc (nulls last), then priority desc, then created desc
     var prank = {high:0, normal:1, low:2};
-    function byDuePriorityCreated(a,b){
+    list.sort(function(a,b){
       var ad = a.due_at ? new Date(a.due_at).getTime() : Infinity;
       var bd = b.due_at ? new Date(b.due_at).getTime() : Infinity;
       if (ad !== bd) return ad - bd;
       var p = (prank[a.priority||'normal']||1) - (prank[b.priority||'normal']||1);
       if (p !== 0) return p;
       return new Date(b.created_at||0) - new Date(a.created_at||0);
-    }
-    if (_mtState.view === 'assigned') {
-      // Personal manual ordering: tasks with an explicit priority index come
-      // first (ascending), unindexed tasks fall back to the default sort below them.
-      list.sort(function(a,b){
-        var ai = a.assignee_priority_index, bi = b.assignee_priority_index;
-        if (ai == null && bi == null) return byDuePriorityCreated(a,b);
-        if (ai == null) return 1;
-        if (bi == null) return -1;
-        if (ai !== bi) return ai - bi;
-        return byDuePriorityCreated(a,b);
-      });
-    } else {
-      list.sort(byDuePriorityCreated);
-    }
+    });
     return list;
   }
 
@@ -17975,20 +17990,10 @@ window.loadBoms = async function initBoms() {
     set('mt-kpi-week',     week_.length);
   }
 
-  function renderTaskRow(t, showReorder){
+  function renderTaskRow(t){
     var done = !!t.completed_at;
     var c = (window.CLIENTS||[]).find(function(x){return x.id===t.client_id;});
     var d = (window.DEALS||[]).find(function(x){return x.id===t.deal_id;});
-    // Per-user manual ordering arrows — only on the "Assigned to me" My Tasks view,
-    // and never for completed tasks (reordering a done item is meaningless).
-    var reorderHtml = '';
-    if (showReorder && _mtState.view === 'assigned' && !done) {
-      var arrowCss = 'background:transparent;border:1px solid var(--navy-border);color:var(--gold);width:22px;height:22px;line-height:20px;padding:0;border-radius:3px;cursor:pointer;font-size:11px;font-weight:700;font-family:Lato,sans-serif;';
-      reorderHtml = '<div style="display:flex;flex-direction:column;gap:2px;flex:0 0 auto;">'
-        + '<button title="Move up" style="' + arrowCss + '" onclick="event.stopPropagation();window.taskPriorityMove(\'' + t.id + '\',\'up\')">&#9650;</button>'
-        + '<button title="Move down" style="' + arrowCss + '" onclick="event.stopPropagation();window.taskPriorityMove(\'' + t.id + '\',\'down\')">&#9660;</button>'
-        + '</div>';
-    }
     var ctxLinks = [];
     if (d) ctxLinks.push('<span style="color:var(--gold);">' + esc(d.name||d.id) + '</span>');
     else if (c) ctxLinks.push('<span style="color:var(--blue);">' + esc(c.company||c.id) + '</span>');
@@ -18007,7 +18012,6 @@ window.loadBoms = async function initBoms() {
       + '<div style="display:flex;gap:6px;align-items:center;flex:0 0 auto;">'
       +   priorityPill(t.priority||'normal')
       +   '<span title="Assigned to ' + esc(userName(t.assignee_id)) + '">' + avatar(t.assignee_id,24) + '</span>'
-      +   reorderHtml
       + '</div>'
       + '</div>';
   }
@@ -18088,65 +18092,12 @@ window.loadBoms = async function initBoms() {
         ? ''
         : '<div style="padding:48px 20px;text-align:center;color:var(--muted);font-size:13px;">' + emptyMsg + '</div>';
     } else {
-      crmHtml = list.map(function(t){ return renderTaskRow(t, true); }).join('');
+      crmHtml = list.map(renderTaskRow).join('');
     }
     host.innerHTML = opsHtml + crmHtml;
     if (opsHtml) bindOpsRows(host);
   }
   window.renderMyTasks = renderMyTasks;
-
-  // Per-user manual reordering of the "Assigned to me" list. The neighbour is found
-  // within the current user's in-memory assigned list (NOT a global query), since
-  // assignee_priority_index is scoped per assignee. Swapping renumbers the whole
-  // list to dense 0..n-1 indexes so positions stay unique and gap-free.
-  window.taskPriorityMove = async function(taskId, dir){
-    if (window._taskReorderBusy) return;
-    var me = meId();
-    var clicked = TASKS.find(function(x){ return x.id === taskId; });
-    if (!clicked || clicked.assignee_id !== me || clicked.completed_at) return;
-
-    var prank = {high:0, normal:1, low:2};
-    var ordered = TASKS.filter(function(t){ return !t.completed_at && t.assignee_id === me; });
-    if (ordered.length < 2) return;
-    ordered.sort(function(a,b){
-      var ai = a.assignee_priority_index, bi = b.assignee_priority_index;
-      if (ai != null || bi != null) {
-        if (ai == null) return 1;
-        if (bi == null) return -1;
-        if (ai !== bi) return ai - bi;
-      }
-      var ad = a.due_at ? new Date(a.due_at).getTime() : Infinity;
-      var bd = b.due_at ? new Date(b.due_at).getTime() : Infinity;
-      if (ad !== bd) return ad - bd;
-      var p = (prank[a.priority||'normal']||1) - (prank[b.priority||'normal']||1);
-      if (p !== 0) return p;
-      return new Date(b.created_at||0) - new Date(a.created_at||0);
-    });
-
-    var pos = ordered.indexOf(clicked);
-    var target = dir === 'up' ? pos - 1 : pos + 1;
-    if (target < 0 || target >= ordered.length) return;   // already at the edge
-
-    window._taskReorderBusy = true;
-    var prev = {};
-    ordered.forEach(function(t){ prev[t.id] = t.assignee_priority_index; });
-    var tmp = ordered[pos]; ordered[pos] = ordered[target]; ordered[target] = tmp;
-    ordered.forEach(function(t, i){ t.assignee_priority_index = i; });
-
-    var changed = ordered.filter(function(t){ return prev[t.id] !== t.assignee_priority_index; });
-    renderMyTasks();   // optimistic — ordered items are live refs into TASKS
-
-    try {
-      for (var i = 0; i < changed.length; i++) {
-        await db.update('job_tasks', '?id=eq.' + encodeURIComponent(changed[i].id), { assignee_priority_index: changed[i].assignee_priority_index });
-      }
-    } catch (e) {
-      window.toast && window.toast('Could not reorder task: ' + (e && e.message || e), 'error');
-      try { await reloadTasks(); renderMyTasks(); } catch(_) {}
-    } finally {
-      window._taskReorderBusy = false;
-    }
-  };
 
   function bindMyTasksUI(){
     var page = document.getElementById('page-my-tasks'); if (!page) return;
@@ -50999,6 +50950,18 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       return r.json();
     });
   }
+  // Token-scoped RPCs replace direct anon table access (see approval_token_rpcs.sql).
+  function apiRpc(fn, args) {
+    return fetch(SUPA + '/rest/v1/rpc/' + fn, {
+      method: 'POST',
+      headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY,
+                 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(args || {})
+    }).then(function(r){
+      if (!r.ok) return r.text().then(function(t){ throw new Error(t || r.statusText); });
+      return r.json();
+    });
+  }
 
   // The email Edge Function is public with the anon key — the page can send
   // the approval-notification trio email directly from the browser.
@@ -51133,12 +51096,12 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (errEl) errEl.textContent = '';
 
     try {
-      var updated = await apiPatch('job_label_approvals?approval_token=eq.' + _state.rec.approval_token, {
-        client_decision: decision,
-        client_decided_at: new Date().toISOString(),
-        client_approver_name: name,
-        client_notes: notes || null,
-        client_user_agent: navigator.userAgent || null
+      var updated = await apiRpc('submit_label_approval', {
+        p_token: _state.rec.approval_token,
+        p_decision: decision,
+        p_name: name,
+        p_notes: notes || null,
+        p_user_agent: navigator.userAgent || null
       });
       _state.rec = (updated && updated[0]) || _state.rec;
 
@@ -51185,7 +51148,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 
   window._labelApprovalBoot = async function(token) {
     try {
-      var rows = await apiGet('job_label_approvals?approval_token=eq.' + encodeURIComponent(token) + '&select=*&limit=1');
+      var rows = await apiRpc('get_label_approval', { p_token: token });
       if (!rows || !rows.length) { renderError('This approval link was not found.'); return; }
       _state.rec = rows[0];
       // Load the job (for product/ABV/volume etc.) — by PostgREST text id
@@ -51230,6 +51193,17 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       method: 'PATCH',
       headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + SUPA_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json', 'Prefer': 'return=representation' },
       body: JSON.stringify(body)
+    }).then(function(r) {
+      if (!r.ok) return r.text().then(function(t){ throw new Error(t || r.statusText); });
+      return r.json();
+    });
+  }
+  // Token-scoped RPCs replace direct anon table access (see approval_token_rpcs.sql).
+  function apiRpc(fn, args) {
+    return fetch(SUPA_URL + '/rest/v1/rpc/' + fn, {
+      method: 'POST',
+      headers: { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + SUPA_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(args || {})
     }).then(function(r) {
       if (!r.ok) return r.text().then(function(t){ throw new Error(t || r.statusText); });
       return r.json();
@@ -51363,12 +51337,12 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (confirmBtn) confirmBtn.disabled = true;
     if (flagBtn) flagBtn.disabled = true;
 
-    apiPatch('job_bom_approvals?approval_token=eq.' + encodeURIComponent(rec.approval_token), {
-      client_decision: decision,
-      client_decided_at: new Date().toISOString(),
-      client_approver_name: name,
-      client_notes: notes || null,
-      client_user_agent: navigator.userAgent || null
+    apiRpc('submit_bom_approval', {
+      p_token: rec.approval_token,
+      p_decision: decision,
+      p_name: name,
+      p_notes: notes || null,
+      p_user_agent: navigator.userAgent || null
     }).then(function() {
       // Notify staff via edge function
       try {
@@ -51406,7 +51380,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 
   window._bomApprovalBoot = async function(token) {
     try {
-      var rows = await apiGet('job_bom_approvals?approval_token=eq.' + encodeURIComponent(token) + '&select=*&limit=1');
+      var rows = await apiRpc('get_bom_approval', { p_token: token });
       if (!rows || !rows.length) { renderBomError('This confirmation link was not found or has expired. Please contact Lighthouse.'); return; }
       var rec = rows[0];
       // Use snapshot data stored at send time — no need to query restricted tables
