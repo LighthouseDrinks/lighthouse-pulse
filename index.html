@@ -7219,6 +7219,11 @@ window.copyInviteLink = function() {
         </select>
         <div class="field-hint">The finished product name (e.g. <em>Ardfort Standard Blend</em>). If it's a blend, set its spirit breakdown in Blend Recipe below.</div>
       </div>
+      <div class="mfield span2">
+        <label>Source Spirit Type <span style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--muted);font-size:11px;">— single-spirit products</span></label>
+        <input type="text" id="bm-source-spirit" list="bm-spirit-type-list" placeholder="e.g. Single Malt ex Bourbon" autocomplete="off" style="width:100%;box-sizing:border-box;">
+        <div class="field-hint">For single-spirit products: the spirit type a vessel must match to be linked at sign-off. Leave blank for blends &mdash; those are enforced from the Blend Recipe below.</div>
+      </div>
     </div>
 
     <!-- SECTION 2b: Blend Recipe (optional, multi-spirit blends) -->
@@ -11363,6 +11368,7 @@ async function openBomModal(editId) {
   // Reset blend recipe rows (edit branch re-hydrates below) + load spirit datalist.
   if (window.bmResetBlendRecipe) window.bmResetBlendRecipe([]);
   if (window.bmPopulateSpiritTypes) window.bmPopulateSpiritTypes();
+  if (el('bm-source-spirit')) el('bm-source-spirit').value = '';
 
   // Default the Lighthouse-stock toggle off — the edit branch re-detects below.
   window._bomIncludeLhStock = false;
@@ -11415,6 +11421,7 @@ async function openBomModal(editId) {
 
       // Hydrate blend recipe rows from the stored BOM
       if (window.bmResetBlendRecipe) window.bmResetBlendRecipe(b.blendRecipe || []);
+      if (el('bm-source-spirit')) el('bm-source-spirit').value = b.sourceSpiritType || '';
 
       // Detect whether this draft uses any shared Lighthouse (CLI-000) stock. If
       // so, auto-enable the toggle so onBomClientChange loads those goods into the
@@ -12021,7 +12028,8 @@ async function saveBomDraft() {
     pallet:        gv('bm-pallet')          || null, casesLayer:     gv('bm-cases-layer')      || null,
     layersPallet:  gv('bm-layers-pallet')   || null, labelPosition:  gv('bm-label-position')   || null,
     notes:         gv('bm-notes')           || null,
-    blendRecipe:   _blendRecipe.length ? _blendRecipe : null
+    blendRecipe:   _blendRecipe.length ? _blendRecipe : null,
+    sourceSpiritType: gv('bm-source-spirit') || null
   };
 
   var dbPayload = {
@@ -12085,7 +12093,7 @@ async function saveBomDraft() {
       bottlesPerShipper: gv('bm-bottles-per-shipper'),
       bph: gv('bm-bph'), bottlingAbv: abv,
       chill: gv('bm-chill-bom'), colour: gv('bm-colouring-bom'), colourSpec: gv('bm-colour-spec-bom'),
-      blendRecipe: _blendRecipe.slice(),
+      blendRecipe: _blendRecipe.slice(), sourceSpiritType: gv('bm-source-spirit') || '',
       labelBarcode: gv('bm-label-barcode'), shipperBarcode: gv('bm-shipper-barcode'),
       intendedMarket: gv('bm-intended-market'), dutyStamp: gv('bm-duty-stamp'),
       annex2: gv('bm-annex2'), lotNumber: gv('bm-lot-number'),
@@ -12169,7 +12177,8 @@ async function saveBom() {
     pallet:        gv('bm-pallet')          || null, casesLayer:     gv('bm-cases-layer')      || null,
     layersPallet:  gv('bm-layers-pallet')   || null, labelPosition:  gv('bm-label-position')   || null,
     notes:         gv('bm-notes')           || null,
-    blendRecipe:   _blendRecipe.length ? _blendRecipe : null
+    blendRecipe:   _blendRecipe.length ? _blendRecipe : null,
+    sourceSpiritType: gv('bm-source-spirit') || null
   };
 
   var dbPayload = {
@@ -12235,7 +12244,7 @@ async function saveBom() {
       chill: gv('bm-chill-bom'),
       colour: gv('bm-colouring-bom'),
       colourSpec: gv('bm-colour-spec-bom'),
-      blendRecipe: _blendRecipe.slice(),
+      blendRecipe: _blendRecipe.slice(), sourceSpiritType: gv('bm-source-spirit') || '',
       labelBarcode: gv('bm-label-barcode'), shipperBarcode: gv('bm-shipper-barcode'),
       intendedMarket: gv('bm-intended-market'), dutyStamp: gv('bm-duty-stamp'),
       annex2: gv('bm-annex2'), lotNumber: gv('bm-lot-number'),
@@ -13042,6 +13051,7 @@ window.loadBoms = async function initBoms() {
         colour:           r.colouring ? 'yes' : 'no',
         colourSpec:       r.colour_spec || '',
         blendRecipe:      Array.isArray(ai.blendRecipe) ? ai.blendRecipe : [],
+        sourceSpiritType: ai.sourceSpiritType || '',
         labelBarcode:     ai.labelBarcode   || '',
         shipperBarcode:   ai.shipperBarcode || '',
         intendedMarket:   ai.intendedMarket || '',
@@ -36102,6 +36112,22 @@ window.saveAdjModal = async function() {
       // Blend recipe state (per-job override default-loaded from BOM)
       window._lsoBlendRecipe      = _blendRecipe.slice();
       window._lsoBlendRecipeBom   = (_bomAdditionalInfo && Array.isArray(_bomAdditionalInfo.blendRecipe)) ? _bomAdditionalInfo.blendRecipe.slice() : [];
+      // Allowed source spirit types for THIS job's BOM: blend recipe components
+      // (per-job override or BOM default) plus any single-spirit Source Spirit
+      // Type. Used to enforce that a linked vessel matches the BOM at link time.
+      // Empty set => legacy BOM with nothing declared => manual confirm fallback.
+      window._lsoNormSpirit = window._lsoNormSpirit || function(s){ return String(s == null ? '' : s).trim().toLowerCase(); };
+      var _allowedSpirits = [], _allowedLabels = [], _allowedSeen = {};
+      function _pushAllowed(name) {
+        var k = window._lsoNormSpirit(name);
+        if (k && !_allowedSeen[k]) { _allowedSeen[k] = 1; _allowedSpirits.push(k); _allowedLabels.push(String(name).trim()); }
+      }
+      (_blendRecipe || []).forEach(function(r){ if (r) _pushAllowed(r.spirit_type); });
+      if (_bomAdditionalInfo && _bomAdditionalInfo.sourceSpiritType) _pushAllowed(_bomAdditionalInfo.sourceSpiritType);
+      window._lsoAllowedSpiritTypes  = _allowedSpirits;
+      window._lsoAllowedSpiritLabels = _allowedLabels;
+      window._lsoSpiritOverride      = null;
+      window._lsoCanSpiritOverride   = window.isExec() || ((window.CURRENT_USER && window.CURRENT_USER.role) === 'warehouse_liquid') || (window.canDo && window.canDo('jobs_spirit_override'));
       window._lsoRecipeActive     = _recipeActive;
       window._lsoRecipePlan       = _recipePlan;
       window._lsoRecipeOverridden = false;
@@ -36318,6 +36344,12 @@ window.saveAdjModal = async function() {
           var lcIds = lcParsed.map(function(lc){ return lc.id; }).filter(Boolean);
           var cRows = await supaGet('liquid_containers?id=in.(' + lcIds.join(',') + ')&select=*');
           linkedContainers = cRows || [];
+          // Carry the per-link spirit_override (stored only in linked_containers_json)
+          // onto the container row so the Work Order can flag authorised overrides.
+          linkedContainers.forEach(function(cr){
+            var src = lcParsed.find(function(lc){ return lc.id === cr.id; });
+            if (src && src.spirit_override) cr.spirit_override = src.spirit_override;
+          });
         }
       }
     } catch(e) { /* non-critical */ }
@@ -36499,6 +36531,12 @@ window.saveAdjModal = async function() {
         h += '</div>';
         if (c.cbw_rotation) {
           h += '<div style="font-size:11px;color:#555;margin-top:8px;"><strong>CBW Rotation:</strong> ' + esc(c.cbw_rotation) + '</div>';
+        }
+        if (c.spirit_override) {
+          h += '<div style="font-size:10px;color:#856404;background:#fffaf0;border:1px solid #ffe0a3;border-radius:4px;padding:6px 10px;margin-top:8px;line-height:1.45;">'
+            + '&#9888; <strong>Spirit-type override</strong> &mdash; authorised by ' + esc(c.spirit_override.by || 'unknown')
+            + (c.spirit_override.reason ? ': ' + esc(c.spirit_override.reason) : '')
+            + '. This vessel does not match the BOM spirit type.</div>';
         }
         h += '</div>';
       });
@@ -36784,35 +36822,90 @@ window.saveAdjModal = async function() {
       }
     }
 
-    // ── Spirit type confirmation ──────────────────────────────────────────────
-    // The BOM has no machine-readable spirit_type, so we show a manual confirmation
-    // prompt whenever the container has a spirit type set, surfacing what was found
-    // against the BOM liquid description for the operator to verify visually.
+    // ── Spirit type match enforcement ─────────────────────────────────────────
+    // When the BOM declares allowed spirit type(s) (blend recipe components or a
+    // single-spirit Source Spirit Type), a vessel may only be linked if its
+    // spirit_type matches. Mismatches are blocked; MD/OD and the liquid manager
+    // can authorise an override with a typed reason. When the BOM declares
+    // nothing (legacy), fall back to the manual confirm checkbox.
     if (spiritWarn) {
-      var liqDesc = window._lsoLiquidSkuDesc;
-      if (c.spirit_type) {
-        spiritWarn.style.display = '';
-        var descNote = liqDesc
-          ? ' BOM specifies: <strong style="color:var(--gold);">' + window.escapeHtml(liqDesc) + '</strong>.'
-          : '';
-        spiritWarn.innerHTML = '<div style="padding:8px 12px;background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.3);border-radius:4px;font-size:11px;color:var(--amber);">'
-          + '&#9432; Container spirit type: <strong style="color:' + spiritColour + ';">' + window.escapeHtml(spiritDisp) + '</strong>.' + descNote
-          + ' <label style="display:inline-flex;align-items:center;gap:6px;margin-left:10px;cursor:pointer;">'
-          + '<input type="checkbox" id="lso-spirit-confirm" onchange="window.lsoSpiritConfirmChange()" style="accent-color:var(--green);width:14px;height:14px;">'
-          + '<span style="color:var(--white);font-weight:600;">Spirit type confirmed &#10003;</span></label></div>';
-        // Button stays disabled until checkbox is ticked
-        if (linkBtn) linkBtn.disabled = true;
+      var allowedN = window._lsoAllowedSpiritTypes || [];
+      var allowedL = window._lsoAllowedSpiritLabels || [];
+      var _norm    = window._lsoNormSpirit || function(s){ return String(s == null ? '' : s).trim().toLowerCase(); };
+      var liqDesc  = window._lsoLiquidSkuDesc;
+      window._lsoSpiritOverride = null;
+      if (allowedN.length === 0) {
+        // Legacy BOM with no declared spirit type — manual confirmation checkbox.
+        if (c.spirit_type) {
+          spiritWarn.style.display = '';
+          var descNote = liqDesc
+            ? ' BOM specifies: <strong style="color:var(--gold);">' + window.escapeHtml(liqDesc) + '</strong>.'
+            : '';
+          spiritWarn.innerHTML = '<div style="padding:8px 12px;background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.3);border-radius:4px;font-size:11px;color:var(--amber);">'
+            + '&#9432; Container spirit type: <strong style="color:' + spiritColour + ';">' + window.escapeHtml(spiritDisp) + '</strong>.' + descNote
+            + ' <label style="display:inline-flex;align-items:center;gap:6px;margin-left:10px;cursor:pointer;">'
+            + '<input type="checkbox" id="lso-spirit-confirm" onchange="window.lsoSpiritConfirmChange()" style="accent-color:var(--green);width:14px;height:14px;">'
+            + '<span style="color:var(--white);font-weight:600;">Spirit type confirmed &#10003;</span></label></div>';
+          if (linkBtn) linkBtn.disabled = true;
+        } else {
+          spiritWarn.style.display = 'none';
+          if (linkBtn) linkBtn.disabled = false;
+        }
       } else {
-        spiritWarn.style.display = 'none';
-        // No spirit type on this container — button can be enabled straight away
-        if (linkBtn) linkBtn.disabled = false;
+        // Enforced: the vessel must match one of the BOM's allowed spirit types.
+        spiritWarn.style.display = '';
+        var allowedTxt  = allowedL.length ? allowedL.map(function(s){ return window.escapeHtml(s); }).join(', ') : '(none)';
+        var matchSpirit = !!(c.spirit_type && allowedN.indexOf(_norm(c.spirit_type)) >= 0);
+        if (matchSpirit) {
+          spiritWarn.innerHTML = '<div style="padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;font-size:11px;color:var(--green);">'
+            + '&#10003; Spirit type <strong>' + window.escapeHtml(spiritDisp) + '</strong> matches the BOM.</div>';
+          if (linkBtn) linkBtn.disabled = false;
+        } else {
+          var foundTxt = c.spirit_type ? window.escapeHtml(spiritDisp) : 'none set';
+          var html = '<div style="padding:8px 12px;background:rgba(224,87,87,0.1);border:1px solid rgba(224,87,87,0.45);border-radius:4px;font-size:11px;color:var(--red);">'
+            + '&#9888; <strong>Spirit type does not match the BOM.</strong> Vessel is <strong>' + foundTxt + '</strong>; this BOM allows <strong>' + allowedTxt + '</strong>. Linking is blocked.';
+          if (window._lsoCanSpiritOverride) {
+            html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(224,87,87,0.3);">'
+              + '<div style="color:var(--amber);font-weight:600;margin-bottom:4px;">Manager override</div>'
+              + '<textarea id="lso-spirit-ovr-reason" rows="2" placeholder="Reason for linking a non-matching vessel (required)" style="width:100%;box-sizing:border-box;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);font-family:Lato,sans-serif;font-size:11px;border-radius:3px;padding:6px 8px;"></textarea>'
+              + '<button type="button" onclick="window.lsoAuthoriseSpiritOverride()" style="margin-top:6px;background:transparent;border:1px solid var(--amber);color:var(--amber);font-size:11px;font-weight:700;padding:5px 12px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Authorise override</button>'
+              + '</div>';
+          }
+          html += '</div>';
+          spiritWarn.innerHTML = html;
+          if (linkBtn) linkBtn.disabled = true;
+        }
       }
-    } else {
-      // spiritWarn element not present — enable the button
-      if (linkBtn) linkBtn.disabled = false;
+    } else if (linkBtn) {
+      linkBtn.disabled = false;
     }
+  };
 
-    // (linkBtn already handled inside the spiritWarn branches above)
+  // Manager-authorised override for a non-matching spirit type. Requires a typed
+  // reason; records who/when so it can be persisted against the job + printed.
+  window.lsoAuthoriseSpiritOverride = function() {
+    var ta = document.getElementById('lso-spirit-ovr-reason');
+    var reason = ta ? (ta.value || '').trim() : '';
+    if (!reason) { window.toast && window.toast('Enter a reason to authorise the override.', 'error'); if (ta) ta.focus(); return; }
+    var sel = document.getElementById('lso-container-sel');
+    var cid = sel ? sel.value : '';
+    var c = (window._lsoActiveContainers || []).find(function(x){ return x.id === cid; });
+    var by = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email || window.CURRENT_USER.role)) || 'unknown';
+    window._lsoSpiritOverride = {
+      reason: reason, by: by, at: new Date().toISOString(),
+      found: (c && c.spirit_type) || '',
+      allowed: (window._lsoAllowedSpiritLabels || []).slice(),
+      containerId: cid
+    };
+    var btn = document.getElementById('lso-link-btn');
+    if (btn) btn.disabled = false;
+    var sw = document.getElementById('lso-spirit-warn');
+    if (sw) {
+      sw.innerHTML = '<div style="padding:8px 12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.45);border-radius:4px;font-size:11px;color:var(--amber);">'
+        + '&#9888; Override authorised by <strong>' + window.escapeHtml(by) + '</strong> — ' + window.escapeHtml(reason)
+        + '<br>You may now link this non-matching vessel; the override is recorded against the job.</div>';
+    }
+    window.toast && window.toast('Spirit-type override authorised.', 'success');
   };
 
   // Called when the spirit-confirm checkbox changes — enables/disables the Add button
@@ -36917,11 +37010,30 @@ window.saveAdjModal = async function() {
     var c = (window._lsoActiveContainers||[]).find(function(x){ return x.id === cid; });
     if (!c) return;
 
-    // Guard: if the spirit-confirm checkbox is visible and not checked, block
-    var confirmCb = document.getElementById('lso-spirit-confirm');
-    if (confirmCb && !confirmCb.checked) {
-      window.toast && window.toast('Please confirm the spirit type before adding this container.', 'error');
-      return;
+    // Guard: enforce spirit-type match when the BOM declares allowed types.
+    // Hard guard mirroring the UI so a vessel can't slip through if the UI was
+    // bypassed. Falls back to the legacy confirm-checkbox for legacy BOMs.
+    var _allowedN = window._lsoAllowedSpiritTypes || [];
+    var _spOverride = null;
+    if (_allowedN.length) {
+      var _normLink = window._lsoNormSpirit || function(s){ return String(s == null ? '' : s).trim().toLowerCase(); };
+      var _isMatch  = !!(c.spirit_type && _allowedN.indexOf(_normLink(c.spirit_type)) >= 0);
+      if (!_isMatch) {
+        var _ov = window._lsoSpiritOverride;
+        if (_ov && _ov.reason && _ov.containerId === cid) {
+          _spOverride = _ov;
+        } else {
+          window.toast && window.toast('Spirit type does not match the BOM — linking blocked.', 'error');
+          return;
+        }
+      }
+    } else {
+      // Legacy: if the spirit-confirm checkbox is visible and not checked, block.
+      var confirmCb = document.getElementById('lso-spirit-confirm');
+      if (confirmCb && !confirmCb.checked) {
+        window.toast && window.toast('Please confirm the spirit type before adding this container.', 'error');
+        return;
+      }
     }
 
     // Add to in-memory list
@@ -36931,13 +37043,17 @@ window.saveAdjModal = async function() {
     }
     // Snapshot current_litres, abv, lpa and reference at link time — used as "Before job"
     // figures in the completion deduction modal, so stale live values don't corrupt the ledger
-    window._lsoAllLinkedConts.push({
+    var _linkEntry = {
       id:        cid,
       reference: c.reference || '',
       litres:    parseFloat(c.current_litres||0),
       abv:       parseFloat(c.abv||0),
-      lpa:       parseFloat(c.current_lpa||0)
-    });
+      lpa:       parseFloat(c.current_lpa||0),
+      spirit_type: c.spirit_type || ''
+    };
+    if (_spOverride) _linkEntry.spirit_override = _spOverride;
+    window._lsoAllLinkedConts.push(_linkEntry);
+    window._lsoSpiritOverride = null;
 
     // Auto-fill ABV from first container only
     if (window._lsoAllLinkedConts.length === 1) {
@@ -37204,9 +37320,18 @@ window.saveAdjModal = async function() {
       }
       // Liquid-identity badge (register membership + BOM liquid description)
       if (cont && window._lsoLiquidBadge) abvBadge += window._lsoLiquidBadge(cont, window._lsoLiquidSkuDesc);
-      return '<div class="lso-linked-row" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
+      // Spirit-type override badge — flags a vessel linked despite not matching the BOM.
+      var ovrRow = '';
+      if (lc.spirit_override) {
+        var _ovr = lc.spirit_override;
+        ovrRow = '<div style="margin-top:5px;font-size:10px;font-weight:600;color:var(--amber);background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.35);border-radius:3px;padding:4px 8px;">'
+          + '&#9888; Spirit override &mdash; ' + window.escapeHtml(_ovr.by || 'unknown') + ': ' + window.escapeHtml(_ovr.reason || '') + '</div>';
+      }
+      return '<div class="lso-linked-row" style="padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">'
         + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + abvBadge + '</span>'
         + (!_locked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" title="Delink this container from the job" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:600;">&#10005; Delink</button>' : '')
+        + '</div>' + ovrRow
         + '</div>';
     }).join('');
 
@@ -47578,6 +47703,7 @@ window.saveAdjModal = async function() {
     { key:'jobs_signoff_liquid',label:'Sign off liquid',             category:'Jobs' },
     { key:'jobs_signoff_quality',label:'Sign off quality',           category:'Jobs' },
     { key:'jobs_signoff_components',label:'Sign off components',     category:'Jobs' },
+    { key:'jobs_spirit_override',label:'Override spirit-type match when linking liquid', category:'Jobs' },
     { key:'jobs_edit_supply_chain', label:'Edit Supply Chain (PO, exclude items)', category:'Jobs' },
     { key:'boms_edit',          label:'Create & edit BOMs',          category:'BOMs' },
     { key:'boms_lock',          label:'Approve & lock BOMs',         category:'BOMs' },
