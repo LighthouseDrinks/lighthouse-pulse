@@ -35577,8 +35577,23 @@ window.saveAdjModal = async function() {
       if (!isLocked) {
         // Container selector for adding more
         var _alreadyLinkedIds = _linkedConts.map(function(lc){ return lc.id; });
+        // Defensive de-dup: collapse any canonical-equivalent rows (e.g. 'IBC050'
+        // vs 'IBC-050') so the same physical vessel never appears twice. Prefer the
+        // row carrying liquid, then a dash-formatted reference, then the earliest.
+        var _canon = window._canonVesselId || function(s){ return String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9]/g,''); };
+        var _bestByCanon = {};
+        _activeConts.forEach(function(c){
+          var k = _canon(c.reference);
+          var prev = _bestByCanon[k];
+          if (!prev) { _bestByCanon[k] = c; return; }
+          var cL = parseFloat(c.current_litres||0), pL = parseFloat(prev.current_litres||0);
+          if (cL !== pL) { if (cL > pL) _bestByCanon[k] = c; return; }
+          var cDash = /-/.test(c.reference||''), pDash = /-/.test(prev.reference||'');
+          if (cDash !== pDash && cDash) _bestByCanon[k] = c;
+        });
+        var _dedupConts = Object.keys(_bestByCanon).map(function(k){ return _bestByCanon[k]; });
         var _conOptH = '<option value="">— Select a container (any strength) —</option>'
-          + _activeConts.filter(function(c){ return _alreadyLinkedIds.indexOf(c.id) === -1; }).map(function(c){
+          + _dedupConts.filter(function(c){ return _alreadyLinkedIds.indexOf(c.id) === -1; }).map(function(c){
               var _lbl_litres = parseFloat(c.current_litres||0) > 0 ? parseFloat(c.current_litres).toFixed(0) + 'L' : 'no liquid tracked';
               var lbl = c.reference + ' [' + (c.type==='ibc'?'IBC':c.type) + '] — ' + (c.spirit_type||'—') + ' — ' + _lbl_litres + ' @ ' + (c.abv||'?') + '%' + (c.cbw_rotation?' · '+c.cbw_rotation:'');
               return '<option value="' + c.id + '">' + window.escapeHtml(lbl) + '</option>';
@@ -42804,6 +42819,23 @@ window.saveAdjModal = async function() {
   // collapse to one key. Used to dedupe destination lists and to block duplicate IDs.
   window._canonVesselId = function(s){ return String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9]/g, ''); };
 
+  // Find an existing non-archived liquid_containers row whose reference is the
+  // canonical equivalent of `ref` (e.g. 'IBC050' matches 'IBC-050'). Used to
+  // reuse a vessel's container instead of inserting a duplicate twin row — the
+  // app-side complement to the DB's partial canonical-unique index. Prefers the
+  // row carrying liquid. Returns the row (with id/reference) or null.
+  window._findCanonContainer = async function(ref){
+    var canon = window._canonVesselId(ref);
+    if (!canon) return null;
+    try {
+      var rows = await window.db.select('liquid_containers', '?select=id,reference,current_litres&archived=is.false');
+      var matches = (rows || []).filter(function(c){ return window._canonVesselId(c.reference) === canon; });
+      if (!matches.length) return null;
+      matches.sort(function(a,b){ return parseFloat(b.current_litres||0) - parseFloat(a.current_litres||0); });
+      return matches[0];
+    } catch(e) { return null; }
+  };
+
   // Unified label for an empty destination vessel (batch-backed or registry-only),
   // e.g. "IBC-083  [IBC]  empty  ·  1,000L  ·  Warehouse 4".
   window._emptyVesselLabel = function(ref, type, capacity, location){
@@ -42930,6 +42962,11 @@ window.saveAdjModal = async function() {
     var vessel   = window._vrVessels && window._vrVessels.find(function(v){ return v.id === vesselId; });
     if (!vessel) return null;
     try {
+      // Reuse an existing container for this vessel if one already exists under a
+      // canonical-equivalent reference (e.g. 'IBC050' vs 'IBC-050') — never create
+      // a duplicate twin row.
+      var _existing = await window._findCanonContainer(vessel.id);
+      if (_existing && _existing.id) return _existing.id;
       // Create empty container record for this vessel
       var payload = {
         type:            vessel.vessel_type,
@@ -43015,6 +43052,10 @@ window.saveAdjModal = async function() {
         payload.is_client_vessel    = true;
         payload.client_vessel_label = code;
       } else {
+        // Reuse an existing canonical-equivalent container (e.g. 'IBC050' vs
+        // 'IBC-050') rather than inserting a duplicate twin.
+        var _dupCont = await window._findCanonContainer(code);
+        if (_dupCont && _dupCont.id) return _dupCont.id;
         var vesselCode = await _ensureVessel(code, type, capacity, location, createdSink && createdSink.vessels);
         if (!vesselCode) {
           window.toast && window.toast('Could not register vessel "' + code + '". Check for duplicates and try again.', 'error');
