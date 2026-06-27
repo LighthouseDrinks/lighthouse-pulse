@@ -17530,6 +17530,9 @@ window.loadBoms = async function initBoms() {
       var existing = id ? TASKS.find(function(x){ return x.id === id; }) : null;
       var savedTask;
       if (id) {
+        // Reassigning clears the old owner's manual ordering position so the task
+        // falls to the bottom of the new assignee's list instead of inheriting a stale index.
+        if (existing && existing.assignee_id !== assignee_id) payload.assignee_priority_index = null;
         await db.update('job_tasks', '?id=eq.'+encodeURIComponent(id), payload);
         savedTask = Object.assign({}, existing||{}, payload, {id:id});
         var idx = TASKS.findIndex(function(x){ return x.id === id; });
@@ -17931,14 +17934,28 @@ window.loadBoms = async function initBoms() {
 
     // Sort: by due date asc (nulls last), then priority desc, then created desc
     var prank = {high:0, normal:1, low:2};
-    list.sort(function(a,b){
+    function byDuePriorityCreated(a,b){
       var ad = a.due_at ? new Date(a.due_at).getTime() : Infinity;
       var bd = b.due_at ? new Date(b.due_at).getTime() : Infinity;
       if (ad !== bd) return ad - bd;
       var p = (prank[a.priority||'normal']||1) - (prank[b.priority||'normal']||1);
       if (p !== 0) return p;
       return new Date(b.created_at||0) - new Date(a.created_at||0);
-    });
+    }
+    if (_mtState.view === 'assigned') {
+      // Personal manual ordering: tasks with an explicit priority index come
+      // first (ascending), unindexed tasks fall back to the default sort below them.
+      list.sort(function(a,b){
+        var ai = a.assignee_priority_index, bi = b.assignee_priority_index;
+        if (ai == null && bi == null) return byDuePriorityCreated(a,b);
+        if (ai == null) return 1;
+        if (bi == null) return -1;
+        if (ai !== bi) return ai - bi;
+        return byDuePriorityCreated(a,b);
+      });
+    } else {
+      list.sort(byDuePriorityCreated);
+    }
     return list;
   }
 
@@ -17958,10 +17975,20 @@ window.loadBoms = async function initBoms() {
     set('mt-kpi-week',     week_.length);
   }
 
-  function renderTaskRow(t){
+  function renderTaskRow(t, showReorder){
     var done = !!t.completed_at;
     var c = (window.CLIENTS||[]).find(function(x){return x.id===t.client_id;});
     var d = (window.DEALS||[]).find(function(x){return x.id===t.deal_id;});
+    // Per-user manual ordering arrows — only on the "Assigned to me" My Tasks view,
+    // and never for completed tasks (reordering a done item is meaningless).
+    var reorderHtml = '';
+    if (showReorder && _mtState.view === 'assigned' && !done) {
+      var arrowCss = 'background:transparent;border:1px solid var(--navy-border);color:var(--gold);width:22px;height:22px;line-height:20px;padding:0;border-radius:3px;cursor:pointer;font-size:11px;font-weight:700;font-family:Lato,sans-serif;';
+      reorderHtml = '<div style="display:flex;flex-direction:column;gap:2px;flex:0 0 auto;">'
+        + '<button title="Move up" style="' + arrowCss + '" onclick="event.stopPropagation();window.taskPriorityMove(\'' + t.id + '\',\'up\')">&#9650;</button>'
+        + '<button title="Move down" style="' + arrowCss + '" onclick="event.stopPropagation();window.taskPriorityMove(\'' + t.id + '\',\'down\')">&#9660;</button>'
+        + '</div>';
+    }
     var ctxLinks = [];
     if (d) ctxLinks.push('<span style="color:var(--gold);">' + esc(d.name||d.id) + '</span>');
     else if (c) ctxLinks.push('<span style="color:var(--blue);">' + esc(c.company||c.id) + '</span>');
@@ -17980,6 +18007,7 @@ window.loadBoms = async function initBoms() {
       + '<div style="display:flex;gap:6px;align-items:center;flex:0 0 auto;">'
       +   priorityPill(t.priority||'normal')
       +   '<span title="Assigned to ' + esc(userName(t.assignee_id)) + '">' + avatar(t.assignee_id,24) + '</span>'
+      +   reorderHtml
       + '</div>'
       + '</div>';
   }
@@ -18060,12 +18088,65 @@ window.loadBoms = async function initBoms() {
         ? ''
         : '<div style="padding:48px 20px;text-align:center;color:var(--muted);font-size:13px;">' + emptyMsg + '</div>';
     } else {
-      crmHtml = list.map(renderTaskRow).join('');
+      crmHtml = list.map(function(t){ return renderTaskRow(t, true); }).join('');
     }
     host.innerHTML = opsHtml + crmHtml;
     if (opsHtml) bindOpsRows(host);
   }
   window.renderMyTasks = renderMyTasks;
+
+  // Per-user manual reordering of the "Assigned to me" list. The neighbour is found
+  // within the current user's in-memory assigned list (NOT a global query), since
+  // assignee_priority_index is scoped per assignee. Swapping renumbers the whole
+  // list to dense 0..n-1 indexes so positions stay unique and gap-free.
+  window.taskPriorityMove = async function(taskId, dir){
+    if (window._taskReorderBusy) return;
+    var me = meId();
+    var clicked = TASKS.find(function(x){ return x.id === taskId; });
+    if (!clicked || clicked.assignee_id !== me || clicked.completed_at) return;
+
+    var prank = {high:0, normal:1, low:2};
+    var ordered = TASKS.filter(function(t){ return !t.completed_at && t.assignee_id === me; });
+    if (ordered.length < 2) return;
+    ordered.sort(function(a,b){
+      var ai = a.assignee_priority_index, bi = b.assignee_priority_index;
+      if (ai != null || bi != null) {
+        if (ai == null) return 1;
+        if (bi == null) return -1;
+        if (ai !== bi) return ai - bi;
+      }
+      var ad = a.due_at ? new Date(a.due_at).getTime() : Infinity;
+      var bd = b.due_at ? new Date(b.due_at).getTime() : Infinity;
+      if (ad !== bd) return ad - bd;
+      var p = (prank[a.priority||'normal']||1) - (prank[b.priority||'normal']||1);
+      if (p !== 0) return p;
+      return new Date(b.created_at||0) - new Date(a.created_at||0);
+    });
+
+    var pos = ordered.indexOf(clicked);
+    var target = dir === 'up' ? pos - 1 : pos + 1;
+    if (target < 0 || target >= ordered.length) return;   // already at the edge
+
+    window._taskReorderBusy = true;
+    var prev = {};
+    ordered.forEach(function(t){ prev[t.id] = t.assignee_priority_index; });
+    var tmp = ordered[pos]; ordered[pos] = ordered[target]; ordered[target] = tmp;
+    ordered.forEach(function(t, i){ t.assignee_priority_index = i; });
+
+    var changed = ordered.filter(function(t){ return prev[t.id] !== t.assignee_priority_index; });
+    renderMyTasks();   // optimistic — ordered items are live refs into TASKS
+
+    try {
+      for (var i = 0; i < changed.length; i++) {
+        await db.update('job_tasks', '?id=eq.' + encodeURIComponent(changed[i].id), { assignee_priority_index: changed[i].assignee_priority_index });
+      }
+    } catch (e) {
+      window.toast && window.toast('Could not reorder task: ' + (e && e.message || e), 'error');
+      try { await reloadTasks(); renderMyTasks(); } catch(_) {}
+    } finally {
+      window._taskReorderBusy = false;
+    }
+  };
 
   function bindMyTasksUI(){
     var page = document.getElementById('page-my-tasks'); if (!page) return;
