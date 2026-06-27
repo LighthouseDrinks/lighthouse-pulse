@@ -35,8 +35,7 @@ function err(message: string, status = 400, extra: Record<string, unknown> = {})
 }
 
 const TZ = 'Europe/Dublin';
-const TOLERANCE_MS = 15 * 60 * 1000;
-const BREAK_REQUIRED_AFTER_MS = 6 * 60 * 60 * 1000;
+const GRACE_MIN = 10;   // minutes of slack after rostered finish before a late clock-out is treated as a forgotten punch
 
 const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -113,22 +112,6 @@ function buildRecs(evts: ClockEvent[]): Record<string, DayRec> {
   });
   return days;
 }
-function breakMs(rec: DayRec | undefined): number {
-  if (!rec) return 0;
-  let t = 0;
-  rec.br.forEach((b) => {
-    if (!b.s) return;
-    const be = b.e ? new Date(b.e.timestamp) : new Date();
-    t += Math.max(0, +be - +new Date(b.s!.timestamp));
-  });
-  return t;
-}
-function grossMs(rec: DayRec | undefined): number {
-  if (!rec || !rec.ci) return 0;
-  const end = rec.co ? new Date(rec.co.timestamp) : new Date();
-  return Math.max(0, +end - +new Date(rec.ci.timestamp));
-}
-
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return err('Method not allowed', 405);
@@ -193,7 +176,15 @@ Deno.serve(async (req: Request) => {
       });
 
       const recs = buildRecs((evts || []) as ClockEvent[]);
+      const hasAnyEvents = (evts || []).length > 0;
       const days: unknown[] = [];
+
+      // If they already submitted once, prefill from their prior answers.
+      const prior: Record<string, Record<string, unknown>> = {};
+      const priorDays = (reqRow.submitted_payload as { days?: Record<string, unknown>[] } | null)?.days;
+      if (Array.isArray(priorDays)) {
+        priorDays.forEach((pd) => { if (pd && typeof pd.date === 'string') prior[pd.date] = pd; });
+      }
 
       weekYmds.forEach((ymd) => {
         const rec = recs[ymd];
@@ -201,31 +192,61 @@ Deno.serve(async (req: Request) => {
         const hasCi = !!(rec && rec.ci);
         const hasCo = !!(rec && rec.co);
         const isPast = ymd < todayKey;
-        const onSite = grossMs(rec);
-        const brk = breakMs(rec);
 
         const issues: string[] = [];
-        if (rosterMs > 0 && !hasCi) issues.push('No clock-in recorded');
+        if (rosterMs > 0 && !hasCi && isPast) issues.push('No clock-in recorded');
         if (hasCi && !hasCo && isPast) issues.push('No clock-out recorded');
-        if (onSite > BREAK_REQUIRED_AFTER_MS && brk === 0) issues.push('No break recorded');
-        if (hasCi && hasCo && rosterMs > 0 && Math.abs(onSite - rosterMs) > TOLERANCE_MS) {
-          issues.push('Hours do not match your rostered shift');
+        // Directional check: clock-in vs rostered start, clock-out vs finish,
+        // with a 10-min grace on the outer edge (mirrors the report).
+        const rt = rosterTimes[ymd];
+        if (hasCi && hasCo && rt && rt.start && rt.end) {
+          const toMin = (hhmm: string) => { const a = hhmm.split(':'); return (parseInt(a[0],10)||0)*60 + (parseInt(a[1],10)||0); };
+          const ci = toMin(wallHHMM(rec!.ci!.timestamp));
+          let co = toMin(wallHHMM(rec!.co!.timestamp));
+          const s = toMin(rt.start);
+          let e = toMin(rt.end);
+          if (e < s) e += 1440;
+          if (co < ci) co += 1440;
+          if (ci > s) issues.push('Clocked in late');
+          if (co < e) issues.push('Left before rostered finish');
+          if (co > e + GRACE_MIN) issues.push('Clocked out long after finish');
         }
         if (!issues.length) return; // only flagged days
 
+        const p = prior[ymd];
         days.push({
           date: ymd,
           label: dayLabel(ymd),
           issues,
-          clockIn:  hasCi ? wallHHMM(rec!.ci!.timestamp) : '',
-          clockOut: hasCo ? wallHHMM(rec!.co!.timestamp) : '',
-          breaks: (rec ? rec.br : [])
-            .filter((b) => b.s || b.e)
-            .map((b) => ({ start: b.s ? wallHHMM(b.s.timestamp) : '', end: b.e ? wallHHMM(b.e.timestamp) : '' })),
+          clockIn:  p && p.clockIn  ? String(p.clockIn)  : (hasCi ? wallHHMM(rec!.ci!.timestamp) : ''),
+          clockOut: p && p.clockOut ? String(p.clockOut) : (hasCo ? wallHHMM(rec!.co!.timestamp) : ''),
+          reason: p && typeof p.reason === 'string' ? p.reason : '',
           rosterStart: rosterTimes[ymd]?.start || '',
           rosterEnd:   rosterTimes[ymd]?.end || '',
         });
       });
+
+      // Blank week: no flagged days AND no clock events at all this week (likely
+      // forgotten punches all week). Offer fillable rows so they can enter it —
+      // rostered days if a roster exists, otherwise Mon-Fri. Gated on
+      // !hasAnyEvents so a fully-correct week still shows "nothing to fix".
+      if (days.length === 0 && !hasAnyEvents) {
+        const rosterDays = weekYmds.filter((d) => (rosterMap[d] || 0) > 0);
+        const offerDays = rosterDays.length ? rosterDays : weekYmds.slice(0, 5);
+        offerDays.forEach((ymd) => {
+          const p = prior[ymd];
+          days.push({
+            date: ymd,
+            label: dayLabel(ymd),
+            issues: ['No clock activity recorded'],
+            clockIn:  p && p.clockIn  ? String(p.clockIn)  : '',
+            clockOut: p && p.clockOut ? String(p.clockOut) : '',
+            reason: p && typeof p.reason === 'string' ? p.reason : '',
+            rosterStart: rosterTimes[ymd]?.start || '',
+            rosterEnd:   rosterTimes[ymd]?.end || '',
+          });
+        });
+      }
 
       return json({
         ok: true,
@@ -248,14 +269,7 @@ Deno.serve(async (req: Request) => {
         date: String(d.date || ''),
         clockIn:  re.test(String(d.clockIn || ''))  ? String(d.clockIn)  : '',
         clockOut: re.test(String(d.clockOut || '')) ? String(d.clockOut) : '',
-        breaks: Array.isArray(d.breaks)
-          ? (d.breaks as Record<string, unknown>[])
-              .map((b) => ({
-                start: re.test(String(b.start || '')) ? String(b.start) : '',
-                end:   re.test(String(b.end || ''))   ? String(b.end)   : '',
-              }))
-              .filter((b) => b.start || b.end)
-          : [],
+        reason: typeof d.reason === 'string' ? d.reason.trim().slice(0, 500) : '',
       })).filter((d) => weekYmds.includes(d.date));
 
       const { error: updErr } = await admin

@@ -146,7 +146,8 @@ PER-JOB BOM CLIENT CONFIRMATION
 • _bomClientGate() is called on task completion; if not approved it blocks and shows a toast.
 
 BOM component SKU links: bottle_sku_id, cork_sku_id, ropp_sku_id, foil_sku_id,
-label_front_sku_id / label_back_sku_id / label_neck_sku_id, shipper_sku_id, divider_sku_id,
+label_front_sku_id / label_back_sku_id / label_neck_sku_id, outer_case_label_sku_id (Outer Shipper Case Label),
+shipper_sku_id, divider_sku_id,
 string_twine_sku_id, monocarton_sku_id, gift_tube_sku_id, tube_lid_sku_id, tin_sku_id
 
 Key BOM fields: product_name, volume_cl (bottle size in centilitres — NOT ml), abv (%),
@@ -218,8 +219,15 @@ Container types: cask, ibc, blue_drum, tank, tanker (filter labels: Casks · Tan
 Container statuses (auto-calculated from current_litres vs capacity): empty, partially_full, full — pills show as Empty / Active / Full / Nearly Full.
 Fill numbers: 1st Fill, 2nd Fill, 3rd Fill, 4th Fill+
 Key fields: reference, type, spirit_type, abv, current_litres, current_lpa, lpa_price,
-fill_date, location, capacity, fill_number, previous_contents, client_id.
+fill_date, location, capacity, fill_number, previous_contents, client_id, liquid_owner_client_id.
 LPA formula: LPA = litres × (ABV% ÷ 100)
+
+VESSEL OWNER vs LIQUID OWNER (tanks & tankers only)
+• Tanks and tankers are always Lighthouse-owned, transient vessels. The vessel itself belongs to Lighthouse (client_id), but the liquid inside can belong to a client.
+• That client (the liquid owner) is stored separately in liquid_owner_client_id. Tanks/tankers can NEVER be a "client vessel".
+• In the UI these rows show the liquid owner as the client, with an "LH VESSEL" tag to make clear Lighthouse owns the vessel, not the liquid. The detail view splits this into "Vessel Owner" (Lighthouse) and "Liquid Owner / Client".
+• When liquid moves into a tank/tanker (transfer, blend, dilute, leftover relocation), the liquid owner is carried onto liquid_owner_client_id; emptying the tank clears it.
+• All other vessel types (cask, ibc, blue_drum) are unchanged: client_id is the owner, and a client's own vessel is still flagged via is_client_vessel.
 
 ARCHIVE / RESTORE (replaces "decommissioned" for containers)
 • Each row has an "Archive" button; archived containers can be brought back via "Restore" when "Show Archived" is toggled on.
@@ -467,29 +475,34 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // RAG: embed the question, retrieve relevant chunks
+    // RAG: embed the question, retrieve relevant chunks.
+    // STAFF ONLY — the knowledge base (peat_chunks) is internal Lighthouse
+    // content and match_peat_chunks is not tenant-scoped, so it must never
+    // be injected into a client session's answer (finding H-5).
     let contextText = '';
-    try {
-      const session = new Supabase.ai.Session('gte-small');
-      const queryEmbedding = await session.run(message, {
-        mean_pool: true,
-        normalize: true,
-      });
+    if (!isClient) {
+      try {
+        const session = new Supabase.ai.Session('gte-small');
+        const queryEmbedding = await session.run(message, {
+          mean_pool: true,
+          normalize: true,
+        });
 
-      const { data: chunks, error: chunksError } = await adminClient.rpc('match_peat_chunks', {
-        query_embedding: Array.from(queryEmbedding as number[]),
-        match_count: 5,
-        match_threshold: 0.3,
-      });
-      if (chunksError) console.warn('[peat-chat] match_peat_chunks RPC error (continuing without context):', chunksError.message);
+        const { data: chunks, error: chunksError } = await adminClient.rpc('match_peat_chunks', {
+          query_embedding: Array.from(queryEmbedding as number[]),
+          match_count: 5,
+          match_threshold: 0.3,
+        });
+        if (chunksError) console.warn('[peat-chat] match_peat_chunks RPC error (continuing without context):', chunksError.message);
 
-      if (chunks && chunks.length > 0) {
-        contextText = '\n\n---\nRelevant knowledge base content:\n' +
-          chunks.map((c: { content: string }) => c.content).join('\n\n') +
-          '\n---';
+        if (chunks && chunks.length > 0) {
+          contextText = '\n\n---\nRelevant knowledge base content:\n' +
+            chunks.map((c: { content: string }) => c.content).join('\n\n') +
+            '\n---';
+        }
+      } catch (ragErr) {
+        console.warn('RAG search failed (continuing without context):', ragErr);
       }
-    } catch (ragErr) {
-      console.warn('RAG search failed (continuing without context):', ragErr);
     }
 
     const messages: ChatMessage[] = [
