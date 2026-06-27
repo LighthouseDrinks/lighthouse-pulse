@@ -34207,7 +34207,7 @@ window.saveAdjModal = async function() {
     // Fetch linked containers for accurate dilution status
     var _psLso = null;
     try {
-      var _psLsoRows = await supaGet('job_liquid_signoff?job_id=eq.' + j.id + '&select=linked_containers_json,water_required,water_added,final_litres');
+      var _psLsoRows = await supaGet('job_liquid_signoff?job_id=eq.' + j.id + '&select=linked_containers_json,water_required,water_added,final_litres,blend_recipe_json');
       _psLso = _psLsoRows[0] || null;
     } catch(e) {}
     var _psLinked = [];
@@ -34215,11 +34215,12 @@ window.saveAdjModal = async function() {
       try { _psLinked = JSON.parse(_psLso.linked_containers_json); } catch(e) {}
     }
     var _psDilutionStr = 'Pending — assign liquid to determine';
+    var _psRecipeStr = null, _psBlendInstr = null;
     if (_psLinked.length > 0) {
       // Fetch current abv + litres from DB — the stored JSON only has id/litres, not abv
       var _psLcIds = _psLinked.map(function(lc){ return lc.id; }).filter(Boolean);
       var _psConts = [];
-      try { _psConts = await supaGet('liquid_containers?id=in.(' + _psLcIds.join(',') + ')&select=id,abv,current_litres'); } catch(e2) {}
+      try { _psConts = await supaGet('liquid_containers?id=in.(' + _psLcIds.join(',') + ')&select=id,reference,abv,current_litres,current_lpa,spirit_type,capacity_litres,type'); } catch(e2) {}
       var _psTotalL = 0, _psTotalLPA = 0;
       _psConts.forEach(function(c){
         var l = parseFloat(c.current_litres || 0);
@@ -34227,11 +34228,34 @@ window.saveAdjModal = async function() {
         _psTotalLPA += l * parseFloat(c.abv || 0) / 100;
       });
       var _psAvgAbv = _psTotalL > 0 ? (_psTotalLPA / _psTotalL * 100) : 0;
-      var _psTargetAbv = (bom && bom.bottling_abv) ? parseFloat(bom.bottling_abv) : 0;
-      if (_psTargetAbv > 0 && _psAvgAbv > _psTargetAbv + 0.05) {
-        _psDilutionStr = 'Yes — container avg ' + _psAvgAbv.toFixed(1) + '% → target ' + _psTargetAbv.toFixed(1) + '%';
-      } else if (_psTargetAbv > 0) {
-        _psDilutionStr = 'No — container avg ABV (' + _psAvgAbv.toFixed(1) + '%) at or below target (' + _psTargetAbv.toFixed(1) + '%)';
+      var _psTargetAbv = (bom && (bom.bottling_abv || bom.abv)) ? parseFloat(bom.bottling_abv || bom.abv) : 0;
+      var _psTargetAbvDil = (bom && bom.bottling_abv) ? parseFloat(bom.bottling_abv) : 0;
+      if (_psTargetAbvDil > 0 && _psAvgAbv > _psTargetAbvDil + 0.05) {
+        _psDilutionStr = 'Yes — container avg ' + _psAvgAbv.toFixed(1) + '% → target ' + _psTargetAbvDil.toFixed(1) + '%';
+      } else if (_psTargetAbvDil > 0) {
+        _psDilutionStr = 'No — container avg ABV (' + _psAvgAbv.toFixed(1) + '%) at or below target (' + _psTargetAbvDil.toFixed(1) + '%)';
+      }
+
+      // Multi-component blend recipe (BOM default, overridable per job).
+      var _psReqLitres = parseFloat(j.liquid_litres || 0);
+      if (!_psReqLitres && j.bottle_target && bom && bom.volume_cl) _psReqLitres = (j.bottle_target * parseFloat(bom.volume_cl)) / 100;
+      var _psRecipe = window._resolveBlendRecipe(bom && bom.additional_info, _psLso && _psLso.blend_recipe_json);
+      var _psDistinct = {};
+      _psConts.forEach(function(c){ if (parseFloat(c.current_litres||0) > 0 && c.spirit_type) _psDistinct[String(c.spirit_type).trim().toLowerCase()] = 1; });
+      var _psRecipeActive = _psRecipe.length > 0 && Object.keys(_psDistinct).length >= 2;
+      var _psRecipePlan = _psRecipeActive
+        ? window._blendRecipePlan(_psConts, _psRecipe, _psReqLitres, _psTargetAbv, (window.LSO_ABV_TOL || 0.5), (window.LSO_PREP_BUFFER || 0))
+        : null;
+      if (_psRecipePlan && !_psRecipePlan.ok) { _psRecipePlan = null; _psRecipeActive = false; }
+      if (_psRecipeActive) {
+        var _psF1 = function(n){ return (parseFloat(n) || 0).toFixed(1); };
+        _psRecipeStr = _psRecipePlan.groups.map(function(g){ return (g.spirit_type || '?') + ' ' + (parseFloat(g.pct) || 0) + '%'; }).join(' · ');
+        var _psParts = _psRecipePlan.groups.map(function(g){
+          var draws = g.containers.filter(function(c){ return c.drawLitres > 0.05; }).map(function(c){ return '~' + _psF1(c.drawLitres) + ' L from ' + (c.reference || '—'); });
+          return (g.spirit_type || '?') + ' (' + (parseFloat(g.pct) || 0) + '%): ' + (draws.length ? draws.join(' + ') : 'no vessel linked');
+        });
+        _psBlendInstr = _psParts.join('; ') + '. Combine into ' + ((_psRecipePlan.receiver && _psRecipePlan.receiver.reference) || '—')
+          + ', add ~' + _psF1(_psRecipePlan.water) + ' L RO water \u2192 ' + _psF1(_psRecipePlan.finalLitres) + ' L.';
       }
     }
     var _psWaterVal = _psLso ? window._soWater(_psLso) : 0;
@@ -34253,6 +34277,8 @@ window.saveAdjModal = async function() {
       + (!isLiquid ? row('Number of Bottles', j.bottle_target ? j.bottle_target.toLocaleString() + ' bottles' : '') : '')
       + section('Liquid Processing')
       + row('Dilution', _psDilutionStr)
+      + (_psRecipeStr ? row('Blend Recipe (by LPA)', _psRecipeStr) : '')
+      + (_psBlendInstr ? row('Blend Instructions', _psBlendInstr) : '')
       + (_psWaterStr ? row('Water to Add', _psWaterStr) : '')
       + (_psFinalStr ? row('Final Batch Volume', _psFinalStr) : '')
       + (bom && bom.bottling_abv ? row('Bottling Target ABV', bom.bottling_abv + '%') : '')
@@ -36045,6 +36071,8 @@ window.saveAdjModal = async function() {
       window._lsoBlendRecipeBom   = (_bomAdditionalInfo && Array.isArray(_bomAdditionalInfo.blendRecipe)) ? _bomAdditionalInfo.blendRecipe.slice() : [];
       window._lsoRecipeActive     = _recipeActive;
       window._lsoRecipePlan       = _recipePlan;
+      window._lsoRecipeOverridden = false;
+      try { var _ovRec = JSON.parse(d.blend_recipe_json || 'null'); if (Array.isArray(_ovRec) && _ovRec.length) window._lsoRecipeOverridden = true; } catch(eOv) {}
       // Dilution calc values for live field updates when radio changes
       window._lsoDilReqWater      = _dilWater;
       window._lsoDilReqFinal      = _dilFinal;
@@ -36334,14 +36362,32 @@ window.saveAdjModal = async function() {
 
     // Build a physical, per-container dilution plan (keeps the lowest-ABV vessel,
     // draws only the needed cask strength from the named donor(s), then waters).
+    // "Requirement" mode carries the filler overage so we never under-prepare.
     var _woTol  = (typeof LSO_ABV_TOL!=='undefined'?LSO_ABV_TOL:0.5);
-    var _woPlan = window._dilutionPlan(linkedContainers, reqLitres, reqAbv, _dilMode, _woTol);
+    var _woBuf  = (_dilMode === 'requirement') ? (window.LSO_PREP_BUFFER || 0) : 0;
+    var _woPlan = window._dilutionPlan(linkedContainers, reqLitres, reqAbv, _dilMode, _woTol, _woBuf);
+
+    // Multi-component blend recipe (BOM default, overridable per job). Drives the
+    // per-spirit-type draws in "requirement" mode; "all" mode is unchanged.
+    var _woRecipe = window._resolveBlendRecipe(bom && bom.additional_info, signoff && signoff.blend_recipe_json);
+    var _woDistinct = {};
+    linkedContainers.forEach(function(c){ if (parseFloat(c.current_litres||0) > 0 && c.spirit_type) _woDistinct[String(c.spirit_type).trim().toLowerCase()] = 1; });
+    var _woRecipeActive = _dilMode === 'requirement' && _woRecipe.length > 0 && Object.keys(_woDistinct).length >= 2;
+    var _woRecipePlan = _woRecipeActive
+      ? window._blendRecipePlan(linkedContainers, _woRecipe, reqLitres, reqAbv, _woTol, (window.LSO_PREP_BUFFER || 0))
+      : null;
+    if (_woRecipePlan && !_woRecipePlan.ok) { _woRecipePlan = null; _woRecipeActive = false; }
 
     var _calcFinalLitres, _calcWater, _calcSourceNeeded;
     if (dilution) {
       _calcFinalLitres  = _woPlan.finalLitres;
       _calcWater        = _woPlan.water;
       _calcSourceNeeded = _woPlan.drawLitres;
+      if (_woRecipeActive) {
+        _calcFinalLitres  = _woRecipePlan.finalLitres;
+        _calcWater        = _woRecipePlan.water;
+        _calcSourceNeeded = _woRecipePlan.totalDraw;
+      }
     } else {
       _calcFinalLitres  = totalLinkedLitres;
       _calcWater        = 0;
@@ -36391,6 +36437,11 @@ window.saveAdjModal = async function() {
       h += kpi('Final Litres (after dilution)', finalLitres > 0 ? finalLitres.toFixed(1) + ' L' : '—', '#555');
     }
     h += '</div>';
+
+    if (_woRecipeActive) {
+      var _recSummary = _woRecipePlan.groups.map(function(g){ return esc(g.spirit_type || '?') + ' ' + (parseFloat(g.pct) || 0) + '%'; }).join(' &middot; ');
+      h += '<div style="margin:0 0 10px;padding:8px 12px;background:#eef5ff;border:1px solid #b9d4ff;border-radius:4px;font-size:11px;color:#0d3349;"><strong>Blend recipe (by LPA):</strong> ' + _recSummary + '</div>';
+    }
 
     // ── Source Containers ─────────────────────────────────────────────────────
     h += '<div style="' + S.sectionHd + '">Source Container' + (linkedContainers.length > 1 ? 's' : '') + '</div>';
@@ -36465,7 +36516,29 @@ window.saveAdjModal = async function() {
       // note if the plan hit a feasibility edge (warnings present).
       var _planUsable = _woPlan && !_woPlan.warnings.length && _woPlan.receiver;
       var bodyMain, srcNote = '';
-      if (_planUsable && _dilMode === 'requirement' && _woPlan.singleSource) {
+      if (_woRecipeActive && _woRecipePlan.receiver) {
+        // Multi-spirit blend: draw each spirit type's % of LPA, then combine + water.
+        var _recvR = esc(_woRecipePlan.receiver.reference || '—');
+        var _grpLines = _woRecipePlan.groups.map(function(g) {
+          var draws = g.containers.filter(function(c){ return c.drawLitres > 0.05; }).map(function(c) {
+            return '~<strong>' + c.drawLitres.toFixed(1) + ' L</strong> from <strong>' + esc(c.reference || '—') + '</strong>' + (c.abv > 0 ? ' (' + c.abv.toFixed(1) + '%)' : '');
+          });
+          return '<div style="margin:3px 0 3px 6px;">&#8226; <strong>' + esc(g.spirit_type || '?') + '</strong> (' + (parseFloat(g.pct) || 0) + '%): '
+            + (draws.length ? 'draw ' + draws.join(' + ') : '<span style="color:#b71c1c;">no vessel linked</span>') + '</div>';
+        }).join('');
+        bodyMain = abvNote
+          + 'Blend to recipe (proportions by LPA):' + _grpLines
+          + 'Combine all draws into <strong>' + _recvR + '</strong>, then add <strong>' + waterToAdd + '</strong> of RO water to reach approximately <strong>' + targetFinal + '</strong>'
+          + (reqAbv > 0 ? ' at ' + reqAbv.toFixed(1) + '%' : '') + '. Verify ABV before proceeding. Record actual quantities below.';
+        var _recRem = [];
+        _woRecipePlan.groups.forEach(function(g) {
+          g.containers.forEach(function(c) { if (c.remainderLitres > 0.5) _recRem.push('~' + c.remainderLitres.toFixed(1) + ' L in ' + esc(c.reference || '—')); });
+        });
+        if (_recRem.length) srcNote = '<br><span style="color:#856404;font-size:10px;">&#9432; Remaining ' + _recRem.join(', ') + ' stays at cask strength.</span>';
+        if (_woRecipePlan.recipeSum && Math.abs(_woRecipePlan.recipeSum - 100) > 0.5) {
+          srcNote += '<br><span style="color:#856404;font-size:10px;">&#9432; Recipe percentages total ' + (parseFloat(_woRecipePlan.recipeSum) || 0) + '% — normalised to 100%.</span>';
+        }
+      } else if (_planUsable && _dilMode === 'requirement' && _woPlan.singleSource) {
         var _ss = _woPlan.singleSource;
         bodyMain = abvNote
           + 'Draw <strong>' + _ss.drawLitres.toFixed(1) + ' L</strong> from <strong>' + esc(_ss.reference || '—') + '</strong>'
@@ -36512,12 +36585,13 @@ window.saveAdjModal = async function() {
       }
       // Capacity caution — the final batch may not fit a single IBC. Rendered as a
       // prominent, hard-to-miss banner so floor staff plan extra vessels up front.
-      var capNote = (_woPlan && _woPlan.overflow)
+      var _capPlan = _woRecipeActive ? _woRecipePlan : _woPlan;
+      var capNote = (_capPlan && _capPlan.overflow)
         ? '<div style="margin-top:10px;padding:10px 12px;background:#fdecea;border:2px solid #d32f2f;border-radius:4px;color:#b71c1c;font-size:11.5px;line-height:1.45;">'
             + '<span style="font-weight:800;text-transform:uppercase;letter-spacing:0.04em;">&#9888; Caution — will not fit one IBC.</span> '
-            + 'Final volume is approximately <strong>' + _woPlan.finalLitres.toFixed(1) + ' L</strong>'
-            + (_woPlan.receiverCapacity ? ', which exceeds a single IBC (~' + Math.round(_woPlan.receiverCapacity) + ' L)' : '') + '. '
-            + 'You will need roughly <strong>' + _woPlan.vesselsNeeded + ' IBCs</strong> — split the batch across additional vessels as needed. '
+            + 'Final volume is approximately <strong>' + _capPlan.finalLitres.toFixed(1) + ' L</strong>'
+            + (_capPlan.receiverCapacity ? ', which exceeds a single IBC (~' + Math.round(_capPlan.receiverCapacity) + ' L)' : '') + '. '
+            + 'You will need roughly <strong>' + _capPlan.vesselsNeeded + ' IBCs</strong> — split the batch across additional vessels as needed. '
             + 'The actual containers used will be logged when you close the job.'
             + '</div>'
         : '';
@@ -37110,55 +37184,18 @@ window.saveAdjModal = async function() {
       if (currentVal && alreadyIds.indexOf(currentVal) === -1) sel.value = currentVal;
     }
 
+    // Re-render the per-spirit-type blend recipe editor for the current linked set.
+    if (window._lsoRenderBlendRecipe) window._lsoRenderBlendRecipe();
+
     // ── Dynamically show/update Dilution Scope based on current linked set ─────
     var scopeWrap = document.getElementById('lso-dil-scope-wrap');
     if (scopeWrap) {
       var _avgAbvLive  = totalLinked > 0 ? (linkedLPA / totalLinked * 100) : 0;
       var _dilNeededLive = _bottAbv > 0 && linked.length > 0 && _avgAbvLive > _bottAbv + _tol;
       if (_dilNeededLive) {
-        var _rL = window._lsoReqLitres || 0;
-
-        // Per-container plans (keep lowest-ABV vessel, draw from named donors).
-        var _livePlanConts = linked.map(function(lc) {
-          var cont = allConts.find(function(c){ return c.id === lc.id; }) || {};
-          return {
-            reference: cont.reference || lc.reference || '',
-            litres:    parseFloat((cont.current_litres != null ? cont.current_litres : lc.litres) || 0),
-            abv:       parseFloat((cont.abv != null ? cont.abv : lc.abv) || 0),
-            lpa:       (cont.current_lpa != null ? parseFloat(cont.current_lpa) : (lc.lpa != null ? parseFloat(lc.lpa) : null)),
-            capacity:  parseFloat(cont.capacity_litres || lc.capacity_litres || 0) || 0,
-            type:      cont.type || lc.type || ''
-          };
-        });
-        var _livePlanReq = window._dilutionPlan(_livePlanConts, _rL, _bottAbv, 'requirement', _tol);
-        var _livePlanAll = window._dilutionPlan(_livePlanConts, _rL, _bottAbv, 'all', _tol);
-
-        var _rSrc = _livePlanReq.drawLitres, _rWater = _livePlanReq.water, _rFinal = _livePlanReq.finalLitres;
-        var _aFinal = _livePlanAll.finalLitres, _aWater = _livePlanAll.water;
-
-        // Store updated calc values + named notes for lsoDilutionModeChange + printLiquidSignoff
-        window._lsoDilReqWater = _rWater;
-        window._lsoDilReqFinal = _rFinal;
-        window._lsoDilReqSrc   = _rSrc;
-        window._lsoDilAllWater = _aWater;
-        window._lsoDilAllFinal = _aFinal;
-        window._lsoDilAllSrc   = totalLinked;
-        window._lsoDilReqNote  = _livePlanReq.receiver ? window._dilutionNoteHtml(_livePlanReq, 'requirement') : '';
-        window._lsoDilAllNote  = _livePlanAll.receiver ? window._dilutionNoteHtml(_livePlanAll, 'all') : '';
-
-        var reqDescEl = document.getElementById('lso-dil-req-desc');
-        if (reqDescEl) {
-          reqDescEl.innerHTML = window._lsoDilReqNote
-            || 'Draw only enough to meet the job volume. Remainder stays in vessel(s) at cask strength.';
-        }
-        var allDescEl = document.getElementById('lso-dil-all-desc');
-        if (allDescEl) {
-          allDescEl.innerHTML = window._lsoDilAllNote
-            || ('Draw full <strong>' + totalLinked.toFixed(1) + ' L</strong> from container(s), add ~' + _aWater.toFixed(1) + ' L water &rarr; <strong>' + _aFinal.toFixed(1) + ' L</strong> at ' + _bottAbv.toFixed(1) + '% ABV.');
-        }
-
         scopeWrap.style.display = '';
-        if (window.lsoDilutionModeChange) window.lsoDilutionModeChange();
+        // Shared helper recomputes requirement/all/recipe plans + refreshes notes.
+        if (window._lsoUpdateDilutionNotes) window._lsoUpdateDilutionNotes();
       } else {
         scopeWrap.style.display = 'none';
       }
