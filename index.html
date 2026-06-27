@@ -23962,9 +23962,8 @@ window._dilutionNoteHtml = function(plan, mode) {
       + '~<strong>' + f1(plan.water) + ' L</strong> water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong> at target ABV.';
   }
   if (plan.overflow) {
-    msg += '<br><span style="color:var(--amber);">&#9888; Final ~' + f1(plan.finalLitres) + ' L won\'t fit one IBC'
-      + (plan.receiverCapacity ? ' (~' + Math.round(plan.receiverCapacity) + ' L)' : '')
-      + ' — split across ~' + plan.vesselsNeeded + ' vessels. Actual containers used are logged at job close.</span>';
+    msg += '<br><span style="color:var(--amber);">&#9888; Final ~' + f1(plan.finalLitres) + ' L won\'t fit one IBC — combine into '
+      + window._lsoVesselGuide(plan.finalLitres) + '. Actual containers used are logged at job close.</span>';
   }
   return msg;
 };
@@ -23982,6 +23981,34 @@ window._normalizeBlendRecipe = function(recipe) {
   }).filter(function(r) { return r.spirit_type && r.pct > 0; });
   var sum = rows.reduce(function(s, r) { return s + r.pct; }, 0);
   return { rows: rows, sum: sum };
+};
+
+// ── Vessel capacity guidance (hard-coded site vessels) ──────────────────────
+// Tanks hold 12,500 L; IBCs ~1,000 L. Used to tell floor staff how many vessels
+// a batch needs instead of naming a too-small source IBC as the destination.
+window.LSO_TANK_CAP = 12500;
+window.LSO_IBC_CAP  = 1000;
+// "1 tank (~12,500 L) or ~5 IBCs (~1,000 L each)" — pluralised, '' for <= 0.
+window._lsoVesselGuide = function(litres) {
+  litres = parseFloat(litres) || 0;
+  if (!(litres > 0)) return '';
+  var tanks = Math.ceil(litres / window.LSO_TANK_CAP);
+  var ibcs  = Math.ceil(litres / window.LSO_IBC_CAP);
+  var tankTxt = (tanks <= 1 ? '1 tank' : '~' + tanks + ' tanks') + ' (~12,500 L' + (tanks <= 1 ? '' : ' each') + ')';
+  var ibcTxt  = '~' + ibcs + ' IBC' + (ibcs === 1 ? '' : 's') + ' (~1,000 L each)';
+  return tankTxt + ' or ' + ibcTxt;
+};
+// Destination for a "combine" instruction: name the receiver only when it can
+// actually hold the whole final volume; otherwise point at a clean tank / new
+// vessels with the count, so we never tell staff to pool a batch into a vessel
+// that is too small.
+window._lsoCombineDest = function(plan) {
+  var fin = parseFloat(plan && plan.finalLitres) || 0;
+  var cap = parseFloat(plan && plan.receiverCapacity) || 0;
+  var ref = plan && plan.receiver && plan.receiver.reference;
+  var esc = window.escapeHtml ? window.escapeHtml : function(s){ return s == null ? '' : String(s); };
+  if (ref && cap > 0 && fin <= cap + 1) return '<strong>' + esc(ref) + '</strong>';
+  return 'a clean tank or new vessel(s) (' + window._lsoVesselGuide(fin) + ')';
 };
 
 // Build a per-spirit-type blend plan. For each recipe row we target that row's
@@ -24092,7 +24119,7 @@ window._blendRecipeNoteHtml = function(plan, reqAbv) {
     return head + (draws.length ? 'draw ' + draws.join(' + ') : '<span style="color:var(--amber);">no vessel linked</span>');
   });
   var msg = 'Blend to recipe — ' + parts.join('; ')
-    + '. Combine into <strong>' + ref(plan.receiver && plan.receiver.reference) + '</strong>, add ~<strong>'
+    + '. Combine into ' + window._lsoCombineDest(plan) + ', add ~<strong>'
     + f1(plan.water) + ' L</strong> RO water &rarr; <strong>' + f1(plan.finalLitres) + ' L</strong>'
     + (reqAbv > 0 ? ' at ' + parseFloat(reqAbv).toFixed(1) + '%' : '') + '.';
   if (plan.recipeSum && Math.abs(plan.recipeSum - 100) > 0.5) {
@@ -24104,9 +24131,8 @@ window._blendRecipeNoteHtml = function(plan, reqAbv) {
       + shorts.map(function(w) { return ref(w.split(':')[1]); }).join(', ') + '.</span>';
   }
   if (plan.overflow) {
-    msg += '<br><span style="color:var(--amber);">&#9888; Final ~' + f1(plan.finalLitres) + ' L won\'t fit one IBC'
-      + (plan.receiverCapacity ? ' (~' + Math.round(plan.receiverCapacity) + ' L)' : '')
-      + ' — split across ~' + plan.vesselsNeeded + ' vessels. Actual containers used are logged at job close.</span>';
+    msg += '<br><span style="color:var(--amber);">&#9888; Final ~' + f1(plan.finalLitres) + ' L won\'t fit one IBC — combine into '
+      + window._lsoVesselGuide(plan.finalLitres) + '. Actual containers used are logged at job close.</span>';
   }
   return msg;
 };
@@ -34259,7 +34285,7 @@ window.saveAdjModal = async function() {
           var draws = g.containers.filter(function(c){ return c.drawLitres > 0.05; }).map(function(c){ return '~' + _psF1(c.drawLitres) + ' L from ' + (c.reference || '—'); });
           return (g.spirit_type || '?') + ' (' + (parseFloat(g.pct) || 0) + '%): ' + (draws.length ? draws.join(' + ') : 'no vessel linked');
         });
-        _psBlendInstr = _psParts.join('; ') + '. Combine into ' + ((_psRecipePlan.receiver && _psRecipePlan.receiver.reference) || '—')
+        _psBlendInstr = _psParts.join('; ') + '. Combine into ' + window._lsoCombineDest(_psRecipePlan).replace(/<[^>]+>/g, '')
           + ', add ~' + _psF1(_psRecipePlan.water) + ' L RO water \u2192 ' + _psF1(_psRecipePlan.finalLitres) + ' L.';
       }
     }
@@ -36551,7 +36577,7 @@ window.saveAdjModal = async function() {
         }).join('');
         bodyMain = abvNote
           + 'Blend to recipe (proportions by LPA):' + _grpLines
-          + 'Combine all draws into <strong>' + _recvR + '</strong>, then add <strong>' + waterToAdd + '</strong> of RO water to reach approximately <strong>' + targetFinal + '</strong>'
+          + 'Combine all draws into ' + window._lsoCombineDest(_woRecipePlan) + ', then add <strong>' + waterToAdd + '</strong> of RO water to reach approximately <strong>' + targetFinal + '</strong>'
           + (reqAbv > 0 ? ' at ' + reqAbv.toFixed(1) + '%' : '') + '. Verify ABV before proceeding. Record actual quantities below.';
         var _recRem = [];
         _woRecipePlan.groups.forEach(function(g) {
@@ -36593,7 +36619,7 @@ window.saveAdjModal = async function() {
         });
         bodyMain = abvNote
           + (_combParts.length
-              ? 'Combine ' + _combParts.join(' and ') + ' into <strong>' + _rcvA + '</strong>, then add '
+              ? 'Combine ' + _combParts.join(' and ') + ' into ' + window._lsoCombineDest(_woPlan) + ', then add '
               : 'Dilute the full contents of <strong>' + _rcvA + '</strong>' + _rcvAbvA + ' — add ')
           + '<strong>' + waterToAdd + '</strong> of RO water to reach a final volume of approximately <strong>' + targetFinal + '</strong>'
           + (reqAbv > 0 ? ' at ' + reqAbv.toFixed(1) + '%' : '') + '. '
@@ -36606,16 +36632,12 @@ window.saveAdjModal = async function() {
                       ? '<br><span style="color:#856404;font-size:10px;">&#9432; Draw ~<strong>' + _calcSourceNeeded.toFixed(1) + ' L</strong> from linked container(s) — remaining volume stays in vessel(s) at cask strength.</span>'
                       : (_dilMode === 'all' ? '<br><span style="color:#856404;font-size:10px;">&#9432; Full contents of all linked containers are being diluted.</span>' : '');
       }
-      // Capacity caution — the final batch may not fit a single IBC. Rendered as a
-      // prominent, hard-to-miss banner so floor staff plan extra vessels up front.
+      // Capacity guidance — when the batch won't fit a single IBC, state calmly how
+      // many tanks / IBCs it needs rather than flagging a scary red warning.
       var _capPlan = _woRecipeActive ? _woRecipePlan : _woPlan;
-      var capNote = (_capPlan && _capPlan.overflow)
-        ? '<div style="margin-top:10px;padding:10px 12px;background:#fdecea;border:2px solid #d32f2f;border-radius:4px;color:#b71c1c;font-size:11.5px;line-height:1.45;">'
-            + '<span style="font-weight:800;text-transform:uppercase;letter-spacing:0.04em;">&#9888; Caution — will not fit one IBC.</span> '
-            + 'Final volume is approximately <strong>' + _capPlan.finalLitres.toFixed(1) + ' L</strong>'
-            + (_capPlan.receiverCapacity ? ', which exceeds a single IBC (~' + Math.round(_capPlan.receiverCapacity) + ' L)' : '') + '. '
-            + 'You will need roughly <strong>' + _capPlan.vesselsNeeded + ' IBCs</strong> — split the batch across additional vessels as needed. '
-            + 'The actual containers used will be logged when you close the job.'
+      var capNote = (_capPlan && _capPlan.finalLitres > window.LSO_IBC_CAP)
+        ? '<div style="margin-top:10px;padding:9px 12px;background:#fffaf0;border:1px solid #ffe0a3;border-radius:4px;color:#856404;font-size:11px;line-height:1.45;">'
+            + '&#9432; Final ~<strong>' + _capPlan.finalLitres.toFixed(1) + ' L</strong> — combine into <strong>' + window._lsoVesselGuide(_capPlan.finalLitres) + '</strong>. Actual vessels used are logged when you close the job.'
             + '</div>'
         : '';
       h += step(stepNum++, 'Dilution — RO Water Addition <span style="display:inline-block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:10px;font-weight:700;margin-left:6px;">REQUIRED</span>' + scopeLabel,
