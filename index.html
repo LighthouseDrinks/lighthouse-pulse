@@ -17033,6 +17033,7 @@ window.loadBoms = async function initBoms() {
   var TASKS       = [];   // CRM tasks only (task_type='crm')
   var OPS_TASKS   = [];   // operational tasks assigned to current user via assigned_to (auth UUID): hr_profile_setup, sign-offs, etc. Kept separate from TASKS to avoid corrupting CRM-shape consumers (openTaskModal, renderKpis, renderTaskRow).
   var NOTIFS      = [];   // current user's notifications
+  var _taskToggleInFlight = {}; // guards toggleTaskComplete against double-click re-entrancy
 
   window.APP_USERS = APP_USERS;
 
@@ -17591,13 +17592,20 @@ window.loadBoms = async function initBoms() {
   window.toggleTaskComplete = async function(taskId, ev){
     if (ev) ev.stopPropagation();
     var t = TASKS.find(function(x){ return x.id === taskId; }); if (!t) return;
+    // Drop concurrent invocations (e.g. rapid double-click/tap) so a single
+    // completion can't create duplicate PATCHes / task_completed notifications.
+    if (_taskToggleInFlight[taskId]) return;
+    _taskToggleInFlight[taskId] = true;
     var done = !t.completed_at;
     var patch = done
       ? { completed_at: new Date().toISOString(), status: 'completed' }
       : { completed_at: null, status: 'pending' };
+    // Snapshot for rollback, then apply optimistically BEFORE the await so any
+    // bypassed re-entry reads the updated state.
+    var prevState = { completed_at: t.completed_at, status: t.status };
+    Object.assign(t, patch);
     try {
       await db.update('job_tasks', '?id=eq.'+encodeURIComponent(taskId), patch);
-      Object.assign(t, patch);
       updateMyTasksBadge(); renderMyTasks();
       if (window._c360CompanyId) window.loadCompanyTasks && window.loadCompanyTasks(window._c360CompanyId);
 
@@ -17661,7 +17669,13 @@ window.loadBoms = async function initBoms() {
           } catch(_) {}
         }
       }
-    } catch(e) { window.lpAlert && window.lpAlert('Could not update task: ' + (e.message||e)); }
+    } catch(e) {
+      Object.assign(t, prevState); // roll back optimistic patch
+      updateMyTasksBadge(); renderMyTasks();
+      window.lpAlert && window.lpAlert('Could not update task: ' + (e.message||e));
+    } finally {
+      delete _taskToggleInFlight[taskId];
+    }
   };
 
   // ── Task detail side-panel ────────────────────────────────────────────
