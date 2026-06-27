@@ -24044,11 +24044,16 @@ window._blendRecipePlan = function(containers, recipe, reqLitres, reqAbv, tol, b
     if (!g) { out.warnings.push('missing-spirit:' + r.spirit_type); return grp; }
     var groupDrawLPA = Math.min(targetLPA, g.lpa);
     if (groupDrawLPA < targetLPA - 1e-6) out.warnings.push('insufficient:' + r.spirit_type);
-    g.containers.forEach(function(c) {
-      var contShare  = g.lpa > 0 ? (c.lpa / g.lpa) : 0;
-      var drawLPA    = groupDrawLPA * contShare;
+    // Drain sequentially, smallest/least-full vessel first, so only the largest
+    // vessel is left part-full (operationally cleaner than splitting the draw
+    // proportionally across every vessel of this spirit type).
+    var ordered = g.containers.slice().sort(function(a, b) { return a.litres - b.litres; });
+    var remLPA = groupDrawLPA;
+    ordered.forEach(function(c) {
+      var drawLPA    = Math.max(0, Math.min(remLPA, c.lpa));
       var drawLitres = c.abv > 0 ? drawLPA / (c.abv / 100) : 0;
-      if (drawLitres > c.litres) drawLitres = c.litres;
+      if (drawLitres > c.litres) { drawLitres = c.litres; drawLPA = c.lpa; }
+      remLPA -= drawLPA;
       grp.containers.push({ reference: c.reference, abv: c.abv, litres: c.litres,
                             drawLitres: drawLitres, remainderLitres: Math.max(0, c.litres - drawLitres) });
       grp.drawLitres += drawLitres;
@@ -35832,6 +35837,11 @@ window.saveAdjModal = async function() {
           + '</div>';
       }
 
+      // ── Blend recipe editor (multi-spirit jobs) — preloaded from the BOM recipe
+      //    by _lsoRenderBlendRecipe; sits above the linked list so the target
+      //    breakdown is visible before/while vessels are linked. ───────────────
+      html += '<div id="lso-blend-recipe-wrap" style="display:none;"></div>';
+
       // ── Linked containers list ────────────────────────────────────────────
       html += '<div id="lso-linked-list" style="margin-bottom:10px;">';
       _linkedConts.forEach(function(lc, idx) {
@@ -35860,9 +35870,6 @@ window.saveAdjModal = async function() {
           + '</div>';
       });
       html += '</div>';
-
-      // ── Blend recipe editor (multi-spirit jobs) — populated by _lsoRenderBlendRecipe ─
-      html += '<div id="lso-blend-recipe-wrap" style="display:none;"></div>';
 
       if (!isLocked) {
         // Container selector for adding more
@@ -36471,11 +36478,27 @@ window.saveAdjModal = async function() {
       });
       // Combined totals if multiple containers
       if (linkedContainers.length > 1) {
+        // Sufficiency is an ALCOHOL question, not a raw-volume one: cask-strength
+        // litres get diluted UP to the target ABV, so comparing linked litres to
+        // required litres reports a false shortfall. Judge on LPA, and show the
+        // equivalent finished litres the linked alcohol yields at target ABV.
+        var _reqLpaEff = (reqLpa != null) ? reqLpa : (reqLitres * reqAbv / 100);
+        var _surplusLPA = _reqLpaEff > 0 ? totalLinkedLPA - _reqLpaEff : null;
+        var _yieldLitres = reqAbv > 0 ? totalLinkedLPA / (reqAbv / 100) : null;
+        var _surplusLitres = (_yieldLitres != null && reqLitres > 0) ? _yieldLitres - reqLitres : null;
+        var _surOk = _surplusLPA == null || _surplusLPA >= -1e-6;
+        var _surCol = _surplusLPA == null ? '#555' : (_surOk ? '#155724' : '#721c24');
+        var _surVal = _surplusLPA == null
+          ? '—'
+          : (_surplusLPA >= 0 ? '+' : '') + _surplusLPA.toFixed(2) + ' LPA'
+            + (_surplusLitres != null
+                ? '<div style="font-size:10px;font-weight:600;color:' + _surCol + ';margin-top:2px;">'
+                  + (_surplusLitres >= 0 ? '+' : '') + _surplusLitres.toFixed(0) + ' L of ' + reqAbv.toFixed(1) + '% product</div>'
+                : '');
         h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:6px;">';
-        h += kpi('Total Litres Linked', totalLinkedLitres.toFixed(1) + ' L', reqLitres > 0 && totalLinkedLitres >= reqLitres * 0.99 ? '#155724' : '#721c24');
+        h += kpi('Total Litres Linked', totalLinkedLitres.toFixed(1) + ' L', '#0d3349');
         h += kpi('Total LPA Linked', totalLinkedLPA.toFixed(3), '#0d3349');
-        var surplusL = reqLitres > 0 ? totalLinkedLitres - reqLitres : null;
-        h += kpi('Surplus / Shortfall', surplusL != null ? (surplusL >= 0 ? '+' : '') + surplusL.toFixed(1) + ' L' : '—', surplusL == null ? '#555' : surplusL >= 0 ? '#155724' : '#721c24');
+        h += kpi('Alcohol Surplus / Shortfall', _surVal, _surCol);
         h += '</div>';
       }
     } else {
@@ -36976,8 +36999,21 @@ window.saveAdjModal = async function() {
     var linked   = window._lsoAllLinkedConts || [];
     var allConts = window._lsoContainers || [];
     var locked   = !!window._lsoIsLocked;
-    // Distinct spirit types among linked vessels (preserve first-seen casing).
+
+    // Recipe components come from the per-job override (if set) else the BOM
+    // default — so the breakdown PRELOADS before any vessel is linked.
+    var recipeSrc = (window._lsoBlendRecipe && window._lsoBlendRecipe.length)
+      ? window._lsoBlendRecipe : (window._lsoBlendRecipeBom || []);
+
+    // Component order: recipe rows first (defined order), then any extra
+    // distinct spirit types found among linked vessels but not in the recipe.
     var order = [], seen = {};
+    recipeSrc.forEach(function(r) {
+      var st = String(r.spirit_type || '').trim();
+      if (!st) return;
+      var k = st.toLowerCase();
+      if (!seen[k]) { seen[k] = st; order.push(st); }
+    });
     linked.forEach(function(lc) {
       var cont = allConts.find(function(c){ return c.id === lc.id; });
       var st = String((cont && cont.spirit_type) || lc.spirit_type || '').trim();
@@ -36985,29 +37021,48 @@ window.saveAdjModal = async function() {
       var k = st.toLowerCase();
       if (!seen[k]) { seen[k] = st; order.push(st); }
     });
-    if (order.length < 2) { wrap.style.display = 'none'; wrap.innerHTML = ''; window._lsoRecipeActive = false; return; }
+    // Multi-spirit only: need at least two components (from recipe or linked).
+    if (order.length < 2) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
 
     function pctFor(st) {
       var k = st.toLowerCase();
-      var src = (window._lsoBlendRecipe && window._lsoBlendRecipe.length) ? window._lsoBlendRecipe : (window._lsoBlendRecipeBom || []);
-      var m = src.find(function(r){ return String(r.spirit_type || '').trim().toLowerCase() === k; });
+      var m = recipeSrc.find(function(r){ return String(r.spirit_type || '').trim().toLowerCase() === k; });
       return (m && m.pct != null) ? m.pct : '';
+    }
+    // Linked vessels for a given spirit type → reference + litres summary.
+    function linkStatus(st) {
+      var k = st.toLowerCase();
+      var hits = [];
+      linked.forEach(function(lc) {
+        var cont = allConts.find(function(c){ return c.id === lc.id; });
+        var cst = String((cont && cont.spirit_type) || lc.spirit_type || '').trim().toLowerCase();
+        if (cst !== k) return;
+        var ref = (cont && cont.reference) || lc.reference || lc.id || '?';
+        var lit = parseFloat((cont && cont.current_litres != null ? cont.current_litres : lc.litres) || 0);
+        hits.push(window.escapeHtml(ref) + (lit > 0 ? ' (' + lit.toFixed(0) + ' L)' : ''));
+      });
+      return hits.length
+        ? '<span style="color:var(--green);">&#10003; ' + hits.join(' + ') + '</span>'
+        : '<span style="color:var(--amber);">&#9888; no vessel linked yet</span>';
     }
     var inStyle = 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;width:90px;text-align:right;box-sizing:border-box;';
     var rowsH = order.map(function(st) {
       var pv = pctFor(st); pv = (pv != null && pv !== '') ? pv : '';
-      return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 0;">'
-        + '<span style="font-size:12px;color:var(--white);">' + window.escapeHtml(st) + '</span>'
+      return '<div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05);">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">'
+        + '<span style="font-size:12px;color:var(--white);font-weight:600;">' + window.escapeHtml(st) + '</span>'
         + '<span style="display:flex;align-items:center;gap:6px;">'
         + '<input type="number" min="0" max="100" step="0.1" class="lso-recipe-pct" data-spirit="' + window.escapeHtml(st) + '" value="' + pv + '" '
         + (locked ? 'readonly' : 'oninput="window._lsoOnRecipeChange()"') + ' style="' + inStyle + (locked ? 'opacity:0.7;' : '') + '">'
         + '<span style="font-size:11px;color:var(--muted);">%</span></span>'
+        + '</div>'
+        + '<div style="font-size:10px;margin-top:3px;">' + linkStatus(st) + '</div>'
         + '</div>';
     }).join('');
     wrap.style.display = '';
     wrap.innerHTML = '<div style="background:rgba(96,165,250,0.06);border:1px solid rgba(96,165,250,0.25);border-radius:5px;padding:12px 16px;margin-bottom:12px;">'
       + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:#60a5fa;font-weight:700;margin-bottom:4px;">Blend Recipe — % by LPA</div>'
-      + '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;">Proportion of the finished blend from each spirit type. Defaults from the BOM; adjust for this job if needed.</div>'
+      + '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;">Proportion of the finished blend from each spirit type. Preloaded from the BOM; adjust for this job if needed. Link a vessel of each spirit type to plan the draws.</div>'
       + rowsH
       + '<div id="lso-recipe-total" style="font-size:11px;color:var(--muted);margin-top:8px;border-top:1px solid var(--navy-border);padding-top:8px;"></div>'
       + '</div>';
