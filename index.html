@@ -36053,7 +36053,9 @@ window.saveAdjModal = async function() {
             + '<div><span style="color:var(--white);">' + window.escapeHtml(h.action === 'signed' ? 'Signed off' : 'Reopened') + '</span>'
             + ' by <strong style="color:var(--white);">' + window.escapeHtml(h.by||'—') + '</strong>'
             + (h.reason ? ' &mdash; <em>' + window.escapeHtml(h.reason) + '</em>' : '')
-            + '<span style="color:var(--muted);margin-left:8px;">' + new Date(h.at).toLocaleString('en-IE') + '</span></div>'
+            + '<span style="color:var(--muted);margin-left:8px;">' + new Date(h.at).toLocaleString('en-IE') + '</span>'
+            + (h.action === 'signed' && h.cbw_confirmed ? '<div style="color:var(--muted);font-size:10px;margin-top:2px;">&#10003; CBW rotations confirmed entered on all linked vessels</div>' : '')
+            + '</div>'
             + '</div>';
         });
         html += '</div>';
@@ -36203,17 +36205,31 @@ window.saveAdjModal = async function() {
           if (prepBtn.disabled) return;
           var ntEl = document.getElementById('lso-not-tracked');
           var nt   = !!(ntEl && ntEl.checked);
-          var doSign = function() { window.saveLiquidSignoff(jobId, lsoBtnId); };
-          if (window._pulseConfirm) {
+          var linkedCount = (window._lsoAllLinkedConts || []).length;
+          var doSign = function(cbwConfirmed) {
+            window._lsoCbwConfirmed = !!cbwConfirmed;
+            window.saveLiquidSignoff(jobId, lsoBtnId);
+          };
+          if (window._pulseConfirm && linkedCount > 0 && !nt) {
+            // Gate sign-off behind a CBW-rotation check: Yes signs off, No closes.
+            window._pulseConfirm({
+              title:        'Confirm CBW Rotations',
+              body:         '<p style="margin:0 0 8px;">Have <strong>all CBW rotations</strong> been entered on each linked vessel (' + linkedCount + ')?</p>'
+                          + '<p style="margin:0;color:var(--muted);font-size:11px;">Click <strong style="color:var(--gold);">Yes</strong> to confirm and sign off the liquid as ready. This locks the sign-off. Actual dilution water and final volumes are recorded later in the job completion step.</p>',
+              confirmLabel: 'Yes — Liquid Ready',
+              cancelLabel:  'No',
+              onConfirm:    function() { doSign(true); }
+            });
+          } else if (window._pulseConfirm) {
             window._pulseConfirm({
               title:        'Sign Off Liquid',
               body:         '<p style="margin:0 0 8px;">Confirm the liquid preparation' + (nt ? '' : ' (including any dilution / chill filtration / colouring)') + ' is complete and sign off?</p>'
                           + '<p style="margin:0;color:var(--muted);font-size:11px;">This locks the liquid sign-off and completes the liquid task. Actual dilution water and final volumes are recorded later in the job completion step.</p>',
               confirmLabel: '&#10003; Sign Off',
-              onConfirm:    doSign
+              onConfirm:    function() { doSign(false); }
             });
           } else {
-            doSign();
+            doSign(false);
           }
         };
       }
@@ -36235,7 +36251,9 @@ window.saveAdjModal = async function() {
     var histRows = await supaGet('job_liquid_signoff?job_id=eq.'+jobId+'&select=signoff_history&limit=1');
     var existingHist = [];
     try { existingHist = JSON.parse((histRows[0]&&histRows[0].signoff_history)||'[]'); } catch(e2){}
-    existingHist.push({ action:'signed', by: signedBy, at: new Date().toISOString() });
+    var _cbwConfirmed = (window._lsoCbwConfirmed === true);
+    existingHist.push({ action:'signed', by: signedBy, at: new Date().toISOString(), cbw_confirmed: _cbwConfirmed });
+    window._lsoCbwConfirmed = false;
 
     // Build multi-container JSON from current in-memory list
     var _lcJson = JSON.stringify(window._lsoAllLinkedConts || []);
@@ -36640,7 +36658,7 @@ window.saveAdjModal = async function() {
     // Step 1: Verify containers
     var contRefs = linkedContainers.map(function(c){ return esc(c.reference); }).join(', ') || '___________';
     h += step(stepNum++, 'Verify Source Container(s)',
-      'Confirm container(s) <strong>' + contRefs + '</strong> are correctly identified. Check reference number, spirit type, and CBW rotation match this work order.');
+      'Confirm container(s) <strong>' + contRefs + '</strong> are correctly identified. Check the reference number and spirit type match this work order, and <strong>check / log the CBW rotation</strong> for each vessel in the box above.');
 
     // Step 2: Dilution
     if (dilution) {
@@ -36779,9 +36797,9 @@ window.saveAdjModal = async function() {
       + '<div><div style="' + S.label + '">ABV Matches Warrant?</div><div style="border-bottom:1px solid #999;height:24px;"></div></div>'
       + '</div>');
 
-    // Step 6: Sign off in Pulse
-    h += step(stepNum++, 'Record in Pulse &amp; Sign Off',
-      'Open job <strong>' + esc(jobRef) + '</strong> in Lighthouse Pulse → Liquid Sign-Off tab. Enter measured ABV, confirm checklist items, enter your name and click <strong>Sign Off</strong> to lock this work order.');
+    // Step 6: Mark Liquid Ready in Pulse
+    h += step(stepNum++, 'Return to Pulse &amp; Mark Liquid Ready',
+      'Once the liquid is physically prepared, fill in the actuals above, then return to job <strong>' + esc(jobRef) + '</strong> in Lighthouse Pulse → Liquid Sign-Off tab. Confirm any chill filtration / colouring steps and click <strong>Liquid Ready</strong> to sign off and lock this work order. You are recorded as the signer.');
 
     // ── Sign-Off Block ────────────────────────────────────────────────────────
     h += '<div style="' + S.sectionHd + '">Liquid Manager Sign-Off</div>';
@@ -36981,7 +36999,7 @@ window.saveAdjModal = async function() {
       + '</div>'
       + '<div style="padding:18px 22px;font-size:12px;color:var(--white);line-height:1.7;">' + opts.body + '</div>'
       + '<div style="padding:12px 22px 18px;display:flex;justify-content:flex-end;gap:10px;">'
-      + '<button id="_pcc-cancel" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;font-weight:600;padding:8px 20px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">Cancel</button>'
+      + '<button id="_pcc-cancel" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;font-weight:600;padding:8px 20px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">' + (opts.cancelLabel || 'Cancel') + '</button>'
       + '<button id="_pcc-confirm" style="' + danger + 'font-size:12px;font-weight:700;padding:8px 22px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">' + (opts.confirmLabel || 'Confirm') + '</button>'
       + '</div></div>';
 
