@@ -39994,11 +39994,30 @@ window.saveAdjModal = async function() {
   };
 
   window._bomSendToClient = async function(jobId, prefillEmail, _skipGuard) {
+    // Never stack a second prompt on top of an existing dialog.
+    if (document.querySelector('.lp-dialog-overlay')) return;
     if (!_skipGuard) {
       if (window._bomSendBusy) return;
       window._bomSendBusy = true;
     }
     try {
+    // Prefill the email box with the last address this BOM was sent to,
+    // falling back to the job's client email when nothing was sent yet.
+    if (!prefillEmail) {
+      var cached = window._bomApprovalCache && window._bomApprovalCache[jobId];
+      if (cached && cached.client_email_to) {
+        prefillEmail = cached.client_email_to;
+      } else {
+        try {
+          var _pjRows = await supaGet('jobs?id=eq.' + jobId + '&select=client_id&limit=1');
+          var _pjClientId = _pjRows && _pjRows[0] && _pjRows[0].client_id;
+          if (_pjClientId) {
+            var _pcRows = await supaGet('clients?id=eq.' + _pjClientId + '&select=email&limit=1');
+            if (_pcRows && _pcRows[0] && _pcRows[0].email) prefillEmail = _pcRows[0].email;
+          }
+        } catch(_pe) { console.warn('BOM prefill email lookup failed:', _pe && _pe.message); }
+      }
+    }
     var to = await window.lpPrompt('Client email address to send BOM confirmation to:', prefillEmail || '', { title: 'Send BOM for Confirmation', placeholder: 'client@example.com' });
     if (to === null) { return; }
     if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to.trim())) {
@@ -40175,14 +40194,13 @@ window.saveAdjModal = async function() {
     try {
     var rec = window._bomApprovalCache[jobId];
     if (!rec) return;
-    // Prompt staff for what was updated before re-sending (optional but logged)
-    var staffNote = await window.lpPrompt('What was updated in the BOM before re-sending? (optional — this is logged)', '', { title: 'Re-send BOM — Log Change' });
-    // Append flagged round to history before clearing the decision fields
+    // Append flagged round to history before clearing the decision fields.
+    // The email prompt below is the only dialog shown on re-send.
     var historyEntry = {
       flagged_by:     rec.client_approver_name || null,
       flagged_at:     rec.client_decided_at    || null,
       client_notes:   rec.client_notes         || null,
-      staff_response: (staffNote && staffNote.trim()) || null,
+      staff_response: null,
       responded_by:   window.CURRENT_USER ? window.CURRENT_USER.email : null,
       responded_at:   new Date().toISOString()
     };
