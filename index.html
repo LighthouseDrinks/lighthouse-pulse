@@ -34220,10 +34220,25 @@ window.saveAdjModal = async function() {
       bom = bomRows[0] || null;
     } catch(e) { window.logError('load BOM for print', e); }
     var ai = (bom && bom.additional_info) || {};
+
+    // Resolve packaging component SKU ids to descriptions for the run sheet
+    var _skuFields = ['liquid_sku_id','bottle_sku_id','cork_sku_id','ropp_sku_id','foil_sku_id',
+      'front_label_sku_id','back_label_sku_id','neck_label_sku_id','outer_case_label_sku_id','shipper_sku_id',
+      'divider_sku_id','string_twine_sku_id','monocarton_sku_id','gift_tube_sku_id','tube_lid_sku_id','tin_sku_id'];
+    var skuMap = {};
+    if (bom) {
+      var _skuIds = _skuFields.map(function(f){ return bom[f]; }).filter(Boolean);
+      if (_skuIds.length) {
+        try {
+          var _skuRows = await supaGet('dry_goods_skus?id=in.(' + _skuIds.join(',') + ')&select=id,description,volume,abv,region');
+          (_skuRows || []).forEach(function(s){ skuMap[s.id] = (window.skuDisplayName ? window.skuDisplayName(s) : (s.description || s.id)); });
+        } catch(e) { window.logError && window.logError('load SKUs for print', e); }
+      }
+    }
+
     var clientName = (j.clients && j.clients.name) || window._clientName(j.client_id);
     var bomLabel = bom ? (window.bomDisplayName(bom) || bom.product_name || j.bom_id || '') : (j.bom_id || '');
     if (bom) window._mergeBomMap([{ id: j.bom_id, product_name: bom.product_name, volume_cl: bom.volume_cl, abv: bom.abv, additional_info: bom.additional_info }]);
-    var payLabel = { credit:'Credit Account', upfront:'Pay Upfront', before_leaving:'Pay Before Leaving' };
     var isLiquid = j.job_target_type === 'liquid';
 
     function section(title) {
@@ -34299,15 +34314,14 @@ window.saveAdjModal = async function() {
       + row('Job No', j.id)
       + row('Product Full Name', window.jobLabel(j))
       + row('Client', clientName)
-      + row('Purchase Order Number', j.po_number)
       + row('BOM', bomLabel)
-      + row('Payment Terms', payLabel[j.payment_type] || j.payment_type)
       + row('Production Bay', j.job_bay ? 'Bay ' + j.job_bay : '—')
       + section('Job Target')
       + row('Target Type', isLiquid ? 'Liquid Target' : 'Bottle Target')
       + (isLiquid ? row('Litres of Liquid', j.liquid_litres ? j.liquid_litres + ' L' : '') : '')
       + (!isLiquid ? row('Number of Bottles', j.bottle_target ? j.bottle_target.toLocaleString() + ' bottles' : '') : '')
       + section('Liquid Processing')
+      + row('Liquid', (bom && (bom.liquid_spec || skuMap[bom.liquid_sku_id])) || '')
       + row('Dilution', _psDilutionStr)
       + (_psRecipeStr ? row('Blend Recipe (by LPA)', _psRecipeStr) : '')
       + (_psBlendInstr ? row('Blend Instructions', _psBlendInstr) : '')
@@ -34324,6 +34338,27 @@ window.saveAdjModal = async function() {
         + row('Bottling ABV', bom.abv ? bom.abv + '%' : '')
         + row('Bottles per Case', bom.bottles_per_shipper)
         + row('Bottling Speed (BPH)', bom.bph);
+
+      // Packaging Components — resolved SKU descriptions with the SKU code
+      var _skuRow = function(label, skuId) {
+        if (!skuId) return '';
+        var desc = skuMap[skuId] || skuId;
+        return row(label, desc + ' [' + skuId + ']');
+      };
+      var _components = [
+        ['Bottle', bom.bottle_sku_id], ['ROPP Capsule', bom.ropp_sku_id], ['Cork', bom.cork_sku_id],
+        ['Foil / Heat Shrink', bom.foil_sku_id], ['Front Label', bom.front_label_sku_id],
+        ['Back Label', bom.back_label_sku_id], ['Neck Label', bom.neck_label_sku_id],
+        ['Outer Shipper Case Label', bom.outer_case_label_sku_id], ['Shipper', bom.shipper_sku_id],
+        ['Divider / Insert', bom.divider_sku_id], ['String / Twine', bom.string_twine_sku_id],
+        ['Monocarton', bom.monocarton_sku_id], ['Gift Tube', bom.gift_tube_sku_id],
+        ['Tube Lid', bom.tube_lid_sku_id], ['Tin', bom.tin_sku_id]
+      ];
+      if (_components.some(function(c){ return !!c[1]; })) {
+        rows += section('Packaging Components')
+          + _components.map(function(c){ return _skuRow(c[0], c[1]); }).join('');
+      }
+
       if (ai.labelBarcode || ai.shipperBarcode || ai.intendedMarket || ai.dutyStamp || ai.annex2 || ai.lotNumber || ai.pallet || ai.casesLayer || ai.layersPallet || ai.labelPosition) {
         rows += section('Packaging & Additional Information')
           + (ai.labelBarcode   ? row('Label Barcode', ai.labelBarcode) : '')
@@ -34366,6 +34401,10 @@ window.saveAdjModal = async function() {
       + '<div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:0.1em;">Job No</div>'
       + '<div style="font-size:22px;font-weight:700;color:#c9a84c;font-family:monospace;">' + j.id + '</div>'
       + '</div></div>'
+      + '<div style="margin-bottom:20px;border:2px solid #c9a84c;border-radius:6px;background:rgba(201,168,76,0.12);padding:12px 16px;-webkit-print-color-adjust:exact;print-color-adjust:exact;">'
+      + '<div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#0d3349;margin-bottom:2px;">&#9888; Team Talk Required</div>'
+      + '<div style="font-size:13px;color:#111;line-height:1.5;">This run sheet must be briefed to the whole team in a team talk before the run begins.</div>'
+      + '</div>'
       + '<table>' + rows + '</table>'
       + '<div class="no-print" style="margin-top:24px;text-align:center;">'
       + '<button onclick="window.print()" style="background:#c9a84c;border:none;color:#0d3349;font-weight:700;padding:10px 28px;font-size:13px;cursor:pointer;border-radius:4px;">Print</button>'
