@@ -33525,11 +33525,10 @@ window.saveAdjModal = async function() {
         'Once all required components are on site, allocate a production bay for this job.');
       html += '<div id="sc-bay-mount" style="margin-bottom:6px;"></div>';
 
-      // ── Step 3: pick the dry goods (print list + record picking) ──
+      // ── Step 3: pick the dry goods (print list) ──
       html += stepHd(3, 'Pick the dry goods',
-        'Print the picking list, then pick each item into the bay and record it below.');
-      html += '<div style="margin:0 0 14px;"><button id="sc-print-btn" style="' + goldBtnStyle + '">&#128438; Print Picking List</button></div>';
-      html += '<div id="sc-drygoods-mount"></div>';
+        'Print the picking list, then pick each item and load them into the allocated bay above.');
+      html += '<div style="margin:0 0 6px;"><button id="sc-print-btn" style="' + goldBtnStyle + '">&#128438; Print Picking List</button></div>';
 
       // ── Step 4: sign off supply chain ──
       html += stepHd(4, 'Sign off supply chain',
@@ -33835,11 +33834,9 @@ window.saveAdjModal = async function() {
         }
       }
 
-      // ── Step 3: print picking list + dry goods picking worksheet ──
+      // ── Step 3: print picking list ──
       var printBtn = document.getElementById('sc-print-btn');
       if (printBtn) printBtn.addEventListener('click', function(){ window.printPickingList(jobId); });
-      try { await window.renderDryGoodsPicking(jobId, 'sc-drygoods-mount'); }
-      catch(e) { console.warn('Dry goods picking render failed:', e); }
 
       // ── Step 4: sign off supply chain ──
       var signoffMount = document.getElementById('sc-signoff-mount');
@@ -39556,59 +39553,6 @@ window.saveAdjModal = async function() {
       el.innerHTML = '<div style="color:var(--red);font-size:12px;">Error: ' + e.message + '</div>';
     }
   }
-
-  // ── Dry goods PICKING worksheet (embedded in the Supply Chain step flow) ───
-  // Renders just the stock-check + qty-picked item table into a target mount,
-  // reusing the job_drygoods_prep / job_drygoods_prep_items model + writers.
-  window.renderDryGoodsPicking = async function(jobId, mountId) {
-    var mount = document.getElementById(mountId);
-    if (!mount) return;
-    try {
-      var preps = await supaGet('job_drygoods_prep?job_id=eq.' + jobId + '&limit=1');
-      var d = preps[0] || {};
-      var items = d.id ? await supaGet('job_drygoods_prep_items?prep_id=eq.' + d.id + '&order=created_at.asc') : [];
-      var dgpNameMap = await window.fetchSkuNameMap(items.map(function(it){ return it.sku_id; }));
-      var checkedCount = items.filter(function(it){ return it.stock_checked; }).length;
-
-      var html = '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">'
-        + '<div style="font-size:11px;color:var(--muted);">' + (items.length ? (checkedCount + ' of ' + items.length + ' items stock-checked') : 'No items loaded yet') + '</div>'
-        + '<button data-job="' + jobId + '" data-prep="' + (d.id||'') + '" onclick="window.scLoadDGFromBOM(this.dataset.job,this.dataset.prep)" class="btn btn-outline" style="font-size:10px;padding:4px 10px;">Load from BOM</button>'
-        + '</div>';
-      html += '<table class="data-table" style="width:100%;margin-bottom:8px;">'
-        + '<thead><tr><th>IT No.</th><th>Item Name</th><th style="text-align:center;">Stock Check</th><th>Qty Required</th><th>Qty Picked</th></tr></thead>'
-        + '<tbody>';
-      if (!items.length) {
-        html += '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted);font-size:12px;">No items — click <strong style="color:var(--gold)">Load from BOM</strong> to populate.</td></tr>';
-      } else {
-        items.forEach(function(item) {
-          html += '<tr>'
-            + '<td style="font-size:11px;color:var(--muted);">' + (item.it_number||'\u2014') + '</td>'
-            + '<td style="font-weight:600;">' + ((item.sku_id && dgpNameMap[item.sku_id]) || item.item_name || '\u2014') + '</td>'
-            + '<td style="text-align:center;"><input type="checkbox" data-item="' + item.id + '" class="sc-dgp-sc-cb"' + (item.stock_checked?' checked':'') + '></td>'
-            + '<td>' + (item.qty_required||'\u2014') + '</td>'
-            + '<td><input type="number" class="sc-dgp-picked" data-item="' + item.id + '" value="' + (item.qty_picked||'') + '" placeholder="0" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:4px 8px;font-size:11px;width:80px;border-radius:3px;"></td>'
-            + '</tr>';
-        });
-      }
-      html += '</tbody></table>';
-      mount.innerHTML = html;
-
-      mount.querySelectorAll('.sc-dgp-sc-cb').forEach(function(cb) {
-        cb.addEventListener('change', function() { window.updateDGItem(this.dataset.item, 'stock_checked', this.checked); });
-      });
-      mount.querySelectorAll('.sc-dgp-picked').forEach(function(inp) {
-        inp.addEventListener('blur', function() { window.updateDGItem(this.dataset.item, 'qty_picked', parseFloat(this.value)||0); });
-      });
-    } catch(e) {
-      mount.innerHTML = '<div style="color:var(--red);font-size:12px;">Error loading picking items: ' + e.message + '</div>';
-    }
-  };
-
-  // Load items from BOM then re-render the embedded picking worksheet.
-  window.scLoadDGFromBOM = async function(jobId, prepId) {
-    await window.loadDGItemsFromBOM(jobId, prepId);
-    await window.renderDryGoodsPicking(jobId, 'sc-drygoods-mount');
-  };
 
   window.saveDGPrep = async function(jobId, existingId) {
     if (!(window.canDo && (window.canDo('jobs_write') || window.canDo('warehouse_liquid')))) { window.toast && window.toast('You do not have permission to save dry goods prep.', 'error'); return; }
@@ -59530,29 +59474,17 @@ window.attendanceReject=async function(reqId,btn){
   }
 
   // ── Action carry-over across grouped series ────────────
-  // Several distinct Google series (different google_recurring_id) can be tied
-  // together as one logical meeting via meeting_series_groups, so open actions
-  // roll forward across the whole group (e.g. Mon -> Wed -> Fri) and not just
-  // within a single series. Ungrouped series fall back to themselves.
-  async function seriesGroupRecIds(recId){
-    if (!recId) return [];
-    try {
-      var grp = await db.select('meeting_series_groups','?google_recurring_id=eq.'+encodeURIComponent(recId)+'&limit=1');
-      if (grp && grp.length){
-        var members = await db.select('meeting_series_groups','?group_id=eq.'+encodeURIComponent(grp[0].group_id)+'&select=google_recurring_id');
-        var ids = (members||[]).map(function(m){return m.google_recurring_id;}).filter(Boolean);
-        if (ids.indexOf(recId)<0) ids.push(recId);
-        return ids;
-      }
-    } catch(e){ /* fall back to the series itself */ }
-    return [recId];
-  }
-  function recIdInList(ids){ return 'in.('+ids.map(function(id){return '"'+String(id).replace(/"/g,'')+'"';}).join(',')+')'; }
-  async function prevGroupMeeting(recIds, beforeStartsAt, excludeMeetingId){
-    if (!recIds || !recIds.length || !beforeStartsAt) return null;
-    var rows = await db.select('meetings','?google_recurring_id='+recIdInList(recIds)+'&starts_at=lt.'+encodeURIComponent(beforeStartsAt)+'&order=starts_at.desc&limit=5');
-    rows = (rows||[]).filter(function(m){ return m.id!==excludeMeetingId; });
-    return rows.length ? rows[0] : null;
+  // Outstanding open actions roll forward across the whole logical meeting
+  // (several Google series tied together via meeting_series_groups, e.g.
+  // Mon -> Wed -> Fri) via the meeting_pull_open_actions RPC. The RPC
+  // aggregates every earlier meeting in the group, de-dupes by text+assignee,
+  // and supersedes the originals so they don't re-appear. It runs SECURITY
+  // DEFINER, so any attendee can pull across sibling series they don't attend.
+  // Tasks only ever flow into a current/upcoming occurrence, never backwards.
+  function mhIsPast(m){
+    if (!m) return false;
+    var t = m.ends_at || m.starts_at;
+    return t ? (new Date(t).getTime() < Date.now()) : false;
   }
 
   // ── Meeting detail ─────────────────────────────────────
@@ -59578,34 +59510,35 @@ window.attendanceReject=async function(reqId,btn){
           entries = await db.select('kpi_entries','?kpi_id=in.('+ids.join(',')+')&order=period_start.desc,recorded_at.desc&limit=200');
         }
       }
-      // Auto-seed a fresh recurring occurrence: when this week's agenda is still
-      // empty, lay down the agenda from the series' linked template and carry any
-      // open actions forward from the previous occurrence. Runs once — as soon as
-      // an agenda exists this whole block is skipped on later opens.
+      // Set up a recurring occurrence on open:
+      //  * seed the agenda from the series template on a fresh occurrence
+      //    (only while the agenda is still empty), and
+      //  * roll any outstanding open actions forward from earlier meetings in
+      //    the group whenever this occurrence has none live yet.
+      // The pull runs for any attendee (RPC is SECURITY DEFINER) and is
+      // idempotent, so it's safe to attempt on every open; it never touches a
+      // meeting that has already ended.
       var _seedMsg='';
-      if (meeting.google_recurring_id && !agenda.length){
+      var _seededCount=0, _carriedCount=0;
+      if (meeting.google_recurring_id && !mhIsPast(meeting)){
         try {
-          if (seriesTpl && seriesTpl.template_id){
+          if (!agenda.length && seriesTpl && seriesTpl.template_id){
             var tIts = await db.select('meeting_template_items','?template_id=eq.'+seriesTpl.template_id+'&order=position.asc');
             if (tIts.length){
               var seedRows = tIts.map(function(it,i){ return { id:uuid(), meeting_id:meeting.id, position:i, topic:it.topic, owner_role:it.owner_role, time_box_min:it.time_box_min, notes:it.notes, created_by:meId() }; });
               var seeded = await db.insert('meeting_agenda_items', seedRows);
               agenda = seeded || seedRows;
+              _seededCount = agenda.length;
             }
           }
-          if (!actions.length){
-            var grpIds = await seriesGroupRecIds(meeting.google_recurring_id);
-            var prevM = await prevGroupMeeting(grpIds, meeting.starts_at, meeting.id);
-            if (prevM){
-              var prevAc = await db.select('meeting_actions','?meeting_id=eq.'+prevM.id+'&done=eq.false');
-              if (prevAc.length){
-                var carryRows = prevAc.map(function(a){ return { id:uuid(), meeting_id:meeting.id, text:a.text, assigned_to:a.assigned_to, due_date:a.due_date, created_by:meId() }; });
-                var carried = await db.insert('meeting_actions', carryRows);
-                actions = actions.concat(carried || carryRows);
-              }
-            }
+          var openNow=(actions||[]).filter(function(a){ return !a.done && !a.carried_forward_at; });
+          if (!openNow.length){
+            try {
+              var pulled = await db.rpc('meeting_pull_open_actions', { p_meeting_id: meeting.id });
+              if (pulled && pulled.length){ actions = actions.concat(pulled); _carriedCount = pulled.length; }
+            } catch(e){ /* non-fatal: leave it and let the user pull manually */ }
           }
-          var parts=[]; if(agenda.length) parts.push(agenda.length+' agenda item'+(agenda.length>1?'s':'')+' from the template'); if(actions.length) parts.push(actions.length+' open action'+(actions.length>1?'s':'')+' carried over');
+          var parts=[]; if(_seededCount) parts.push(_seededCount+' agenda item'+(_seededCount>1?'s':'')+' from the template'); if(_carriedCount) parts.push(_carriedCount+' open action'+(_carriedCount>1?'s':'')+' carried over');
           if(parts.length) _seedMsg='Set up this week: '+parts.join(' and ')+'.';
         } catch(e){ /* non-fatal: leave it empty and let the admin apply manually */ }
       }
@@ -59621,6 +59554,7 @@ window.attendanceReject=async function(reqId,btn){
     if (d.loading){ el.innerHTML='<div class="mh-muted" style="padding:40px;text-align:center;">Loading meeting\u2026</div>'; return; }
     if (d.error){ el.innerHTML='<button class="mh-btn" onclick="MH.close()">\u2039 Back</button><div class="mh-card" style="padding:24px;margin-top:14px;color:var(--red);">'+esc(d.error)+'</div>'; return; }
     var m=d.meeting; var admin=S.isAdmin || (window.canDo&&window.canDo('meetings_admin'));
+    var isPast = mhIsPast(m);
     var hasKpis = d.seriesKpis && d.seriesKpis.length;
     var att = (d.attendees||[]).map(function(a){ return '<span class="mh-pill" style="background:rgba(255,255,255,0.06);color:var(--text);margin:0 4px 4px 0;">'+esc(a.display_name||a.email)+(a.is_organizer?' \u2605':'')+'</span>'; }).join('');
     var head = '<button class="mh-btn" onclick="MH.close()">\u2039 Back to calendar</button>'
@@ -59648,7 +59582,7 @@ window.attendanceReject=async function(reqId,btn){
       +   '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">'
       +     '<div style="font-size:15px;font-weight:800;color:var(--white);">Action items</div>'
       +     '<div style="display:flex;gap:8px;">'
-      +       (admin?'<button class="mh-btn" onclick="MH.pullActions()" title="Pull any open actions from the previous meeting in this group">Pull open actions</button>':'')
+      +       ((m.google_recurring_id && !isPast)?'<button class="mh-btn" onclick="MH.pullActions()" title="Pull outstanding open actions from earlier meetings in this series">Pull open actions</button>':'')
       +       '<button class="mh-btn gold" onclick="MH.addAction()">+ Action</button>'
       +     '</div>'
       +   '</div>'
@@ -59683,6 +59617,16 @@ window.attendanceReject=async function(reqId,btn){
   function renderActions(items){
     if (!items.length) return '<div class="mh-muted">No actions yet.</div>';
     return items.map(function(a){
+      // Superseded: this action was rolled forward into a later meeting, so it
+      // is no longer live here. Show it muted and read-only (not "done", which
+      // would read as completed).
+      if (a.carried_forward_at){
+        return '<div class="mh-ag" data-id="'+a.id+'" style="opacity:.5;">'
+          + '<div class="row1" style="align-items:center;gap:8px;">'
+          +   '<span class="mh-pill" style="background:rgba(255,255,255,0.06);color:var(--muted);flex:none;">\u2192 Moved to a later meeting</span>'
+          +   '<span style="text-decoration:line-through;color:var(--muted);">'+esc(a.text||'')+'</span>'
+          + '</div></div>';
+      }
       var inTasks = !!a.task_id;
       return '<div class="mh-ag" data-id="'+a.id+'">'
         + '<div class="row1">'
@@ -59909,27 +59853,21 @@ window.attendanceReject=async function(reqId,btn){
     });
   };
 
-  // Manual pull: bring open actions from the previous group meeting into this
-  // one on demand, de-duplicated by text + assignee.
+  // Manual pull: roll every outstanding open action from earlier meetings in
+  // this series group into the current one, de-duplicated and superseding the
+  // originals. All the heavy lifting (group resolution, dedupe, supersede,
+  // attendee/past-meeting guards) happens server-side in the RPC.
   MH.pullActions = async function(){
     var d=S.detail; if(!d||!d.meeting) return;
     var m=d.meeting;
     if(!m.google_recurring_id){ window.toast&&window.toast('This is a one-off meeting \u2014 nothing to pull from.'); return; }
+    if(mhIsPast(m)){ window.toast&&window.toast('This meeting has already ended \u2014 tasks can only be pulled into an upcoming meeting.'); return; }
     try {
-      var grpIds = await seriesGroupRecIds(m.google_recurring_id);
-      var prevM = await prevGroupMeeting(grpIds, m.starts_at, m.id);
-      if(!prevM){ window.toast&&window.toast('No earlier meeting found in this group.'); return; }
-      var prevAc = await db.select('meeting_actions','?meeting_id=eq.'+prevM.id+'&done=eq.false');
-      if(!prevAc.length){ window.toast&&window.toast('No open actions to pull from the previous meeting.'); return; }
-      var key=function(a){ return String(a.text||'').trim().toLowerCase()+'|'+(a.assigned_to||''); };
-      var existing={}; (d.actions||[]).forEach(function(a){ if(!a.done) existing[key(a)]=1; });
-      var toAdd=prevAc.filter(function(a){ return !existing[key(a)]; });
-      if(!toAdd.length){ window.toast&&window.toast('Already up to date \u2014 no new open actions.'); return; }
-      var rows=toAdd.map(function(a){ return { id:uuid(), meeting_id:m.id, text:a.text, assigned_to:a.assigned_to, due_date:a.due_date, created_by:meId() }; });
-      var added=await db.insert('meeting_actions', rows);
-      d.actions=(d.actions||[]).concat(added||rows);
+      var pulled = await db.rpc('meeting_pull_open_actions', { p_meeting_id: m.id });
+      if(!pulled || !pulled.length){ window.toast&&window.toast('Already up to date \u2014 no outstanding actions to pull.'); return; }
+      d.actions=(d.actions||[]).concat(pulled);
       var ael=document.getElementById('mh-actions'); if(ael) ael.innerHTML=renderActions(d.actions);
-      window.toast&&window.toast('Pulled '+rows.length+' open action'+(rows.length>1?'s':'')+'.','success');
+      window.toast&&window.toast('Pulled '+pulled.length+' open action'+(pulled.length>1?'s':'')+' from earlier meetings.','success');
     } catch(e){ window.toast&&window.toast('Pull failed: '+((e&&e.message)||e),'error'); }
   };
 
