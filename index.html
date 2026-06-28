@@ -2289,8 +2289,12 @@ async function handleSession(session) {
     } catch(se) { /* status column may not exist yet — safe to continue */ }
 
     window.CURRENT_USER = { id: uid, app_user_id: appUserId, email: email, role: role, client_id: clientId, client_name: clientName, display_name: displayName };
-    // Store email in app_users for settings panel display (fire-and-forget — does not block login)
-    window.db.update('app_users', '?auth_user_id=eq.' + uid, { email: email }).catch(function(e) { window.logError('store user email', e); });
+    // Store email in app_users for settings panel display (fire-and-forget — does not block login).
+    // Staff only: client accounts have no app_users self-update RLS policy, so this PATCH
+    // would 403 on every client login. Skip it for clients to avoid the guaranteed failure.
+    if (role !== 'client') {
+      window.db.update('app_users', '?auth_user_id=eq.' + uid, { email: email }).catch(function(e) { window.logError('store user email', e); });
+    }
     if (role === 'client') {
       showPortal(window.CURRENT_USER);
     } else if (STAFF_ROLES.indexOf(role) !== -1) {
@@ -2636,6 +2640,30 @@ window._portalIsLhHousedName = function(name) {
   return n.indexOf('lighthouse') >= 0 || n.indexOf('fero') >= 0;
 };
 
+// ── Portal job-stage style/label maps (single source of truth) ───────────────
+// Live jobs.stage is only new/active/complete; the title-case keys are legacy
+// defensive mappings for old rows. Shared by the Jobs table and the read-only
+// Job view so the two never drift apart. Hard-coded colours so no CSS vars are
+// needed in the portal.
+window._PORTAL_STAGE_STYLE = {
+  new:       'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+  active:    'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+  complete:  'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
+  on_hold:   'background:rgba(232,156,58,0.12);color:#e89c3a;border:1px solid rgba(232,156,58,0.25);',
+  cancelled: 'background:rgba(100,100,120,0.15);color:#888;border:1px solid rgba(100,100,120,0.3);',
+  'Intake':                'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+  'Job Prep':              'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
+  'In Production':         'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+  'Scheduled':             'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
+  'Complete':              'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
+  'Pre-Production Signoff':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);'
+};
+window._PORTAL_STAGE_LABEL = {
+  new:'New', active:'Active', complete:'Complete', on_hold:'On Hold', cancelled:'Cancelled',
+  'Intake':'New', 'Job Prep':'New', 'In Production':'Active',
+  'Scheduled':'Active', 'Complete':'Complete', 'Pre-Production Signoff':'Active'
+};
+
 // ── Portal data ──────────────────────────────────────────────────────────────
 async function loadPortalData(clientId) {
   if (!clientId) return;
@@ -2691,25 +2719,9 @@ async function loadPortalData(clientId) {
         + '<td></td>'
         + '</tr>');
     });
-    // Stage style/label maps (mirrors main app — using hard-coded colours so no CSS vars needed in portal)
-    var _PSS = {
-      new:       'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
-      active:    'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
-      complete:  'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
-      on_hold:   'background:rgba(232,156,58,0.12);color:#e89c3a;border:1px solid rgba(232,156,58,0.25);',
-      cancelled: 'background:rgba(100,100,120,0.15);color:#888;border:1px solid rgba(100,100,120,0.3);',
-      'Intake':                'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
-      'Job Prep':              'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
-      'In Production':         'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
-      'Scheduled':             'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
-      'Complete':              'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
-      'Pre-Production Signoff':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);'
-    };
-    var _PSL = {
-      new:'New', active:'Active', complete:'Complete', on_hold:'On Hold', cancelled:'Cancelled',
-      'Intake':'New', 'Job Prep':'New', 'In Production':'Active',
-      'Scheduled':'Active', 'Complete':'Complete', 'Pre-Production Signoff':'Active'
-    };
+    // Stage style/label maps — shared single source of truth (see _PORTAL_STAGE_*).
+    var _PSS = window._PORTAL_STAGE_STYLE;
+    var _PSL = window._PORTAL_STAGE_LABEL;
     window._portalJobs = jobs; // store for view modal
     jobs.forEach(function(j) {
       var stageSty = _PSS[j.stage] || _PSS.new;
@@ -2837,8 +2849,7 @@ async function loadPortalData(clientId) {
 }
 
 // ── Portal: Summary tiles ────────────────────────────────────────────────────
-// Data window starts 1 May 2026 (first usable month of Pulse production data).
-window.PORTAL_DATA_FROM = '2026-05-01T00:00:00Z';
+// NOTE: all Summary KPIs below are all-time (no date floor is applied).
 
 function _portalSet(id, txt, col) {
   var el = document.getElementById(id);
@@ -2866,7 +2877,6 @@ async function loadPortalSummary(clientId) {
   // belongs to the staff/schedule side only; the "Next Scheduled" KPI below
   // no longer depends on scheduled_start (it falls back to scheduled_date /
   // bottling_date), so the portal no longer needs to mutate jobs here.
-  var FROM = window.PORTAL_DATA_FROM;
 
   // Jobs Completed (all-time; stage written as 'complete' or 'Complete' depending on path)
   try {
@@ -3945,24 +3955,8 @@ window.openPortalJobView = async function(jobId) {
 
     var esc = window.escapeHtml || function(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
 
-    var _PSS = {
-      new:       'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
-      active:    'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
-      complete:  'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
-      on_hold:   'background:rgba(232,156,58,0.12);color:#e89c3a;border:1px solid rgba(232,156,58,0.25);',
-      cancelled: 'background:rgba(100,100,120,0.15);color:#888;border:1px solid rgba(100,100,120,0.3);',
-      'Intake':'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
-      'Job Prep':'background:rgba(232,156,58,0.15);color:#e89c3a;border:1px solid rgba(232,156,58,0.3);',
-      'In Production':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
-      'Scheduled':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);',
-      'Complete':'background:rgba(61,186,120,0.15);color:#3dba78;border:1px solid rgba(61,186,120,0.3);',
-      'Pre-Production Signoff':'background:rgba(74,158,221,0.15);color:#4a9edd;border:1px solid rgba(74,158,221,0.3);'
-    };
-    var _PSL = {
-      new:'New', active:'Active', complete:'Complete', on_hold:'On Hold', cancelled:'Cancelled',
-      'Intake':'New','Job Prep':'New','In Production':'Active',
-      'Scheduled':'Active','Complete':'Complete','Pre-Production Signoff':'Active'
-    };
+    var _PSS = window._PORTAL_STAGE_STYLE;
+    var _PSL = window._PORTAL_STAGE_LABEL;
 
     var stageSty = _PSS[j.stage] || _PSS.new;
     var stageLbl = _PSL[j.stage] || j.stage || 'New';
@@ -36425,11 +36419,20 @@ window.saveAdjModal = async function() {
         + '<div style="' + S.label + '">' + label + '</div>'
         + '<div style="font-size:20px;font-weight:800;color:' + (colour||'#0d3349') + ';margin-top:4px;">' + val + '</div></div>';
     }
+    // Compact KPI for the per-container source records (smaller than the headline
+    // kpi() so the floor-facing Process Instructions read larger by comparison).
+    function kpiSm(label, val, colour, sub) {
+      return '<div style="text-align:center;padding:7px 6px;border:1px solid #e0e0e0;border-radius:4px;background:#fafafa;">'
+        + '<div style="font-size:9px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">' + label + '</div>'
+        + '<div style="font-size:16px;font-weight:800;color:' + (colour||'#0d3349') + ';margin-top:2px;">' + val + '</div>'
+        + (sub ? '<div style="font-size:10px;font-weight:600;color:#666;margin-top:2px;">' + sub + '</div>' : '')
+        + '</div>';
+    }
     function step(num, title, body) {
-      return '<div style="' + S.stepBox + 'display:flex;align-items:flex-start;gap:10px;">'
-        + '<div><span style="' + S.stepNo + '">' + num + '</span></div>'
-        + '<div style="flex:1;"><div style="font-size:12px;font-weight:700;color:#0d3349;margin-bottom:4px;">' + title + '</div>'
-        + '<div style="font-size:11px;color:#333;">' + body + '</div></div></div>';
+      return '<div style="' + S.stepBox + 'display:flex;align-items:flex-start;gap:12px;">'
+        + '<div><span style="display:inline-block;width:26px;height:26px;background:#0d3349;color:#fff;border-radius:50%;font-weight:700;font-size:13px;text-align:center;line-height:26px;flex-shrink:0;">' + num + '</span></div>'
+        + '<div style="flex:1;"><div style="font-size:14px;font-weight:700;color:#0d3349;margin-bottom:5px;">' + title + '</div>'
+        + '<div style="font-size:12.5px;color:#333;line-height:1.5;">' + body + '</div></div></div>';
     }
     function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -36520,19 +36523,39 @@ window.saveAdjModal = async function() {
 
     // ── Liquid Requirement ────────────────────────────────────────────────────
     h += '<div style="' + S.sectionHd + '">Liquid Requirement</div>';
-    var cols = dilution ? 4 : 3;
+    var cols = dilution ? 3 : 2;
     h += '<div style="display:grid;grid-template-columns:repeat(' + cols + ',1fr);gap:10px;margin-bottom:10px;">';
-    h += kpi('Litres Required', reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—', '#0d3349');
-    h += kpi('Bottling ABV', reqAbv > 0 ? reqAbv.toFixed(1) + '%' : '—', '#c9a84c');
+    h += kpi('Bulk Litres Required at Bottling Strength' + (reqAbv > 0 ? ' (' + reqAbv.toFixed(1) + '%)' : ''),
+      reqLitres > 0 ? reqLitres.toFixed(1) + ' L' : '—', '#0d3349');
     h += kpi('Required LPA', reqLpa != null ? reqLpa.toFixed(3) : '—', '#0d3349');
     if (dilution) {
       h += kpi('Final Litres (after dilution)', finalLitres > 0 ? finalLitres.toFixed(1) + ' L' : '—', '#555');
     }
     h += '</div>';
 
+    // Additional-liquid callout — labelled by dilution mode so the liquid manager
+    // is never misled. "Dilute all" yields genuine surplus stock; "dilute required"
+    // only carries the ~2% filler/line-loss overage (prep volume, not stock).
+    var _addL = finalLitres - reqLitres;
+    if (reqLitres > 0 && _addL > 0.05) {
+      if (_dilMode === 'all') {
+        h += '<div style="margin:0 0 10px;padding:11px 16px;background:#d4edda;border:1px solid #28a745;border-radius:4px;font-size:13px;font-weight:700;color:#155724;">'
+          + 'Additional stock produced beyond this job: +' + _addL.toFixed(1) + ' L at ' + reqAbv.toFixed(1) + '% &mdash; surplus finished product</div>';
+      } else if (dilution) {
+        h += '<div style="margin:0 0 10px;padding:11px 16px;background:#fff8e6;border:1px solid #e0c060;border-radius:4px;font-size:12px;font-weight:600;color:#7a5c00;">'
+          + 'Includes ~' + _addL.toFixed(1) + ' L filler / line-loss overage (prep volume only &mdash; not surplus stock)</div>';
+      }
+    }
+
     if (_woRecipeActive) {
-      var _recSummary = _woRecipePlan.groups.map(function(g){ return esc(g.spirit_type || '?') + ' ' + (parseFloat(g.pct) || 0) + '%'; }).join(' &middot; ');
-      h += '<div style="margin:0 0 10px;padding:8px 12px;background:#eef5ff;border:1px solid #b9d4ff;border-radius:4px;font-size:11px;color:#0d3349;"><strong>Blend recipe (by LPA):</strong> ' + _recSummary + '</div>';
+      var _recRows = _woRecipePlan.groups.map(function(g){
+        return '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;border-bottom:1px solid #d8e6fb;">'
+          + '<span style="font-size:14px;font-weight:600;color:#0d3349;">' + esc(g.spirit_type || '?') + '</span>'
+          + '<span style="font-size:19px;font-weight:800;color:#c9a84c;">' + (parseFloat(g.pct) || 0) + '%</span></div>';
+      }).join('');
+      h += '<div style="margin:0 0 12px;padding:12px 16px;background:#eef5ff;border:1px solid #b9d4ff;border-radius:4px;">'
+        + '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#1d4ed8;margin-bottom:4px;">Blend Recipe (by LPA)</div>'
+        + _recRows + '</div>';
     }
 
     // ── Source Containers ─────────────────────────────────────────────────────
@@ -36547,18 +36570,23 @@ window.saveAdjModal = async function() {
         var spiritDisp = c.spirit_type
           ? c.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();})
           : '—';
+        // Vessels are coded IBC, so the Type box is redundant; only flag the rare
+        // non-IBC vessel by appending its type to the reference.
+        var refDisp = (c.reference || '—') + ((c.type && c.type !== 'ibc') ? ' (' + cType + ')' : '');
         h += '<div style="padding:12px 16px;background:#f0f8f0;border:1px solid #90c090;border-radius:4px;margin-bottom:8px;">';
         if (linkedContainers.length > 1) h += '<div style="font-size:10px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Container ' + (ci+1) + '</div>';
-        h += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;">';
-        h += kpi('Reference', esc(c.reference||'—'), '#0d3349');
-        h += kpi('Type', esc(cType), '#555');
-        h += kpi('Spirit / Product', esc(spiritDisp), '#c9a84c');
-        h += kpi('Litres Available', cLitres.toFixed(1) + ' L', '#0d3349');
-        h += kpi('ABV', cAbv > 0 ? cAbv.toFixed(1) + '%' : '—', '#c9a84c');
-        h += '</div>';
+        h += '<div style="display:grid;grid-template-columns:1.1fr 2fr 1.3fr 1.3fr;gap:8px;">';
+        h += kpiSm('Reference', esc(refDisp), '#0d3349');
+        h += kpiSm('Spirit / Product', esc(spiritDisp), '#c9a84c');
+        h += kpiSm('Bulk Litres', cLitres.toFixed(1) + ' L', '#0d3349', cAbv > 0 ? '@ ' + cAbv.toFixed(1) + '% ABV' : '');
         if (c.cbw_rotation) {
-          h += '<div style="font-size:11px;color:#555;margin-top:8px;"><strong>CBW Rotation:</strong> ' + esc(c.cbw_rotation) + '</div>';
+          h += kpiSm('CBW Rotation', esc(c.cbw_rotation), '#0d3349');
+        } else {
+          h += '<div style="text-align:center;padding:7px 6px;border:1px solid #e0e0e0;border-radius:4px;background:#fafafa;">'
+            + '<div style="font-size:9px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">CBW Rotation</div>'
+            + '<div style="border-bottom:1px solid #999;height:18px;margin:6px 8px 0;"></div></div>';
         }
+        h += '</div>';
         if (c.spirit_override) {
           h += '<div style="font-size:10px;color:#856404;background:#fffaf0;border:1px solid #ffe0a3;border-radius:4px;padding:6px 10px;margin-top:8px;line-height:1.45;">'
             + '&#9888; <strong>Spirit-type override</strong> &mdash; authorised by ' + esc(c.spirit_override.by || 'unknown')
@@ -36598,8 +36626,7 @@ window.saveAdjModal = async function() {
       var blank = '<div style="border-bottom:1px solid #999;height:24px;margin-top:4px;"></div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">';
       h += '<div><div style="' + S.label + '">Container Reference</div>' + blank + '</div>';
-      h += '<div><div style="' + S.label + '">Type</div>' + blank + '</div>';
-      h += '<div><div style="' + S.label + '">Current Litres</div>' + blank + '</div>';
+      h += '<div><div style="' + S.label + '">Bulk Litres</div>' + blank + '</div>';
       h += '<div><div style="' + S.label + '">ABV %</div>' + blank + '</div>';
       h += '<div><div style="' + S.label + '">LPA</div>' + blank + '</div>';
       h += '<div><div style="' + S.label + '">CBW Rotation</div>' + blank + '</div>';
