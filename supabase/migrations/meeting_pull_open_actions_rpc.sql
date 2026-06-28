@@ -64,11 +64,14 @@ begin
   end if;
 
   -- Candidate open, not-yet-carried actions from EARLIER meetings in the group.
+  -- An action linked to a completed job_task counts as done even if its own
+  -- done flag is stale, so it is never carried forward.
   create temp table _cand on commit drop as
   select a.id,
          a.text,
          a.assigned_to,
          a.due_date,
+         a.task_id,
          a.created_at,
          lower(btrim(a.text)) || '|' || coalesce(a.assigned_to::text, '') as k
   from public.meeting_actions a
@@ -77,7 +80,11 @@ begin
     and m.starts_at < v_target.starts_at
     and a.meeting_id <> p_meeting_id
     and a.done = false
-    and a.carried_forward_at is null;
+    and a.carried_forward_at is null
+    and not exists (
+      select 1 from public.job_tasks jt
+      where jt.id = a.task_id and jt.status = 'completed'
+    );
 
   -- Keys already open on the target meeting (avoid duplicates).
   create temp table _existing on commit drop as
@@ -88,16 +95,17 @@ begin
 
   -- One representative per key (most recent), excluding keys already on target.
   create temp table _rep on commit drop as
-  select distinct on (k) id, text, assigned_to, due_date, k
+  select distinct on (k) id, text, assigned_to, due_date, task_id, k
   from _cand
   where k not in (select k from _existing)
   order by k, created_at desc;
 
-  -- Insert the survivors into the target meeting.
+  -- Insert the survivors into the target meeting, preserving the task link so a
+  -- later task completion still flows back onto the carried action.
   create temp table _ins (id uuid) on commit drop;
   with ins as (
-    insert into public.meeting_actions (id, meeting_id, text, assigned_to, due_date, created_by)
-    select gen_random_uuid(), p_meeting_id, r.text, r.assigned_to, r.due_date, v_uid
+    insert into public.meeting_actions (id, meeting_id, text, assigned_to, due_date, task_id, created_by)
+    select gen_random_uuid(), p_meeting_id, r.text, r.assigned_to, r.due_date, r.task_id, v_uid
     from _rep r
     returning id
   )
