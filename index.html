@@ -36198,14 +36198,35 @@ window.saveAdjModal = async function() {
         html += '</div>';
       }
 
-      // ── Liquid Operations History (all events on linked containers) ────────────
-      if (_linkedConts.length) {
+      // ── Liquid Operations History (events on linked containers + this job's
+      //    link/delink audit, so delinked containers still show their history) ──
+      {
         try {
+          var _lcHist = [];
           var _lcHistIds = _linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
-          var _lcHist = await supaGet(
-            'liquid_history?container_id=in.(' + _lcHistIds.join(',') + ')&order=created_at.desc&limit=20'
-          );
-          if (_lcHist && _lcHist.length) {
+          if (_lcHistIds.length) {
+            _lcHist = await supaGet(
+              'liquid_history?container_id=in.(' + _lcHistIds.join(',') + ')&order=created_at.desc&limit=20'
+            ) || [];
+          }
+          // Link/delink events are tagged with job_id; fetch them directly so events
+          // for containers no longer in the linked list (delinked) still appear.
+          var _jobLinkHist = [];
+          if (jobId) {
+            _jobLinkHist = await supaGet(
+              'liquid_history?job_id=eq.' + jobId + '&event_type=in.(job_linked,job_unlinked)&order=created_at.desc&limit=20'
+            ) || [];
+          }
+          // Merge, de-dupe by id, re-sort newest first, cap at 20.
+          var _seenHistIds = {};
+          var _lcMerged = [];
+          _lcHist.concat(_jobLinkHist).forEach(function(ev) {
+            if (ev && ev.id && !_seenHistIds[ev.id]) { _seenHistIds[ev.id] = 1; _lcMerged.push(ev); }
+          });
+          _lcMerged.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
+          var _lcHistCapped = _lcMerged.length > 20;
+          _lcMerged = _lcMerged.slice(0, 20);
+          if (_lcMerged.length) {
             var _evTypeLabel = {
               add:'Added', edit:'Edited',
               container_adjusted:'Adjusted', container_created:'Created',
@@ -36216,7 +36237,8 @@ window.saveAdjModal = async function() {
               price_change:'Price updated', regauge:'Regauged',
               lpa_price:'Price updated',
               bottling_deduction:'Bottling deduction',
-              measurement_variance:'Measurement variance'
+              measurement_variance:'Measurement variance',
+              job_linked:'Linked to job', job_unlinked:'Delinked from job'
             };
             var _defEgid = d.blend_event_group_id || null;
             html += sec('Liquid Operations History');
@@ -36224,7 +36246,7 @@ window.saveAdjModal = async function() {
             html += '<div style="font-size:11px;">'
               + '<div style="display:grid;grid-template-columns:130px 90px 70px 1fr 130px;gap:8px;padding:4px 0 6px;border-bottom:2px solid var(--navy-border);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);">'
               + '<div>Operation</div><div>Container</div><div>Change</div><div>Performed by</div><div style="text-align:right;">Date</div></div>';
-            _lcHist.forEach(function(ev) {
+            _lcMerged.forEach(function(ev) {
               var isJobEv = _defEgid && ev.event_group_id === _defEgid;
               var _ed = window.lhDescribe ? window.lhDescribe(ev) : null;
               var evLabel = _ed ? _ed.label : (_evTypeLabel[ev.event_type] || ev.event_type.replace(/_/g,' ') || '—');
@@ -36246,7 +36268,7 @@ window.saveAdjModal = async function() {
                 + '</div>';
             });
             html += '</div>';
-            if (_lcHist.length === 20) {
+            if (_lcHistCapped) {
               html += '<div style="font-size:10px;color:var(--muted);padding:6px 0;">Showing last 20 events — view full history in the Liquid tab.</div>';
             }
           }
@@ -37306,6 +37328,16 @@ window.saveAdjModal = async function() {
     // Re-render linked list, requirement bar, and silently persist to DB
     window._lsoRenderLinkedList();
     _lsoAutoSaveContainers(window._lsoCurrentJobId);
+    // Audit: record the link in liquid operations history (best-effort)
+    window._writeBlendHistory && window._writeBlendHistory({
+      container_id:      cid,
+      container_ref:     c.reference || '',
+      event_type:        'job_linked',
+      job_id:            window._lsoCurrentJobId,
+      notes:             'Linked to job ' + window._lsoCurrentJobId,
+      performed_by_id:   window.CURRENT_USER ? (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id) : null,
+      performed_by_name: window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email) : null
+    });
     // Reset selector
     sel.value = '';
     var linkBtn = document.getElementById('lso-link-btn');
@@ -37337,6 +37369,18 @@ window.saveAdjModal = async function() {
         if (hiddenEl) hiddenEl.value = window._lsoAllLinkedConts.length ? window._lsoAllLinkedConts[0].id : '';
         window._lsoRenderLinkedList();
         _lsoAutoSaveContainers(window._lsoCurrentJobId);
+        // Audit: record the delink in liquid operations history (best-effort)
+        if (cont && cont.id) {
+          window._writeBlendHistory && window._writeBlendHistory({
+            container_id:      cont.id,
+            container_ref:     (c && c.reference) || cont.reference || label,
+            event_type:        'job_unlinked',
+            job_id:            window._lsoCurrentJobId,
+            notes:             'Delinked from job ' + window._lsoCurrentJobId,
+            performed_by_id:   window.CURRENT_USER ? (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id) : null,
+            performed_by_name: window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email) : null
+          });
+        }
       }
     });
   };
@@ -37773,12 +37817,25 @@ window.saveAdjModal = async function() {
       if (existing && existing[0]) {
         try { current = JSON.parse(existing[0].linked_containers_json || '[]'); } catch(e2) {}
       }
+      var _newlyLinked = [];
       containers.forEach(function(nc) {
-        if (!current.find(function(lc){ return lc.id === nc.id; })) current.push(nc);
+        if (!current.find(function(lc){ return lc.id === nc.id; })) { current.push(nc); _newlyLinked.push(nc); }
       });
       var lcJson  = JSON.stringify(current);
       var firstId = current.length ? current[0].id : null;
       await _lsoUpsertByJob(jobId, { linked_container_id: firstId, linked_containers_json: lcJson });
+      // Audit: record each new link in liquid operations history (best-effort)
+      _newlyLinked.forEach(function(nc) {
+        window._writeBlendHistory && window._writeBlendHistory({
+          container_id:      nc.id,
+          container_ref:     nc.reference || '',
+          event_type:        'job_linked',
+          job_id:            jobId,
+          notes:             'Linked to job ' + jobId,
+          performed_by_id:   window.CURRENT_USER ? (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id) : null,
+          performed_by_name: window.CURRENT_USER ? (window.CURRENT_USER.display_name || window.CURRENT_USER.email) : null
+        });
+      });
       window.toast && window.toast('Container(s) linked to job sign-off.', 'success');
     } catch(e) { window.toast && window.toast('Could not link to sign-off: ' + e.message, 'error'); }
   }
@@ -44186,7 +44243,8 @@ window.saveAdjModal = async function() {
     blend_loss:'Blend Loss', dilution_loss:'Dilution Loss', regauge:'Regauge',
     price_change:'Price Update', lpa_price:'Price Update',
     container_adjusted:'Adjusted', container_created:'Created',
-    container_archived:'Archived', container_restored:'Restored'
+    container_archived:'Archived', container_restored:'Restored',
+    job_linked:'Linked', job_unlinked:'Delinked'
   };
   var LH_COLORS = {
     add:'var(--green)', dilution:'var(--amber)', dilution_water:'#3b82f6',
@@ -44196,7 +44254,8 @@ window.saveAdjModal = async function() {
     bottling_deduction:'var(--red)', measurement_variance:'var(--amber)',
     blend_loss:'var(--muted)', dilution_loss:'var(--muted)', regauge:'var(--amber)',
     container_adjusted:'var(--muted)', container_created:'var(--green)',
-    container_archived:'var(--muted)', container_restored:'var(--green)'
+    container_archived:'var(--muted)', container_restored:'var(--green)',
+    job_linked:'var(--green)', job_unlinked:'var(--amber)'
   };
   window.LH_LABELS = LH_LABELS;
   window.LH_COLORS = LH_COLORS;
