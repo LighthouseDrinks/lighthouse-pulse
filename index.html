@@ -36198,15 +36198,27 @@ window.saveAdjModal = async function() {
         html += '</div>';
       }
 
-      // ── Liquid Operations History (events on linked containers + this job's
-      //    link/delink audit, so delinked containers still show their history) ──
+      // ── Liquid Operations History (job-relevant events only) ───────────────────
+      //    Shows links, delinks, and liquid movements (blend/dilution/transfer/
+      //    bottling) for this job — including for delinked containers via the
+      //    job_id-tagged audit fetch. Container-lifecycle noise (creation, bulk
+      //    add, manual adjustments, price/regauge, archive/restore) is hidden.
       {
         try {
+          // Container-lifecycle event types that are NOT job-relevant — hidden here
+          // (they remain visible in the container detail and Blending History views).
+          var _lsoHistHide = {
+            add:1, edit:1,
+            container_created:1, container_adjusted:1,
+            container_archived:1, container_restored:1,
+            price_change:1, lpa_price:1, regauge:1
+          };
           var _lcHist = [];
           var _lcHistIds = _linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
           if (_lcHistIds.length) {
+            // Fetch generously — most rows are noise that gets filtered out below.
             _lcHist = await supaGet(
-              'liquid_history?container_id=in.(' + _lcHistIds.join(',') + ')&order=created_at.desc&limit=20'
+              'liquid_history?container_id=in.(' + _lcHistIds.join(',') + ')&order=created_at.desc&limit=60'
             ) || [];
           }
           // Link/delink events are tagged with job_id; fetch them directly so events
@@ -36217,11 +36229,13 @@ window.saveAdjModal = async function() {
               'liquid_history?job_id=eq.' + jobId + '&event_type=in.(job_linked,job_unlinked)&order=created_at.desc&limit=20'
             ) || [];
           }
-          // Merge, de-dupe by id, re-sort newest first, cap at 20.
+          // Merge, drop container-lifecycle noise, de-dupe by id, re-sort newest first, cap at 20.
           var _seenHistIds = {};
           var _lcMerged = [];
           _lcHist.concat(_jobLinkHist).forEach(function(ev) {
-            if (ev && ev.id && !_seenHistIds[ev.id]) { _seenHistIds[ev.id] = 1; _lcMerged.push(ev); }
+            if (!ev || !ev.id || _seenHistIds[ev.id]) return;
+            if (_lsoHistHide[ev.event_type]) return; // hide creation, bulk-add, manual adjustments, etc.
+            _seenHistIds[ev.id] = 1; _lcMerged.push(ev);
           });
           _lcMerged.sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
           var _lcHistCapped = _lcMerged.length > 20;
