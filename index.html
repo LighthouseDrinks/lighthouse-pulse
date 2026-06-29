@@ -35406,6 +35406,12 @@ window.saveAdjModal = async function() {
         + sec('5 · Quality Control',         s5)
         + sec('6 · Sign-Off &amp; Compliance', s6);
 
+      // ── Section 7: Liquid Trace & Ownership (per-job reconciliation) ─────────
+      try {
+        var _liqTrace = await window._buildJobLiquidTrace(jobId);
+        body.innerHTML += sec('7 · Liquid Trace &amp; Ownership', window._renderJobLiquidTrace(_liqTrace, { embed:true }));
+      } catch(eLt) { window.logError && window.logError('openBottlingReport:liquidTrace', eLt); }
+
     } catch(e) {
       body.innerHTML = '<div style="color:var(--red);padding:48px;text-align:center;">Error loading report: ' + String(e.message||e) + '</div>';
       window.logError && window.logError('openBottlingReport', e);
@@ -35882,9 +35888,13 @@ window.saveAdjModal = async function() {
         ? '<div style="background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.3);border-radius:5px;padding:8px 14px;font-size:11px;color:var(--amber);margin-bottom:16px;">&#128274; This sign-off is locked. Click <strong>Reopen</strong> to amend — your reason and name will be recorded.</div>'
         : '';
 
+      var _liqReportBtn = (j && j.stage === 'complete')
+        ? '<button onclick="window.openJobLiquidReport(\'' + jobId + '\')" class="btn btn-outline" style="font-size:11px;padding:5px 12px;border-radius:5px;">&#128202; Liquid Report</button>'
+        : '';
       var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">'
         + '<div style="font-size:14px;font-weight:700;color:var(--white);">Liquid Sign-Off</div>'
         + '<div style="display:flex;gap:8px;align-items:center;">'
+        + _liqReportBtn
         + signedBlock
         + '</div></div>'
         + lockedBanner;
@@ -47904,6 +47914,7 @@ window.saveAdjModal = async function() {
           +   '<span id="blgrp-caret-' + key + '" style="color:var(--gold);margin-right:6px;">&#9656;</span>'
           +   esc(summary.headline)
           +   ' <span style="color:var(--muted);font-size:11px;">(' + g.rows.length + ' steps)</span>'
+          +   (summary.job ? ' <a href="#" onclick="event.stopPropagation(); event.preventDefault(); window.openJobLiquidReport(\'' + esc(summary.job) + '\');" style="color:var(--gold);font-size:11px;margin-left:8px;white-space:nowrap;">view job report &raquo;</a>' : '')
           + '</td>'
           + '<td style="font-size:11px;color:var(--muted);">' + esc(latest.performed_by_name || '—') + '</td>'
           + '</tr>';
@@ -47918,6 +47929,437 @@ window.saveAdjModal = async function() {
     }
   };
 
+})();
+</script>
+
+<!-- ══ POST-JOB LIQUID REPORT ════════════════════════════════════════════════
+     Reconstructs the full liquid story for a single job (sources -> drawn ->
+     proofing water -> bottled -> leftover vessel + owner -> waste) with an LPA
+     and volume reconciliation plus plain-English discrepancy flags. Read-only:
+     leftover is COMPUTED from liquid_history + container state, never trusted
+     from the legacy jobs.liquid_leftover column. -->
+<script>
+(function(){
+  function _sel(table, qs){ return window.db.select(table, qs || ''); }
+  function _n(v){ var x = parseFloat(v); return isNaN(x) ? null : x; }
+  function _qList(arr){ return arr.map(function(v){ return '"' + String(v).replace(/"/g,'') + '"'; }).join(','); }
+  function _mkNameOf(map){
+    return function(id){
+      if (!id) return '';
+      if (map[id]) return map[id];
+      var n = window._clientNameById ? window._clientNameById(id) : '';
+      return n || id;
+    };
+  }
+
+  window._buildJobLiquidTrace = async function(jobId){
+    var job = (window._jobs && window._jobs.find) ? window._jobs.find(function(x){ return x.id === jobId; }) : null;
+    if (!job) { var jr = await _sel('jobs', '?id=eq.' + jobId + '&limit=1'); job = jr && jr[0]; }
+    if (!job) throw new Error('Job ' + jobId + ' not found.');
+
+    // Two history pulls: by job_id column, and by the legacy "(job X)" notes tag
+    // (blend/dilute writes only tag the notes). The closing paren means JOB-4
+    // cannot substring-match JOB-41.
+    var batch = await Promise.all([
+      _sel('job_liquid_signoff', '?job_id=eq.' + jobId + '&limit=1'),
+      _sel('boms', '?id=eq.' + (job.bom_id || '__none') + '&select=id,volume_cl,abv,bottling_abv,bottles_per_shipper&limit=1'),
+      _sel('clients', '?id=eq.' + (job.client_id || '__none') + '&select=id,name&limit=1'),
+      _sel('liquid_history', '?job_id=eq.' + jobId + '&order=created_at.asc'),
+      _sel('liquid_history', '?notes=ilike.*(job ' + jobId + ')*&order=created_at.asc')
+    ]);
+    var lso    = (batch[0] && batch[0][0]) || {};
+    var bom    = (batch[1] && batch[1][0]) || {};
+    var client = (batch[2] && batch[2][0]) || {};
+
+    var seen = {}, hist = [];
+    (batch[3] || []).concat(batch[4] || []).forEach(function(r){
+      if (r && r.id && !seen[r.id]) { seen[r.id] = 1; hist.push(r); }
+    });
+    hist.sort(function(a,b){ return new Date(a.created_at) - new Date(b.created_at); });
+
+    var linked = [];
+    try { linked = JSON.parse(lso.linked_containers_json || '[]'); } catch(e){}
+    if (!linked.length && lso.linked_container_id) linked = [{ id: lso.linked_container_id }];
+
+    var idSet = {};
+    linked.forEach(function(l){ if (l && l.id) idSet[l.id] = 1; });
+    hist.forEach(function(h){ if (h.container_id) idSet[h.container_id] = 1; });
+    if (lso.leftover_container_id) idSet[lso.leftover_container_id] = 1;
+    var ids = Object.keys(idSet);
+    var conts = ids.length
+      ? await _sel('liquid_containers', '?id=in.(' + ids.join(',') + ')&select=id,reference,type,status,current_litres,current_lpa,abv,capacity_litres,spirit_type,location,vessel_id,client_id,liquid_owner_client_id,is_client_vessel,cbw_rotation,previous_contents')
+      : [];
+    var cMap = {}; conts.forEach(function(c){ cMap[c.id] = c; });
+
+    var clientIds = {}; if (job.client_id) clientIds[job.client_id] = 1;
+    conts.forEach(function(c){
+      if (c.client_id) clientIds[c.client_id] = 1;
+      if (c.liquid_owner_client_id) clientIds[c.liquid_owner_client_id] = 1;
+    });
+    var vIds = conts.map(function(c){ return c.vessel_id; }).filter(Boolean);
+    var side = await Promise.all([
+      Object.keys(clientIds).length ? _sel('clients', '?id=in.(' + _qList(Object.keys(clientIds)) + ')&select=id,name') : Promise.resolve([]),
+      vIds.length ? _sel('vessels', '?id=in.(' + _qList(vIds) + ')&select=id,owner,location,vessel_type') : Promise.resolve([])
+    ]);
+    var clMap = {}; (side[0] || []).forEach(function(c){ clMap[c.id] = c.name; });
+    if (client && client.id && client.name) clMap[client.id] = client.name;
+    var vMap = {}; (side[1] || []).forEach(function(v){ vMap[v.id] = v; });
+    var nameOf = _mkNameOf(clMap);
+
+    var jobClientName = nameOf(job.client_id) || (client && client.name) || job.client_id || '—';
+    var jobClientIsLh = window._isLhHousedClientName ? window._isLhHousedClientName(jobClientName) : false;
+
+    function ownerOf(c){
+      if (!c) return '';
+      return nameOf(c.liquid_owner_client_id) || nameOf(c.client_id)
+        || (c.vessel_id && vMap[c.vessel_id] ? vMap[c.vessel_id].owner : '') || '';
+    }
+    function effAbv(litres, lpa, abv){
+      var Lv = _n(litres), Pv = _n(lpa), Av = _n(abv);
+      if (Lv && Pv) return (Pv / Lv) * 100;
+      return Av || 0;
+    }
+
+    // Draws (bottling_deduction) aggregated per container (handles re-runs)
+    var drawMap = {};
+    hist.forEach(function(h){
+      if (h.event_type !== 'bottling_deduction') return;
+      var cid = h.container_id;
+      var d = drawMap[cid] || { litres:0, lpa:0, ref:h.container_ref, at:h.created_at, by:h.performed_by_name, litresAfter:null, lpaAfter:null, abv:null };
+      var lc = Math.abs(_n(h.litres_changed) != null ? _n(h.litres_changed) : ((_n(h.litres_before)||0) - (_n(h.litres_after)||0)));
+      var lpaB = _n(h.lpa_before), lpaA = _n(h.lpa_after);
+      var lpaDrawn = (lpaB != null && lpaA != null) ? (lpaB - lpaA) : (lc * (effAbv(h.litres_before, h.lpa_before, h.abv_before) / 100));
+      d.litres += lc;
+      d.lpa    += (lpaDrawn || 0);
+      if (_n(h.litres_after) != null) d.litresAfter = _n(h.litres_after);
+      if (lpaA != null) d.lpaAfter = lpaA;
+      d.abv = effAbv(h.litres_before, h.lpa_before, h.abv_before) || d.abv;
+      d.at = h.created_at; d.by = h.performed_by_name || d.by; d.ref = h.container_ref || d.ref;
+      drawMap[cid] = d;
+    });
+    var drawnIds = {}; Object.keys(drawMap).forEach(function(cid){ drawnIds[cid] = 1; });
+
+    var draws = Object.keys(drawMap).map(function(cid){
+      var d = drawMap[cid]; var c = cMap[cid] || {};
+      return {
+        ref: d.ref || c.reference || cid,
+        litresDrawn: Math.round(d.litres * 100) / 100,
+        lpaDrawn: Math.round(d.lpa * 100) / 100,
+        abv: d.abv ? Math.round(d.abv * 100) / 100 : null,
+        litresAfter: d.litresAfter != null ? d.litresAfter : (c.current_litres != null ? _n(c.current_litres) : null),
+        by: d.by || '—',
+        at: d.at
+      };
+    });
+
+    var histWater = 0;
+    hist.forEach(function(h){ if (h.event_type === 'dilution_water') histWater += (_n(h.litres_changed) || 0); });
+    var waterAdded = _n(lso.water_added) != null ? _n(lso.water_added) : histWater;
+
+    var variance = 0;
+    hist.forEach(function(h){ if (h.event_type === 'measurement_variance') variance += (_n(h.litres_changed) || 0); });
+
+    var volumeCl    = _n(bom.volume_cl);
+    var bottles     = parseInt(job.actual_bottles_produced || 0) || 0;
+    var bottlingAbv = _n(job.bottling_abv) || _n(bom.bottling_abv) || _n(bom.abv) || null;
+    var bottledLitres = (bottles && volumeCl) ? Math.round((bottles * volumeCl / 100) * 100) / 100 : null;
+    var bottledLpa    = (bottledLitres != null && bottlingAbv) ? Math.round((bottledLitres * bottlingAbv / 100) * 100) / 100 : null;
+
+    var drawnLitres = draws.reduce(function(s,d){ return s + (d.litresDrawn || 0); }, 0);
+    var drawnLpa    = draws.reduce(function(s,d){ return s + (d.lpaDrawn || 0); }, 0);
+
+    var wasteLitres = _n(lso.waste_litres) || 0;
+    var wasteLpa    = bottlingAbv ? (wasteLitres * bottlingAbv / 100) : 0;
+
+    // Leftover — COMPUTED. Remainder in each drawn source + linked-but-unused +
+    // any explicit moved destination.
+    var leftover = [];
+    Object.keys(drawMap).forEach(function(cid){
+      var c = cMap[cid] || {}; var d = drawMap[cid];
+      var rem = d.litresAfter != null ? d.litresAfter : _n(c.current_litres);
+      if (rem == null || rem <= 0.05) return;
+      var abv = effAbv(rem, c.current_lpa, c.abv);
+      leftover.push({
+        ref: c.reference || d.ref || cid, location: c.location || '—',
+        litres: Math.round(rem * 100) / 100,
+        abv: abv ? Math.round(abv * 100) / 100 : null,
+        lpa: abv ? Math.round(rem * abv / 100 * 100) / 100 : _n(c.current_lpa),
+        owner: ownerOf(c) || '—', strength: lso.leftover_strength || 'original', kind: 'remainder'
+      });
+    });
+    linked.forEach(function(l){
+      if (!l.id || drawnIds[l.id]) return;
+      var c = cMap[l.id] || {};
+      var lit = _n(l.litres) != null ? _n(l.litres) : _n(c.current_litres);
+      var abv = _n(l.abv) != null ? _n(l.abv) : _n(c.abv);
+      leftover.push({
+        ref: c.reference || l.reference || l.id, location: c.location || '—',
+        litres: lit != null ? Math.round(lit * 100) / 100 : null,
+        abv: abv != null ? abv : null,
+        lpa: _n(l.lpa) != null ? _n(l.lpa) : (lit != null && abv != null ? Math.round(lit * abv / 100 * 100) / 100 : null),
+        owner: ownerOf(c) || '—', strength: 'original', kind: 'unused'
+      });
+    });
+    if (lso.leftover_container_id && !drawnIds[lso.leftover_container_id] && !linked.some(function(l){ return l.id === lso.leftover_container_id; })) {
+      var lc2 = cMap[lso.leftover_container_id] || {};
+      leftover.push({
+        ref: lc2.reference || lso.leftover_container_id, location: lc2.location || '—',
+        litres: _n(lc2.current_litres), abv: _n(lc2.abv), lpa: _n(lc2.current_lpa),
+        owner: ownerOf(lc2) || '—', strength: lso.leftover_strength || '—', kind: 'moved'
+      });
+    }
+    var computedLeftover = leftover.filter(function(x){ return x.kind === 'remainder'; })
+                                   .reduce(function(s,x){ return s + (x.litres || 0); }, 0);
+
+    var sources = linked.map(function(l){
+      var c = cMap[l.id] || {};
+      var lit = _n(l.litres) != null ? _n(l.litres) : _n(c.current_litres);
+      var abv = _n(l.abv)    != null ? _n(l.abv)    : _n(c.abv);
+      var lpa = _n(l.lpa)    != null ? _n(l.lpa)    : _n(c.current_lpa);
+      return {
+        ref: c.reference || l.reference || l.id,
+        spirit: c.spirit_type || l.spirit_type || '—',
+        vesselOwner: nameOf(c.client_id) || (c.vessel_id && vMap[c.vessel_id] ? vMap[c.vessel_id].owner : '') || '—',
+        liquidOwner: nameOf(c.liquid_owner_client_id) || '—',
+        litresBefore: lit != null ? lit : null,
+        abvBefore: abv != null ? abv : null,
+        lpaBefore: lpa != null ? lpa : null,
+        drawn: !!drawnIds[l.id]
+      };
+    });
+
+    var lpaIn  = Math.round(drawnLpa * 100) / 100;
+    var lpaOut = Math.round(((bottledLpa || 0) + wasteLpa) * 100) / 100;
+    var deltaLpa = Math.round((lpaIn - lpaOut) * 100) / 100;
+    var lpaTol = Math.max(0.5, lpaIn * 0.01);
+    var lpaOk  = bottledLpa != null && Math.abs(deltaLpa) <= lpaTol;
+
+    var volIn  = Math.round((drawnLitres + (waterAdded || 0)) * 100) / 100;
+    var volOut = Math.round(((bottledLitres || 0) + wasteLitres) * 100) / 100;
+    var deltaVol = Math.round((volIn - volOut) * 100) / 100;
+    var volTol = Math.max(1, volIn * 0.01);
+    var volOk  = bottledLitres != null && Math.abs(deltaVol) <= volTol;
+
+    var warnings = [];
+    var complete = (job.stage === 'complete') && draws.length > 0;
+    if (!complete) warnings.push({ level:'info', text:'This job is not yet completed (or no liquid has been drawn yet) — figures below are partial.' });
+    if (!jobClientIsLh && draws.length) {
+      var ownerSet = {};
+      Object.keys(drawMap).forEach(function(cid){
+        var c = cMap[cid]; if (!c) return;
+        var o = ownerOf(c);
+        if (!c.liquid_owner_client_id) {
+          warnings.push({ level:'warn', text:'Liquid owner not set on ' + (c.reference || cid) + ' — the job is for ' + jobClientName + '.', fix:cid });
+        } else if (o && o !== jobClientName) {
+          ownerSet[o] = (c.reference || cid);
+        }
+      });
+      Object.keys(ownerSet).forEach(function(o){
+        warnings.push({ level:'warn', text:'Job is for ' + jobClientName + ' but the liquid drawn (' + ownerSet[o] + ') is owned by ' + o + '.', fix:null });
+      });
+    }
+    sources.forEach(function(s){
+      if (!s.drawn) warnings.push({ level:'info', text:s.ref + ' was linked to the job but no liquid was drawn from it.' });
+    });
+    var jobsLeftover = _n(job.liquid_leftover);
+    if (jobsLeftover != null && Math.abs(jobsLeftover - computedLeftover) > Math.max(1, computedLeftover * 0.02)) {
+      warnings.push({ level:'warn', text:'Recorded job leftover (' + jobsLeftover.toFixed(1) + ' L) does not match the computed remainder (' + computedLeftover.toFixed(1) + ' L). The stored figure may be stale.' });
+    }
+    if (complete && !lpaOk) warnings.push({ level:'error', text:'Alcohol balance is off by ' + deltaLpa.toFixed(2) + ' LPA (drawn ' + lpaIn.toFixed(2) + ' vs bottled+waste ' + lpaOut.toFixed(2) + ').' });
+    if (complete && !volOk) warnings.push({ level:'error', text:'Volume balance is off by ' + deltaVol.toFixed(1) + ' L (in ' + volIn.toFixed(1) + ' vs out ' + volOut.toFixed(1) + ').' });
+
+    var productLabel = (window.jobLabel && window.jobLabel(job)) || job.product_name || jobId;
+    var headline;
+    if (!complete) {
+      headline = jobId + ' (' + productLabel + ') for ' + jobClientName + ' — not yet completed; no bottling draw recorded.';
+    } else {
+      var drawStr = draws.map(function(d){ return d.litresDrawn.toFixed(1) + ' L from ' + d.ref; }).join(', ');
+      var lo = leftover.filter(function(x){ return x.kind === 'remainder'; })[0];
+      headline = jobId + ' (' + productLabel + ') ran for ' + jobClientName + '. Drew ' + drawStr
+        + (waterAdded ? ', added ' + waterAdded.toFixed(1) + ' L water' : '')
+        + (bottledLitres != null ? ' -> ' + bottledLitres.toFixed(1) + ' L @ ' + (bottlingAbv||0).toFixed(1) + '% (' + bottles.toLocaleString() + ' bottles)' : '') + '.'
+        + (lo ? ' Leftover ' + lo.litres.toFixed(1) + ' L @ ' + (lo.abv||0).toFixed(1) + '% remains in ' + lo.ref + ' (' + lo.location + '), owner ' + lo.owner + '.' : '');
+    }
+
+    return {
+      jobId: jobId, productLabel: productLabel, clientName: jobClientName,
+      lot: job.lot_number || '', dateCompleted: job.date_completed,
+      signedBy: lso.signed_by || job.results_signed_by || '', signedAt: lso.signed_at || job.results_signed_at,
+      complete: complete, headline: headline,
+      sources: sources, draws: draws, waterAdded: waterAdded || 0, variance: Math.round(variance * 100) / 100,
+      bottled: { litres: bottledLitres, abv: bottlingAbv, lpa: bottledLpa, bottles: bottles },
+      leftover: leftover, computedLeftover: Math.round(computedLeftover * 100) / 100, jobsLeftover: jobsLeftover,
+      waste: { litres: wasteLitres, reason: lso.waste_reason || '', lpa: Math.round(wasteLpa * 100) / 100 },
+      balance: { lpaIn: lpaIn, lpaOut: lpaOut, deltaLpa: deltaLpa, lpaOk: lpaOk, volIn: volIn, volOut: volOut, deltaVol: deltaVol, volOk: volOk },
+      warnings: warnings
+    };
+  };
+
+  window._renderJobLiquidTrace = function(t, opts){
+    opts = opts || {};
+    var embed = !!opts.embed;
+    function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function L(n){ return (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString(undefined,{maximumFractionDigits:1}) + ' L'; }
+    function P(n){ return (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString(undefined,{maximumFractionDigits:2}) + ' LPA'; }
+    function PC(n){ return (n==null||isNaN(n)) ? '—' : Number(n).toFixed(1) + '%'; }
+    function dt(ts){ if(!ts) return '—'; try { return new Date(ts).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}); } catch(e){ return ts; } }
+    function block(title, inner){
+      return '<div style="border-top:1px solid var(--navy-border);padding:18px 22px;">'
+        + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:12px;">' + title + '</div>' + inner + '</div>';
+    }
+    function kvRows(rows){ return '<table style="width:100%;border-collapse:collapse;">' + rows.join('') + '</table>'; }
+    function kv(k,v){ return '<tr><td style="color:var(--muted);font-size:12px;padding:5px 16px 5px 0;width:210px;vertical-align:top;">' + k + '</td><td style="color:var(--white);font-size:13px;padding:5px 0;font-weight:600;">' + (v==null?'—':v) + '</td></tr>'; }
+    function bcol(ok){ return ok ? 'var(--green)' : 'var(--red)'; }
+
+    var hasErr = t.warnings.some(function(w){ return w.level==='error'; });
+    var hasWarn= t.warnings.some(function(w){ return w.level==='warn'; });
+    var bannerCol = hasErr ? 'var(--red)' : (hasWarn ? '#d98b2b' : 'var(--green)');
+    var banner = '<div style="background:rgba(255,255,255,0.02);border-left:4px solid ' + bannerCol + ';padding:14px 18px;">'
+      + '<div style="font-size:13px;line-height:1.5;color:var(--white);font-weight:600;">' + esc(t.headline) + '</div></div>';
+
+    var disc;
+    if (!t.warnings.length) {
+      disc = block('Reconciliation', '<div style="color:var(--green);font-size:13px;font-weight:600;">&#10003; Liquid reconciles — no discrepancies detected.</div>');
+    } else {
+      var items = t.warnings.map(function(w){
+        var c = w.level==='error' ? 'var(--red)' : (w.level==='warn' ? '#d98b2b' : 'var(--muted)');
+        var icon = w.level==='info' ? '&#9432;' : '&#9888;';
+        var fix = w.fix ? ' <a href="#" onclick="event.preventDefault(); window.openLiqView && window.openLiqView(\'' + w.fix + '\');" style="color:var(--gold);font-size:11px;">fix &raquo;</a>' : '';
+        return '<li style="margin-bottom:7px;color:' + c + ';font-size:12.5px;line-height:1.45;"><span style="margin-right:6px;">' + icon + '</span>' + esc(w.text) + fix + '</li>';
+      }).join('');
+      disc = block('Discrepancies (' + t.warnings.length + ')', '<ul style="margin:0;padding-left:2px;list-style:none;">' + items + '</ul>');
+    }
+
+    var srcRows = t.sources.length ? t.sources.map(function(s){
+      return '<tr><td>' + esc(s.ref) + (s.drawn ? '' : ' <span style="color:var(--muted);font-size:10px;">(not drawn)</span>') + '</td>'
+        + '<td>' + esc(s.spirit) + '</td>'
+        + '<td>' + esc(s.liquidOwner !== '—' ? s.liquidOwner : s.vesselOwner) + '</td>'
+        + '<td style="text-align:right;">' + L(s.litresBefore) + '</td>'
+        + '<td style="text-align:right;">' + PC(s.abvBefore) + '</td>'
+        + '<td style="text-align:right;">' + P(s.lpaBefore) + '</td></tr>';
+    }).join('') : '<tr><td colspan="6" style="color:var(--muted);">No source containers linked.</td></tr>';
+    var srcTable = '<div style="overflow-x:auto;"><table class="data-table" style="width:100%;min-width:520px;">'
+      + '<thead><tr><th>Vessel</th><th>Spirit</th><th>Owner</th><th style="text-align:right;">Litres</th><th style="text-align:right;">ABV</th><th style="text-align:right;">LPA</th></tr></thead><tbody>' + srcRows + '</tbody></table></div>';
+
+    var drawRows = t.draws.length ? t.draws.map(function(d){
+      return '<tr><td>' + esc(d.ref) + '</td>'
+        + '<td style="text-align:right;color:var(--red);font-weight:700;">-' + L(d.litresDrawn) + '</td>'
+        + '<td style="text-align:right;">' + PC(d.abv) + '</td>'
+        + '<td style="text-align:right;">' + P(d.lpaDrawn) + '</td>'
+        + '<td style="text-align:right;">' + L(d.litresAfter) + '</td>'
+        + '<td>' + esc(d.by) + '</td></tr>';
+    }).join('') : '<tr><td colspan="6" style="color:var(--muted);">No bottling draws recorded.</td></tr>';
+    var drawTable = '<div style="overflow-x:auto;"><table class="data-table" style="width:100%;min-width:560px;">'
+      + '<thead><tr><th>Vessel</th><th style="text-align:right;">Drawn</th><th style="text-align:right;">ABV</th><th style="text-align:right;">Alcohol</th><th style="text-align:right;">Remaining</th><th>By</th></tr></thead><tbody>' + drawRows + '</tbody></table></div>';
+
+    var bottledTbl = kvRows([
+      kv('Bottles produced', t.bottled.bottles ? t.bottled.bottles.toLocaleString() + ' btls' : '—'),
+      kv('Bottled volume', L(t.bottled.litres)),
+      kv('Bottling ABV', PC(t.bottled.abv)),
+      kv('Bottled alcohol', P(t.bottled.lpa)),
+      kv('Dilution water added', t.waterAdded ? L(t.waterAdded) + ' <span style="color:var(--muted);font-weight:400;font-size:11px;">(volume only — LPA neutral)</span>' : 'N/A'),
+      (t.variance ? kv('Stock variance', L(t.variance)) : '')
+    ]);
+
+    var loRows = t.leftover.length ? t.leftover.map(function(x){
+      var tag = x.kind==='unused' ? ' <span style="color:var(--muted);font-size:10px;">(linked, not drawn)</span>' : (x.kind==='moved' ? ' <span style="color:var(--muted);font-size:10px;">(moved)</span>' : '');
+      return '<tr><td>' + esc(x.ref) + tag + '</td>'
+        + '<td>' + esc(x.location) + '</td>'
+        + '<td style="text-align:right;">' + L(x.litres) + '</td>'
+        + '<td style="text-align:right;">' + PC(x.abv) + '</td>'
+        + '<td style="text-align:right;">' + P(x.lpa) + '</td>'
+        + '<td>' + esc(x.owner) + '</td>'
+        + '<td>' + esc(x.strength) + '</td></tr>';
+    }).join('') : '<tr><td colspan="7" style="color:var(--muted);">No leftover liquid.</td></tr>';
+    var loTable = '<div style="overflow-x:auto;"><table class="data-table" style="width:100%;min-width:600px;">'
+      + '<thead><tr><th>Vessel</th><th>Location</th><th style="text-align:right;">Litres</th><th style="text-align:right;">ABV</th><th style="text-align:right;">LPA</th><th>Owner</th><th>Strength</th></tr></thead><tbody>' + loRows + '</tbody></table></div>';
+
+    var wasteTbl = kvRows([
+      kv('Waste litres', t.waste.litres ? L(t.waste.litres) : 'None'),
+      (t.waste.litres ? kv('Waste alcohol', P(t.waste.lpa)) : ''),
+      (t.waste.reason ? kv('Reason', esc(t.waste.reason)) : '')
+    ]);
+
+    var balTbl = kvRows([
+      kv('Alcohol drawn (in)', P(t.balance.lpaIn)),
+      kv('Bottled + waste (out)', P(t.balance.lpaOut)),
+      kv('Alcohol delta', '<span style="color:' + bcol(t.balance.lpaOk) + ';">' + t.balance.deltaLpa.toFixed(2) + ' LPA ' + (t.balance.lpaOk ? '&#10003;' : '&#9888;') + '</span>'),
+      kv('Volume in (drawn + water)', L(t.balance.volIn)),
+      kv('Volume out (bottled + waste)', L(t.balance.volOut)),
+      kv('Volume delta', '<span style="color:' + bcol(t.balance.volOk) + ';">' + t.balance.deltaVol.toFixed(1) + ' L ' + (t.balance.volOk ? '&#10003;' : '&#9888;') + '</span>')
+    ]);
+
+    var headerBand = embed ? '' : '<div style="background:var(--navy-dark);padding:22px 22px 16px;border-bottom:3px solid var(--gold);">'
+      + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Lighthouse Drinks — Job Liquid Report</div>'
+      + '<div style="font-size:20px;font-weight:700;color:var(--white);margin-bottom:2px;">' + esc(t.productLabel) + '</div>'
+      + '<div style="font-size:12px;color:var(--muted);">' + esc(t.clientName) + ' &nbsp;·&nbsp; ' + esc(t.jobId)
+      + (t.lot ? ' &nbsp;·&nbsp; Lot ' + esc(t.lot) : '')
+      + (t.dateCompleted ? ' &nbsp;·&nbsp; ' + dt(t.dateCompleted) : '')
+      + (t.signedBy ? ' &nbsp;·&nbsp; Signed by ' + esc(t.signedBy) : '') + '</div></div>';
+
+    return headerBand + banner + disc
+      + block('Sources', srcTable)
+      + block('Drawn for Bottling', drawTable)
+      + block('Bottled Output', bottledTbl)
+      + block('Leftover &amp; Where It Is Now', loTable)
+      + block('Waste', wasteTbl)
+      + block('Reconciliation / Balance', balTbl);
+  };
+
+  window.openJobLiquidReport = async function(jobId){
+    var ov = document.getElementById('jlr-overlay');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'jlr-overlay';
+      ov.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:9999;overflow-y:auto;padding:24px 16px;';
+      ov.innerHTML = '<div style="max-width:900px;margin:0 auto;">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">'
+        +   '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;">Job Liquid Report</div>'
+        +   '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">'
+        +     '<button id="jlr-print-btn" class="btn btn-outline" style="font-size:12px;padding:6px 16px;">&#128438; Print</button>'
+        +     '<button id="jlr-close-btn" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;padding:6px 16px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">&#10005; Close</button>'
+        +   '</div></div>'
+        + '<div id="jlr-body" style="background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:8px;overflow:hidden;"></div></div>';
+      document.body.appendChild(ov);
+      ov.querySelector('#jlr-close-btn').onclick = window.closeJobLiquidReport;
+      ov.addEventListener('click', function(e){ if (e.target === ov) window.closeJobLiquidReport(); });
+    }
+    var body = ov.querySelector('#jlr-body');
+    ov.style.display = 'block'; document.body.style.overflow = 'hidden';
+    ov.querySelector('#jlr-print-btn').onclick = function(){ window._printJobLiquidReport(jobId); };
+    body.innerHTML = '<div style="color:var(--muted);padding:48px;text-align:center;">Loading liquid report…</div>';
+    try {
+      var t = await window._buildJobLiquidTrace(jobId);
+      body.innerHTML = window._renderJobLiquidTrace(t, { embed:false });
+    } catch(e){
+      body.innerHTML = '<div style="color:var(--red);padding:48px;text-align:center;">Error: ' + String(e&&e.message||e) + '</div>';
+      window.logError && window.logError('openJobLiquidReport', e);
+    }
+  };
+  window.closeJobLiquidReport = function(){ var ov=document.getElementById('jlr-overlay'); if (ov) ov.style.display='none'; document.body.style.overflow=''; };
+
+  window._printJobLiquidReport = async function(jobId){
+    var win = window.open('', '_blank', 'width=900,height=1000');
+    if (!win) { window.toast && window.toast('Pop-up blocked — please allow pop-ups to print.', 'error'); return; }
+    win.document.write('<!DOCTYPE html><html><head><title>Job Liquid Report</title></head><body style="font-family:Arial;padding:24px;">Loading…</body></html>');
+    win.document.close();
+    try {
+      var t = await window._buildJobLiquidTrace(jobId);
+      var inner = window._renderJobLiquidTrace(t, { embed:false });
+      var css = ':root{--gold:#b45309;--white:#111827;--muted:#6b7280;--red:#b91c1c;--green:#15803d;--navy-mid:#ffffff;--navy-dark:#f9fafb;--navy-border:#e5e7eb;}'
+        + 'body{font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#111827;max-width:860px;margin:18px auto;padding:0 18px;}'
+        + 'table{width:100%;border-collapse:collapse;margin-bottom:6px;}'
+        + 'th,td{padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:left;}'
+        + 'th{background:#f9fafb;font-weight:600;font-size:11px;}'
+        + '@media print{body{margin:0;}}';
+      win.document.open();
+      win.document.write('<!DOCTYPE html><html><head><title>Job Liquid Report — ' + jobId + '</title><style>' + css + '</style></head><body>' + inner + '</body></html>');
+      win.document.close(); win.focus();
+      setTimeout(function(){ try { win.print(); } catch(e){} }, 500);
+    } catch(e){
+      try { win.document.body.innerHTML = '<p style="color:#b91c1c;">Error: ' + String(e&&e.message||e) + '</p>'; } catch(_){}
+    }
+  };
 })();
 </script>
 
