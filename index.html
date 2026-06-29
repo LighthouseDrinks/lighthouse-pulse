@@ -25865,7 +25865,13 @@ async function _cbwFetchMonth(yearMonth) {
     var volumeCl    = parseFloat(bom.volume_cl || 0);
     var bottlesFill = parseInt(j.actual_bottles_produced || 0);
     var filledLitres = volumeCl && bottlesFill ? (bottlesFill * volumeCl) / 100 : 0;
-    var losses      = finalLitres > 0 ? Math.max(0, finalLitres - filledLitres - parseFloat(j.liquid_leftover||0)) : null;
+    // Losses basis: finalLitres is the BOTTLING BATCH (drawn source + water). The
+    // job's liquid_leftover is the UNDRAWN remainder that stayed in the source and
+    // never entered the batch, so it must NOT be subtracted here (doing so would
+    // understate losses). It is reported separately as `residue` below. While the
+    // field was always 0 this subtraction was a no-op; now that it is populated we
+    // decouple it so the loss figure stays correct.
+    var losses      = finalLitres > 0 ? Math.max(0, finalLitres - filledLitres) : null;
 
     var bottlesPerCase  = parseInt(bom.bottles_per_shipper || 0) || null;
     var casesPerLayer   = parseInt((ai.casesLayer||0)) || null;
@@ -37905,7 +37911,7 @@ window.saveAdjModal = async function() {
     var contIds  = linkedConts.map(function(lc){ return lc.id; }).filter(Boolean);
     var liveConts = [];
     try {
-      if (contIds.length) liveConts = await supaGet('liquid_containers?id=in.(' + contIds.join(',') + ')&select=id,reference,type,current_litres,current_lpa,abv,client_id,fill_date,capacity_litres,spirit_type');
+      if (contIds.length) liveConts = await supaGet('liquid_containers?id=in.(' + contIds.join(',') + ')&select=id,reference,type,current_litres,current_lpa,abv,client_id,liquid_owner_client_id,fill_date,capacity_litres,spirit_type');
     } catch(e) {}
 
     // Candidate destination vessels for relocating leftover (Phase 3). Any
@@ -37928,17 +37934,31 @@ window.saveAdjModal = async function() {
     var contRows = linkedConts.map(function(lc) {
       var live   = liveConts.find(function(c){ return c.id === lc.id; });
       var ref    = lc.reference || (live && live.reference) || lc.id.slice(0,8)+'…';
-      var before = lc.litres != null ? parseFloat(lc.litres) : parseFloat((live && live.current_litres) || 0);
+      // Before-state integrity: prefer the litres/lpa snapshotted when the vessel
+      // was LINKED to the job, but remember the LIVE figure too so we can warn the
+      // operator if the vessel has changed since (e.g. a 540 L value silently
+      // overwriting what should be a frozen history record).
+      var snapLitres = lc.litres != null ? parseFloat(lc.litres) : null;
+      var liveLitres = parseFloat((live && live.current_litres) || 0);
+      var before = snapLitres != null ? snapLitres : liveLitres;
       var lpaB   = lc.lpa != null && parseFloat(lc.lpa) > 0 ? parseFloat(lc.lpa) : parseFloat((live && live.current_lpa) || 0);
       var nomAbv = lc.abv != null ? parseFloat(lc.abv) : parseFloat((live && live.abv) || 0);
       var effAbv = (before > 0 && lpaB > 0) ? (lpaB / before * 100) : nomAbv;
+      var ownerBeforeId = (live && (live.liquid_owner_client_id || live.client_id)) || null;
       return { id: lc.id, reference: ref, before: before, abv: effAbv,
                lpaBefore: lpaB > 0 ? lpaB : (before * effAbv / 100),
+               snapLitres: snapLitres, liveLitres: liveLitres,
                clientId: (live && live.client_id) || null,
+               ownerBeforeId: ownerBeforeId,
                fillDate: (live && live.fill_date) || null,
                type: (live && live.type) || null,
                capacity: parseFloat((live && live.capacity_litres) || 0) || 0 };
     }).filter(function(row){ return alreadyDeductedIds.indexOf(row.id) < 0; });
+
+    // Clients for the per-vessel "owner after" pickers. Non-critical: if it fails
+    // the selects fall back to a name-less list and ownership simply isn't changed.
+    var _ownerClients = [];
+    try { _ownerClients = await supaGet('clients?select=id,name&order=name.asc') || []; } catch(e) { _ownerClients = []; }
 
     // If every container was already deducted (clean full run), skip the modal
     if (!contRows.length && alreadyDeductedIds.length > 0) return [];
@@ -38038,6 +38058,18 @@ window.saveAdjModal = async function() {
       function getLeftoverStrength(idx) {
         var r = document.querySelector('input[name="lq-lo-strength-' + idx + '"]:checked');
         return r ? r.value : 'original';
+      }
+      // Owner chosen for the liquid that remains in this source vessel after the
+      // job. Defaults to the current owner; the operator can reassign it here.
+      function getLeftoverOwner(idx) {
+        var el = document.getElementById('lq-lo-owner-' + idx);
+        var v = el ? (el.value || '') : '';
+        return v || (contRows[idx] && contRows[idx].ownerBeforeId) || null;
+      }
+      function getBottledOwner() {
+        var el = document.getElementById('lq-bottled-owner');
+        var v = el ? (el.value || '') : '';
+        return v || (typeof job !== 'undefined' && job && job.client_id) || null;
       }
       // Target volume the leftover occupies after the optional dilution: at
       // bottling strength the alcohol (LPA) is unchanged but the volume expands,
@@ -38413,6 +38445,14 @@ window.saveAdjModal = async function() {
       window._lqDestOpts = _destOpts;
       var _selStyle = 'width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;';
       window._lqSelStyle = _selStyle;
+      // Owner picker options. selId pre-selects the current owner; a leading blank
+      // is offered only when there is no current owner to default to.
+      var _ownerOpts = function(selId){
+        var head = selId ? '' : '<option value="">— Select owner —</option>';
+        return head + (_ownerClients || []).map(function(c){
+          return '<option value="' + esc(c.id) + '"' + (c.id === selId ? ' selected' : '') + '>' + esc(c.name || c.id) + '</option>';
+        }).join('');
+      };
       var leftoverHtml = '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
         + '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Leftover Handling</div>'
         + '<div style="font-size:10px;color:var(--muted);margin-bottom:10px;line-height:1.4;">What happens to the liquid left in each container after the run. Default: kept in the same container at its original strength (preserves age &amp; value). Bringing leftover to bottling strength adds water and grows the volume &mdash; if it no longer fits the source vessel, add another vessel and the source keeps the remainder.</div>'
@@ -38420,6 +38460,19 @@ window.saveAdjModal = async function() {
             var clientBadge = row.clientId
               ? '<span style="font-size:9px;font-weight:700;color:var(--amber);background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.4);border-radius:3px;padding:1px 6px;margin-left:6px;">CLIENT-OWNED</span>'
               : '';
+            // Before-state drift: the litres we are reconciling against (snapshot at
+            // link time) no longer matches the vessel's live litres. Surface it so a
+            // stale/overwritten figure is caught before it is frozen into history.
+            var driftNote = '';
+            if (row.snapLitres != null && Math.abs(row.snapLitres - row.liveLitres) > 0.5) {
+              driftNote = '<div style="font-size:10px;color:var(--amber);background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);border-radius:3px;padding:5px 8px;margin-bottom:8px;line-height:1.4;">'
+                + '&#9888; This vessel held <strong>' + row.snapLitres.toFixed(1) + ' L</strong> when linked but now shows <strong>' + row.liveLitres.toFixed(1) + ' L</strong> live. The job uses the linked figure; check it is correct before completing.'
+                + '</div>';
+            }
+            var ownerSel = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">'
+              + '<span style="font-size:11px;color:var(--muted);white-space:nowrap;">Owner after job:</span>'
+              + '<select id="lq-lo-owner-' + idx + '" style="' + _selStyle + 'width:auto;min-width:180px;flex:1 1 180px;">' + _ownerOpts(row.ownerBeforeId) + '</select>'
+              + '</div>';
             var canDilute = bottlingAbv > 0 && row.abv > bottlingAbv + 0.5;
             var srcCapTxt = row.capacity > 0 ? row.capacity.toFixed(0) + 'L capacity' : 'capacity unknown';
             var strengthRadios = canDilute
@@ -38436,6 +38489,8 @@ window.saveAdjModal = async function() {
               + '</div>';
             return '<div style="border:1px solid var(--navy-border);border-radius:4px;padding:10px 12px;margin-bottom:8px;">'
               + '<div style="font-size:11px;font-weight:700;color:var(--white);margin-bottom:8px;">' + esc(row.reference) + ' — leftover <span id="lq-leftover-litres-' + idx + '">' + fifoRemaining[idx].toFixed(1) + '</span> L' + clientBadge + '</div>'
+              + driftNote
+              + ownerSel
               + strengthRadios
               + '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Target volume to place: <strong style="color:var(--white);"><span id="lq-lo-target-' + idx + '">' + fifoRemaining[idx].toFixed(1) + '</span> L</strong> @ <span id="lq-lo-targetabv-' + idx + '">' + row.abv.toFixed(1) + '</span>%</div>'
               + '<div id="lq-lo-alloc-' + idx + '" data-lo-idx="' + idx + '">' + srcRow + '</div>'
@@ -38533,6 +38588,12 @@ window.saveAdjModal = async function() {
         + '</div>'
 
         + leftoverHtml
+
+        + '<div style="margin-top:10px;padding:14px 16px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:5px;">'
+        +   '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Bottled Output Owner</div>'
+        +   '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">Who owns the finished, bottled liquid. Defaults to the job\'s client.</div>'
+        +   '<select id="lq-bottled-owner" style="' + _selStyle + 'min-width:180px;">' + _ownerOpts((job && job.client_id) || null) + '</select>'
+        + '</div>'
 
         + '<div id="lq-balance-display" style="margin-top:14px;padding:14px 16px;background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:5px;"></div>'
 
@@ -38733,8 +38794,11 @@ window.saveAdjModal = async function() {
           lines: contRows.map(function(row, idx) {
             var rem   = getRemaining(idx);
             var drawn = Math.max(0, row.before - rem);
-            return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv, lpaBefore: row.lpaBefore, clientId: row.clientId };
+            return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv, lpaBefore: row.lpaBefore, clientId: row.clientId, ownerBefore: row.ownerBeforeId, ownerAfter: getLeftoverOwner(idx) };
           }).filter(function(l){ return l.litreDrawn > 0.001 && alreadyDeductedIds.indexOf(l.containerId) < 0; }),
+          bottledOwner:       getBottledOwner(),
+          bottledOwnerBefore: (job && job.client_id) || null,
+          isPartial:          alreadyDeductedIds.length > 0,
           waste:      { litres: getWasteLitres(),    reason: getWasteReason() },
           variance:   { litres: getVarianceLitres(), reason: getVarianceReason(), cap: getVarianceCap() },
           waterAdded: getWaterAdded(),
@@ -38763,6 +38827,8 @@ window.saveAdjModal = async function() {
               targetAbv:   targetAbv,
               lpa:         rem * (row.abv / 100),
               clientId:    row.clientId,
+              ownerBefore: row.ownerBeforeId,
+              ownerAfter:  getLeftoverOwner(idx),
               fillDate:    row.fillDate,
               strength:    strength,
               allocations: allocs,
@@ -38801,11 +38867,15 @@ window.saveAdjModal = async function() {
         var drawnLP  = origABV > 0 ? line.litreDrawn     * origABV / 100 : 0;
         var newStatus = line.litreRemaining <= 0 ? 'empty'
           : (line.litreRemaining < line.litreBefore ? 'partially_full' : 'full');
-        await window.db.update('liquid_containers', '?id=eq.' + line.containerId, {
+        var _cUpd = {
           current_litres: Math.round(line.litreRemaining * 1e4) / 1e4,
           current_lpa:    Math.round(remainLP * 1e4) / 1e4,
           status:         newStatus
-        });
+        };
+        // Stamp the chosen liquid owner onto whatever stays in the source. Absolute
+        // set (idempotent on re-completion); only when liquid remains to be owned.
+        if (line.ownerAfter && line.litreRemaining > 0.05) _cUpd.liquid_owner_client_id = line.ownerAfter;
+        await window.db.update('liquid_containers', '?id=eq.' + line.containerId, _cUpd);
       } catch(lineErr) {
         console.error('Liquid container update failed for ' + line.containerId + ':', lineErr.message);
         failures.push(line.reference || line.containerId);
@@ -38949,11 +39019,48 @@ window.saveAdjModal = async function() {
       if (plan.colour.abs430 != null) _soPatch.colour_actual_430nm = plan.colour.abs430;
       _soPatch.colouring_complete = 'yes';
     }
+    // Immutable ownership snapshot (owner before -> owner after, per vessel + the
+    // bottled output). This is what the Job Liquid Report reads, so it stays
+    // stable even if a vessel's live owner is later corrected in liquid inventory.
+    var ownershipJson = [];
+    (plan.lines || []).forEach(function(l){
+      ownershipJson.push({
+        containerId: l.containerId, ref: l.reference, role: 'source',
+        ownerBefore: l.ownerBefore || null,
+        ownerAfter:  l.ownerAfter || l.ownerBefore || null
+      });
+    });
+    if (plan.bottledOwner) {
+      ownershipJson.push({
+        containerId: null, ref: 'Bottled output', role: 'bottled',
+        ownerBefore: plan.bottledOwnerBefore || null, ownerAfter: plan.bottledOwner
+      });
+    }
+    if (ownershipJson.length) _soPatch.ownership_json = ownershipJson;
     if (Object.keys(_soPatch).length) {
       try {
         await window.db.update('job_liquid_signoff', '?job_id=eq.' + jobId, _soPatch);
       } catch(woErr) {
-        console.warn('Close-out reconciliation persist skipped (columns may be missing — run dilution-reconcile migration):', woErr && woErr.message);
+        console.warn('Close-out reconciliation persist failed:', woErr && woErr.message);
+        window.toast && window.toast('Liquid sign-off details (ownership / leftover) failed to save — please notify an admin so the record can be corrected.', 'error');
+      }
+    }
+
+    // Persist the computed remainder onto the job so the CBW log and the Job
+    // Liquid Report agree (this field was previously never written, so it always
+    // read 0 and triggered a false "stored leftover does not match" warning). The
+    // figure matches the report's computed remainder: litres left in each drawn
+    // source after the run. Absolute set = idempotent on re-completion. Skipped on
+    // partial recovery runs so an incomplete plan can't clobber the real total.
+    if (!plan.isPartial) {
+      var computedLeftover = (plan.lines || []).reduce(function(s, l){
+        return s + Math.max(0, parseFloat(l.litreRemaining || 0));
+      }, 0);
+      try {
+        await window.db.update('jobs', '?id=eq.' + jobId, { liquid_leftover: Math.round(computedLeftover * 1e4) / 1e4 });
+      } catch(llErr) {
+        console.warn('jobs.liquid_leftover persist failed:', llErr && llErr.message);
+        window.toast && window.toast('Job leftover total failed to save — the CBW log may be understated until corrected.', 'error');
       }
     }
     // Non-critical: record the bottling-batch dilution water as a history note.
@@ -39028,6 +39135,9 @@ window.saveAdjModal = async function() {
       status:         srcLit <= 0 ? 'empty' : 'partially_full'
     };
     if (srcAlloc.cbw) srcUpd.cbw_rotation = srcAlloc.cbw;
+    // Owner chosen at close-out for the liquid that stays in the source.
+    var _ownerAfter = lo.ownerAfter || lo.clientId || null;
+    if (_ownerAfter && srcLit > 0.05) srcUpd.liquid_owner_client_id = _ownerAfter;
     await window.db.update('liquid_containers', '?id=eq.' + srcId, srcUpd);
 
     var dilNote = toBott ? (loAbv.toFixed(1) + '% → ' + targetAbv.toFixed(1) + '%, +' + Math.max(0, (loLpa / (targetAbv / 100)) - loLit).toFixed(1) + 'L water') : 'at ' + targetAbv.toFixed(1) + '%';
@@ -39065,10 +39175,10 @@ window.saveAdjModal = async function() {
       // destination was previously empty.
       if (dLit <= 0.001 && lo.fillDate) destUpd.fill_date = lo.fillDate;
       if (a.cbw) destUpd.cbw_rotation = a.cbw;
-      // For LH-owned tank/tanker destinations that were empty, carry the leftover's
-      // owner onto the liquid owner so it isn't lost.
-      if ((d.type === 'tank' || d.type === 'tanker') && dLit <= 0.001 && lo.clientId) {
-        destUpd.liquid_owner_client_id = lo.clientId;
+      // Carry the chosen owner onto any destination that was empty before the move
+      // (blending into already-owned liquid keeps the destination's owner).
+      if (dLit <= 0.001 && _ownerAfter) {
+        destUpd.liquid_owner_client_id = _ownerAfter;
       }
       await window.db.update('liquid_containers', '?id=eq.' + a.vesselId, destUpd);
 
@@ -47981,6 +48091,11 @@ window.saveAdjModal = async function() {
     try { linked = JSON.parse(lso.linked_containers_json || '[]'); } catch(e){}
     if (!linked.length && lso.linked_container_id) linked = [{ id: lso.linked_container_id }];
 
+    // Immutable ownership snapshot captured at close-out (owner before -> after,
+    // per vessel + bottled output). jsonb comes back already parsed.
+    var ownershipSnap = [];
+    try { ownershipSnap = Array.isArray(lso.ownership_json) ? lso.ownership_json : JSON.parse(lso.ownership_json || '[]'); } catch(e){ ownershipSnap = []; }
+
     var idSet = {};
     linked.forEach(function(l){ if (l && l.id) idSet[l.id] = 1; });
     hist.forEach(function(h){ if (h.container_id) idSet[h.container_id] = 1; });
@@ -47995,6 +48110,10 @@ window.saveAdjModal = async function() {
     conts.forEach(function(c){
       if (c.client_id) clientIds[c.client_id] = 1;
       if (c.liquid_owner_client_id) clientIds[c.liquid_owner_client_id] = 1;
+    });
+    ownershipSnap.forEach(function(o){
+      if (o && o.ownerBefore) clientIds[o.ownerBefore] = 1;
+      if (o && o.ownerAfter)  clientIds[o.ownerAfter]  = 1;
     });
     var vIds = conts.map(function(c){ return c.vessel_id; }).filter(Boolean);
     var side = await Promise.all([
@@ -48078,12 +48197,18 @@ window.saveAdjModal = async function() {
       var c = cMap[cid] || {}; var d = drawMap[cid];
       var rem = d.litresAfter != null ? d.litresAfter : _n(c.current_litres);
       if (rem == null || rem <= 0.05) return;
-      var abv = effAbv(rem, c.current_lpa, c.abv);
+      // Strength/LPA from the JOB-TIME draw, never the container's current state
+      // (the vessel may have been refilled since, which previously produced
+      // impossible ABVs like 132%). Drawing liquid doesn't change strength, so the
+      // remainder ABV equals the source ABV: prefer the recorded lpa_after, else the
+      // draw's effective ABV, else leave blank rather than divide by a stale figure.
+      var remLpa = d.lpaAfter != null ? d.lpaAfter : (d.abv != null ? rem * d.abv / 100 : null);
+      var remAbv = (remLpa != null && rem > 0) ? (remLpa / rem * 100) : (d.abv != null ? d.abv : null);
       leftover.push({
         ref: c.reference || d.ref || cid, location: c.location || '—',
         litres: Math.round(rem * 100) / 100,
-        abv: abv ? Math.round(abv * 100) / 100 : null,
-        lpa: abv ? Math.round(rem * abv / 100 * 100) / 100 : _n(c.current_lpa),
+        abv: remAbv != null ? Math.round(remAbv * 100) / 100 : null,
+        lpa: remLpa != null ? Math.round(remLpa * 100) / 100 : null,
         owner: ownerOf(c) || '—', strength: lso.leftover_strength || 'original', kind: 'remainder'
       });
     });
@@ -48141,36 +48266,71 @@ window.saveAdjModal = async function() {
     var volOk  = bottledLitres != null && Math.abs(deltaVol) <= volTol;
 
     var warnings = [];
-    var complete = (job.stage === 'complete') && draws.length > 0;
-    if (!complete) warnings.push({ level:'info', text:'This job is not yet completed (or no liquid has been drawn yet) — figures below are partial.' });
+    var jobIsComplete = (job.stage === 'complete');
+    var complete = jobIsComplete && draws.length > 0;
+    var noHistory = jobIsComplete && draws.length === 0 && !hist.length;
+    if (noHistory) {
+      warnings.push({ level:'info', text:'No liquid movements were recorded for this job, so there is nothing to trace. This is normal for jobs completed before liquid tracking, or where liquid was not tracked in the system.' });
+    } else if (!complete) {
+      warnings.push({ level:'info', text:'This job is not yet completed (or no liquid has been drawn yet) — figures below are partial.' });
+    }
+    // Ownership is informational, not an error: anybody's liquid can be used in
+    // anybody's job. Only flag when NO owner resolves at all; a differing owner is
+    // a neutral note, not a warning.
     if (!jobClientIsLh && draws.length) {
       var ownerSet = {};
       Object.keys(drawMap).forEach(function(cid){
         var c = cMap[cid]; if (!c) return;
         var o = ownerOf(c);
-        if (!c.liquid_owner_client_id) {
-          warnings.push({ level:'warn', text:'Liquid owner not set on ' + (c.reference || cid) + ' — the job is for ' + jobClientName + '.', fix:cid });
-        } else if (o && o !== jobClientName) {
+        if (!o) {
+          warnings.push({ level:'warn', text:'No owner is recorded for ' + (c.reference || cid) + '.', fix:cid });
+        } else if (o !== jobClientName) {
           ownerSet[o] = (c.reference || cid);
         }
       });
       Object.keys(ownerSet).forEach(function(o){
-        warnings.push({ level:'warn', text:'Job is for ' + jobClientName + ' but the liquid drawn (' + ownerSet[o] + ') is owned by ' + o + '.', fix:null });
+        warnings.push({ level:'info', text:'Liquid drawn (' + ownerSet[o] + ') is owned by ' + o + '; the job is for ' + jobClientName + '.' });
       });
     }
     sources.forEach(function(s){
       if (!s.drawn) warnings.push({ level:'info', text:s.ref + ' was linked to the job but no liquid was drawn from it.' });
     });
     var jobsLeftover = _n(job.liquid_leftover);
-    if (jobsLeftover != null && Math.abs(jobsLeftover - computedLeftover) > Math.max(1, computedLeftover * 0.02)) {
-      warnings.push({ level:'warn', text:'Recorded job leftover (' + jobsLeftover.toFixed(1) + ' L) does not match the computed remainder (' + computedLeftover.toFixed(1) + ' L). The stored figure may be stale.' });
+    // Only flag a genuine divergence: a recorded leftover that is present (non-zero)
+    // and disagrees with the computed remainder. A 0/null recorded value means the
+    // job pre-dates leftover persistence — show the computed figure without warning.
+    if (jobsLeftover != null && jobsLeftover > 0.05 && Math.abs(jobsLeftover - computedLeftover) > Math.max(1, computedLeftover * 0.02)) {
+      warnings.push({ level:'warn', text:'Recorded job leftover (' + jobsLeftover.toFixed(1) + ' L) does not match the computed remainder (' + computedLeftover.toFixed(1) + ' L).' });
     }
     if (complete && !lpaOk) warnings.push({ level:'error', text:'Alcohol balance is off by ' + deltaLpa.toFixed(2) + ' LPA (drawn ' + lpaIn.toFixed(2) + ' vs bottled+waste ' + lpaOut.toFixed(2) + ').' });
     if (complete && !volOk) warnings.push({ level:'error', text:'Volume balance is off by ' + deltaVol.toFixed(1) + ' L (in ' + volIn.toFixed(1) + ' vs out ' + volOut.toFixed(1) + ').' });
 
+    // Ownership before -> after. Prefer the immutable snapshot captured at close-out;
+    // fall back to current container owners for jobs closed before snapshots existed.
+    var roleLabel = { source:'Source / remainder', leftover:'Leftover', bottled:'Bottled output' };
+    var ownership;
+    if (ownershipSnap.length) {
+      ownership = ownershipSnap.map(function(o){
+        var beforeName = o.ownerBefore ? (nameOf(o.ownerBefore) || o.ownerBefore) : '—';
+        var afterName  = o.ownerAfter  ? (nameOf(o.ownerAfter)  || o.ownerAfter)  : beforeName;
+        var ref = o.ref || (o.containerId && cMap[o.containerId] ? cMap[o.containerId].reference : '') || '—';
+        return { ref: ref, role: roleLabel[o.role] || o.role || 'Source',
+                 ownerBefore: beforeName, ownerAfter: afterName,
+                 changed: (o.ownerBefore || null) !== (o.ownerAfter || null), legacy: false };
+      });
+    } else {
+      ownership = sources.map(function(s){
+        var nm = (s.liquidOwner !== '—' ? s.liquidOwner : s.vesselOwner) || '—';
+        return { ref: s.ref, role: 'Source / remainder', ownerBefore: nm, ownerAfter: nm, changed: false, legacy: true };
+      });
+    }
+    var ownershipLegacy = !ownershipSnap.length;
+
     var productLabel = (window.jobLabel && window.jobLabel(job)) || job.product_name || jobId;
     var headline;
-    if (!complete) {
+    if (noHistory) {
+      headline = jobId + ' (' + productLabel + ') for ' + jobClientName + ' — completed, but no liquid movements were recorded for this job.';
+    } else if (!complete) {
       headline = jobId + ' (' + productLabel + ') for ' + jobClientName + ' — not yet completed; no bottling draw recorded.';
     } else {
       var drawStr = draws.map(function(d){ return d.litresDrawn.toFixed(1) + ' L from ' + d.ref; }).join(', ');
@@ -48185,7 +48345,8 @@ window.saveAdjModal = async function() {
       jobId: jobId, productLabel: productLabel, clientName: jobClientName,
       lot: job.lot_number || '', dateCompleted: job.date_completed,
       signedBy: lso.signed_by || job.results_signed_by || '', signedAt: lso.signed_at || job.results_signed_at,
-      complete: complete, headline: headline,
+      complete: complete, noHistory: noHistory, headline: headline,
+      ownership: ownership, ownershipLegacy: ownershipLegacy,
       sources: sources, draws: draws, waterAdded: waterAdded || 0, variance: Math.round(variance * 100) / 100,
       bottled: { litres: bottledLitres, abv: bottlingAbv, lpa: bottledLpa, bottles: bottles },
       leftover: leftover, computedLeftover: Math.round(computedLeftover * 100) / 100, jobsLeftover: jobsLeftover,
@@ -48207,9 +48368,23 @@ window.saveAdjModal = async function() {
       return '<div style="border-top:1px solid var(--navy-border);padding:18px 22px;">'
         + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:12px;">' + title + '</div>' + inner + '</div>';
     }
-    function kvRows(rows){ return '<table style="width:100%;border-collapse:collapse;">' + rows.join('') + '</table>'; }
-    function kv(k,v){ return '<tr><td style="color:var(--muted);font-size:12px;padding:5px 16px 5px 0;width:210px;vertical-align:top;">' + k + '</td><td style="color:var(--white);font-size:13px;padding:5px 0;font-weight:600;">' + (v==null?'—':v) + '</td></tr>'; }
+    function kvRows(rows){ return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;">' + rows.join('') + '</table>'; }
+    function kv(k,v){ return '<tr><td style="color:var(--muted);font-size:12px;padding:5px 16px 5px 0;width:46%;vertical-align:top;word-break:break-word;">' + k + '</td><td style="color:var(--white);font-size:13px;padding:5px 0;font-weight:600;word-break:break-word;">' + (v==null?'—':v) + '</td></tr>'; }
     function bcol(ok){ return ok ? 'var(--green)' : 'var(--red)'; }
+    // Responsive card: a titled entity with label/value pairs that wrap instead of a
+    // fixed-width table, so the report reads on phone/tablet as well as desktop.
+    function pair(label, value, colour){
+      return '<div style="flex:1 1 92px;min-width:92px;">'
+        + '<div style="font-size:9px;letter-spacing:0.06em;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">' + label + '</div>'
+        + '<div style="font-size:13px;font-weight:600;color:' + (colour||'var(--white)') + ';word-break:break-word;">' + (value==null?'—':value) + '</div></div>';
+    }
+    function entityCard(title, pairs){
+      var inner = pairs.filter(Boolean).join('');
+      return '<div style="border:1px solid var(--navy-border);border-radius:6px;padding:11px 13px;margin-bottom:8px;">'
+        + (title ? '<div style="font-size:13px;font-weight:700;color:var(--white);margin-bottom:9px;">' + title + '</div>' : '')
+        + '<div style="display:flex;flex-wrap:wrap;gap:11px 16px;">' + inner + '</div></div>';
+    }
+    function emptyCard(msg){ return '<div style="color:var(--muted);font-size:12px;padding:4px 2px;">' + msg + '</div>'; }
 
     var hasErr = t.warnings.some(function(w){ return w.level==='error'; });
     var hasWarn= t.warnings.some(function(w){ return w.level==='warn'; });
@@ -48230,27 +48405,25 @@ window.saveAdjModal = async function() {
       disc = block('Discrepancies (' + t.warnings.length + ')', '<ul style="margin:0;padding-left:2px;list-style:none;">' + items + '</ul>');
     }
 
-    var srcRows = t.sources.length ? t.sources.map(function(s){
-      return '<tr><td>' + esc(s.ref) + (s.drawn ? '' : ' <span style="color:var(--muted);font-size:10px;">(not drawn)</span>') + '</td>'
-        + '<td>' + esc(s.spirit) + '</td>'
-        + '<td>' + esc(s.liquidOwner !== '—' ? s.liquidOwner : s.vesselOwner) + '</td>'
-        + '<td style="text-align:right;">' + L(s.litresBefore) + '</td>'
-        + '<td style="text-align:right;">' + PC(s.abvBefore) + '</td>'
-        + '<td style="text-align:right;">' + P(s.lpaBefore) + '</td></tr>';
-    }).join('') : '<tr><td colspan="6" style="color:var(--muted);">No source containers linked.</td></tr>';
-    var srcTable = '<div style="overflow-x:auto;"><table class="data-table" style="width:100%;min-width:520px;">'
-      + '<thead><tr><th>Vessel</th><th>Spirit</th><th>Owner</th><th style="text-align:right;">Litres</th><th style="text-align:right;">ABV</th><th style="text-align:right;">LPA</th></tr></thead><tbody>' + srcRows + '</tbody></table></div>';
+    var srcTable = t.sources.length ? t.sources.map(function(s){
+      return entityCard(esc(s.ref) + (s.drawn ? '' : ' <span style="color:var(--muted);font-size:10px;font-weight:400;">(not drawn)</span>'), [
+        pair('Spirit', esc(s.spirit)),
+        pair('Owner', esc(s.liquidOwner !== '—' ? s.liquidOwner : s.vesselOwner)),
+        pair('Litres', L(s.litresBefore)),
+        pair('ABV', PC(s.abvBefore)),
+        pair('LPA', P(s.lpaBefore))
+      ]);
+    }).join('') : emptyCard('No source containers linked.');
 
-    var drawRows = t.draws.length ? t.draws.map(function(d){
-      return '<tr><td>' + esc(d.ref) + '</td>'
-        + '<td style="text-align:right;color:var(--red);font-weight:700;">-' + L(d.litresDrawn) + '</td>'
-        + '<td style="text-align:right;">' + PC(d.abv) + '</td>'
-        + '<td style="text-align:right;">' + P(d.lpaDrawn) + '</td>'
-        + '<td style="text-align:right;">' + L(d.litresAfter) + '</td>'
-        + '<td>' + esc(d.by) + '</td></tr>';
-    }).join('') : '<tr><td colspan="6" style="color:var(--muted);">No bottling draws recorded.</td></tr>';
-    var drawTable = '<div style="overflow-x:auto;"><table class="data-table" style="width:100%;min-width:560px;">'
-      + '<thead><tr><th>Vessel</th><th style="text-align:right;">Drawn</th><th style="text-align:right;">ABV</th><th style="text-align:right;">Alcohol</th><th style="text-align:right;">Remaining</th><th>By</th></tr></thead><tbody>' + drawRows + '</tbody></table></div>';
+    var drawTable = t.draws.length ? t.draws.map(function(d){
+      return entityCard(esc(d.ref), [
+        pair('Drawn', '-' + L(d.litresDrawn), 'var(--red)'),
+        pair('ABV', PC(d.abv)),
+        pair('Alcohol', P(d.lpaDrawn)),
+        pair('Remaining', L(d.litresAfter)),
+        pair('By', esc(d.by))
+      ]);
+    }).join('') : emptyCard('No bottling draws recorded.');
 
     var bottledTbl = kvRows([
       kv('Bottles produced', t.bottled.bottles ? t.bottled.bottles.toLocaleString() + ' btls' : '—'),
@@ -48261,18 +48434,17 @@ window.saveAdjModal = async function() {
       (t.variance ? kv('Stock variance', L(t.variance)) : '')
     ]);
 
-    var loRows = t.leftover.length ? t.leftover.map(function(x){
-      var tag = x.kind==='unused' ? ' <span style="color:var(--muted);font-size:10px;">(linked, not drawn)</span>' : (x.kind==='moved' ? ' <span style="color:var(--muted);font-size:10px;">(moved)</span>' : '');
-      return '<tr><td>' + esc(x.ref) + tag + '</td>'
-        + '<td>' + esc(x.location) + '</td>'
-        + '<td style="text-align:right;">' + L(x.litres) + '</td>'
-        + '<td style="text-align:right;">' + PC(x.abv) + '</td>'
-        + '<td style="text-align:right;">' + P(x.lpa) + '</td>'
-        + '<td>' + esc(x.owner) + '</td>'
-        + '<td>' + esc(x.strength) + '</td></tr>';
-    }).join('') : '<tr><td colspan="7" style="color:var(--muted);">No leftover liquid.</td></tr>';
-    var loTable = '<div style="overflow-x:auto;"><table class="data-table" style="width:100%;min-width:600px;">'
-      + '<thead><tr><th>Vessel</th><th>Location</th><th style="text-align:right;">Litres</th><th style="text-align:right;">ABV</th><th style="text-align:right;">LPA</th><th>Owner</th><th>Strength</th></tr></thead><tbody>' + loRows + '</tbody></table></div>';
+    var loTable = t.leftover.length ? t.leftover.map(function(x){
+      var tag = x.kind==='unused' ? ' <span style="color:var(--muted);font-size:10px;font-weight:400;">(linked, not drawn)</span>' : (x.kind==='moved' ? ' <span style="color:var(--muted);font-size:10px;font-weight:400;">(moved)</span>' : '');
+      return entityCard(esc(x.ref) + tag, [
+        pair('Location', esc(x.location)),
+        pair('Litres', L(x.litres)),
+        pair('ABV', PC(x.abv)),
+        pair('LPA', P(x.lpa)),
+        pair('Owner', esc(x.owner)),
+        pair('Strength', esc(x.strength))
+      ]);
+    }).join('') : emptyCard('No leftover liquid.');
 
     var wasteTbl = kvRows([
       kv('Waste litres', t.waste.litres ? L(t.waste.litres) : 'None'),
@@ -48297,7 +48469,19 @@ window.saveAdjModal = async function() {
       + (t.dateCompleted ? ' &nbsp;·&nbsp; ' + dt(t.dateCompleted) : '')
       + (t.signedBy ? ' &nbsp;·&nbsp; Signed by ' + esc(t.signedBy) : '') + '</div></div>';
 
+    var ownTable = (t.ownership && t.ownership.length)
+      ? t.ownership.map(function(o){
+          return entityCard(esc(o.ref) + ' <span style="color:var(--muted);font-size:10px;font-weight:400;">(' + esc(o.role) + ')</span>', [
+            pair('Owner before', esc(o.ownerBefore)),
+            pair('Owner after', o.changed ? '<span style="color:var(--green);">' + esc(o.ownerAfter) + '</span>' : esc(o.ownerAfter)),
+            pair('Change', o.changed ? '<span style="color:var(--gold);">reassigned</span>' : 'unchanged')
+          ]);
+        }).join('')
+        + (t.ownershipLegacy ? '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Showing current owners — this job was completed before ownership was captured at close-out, so the before/after history is not available.</div>' : '')
+      : emptyCard('No ownership recorded.');
+
     return headerBand + banner + disc
+      + block('Ownership (before &#8594; after)', ownTable)
       + block('Sources', srcTable)
       + block('Drawn for Bottling', drawTable)
       + block('Bottled Output', bottledTbl)
