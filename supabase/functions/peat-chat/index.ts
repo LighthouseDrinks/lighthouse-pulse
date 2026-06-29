@@ -448,10 +448,16 @@ Deno.serve(async (req: Request) => {
       .eq('auth_user_id', user.id)
       .maybeSingle();
 
-    // Treat terminated / pending-termination staff as clients so they
-    // don't get the staff prompt with internal context (defence-in-depth
-    // against a stale session token).
-    const isActiveStaff = !!appUser && appUser.status === 'active';
+    // Client vs staff is derived from the authenticated user's app_users
+    // ROLE — never from the request body. A client account
+    // (role = 'client') must always get the client prompt and never the
+    // internal knowledge base, even if it POSTs is_client:false directly.
+    // Terminated / pending-termination or unknown accounts are treated as
+    // clients too (defence-in-depth against a stale session token).
+    // is_client from the body may only DOWNGRADE staff to the client view
+    // (e.g. for testing); it can never upgrade a client to staff.
+    const isActiveStaff = !!appUser && appUser.status === 'active'
+      && !!appUser.role && appUser.role !== 'client';
     const isClient = !isActiveStaff || is_client;
 
     // For staff, splice in the live STAFF ROLES list from the roles table so
