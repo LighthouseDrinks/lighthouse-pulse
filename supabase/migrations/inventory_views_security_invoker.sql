@@ -1,0 +1,32 @@
+-- ============================================================
+-- Inventory views — switch to security_invoker (audit finding:
+-- CRITICAL cross-tenant exposure via SECURITY DEFINER views).
+--
+-- v_liquid_inventory and v_dry_goods_inventory are SECURITY DEFINER
+-- views (Supabase advisor lint 0010) with SELECT granted to the
+-- `authenticated` role. A SECURITY DEFINER view runs with the view
+-- owner's rights and BYPASSES the row level security of its base
+-- tables. The base tables (liquid_containers, dry_goods_skus/_batches/
+-- _movements) are correctly tenant-scoped, but a client querying the
+-- VIEW directly via /rest/v1/v_liquid_inventory sees EVERY brand's
+-- inventory.
+--
+-- Fix: set security_invoker = true so the view enforces the querying
+-- user's RLS. Effect:
+--   * Staff  (is_staff() = true on base tables) -> see all rows (no
+--     change to staff dashboards).
+--   * Client (client_read_own on base tables)   -> see only their own
+--     brand's rows. The portal reads the base tables directly, not
+--     these views, so no portal UI depends on this.
+--
+-- Requires PostgreSQL 15+ (project is on PG 17 — verified). Idempotent.
+--
+-- NOTE: the advisor also flags other SECURITY DEFINER views
+-- (v_tasks, v_clock_status, line_throughput_live, line_hourly_totals,
+-- xero_connection_public, ecommerce_stores_public). They are staff-only
+-- dashboards and out of scope for the portal tenant boundary, but should
+-- be reviewed separately.
+-- ============================================================
+
+ALTER VIEW public.v_liquid_inventory   SET (security_invoker = true);
+ALTER VIEW public.v_dry_goods_inventory SET (security_invoker = true);
