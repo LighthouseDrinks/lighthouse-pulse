@@ -23447,8 +23447,13 @@ window.ccxPrintRecord = function() {
     return hay.indexOf(state.search) >= 0;
   }
 
+  // ── Geometry (NODE_W / NODE_H must match the .oc-node CSS) ───────────────────
+  var NODE_W = 214, NODE_H = 104, H_GAP = 34, V_GAP = 54;
+  var COL = NODE_W + H_GAP, ROW = NODE_H + V_GAP;
+  var ROOT_GAP = COL, LANE_GAP = Math.round(COL * 1.3);
+
   // ── Rendering ──────────────────────────────────────────────────────────────
-  function renderNode(u){
+  function renderNode(u, rec){
     var kids = state.children[u.id] || [];
     var count = kids.length;
     var dept = deptOf(u.role);
@@ -23470,9 +23475,10 @@ window.ccxPrintRecord = function() {
     var menuBtn = state.editMode
       ? '<button class="oc-menu-btn" data-menu="' + esc(u.id) + '" title="Change manager">Manager &#9662;</button>'
       : '';
+    var pos = rec ? ('left:' + (rec.x - NODE_W / 2) + 'px;top:' + rec.y + 'px;') : '';
 
     return '<div class="oc-node' + termCls + (dim ? ' oc-dim' : '') + (hit ? ' oc-hit' : '') + (state.focusId === u.id ? ' oc-focus' : '') + '"'
-      + ' data-id="' + esc(u.id) + '" draggable="' + (state.editMode ? 'true' : 'false') + '" style="--oc-accent:' + accent + ';">'
+      + ' data-id="' + esc(u.id) + '" draggable="' + (state.editMode ? 'true' : 'false') + '" style="--oc-accent:' + accent + ';' + pos + '">'
       + '<span class="oc-status ' + st.cls + '" title="' + st.label + '"></span>'
       + '<div class="oc-head">'
       +   '<div class="oc-avatar">' + esc(initials(u.display_name || u.email)) + '</div>'
@@ -23482,17 +23488,54 @@ window.ccxPrintRecord = function() {
       + '</div>';
   }
 
-  function renderBranch(u){
-    var kids = state.children[u.id] || [];
-    var hasKids = kids.length > 0;
-    var collapsed = !!state.collapsed[u.id];
-    var html = '<div class="oc-branch' + (hasKids ? ' has-children' : '') + '">' + renderNode(u);
-    if (hasKids && !collapsed){
-      html += '<div class="oc-descendants">';
-      for (var i = 0; i < kids.length; i++) html += renderBranch(kids[i]);
-      html += '</div>';
+  // ── Tidy-tree layout: each parent centered between its direct reports ────────
+  function layoutTree(){
+    var nodes = [], links = [], nextX = 0;
+    var topOffset = state.editMode ? 46 : 0;
+    if (state.unassigned.length) topOffset = Math.max(topOffset, 26);
+
+    function place(u, depth){
+      var collapsed = !!state.collapsed[u.id];
+      var kids = collapsed ? [] : (state.children[u.id] || []);
+      var rec = { u: u, depth: depth, x: 0, y: depth * ROW + topOffset };
+      if (!kids.length){
+        rec.x = nextX + NODE_W / 2;
+        nextX += COL;
+      } else {
+        var childRecs = [];
+        for (var i = 0; i < kids.length; i++) childRecs.push(place(kids[i], depth + 1));
+        rec.x = (childRecs[0].x + childRecs[childRecs.length - 1].x) / 2;
+        links.push({ parent: rec, children: childRecs });
+      }
+      nodes.push(rec);
+      return rec;
     }
-    return html + '</div>';
+
+    // Real top-level trees first, separated by an extra gap.
+    for (var i = 0; i < state.roots.length; i++){
+      if (i > 0) nextX += ROOT_GAP;
+      place(state.roots[i], 0);
+    }
+    var mainWidth = nextX > 0 ? nextX - H_GAP : 0;
+
+    // Orphans (manager not found) as a separate labelled cluster on the right.
+    var lane = null;
+    if (state.unassigned.length){
+      nextX += LANE_GAP;
+      var laneLeft = nextX;
+      for (var j = 0; j < state.unassigned.length; j++){
+        if (j > 0) nextX += ROOT_GAP;
+        place(state.unassigned[j], 0);
+      }
+      lane = { left: laneLeft, right: nextX - H_GAP, labelY: topOffset - 24 };
+    }
+
+    var width = 0, height = 0;
+    for (var k = 0; k < nodes.length; k++){
+      width = Math.max(width, nodes[k].x + NODE_W / 2);
+      height = Math.max(height, nodes[k].y + NODE_H);
+    }
+    return { nodes: nodes, links: links, width: width, height: height, mainWidth: mainWidth, lane: lane };
   }
 
   function render(){
@@ -23500,30 +23543,50 @@ window.ccxPrintRecord = function() {
     if (!canvas) return;
 
     if (!state.users.length){
+      canvas.style.width = ''; canvas.style.height = '';
       canvas.innerHTML = '<div class="oc-empty">No people to show yet.</div>';
       applyTransform();
       return;
     }
+    if (!state.roots.length && !state.unassigned.length){
+      canvas.style.width = ''; canvas.style.height = '';
+      canvas.innerHTML = '<div class="oc-empty">No top-level manager set.' + (state.editMode ? ' Drag someone onto the bar to start.' : '') + '</div>';
+      applyTransform();
+      return;
+    }
 
-    var html = '';
+    var L = layoutTree();
+    canvas.style.width = L.width + 'px';
+    canvas.style.height = L.height + 'px';
+
+    var parts = [];
+
+    // Connector layer — one SVG path built from the computed coordinates.
+    var d = '';
+    L.links.forEach(function(lk){
+      var p = lk.parent, ch = lk.children;
+      var busY = p.y + NODE_H + V_GAP / 2;
+      d += 'M' + p.x + ' ' + (p.y + NODE_H) + 'V' + busY;
+      var minX = ch[0].x, maxX = ch[ch.length - 1].x;
+      if (maxX > minX) d += 'M' + minX + ' ' + busY + 'H' + maxX;
+      for (var c = 0; c < ch.length; c++) d += 'M' + ch[c].x + ' ' + busY + 'V' + ch[c].y;
+    });
+    if (d) parts.push('<svg class="oc-links" width="' + L.width + '" height="' + L.height + '"><path d="' + d + '"/></svg>');
+
+    // Node cards (absolutely positioned from the layout).
+    for (var n = 0; n < L.nodes.length; n++) parts.push(renderNode(L.nodes[n].u, L.nodes[n]));
+
+    // Unassigned cluster label.
+    if (L.lane){
+      parts.push('<div class="oc-lane-label" style="left:' + L.lane.left + 'px;top:' + L.lane.labelY + 'px;width:' + Math.max(0, L.lane.right - L.lane.left) + 'px;">Unassigned &middot; manager not found</div>');
+    }
+
+    // Exec-only "make top-level" drop bar, pinned across the top of the forest.
     if (state.editMode){
-      html += '<div class="oc-root-drop" data-rootdrop="1">Drop here to make top-level (no manager)</div>';
-    }
-    html += '<div class="oc-forest">';
-    if (state.roots.length){
-      for (var i = 0; i < state.roots.length; i++) html += renderBranch(state.roots[i]);
-    } else {
-      html += '<div class="oc-empty">No top-level manager set. ' + (state.editMode ? 'Drag someone onto the bar above to start.' : '') + '</div>';
-    }
-    html += '</div>';
-
-    if (state.unassigned.length){
-      html += '<div class="oc-unassigned"><div class="oc-lane-label">Unassigned &middot; manager not found</div><div class="oc-lane">';
-      for (var j = 0; j < state.unassigned.length; j++) html += renderBranch(state.unassigned[j]);
-      html += '</div></div>';
+      parts.push('<div class="oc-root-drop" data-rootdrop="1" style="left:0;top:6px;width:' + Math.max(260, L.mainWidth) + 'px;">Drop here to make top-level (no manager)</div>');
     }
 
-    canvas.innerHTML = html;
+    canvas.innerHTML = parts.join('');
     applyTransform();
   }
 
@@ -23808,7 +23871,15 @@ window.ccxPrintRecord = function() {
     canvas.innerHTML = '<div class="oc-empty">Loading chart…</div>';
     try {
       var rows = await window.db.select('app_users', '?select=id,display_name,email,role,status,reports_to_id&order=display_name.asc');
-      state.users = (rows || []).filter(function(u){ return u.role !== 'client' && u.status !== 'terminated'; });
+      // Shared kiosk / service logins (e.g. the plant-display TV screen signs in
+      // as warehouse@lighthousedrinks.com) are real app_users rows but not people —
+      // keep them off the org chart.
+      var OC_EXCLUDE_EMAILS = ['warehouse@lighthousedrinks.com'];
+      state.users = (rows || []).filter(function(u){
+        return u.role !== 'client'
+          && u.status !== 'terminated'
+          && OC_EXCLUDE_EMAILS.indexOf(String(u.email || '').toLowerCase()) < 0;
+      });
       rebuild();
       render();
       window._ocFit();
