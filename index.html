@@ -35387,12 +35387,14 @@ window.saveAdjModal = async function() {
           pallet_construction:'Pallet Construction', final_wrapping:'Final Wrapping', pallet_labels:'Pallet Labels'
         };
         var qcDetailFields = Object.keys(labelsMap);
-        var qcHtml = '<div style="display:flex;flex-direction:column;gap:10px;">';
+        // id/data-qc-pass markers are invisible on screen; the print report uses
+        // them to strip failed checks from the client-facing copy.
+        var qcHtml = '<div id="bt-qc-wrap" style="display:flex;flex-direction:column;gap:10px;">';
         qcChecks.forEach(function(qc, idx) {
-          var pass       = qc.satisfactory;
+          var pass       = qc.satisfactory === true;
           var statusCol  = pass ? 'var(--green)' : 'var(--red)';
           var typeLabel  = qc.check_type === 'online' ? 'Online Check' : qc.check_type === 'offline' ? 'Offline Check' : (qc.check_type || 'Check');
-          qcHtml += '<div style="background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;padding:12px 16px;">'
+          qcHtml += '<div data-qc-pass="' + (pass ? '1' : '0') + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;padding:12px 16px;">'
             + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
             + '<span style="font-size:12px;font-weight:700;color:var(--white);">Round ' + _e(String(qc.check_round || idx+1)) + ' — ' + typeLabel + '</span>'
             + '<span style="font-size:11px;font-weight:700;color:' + statusCol + ';padding:2px 10px;border:1px solid ' + statusCol + ';border-radius:3px;">' + (pass ? '&#10003; PASS' : '&#10007; FAIL') + '</span>'
@@ -35553,8 +35555,10 @@ window.saveAdjModal = async function() {
       }
 
       // QC table HTML for email
-      var qcEmailHtml;
-      if (qcChecks.length) {
+      // Client report shows passing QC checks only; failed checks are hidden.
+      var qcPass = (qcChecks || []).filter(function(qc){ return qc.satisfactory === true; });
+      var qcEmailHtml = '';
+      if (qcPass.length) {
         qcEmailHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">'
           + '<thead><tr style="background:#f3f4f6;">'
           + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;">Round</th>'
@@ -35563,20 +35567,24 @@ window.saveAdjModal = async function() {
           + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;">Date</th>'
           + '<th style="text-align:center;padding:6px 8px;border-bottom:1px solid #e5e7eb;">Result</th>'
           + '</tr></thead><tbody>';
-        qcChecks.forEach(function(qc, idx) {
-          var pass = qc.satisfactory;
+        qcPass.forEach(function(qc, idx) {
           qcEmailHtml += '<tr>'
             + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + String(qc.check_round || idx+1) + '</td>'
             + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-transform:capitalize;">' + String(qc.check_type || '—') + '</td>'
             + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + String(qc.checked_by || '—') + '</td>'
             + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + _fmtDate(qc.checked_at) + '</td>'
-            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:700;color:' + (pass ? '#16a34a' : '#dc2626') + ';">' + (pass ? '&#10003; Pass' : '&#10007; Fail') + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:700;color:#16a34a;">&#10003; Pass</td>'
             + '</tr>';
         });
         qcEmailHtml += '</tbody></table>';
-      } else {
-        qcEmailHtml = '<p style="color:#9ca3af;font-size:12px;margin-top:8px;">No QC checks recorded.</p>';
       }
+      // When no checks pass, the whole QC section (header included) is omitted below.
+      var qcEmailSection = qcPass.length
+        ? ('<div style="padding:20px 32px 0;">'
+            + '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:#c9a84c;font-weight:700;border-bottom:1px solid #e5e7eb;padding-bottom:6px;margin-bottom:12px;">Quality Control Checks</div>'
+            + qcEmailHtml
+            + '</div>')
+        : '';
 
       // Build email HTML
       var emailHtml = '<div style="' + _emailWrap + '">'
@@ -35617,10 +35625,7 @@ window.saveAdjModal = async function() {
             ['Cases per Pallet',    casesPerPallet ? String(casesPerPallet) : '—'],
             ['Total Pallets',       totalPallets ? String(totalPallets) : '—']
           ])
-        + '<div style="padding:20px 32px 0;">'
-        +   '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:#c9a84c;font-weight:700;border-bottom:1px solid #e5e7eb;padding-bottom:6px;margin-bottom:12px;">Quality Control Checks</div>'
-        +   qcEmailHtml
-        + '</div>'
+        + qcEmailSection
         + _emailSection('Sign-Off &amp; Compliance', [
             ['Production Manager', j.results_signed_by || '—'],
             ['Sign-Off Date',      _fmtDate(j.results_signed_at)],
@@ -35646,6 +35651,18 @@ window.saveAdjModal = async function() {
   window._printBottlingReport = function() {
     var body = document.getElementById('bottling-report-body');
     if (!body) return;
+    // The printed copy is client-facing: strip failed QC checks (and the whole QC
+    // section if none passed). Work on a clone so the on-screen report is untouched.
+    var clone = body.cloneNode(true);
+    try {
+      var fails = clone.querySelectorAll('#bt-qc-wrap [data-qc-pass="0"]');
+      Array.prototype.forEach.call(fails, function(el){ el.remove(); });
+      var wrap = clone.querySelector('#bt-qc-wrap');
+      if (wrap && !wrap.querySelector('[data-qc-pass="1"]') && wrap.parentElement) {
+        wrap.parentElement.remove();
+      }
+    } catch(ePrint) { window.logError && window.logError('_printBottlingReport:qc', ePrint); }
+    var printBodyHtml = clone.innerHTML;
     var win = window.open('', '_blank', 'width=860,height=960');
     if (!win) { window.toast && window.toast('Pop-up blocked — please allow pop-ups to print.', 'error'); return; }
     win.document.write('<!DOCTYPE html><html><head><title>Bottling Report</title>'
@@ -35663,7 +35680,7 @@ window.saveAdjModal = async function() {
       + 'span[style*="color:var"]{color:inherit!important;}'
       + '@media print{body{margin:0;}}'
       + '</style></head><body>'
-      + body.innerHTML
+      + printBodyHtml
       + '</body></html>');
     win.document.close();
     win.focus();
