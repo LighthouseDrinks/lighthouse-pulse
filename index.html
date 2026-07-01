@@ -18071,7 +18071,7 @@ window.loadBoms = async function initBoms() {
   };
 
   // ── My Tasks page ─────────────────────────────────────────────────────
-  var _mtState = { view:'assigned', priority:'', date:'', search:'' };
+  var _mtState = { view:'assigned', priority:'', date:'', search:'', employee:'' };
 
   function filteredTasks(){
     var me = meId();
@@ -18089,6 +18089,7 @@ window.loadBoms = async function initBoms() {
                           : list.filter(function(t){ return !t.completed_at && (t.assignee_id === me || t.created_by === me || (t.watchers||[]).indexOf(me)>=0); });
                         break;
     }
+    if (_mtState.employee) list = list.filter(function(t){ return t.assignee_id === _mtState.employee; });
     if (_mtState.priority) list = list.filter(function(t){ return (t.priority||'normal') === _mtState.priority; });
     if (_mtState.date === 'overdue') list = list.filter(function(t){ return t.due_at && new Date(t.due_at) < now; });
     else if (_mtState.date === 'today') list = list.filter(function(t){ if(!t.due_at) return false; var d=new Date(t.due_at); d.setHours(0,0,0,0); return d.getTime()===today.getTime(); });
@@ -18217,9 +18218,47 @@ window.loadBoms = async function initBoms() {
     });
   }
 
+  function populateEmployeeFilter(){
+    var sel = document.getElementById('mt-employee'); if (!sel) return;
+    var prev = _mtState.employee || '';
+    var counts = {};
+    TASKS.forEach(function(t){ if (!t.completed_at && t.assignee_id) counts[t.assignee_id] = (counts[t.assignee_id]||0) + 1; });
+    var html = '<option value="">All employees</option>';
+    APP_USERS.forEach(function(u){
+      if (u.status === 'terminated' || u.status === 'pending_termination') return;
+      var n = counts[u.id] || 0;
+      html += '<option value="'+esc(u.id)+'">'+esc(u.display_name||u.email||u.id)+' ('+n+')</option>';
+    });
+    sel.innerHTML = html;
+    // Preserve the current selection across repopulation
+    sel.value = prev;
+    if (sel.value !== prev) { _mtState.employee = ''; }
+  }
+
+  function toggleEmployeeFilter(){
+    var sel = document.getElementById('mt-employee'); if (!sel) return;
+    var show = _mtState.view === 'all' && window.canViewAllTasks();
+    sel.style.display = show ? '' : 'none';
+    if (!show) {
+      _mtState.employee = '';
+      sel.value = '';
+      updateEmployeeCount();
+    }
+  }
+
+  function updateEmployeeCount(){
+    var el = document.getElementById('mt-employee-count'); if (!el) return;
+    if (!_mtState.employee || _mtState.view !== 'all') { el.style.display = 'none'; el.textContent = ''; return; }
+    var n = filteredTasks().length;
+    el.textContent = n + (n === 1 ? ' open task' : ' open tasks');
+    el.style.display = '';
+  }
+
   function renderMyTasks(){
     var host = document.getElementById('mt-list'); if (!host) return;
     renderKpis();
+    populateEmployeeFilter();
+    updateEmployeeCount();
     var opsHtml = renderOpsSection();
     var list = filteredTasks();
     var crmHtml;
@@ -18262,6 +18301,7 @@ window.loadBoms = async function initBoms() {
           b.style.borderBottomColor = a ? 'var(--gold)' : 'transparent';
           b.style.color = a ? 'var(--white)' : 'var(--muted)';
         });
+        toggleEmployeeFilter();
         renderMyTasks();
       });
     });
@@ -18285,12 +18325,15 @@ window.loadBoms = async function initBoms() {
           });
           var dSel = document.getElementById('mt-date'); if (dSel) dSel.value = f;
         }
+        toggleEmployeeFilter();
         renderMyTasks();
       });
     });
     document.getElementById('mt-search').addEventListener('input', function(){ _mtState.search = this.value; renderMyTasks(); });
     document.getElementById('mt-priority').addEventListener('change', function(){ _mtState.priority = this.value; renderMyTasks(); });
     document.getElementById('mt-date').addEventListener('change', function(){ _mtState.date = this.value; renderMyTasks(); });
+    var empSel = document.getElementById('mt-employee');
+    if (empSel) empSel.addEventListener('change', function(){ _mtState.employee = this.value; updateEmployeeCount(); renderMyTasks(); });
   }
 
   window.loadMyTasksPage = async function(){
@@ -23272,6 +23315,10 @@ window.ccxPrintRecord = function() {
       <option value="week">This week</option>
       <option value="nodate">No due date</option>
     </select>
+    <select id="mt-employee" style="display:none;background:var(--navy-card);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:4px;font-family:Lato,sans-serif;">
+      <option value="">All employees</option>
+    </select>
+    <span id="mt-employee-count" style="display:none;font-size:12px;color:var(--muted);"></span>
   </div>
 
   <!-- Task list -->
@@ -37365,7 +37412,11 @@ window.saveAdjModal = async function() {
             var _rem = Math.max(0, _tot - _drawn);
             var _isLeft = _rem > 0.5;
             var _cell = 'border-top:1px solid #ededed;padding:5px 0;';
-            h += '<div style="' + _cell + 'font-weight:700;color:#0d3349;">' + esc(c.reference || '—') + '</div>'
+            var _spirit = c.spirit_type
+              ? c.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();})
+              : '';
+            h += '<div style="' + _cell + 'font-weight:700;color:#0d3349;">' + esc(c.reference || '—')
+              + (_spirit ? '<div style="font-size:10px;font-weight:400;color:#888;">' + esc(_spirit) + '</div>' : '') + '</div>'
               + '<div style="' + _cell + 'text-align:right;color:#0d3349;">' + (_tot > 0 ? '~' + _tot.toFixed(0) + ' L' : '—') + '</div>'
               + '<div style="' + _cell + 'text-align:right;color:#0d3349;">' + (_drawn > 0.5 ? '~' + _drawn.toFixed(0) + ' L' : '—') + '</div>'
               + '<div style="' + _cell + 'text-align:right;font-weight:700;color:' + (_isLeft ? '#0d3349' : '#2e7d32') + ';">'
