@@ -17776,33 +17776,63 @@ window.loadBoms = async function initBoms() {
           });
         });
 
-        // If this is a sample mixing task — notify requester + update sample status
+        // Sample workflow: advance the linked sample when its task completes.
+        // review  -> move Submitted to Under Review + auto-close the sibling review task
+        // prepare -> mark the sample Prepared and ping the requester
         try {
-          var smpCheck = await db.select('samples','?mixing_task_id=eq.'+encodeURIComponent(taskId)+'&select=id,requested_by,client_id&limit=1');
-          if (smpCheck && smpCheck.length) {
-            var smpRec = smpCheck[0];
-            // Bump sample to awaiting_feedback
-            await db.update('samples','?id=eq.'+encodeURIComponent(smpRec.id),{ status:'awaiting_feedback' });
-            var cachedSmp = (window._SAMPLES||[]).find(function(s){ return s.id === smpRec.id; });
-            if (cachedSmp) cachedSmp.status = 'awaiting_feedback';
-            if (window.toast) window.toast('Sample '+smpRec.id+' marked Shipped.','success');
-            // Send email to requester if we can find their address
-            if (smpRec.requested_by && window.sendEmail) {
-              try {
-                var reqName = smpRec.requested_by;
-                var uRows = await db.select('app_users','?display_name=ilike.'+encodeURIComponent(reqName)+'&select=email&limit=1');
-                var reqEmail = uRows && uRows[0] && uRows[0].email;
-                if (reqEmail) {
-                  window.sendEmail({
-                    to: reqEmail,
-                    subject: 'Sample '+smpRec.id+' is ready for review',
-                    html: '<p>Hi '+reqName+',</p>'
-                      +'<p>The mixing task for sample <strong>'+smpRec.id+'</strong> has been completed.</p>'
-                      +'<p>The sample is now ready for your review. Please log in to Pulse to update the status.</p>'
-                      +'<p style="color:#999;font-size:12px;">This is an automated notification from Lighthouse Pulse.</p>'
-                  });
+          var smpId    = t.sample_id || null;
+          var taskKind = t.task_kind || null;
+          if (!smpId) {
+            // legacy link via mixing_task_id
+            var lk = await db.select('samples','?mixing_task_id=eq.'+encodeURIComponent(taskId)+'&select=id&limit=1');
+            if (lk && lk[0]) { smpId = lk[0].id; taskKind = taskKind || 'prepare'; }
+          } else if (!taskKind) {
+            var tk = await db.select('job_tasks','?id=eq.'+encodeURIComponent(taskId)+'&select=task_kind&limit=1');
+            taskKind = (tk && tk[0] && tk[0].task_kind) || 'review';
+          }
+          if (smpId) {
+            var sr = await db.select('samples','?id=eq.'+encodeURIComponent(smpId)+'&select=id,requested_by,requested_by_id,client_id,status,recipient_company&limit=1');
+            var smpRec = sr && sr[0];
+            if (smpRec) {
+              var setSampleCache = function(status){ var c=(window._SAMPLES||[]).find(function(s){return s.id===smpRec.id;}); if(c) c.status=status; };
+              if (taskKind === 'review') {
+                if (smpRec.status === 'submitted' || smpRec.status === 'pending') {
+                  await db.update('samples','?id=eq.'+encodeURIComponent(smpRec.id),{ status:'under_review' });
+                  setSampleCache('under_review');
                 }
-              } catch(_) {}
+                // Auto-close sibling review tasks so no stale duplicate lingers
+                try {
+                  var sibs = await db.select('job_tasks','?sample_id=eq.'+encodeURIComponent(smpRec.id)+'&task_kind=eq.review&select=id,completed_at');
+                  for (var qi=0; qi<(sibs||[]).length; qi++) {
+                    if (sibs[qi].id !== taskId && !sibs[qi].completed_at) {
+                      await db.update('job_tasks','?id=eq.'+encodeURIComponent(sibs[qi].id), { completed_at: nowIso, status:'completed', completed_by:(window.CURRENT_USER && window.CURRENT_USER.email)||null });
+                      var localSib=(TASKS||[]).find(function(x){return x.id===sibs[qi].id;});
+                      if (localSib) { localSib.completed_at=nowIso; localSib.status='completed'; }
+                    }
+                  }
+                } catch(_) {}
+                updateMyTasksBadge();
+                if (window.toast) window.toast('Sample '+smpRec.id+' is now Under Review.','success');
+              } else {
+                // prepare / legacy mixing task completed
+                await db.update('samples','?id=eq.'+encodeURIComponent(smpRec.id),{ status:'prepared' });
+                setSampleCache('prepared');
+                if (window.toast) window.toast('Sample '+smpRec.id+' marked Prepared.','success');
+                // Notify the requester (prefer reliable id, else email by name)
+                if (smpRec.requested_by_id) {
+                  createNotification({ user_id: smpRec.requested_by_id, type:'task_completed', task_id: taskId, client_id: smpRec.client_id||null,
+                    body:'Sample '+smpRec.id+' has been prepared and is ready for QC / dispatch.' });
+                } else if (smpRec.requested_by && window.sendEmail) {
+                  try {
+                    var uRows = await db.select('app_users','?display_name=ilike.'+encodeURIComponent(smpRec.requested_by)+'&select=email&limit=1');
+                    var reqEmail = uRows && uRows[0] && uRows[0].email;
+                    if (reqEmail) {
+                      window.sendEmail({ to:reqEmail, subject:'Sample '+smpRec.id+' has been prepared',
+                        html:'<p>Sample <strong>'+smpRec.id+'</strong> has been prepared and is ready for QC / dispatch.</p><p style="color:#999;font-size:12px;">Automated notification from Lighthouse Pulse.</p>' });
+                    }
+                  } catch(_) {}
+                }
+              }
             }
           }
         } catch(_) {}
@@ -20367,11 +20397,23 @@ window.loadBoms = async function initBoms() {
     <input id="smp-search" placeholder="Search client, contact, product…" oninput="window._smpRender()" style="flex:1;min-width:180px;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;">
     <select id="smp-status-filter" onchange="window._smpRender()" style="background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;cursor:pointer;">
       <option value="">All Statuses</option>
-      <option value="pending">Pending</option>
-      <option value="awaiting_feedback">Shipped</option>
-      <option value="approved">Approved</option>
+      <option value="submitted">Submitted</option>
+      <option value="under_review">Under Review</option>
+      <option value="ready_to_prepare">Ready to Prepare</option>
+      <option value="prepared">Prepared</option>
+      <option value="qc_checked">QC Checked</option>
+      <option value="dispatched">Dispatched</option>
+      <option value="closed">Closed</option>
+      <option value="on_hold">On Hold</option>
       <option value="rejected">Rejected</option>
     </select>
+    <div style="display:flex;gap:12px;align-items:center;font-size:10px;color:var(--muted);margin-left:auto;flex-wrap:wrap;">
+      <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block;"></span>New / Closed</span>
+      <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:8px;height:8px;border-radius:50%;background:var(--amber);display:inline-block;"></span>In progress</span>
+      <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;"></span>QC passed</span>
+      <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:8px;height:8px;border-radius:50%;background:var(--blue);display:inline-block;"></span>Dispatched</span>
+      <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;"></span>Rejected</span>
+    </div>
   </div>
 
   <div class="card" style="padding:0;overflow:hidden;">
@@ -20401,6 +20443,7 @@ window.loadBoms = async function initBoms() {
   <div id="smp-modal-box" class="modal-box" style="max-width:1040px;width:96%;max-height:90vh;border-radius:6px;overflow:hidden;display:flex;flex-direction:column;" onclick="event.stopPropagation()">
 
     <input type="hidden" id="smp-modal-hidden-id">
+    <input type="hidden" id="smp-modal-recip-mode" value="client">
 
     <!-- ── TOP STRIP: two clean rows ── -->
     <div style="flex:0 0 auto;border-bottom:1px solid var(--navy-border);background:var(--navy-mid);position:relative;">
@@ -20416,10 +20459,22 @@ window.loadBoms = async function initBoms() {
           </div>
         </div>
         <div style="flex:3;min-width:0;">
-          <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Client *</div>
-          <select id="smp-modal-client" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;">
-            <option value="">— select client —</option>
-          </select>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px;gap:8px;">
+            <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;">Recipient *</div>
+            <div style="display:inline-flex;border:1px solid var(--navy-border);border-radius:3px;overflow:hidden;">
+              <button type="button" id="smp-recip-tab-client" onclick="window._smpSetRecipientMode('client')" style="background:var(--gold);border:none;color:var(--navy);font-size:9px;font-weight:700;padding:3px 8px;cursor:pointer;font-family:Lato,sans-serif;">Existing client</button>
+              <button type="button" id="smp-recip-tab-off" onclick="window._smpSetRecipientMode('off')" style="background:transparent;border:none;color:var(--muted);font-size:9px;font-weight:700;padding:3px 8px;cursor:pointer;font-family:Lato,sans-serif;">Not on Pulse</button>
+            </div>
+          </div>
+          <div id="smp-recip-client-wrap">
+            <select id="smp-modal-client" onchange="window._smpOnClientChange()" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;">
+              <option value="">— select client —</option>
+            </select>
+          </div>
+          <div id="smp-recip-off-wrap" style="display:none;flex-direction:column;gap:6px;">
+            <input id="smp-modal-recip-company" type="text" placeholder="Company / recipient *" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+            <input id="smp-modal-recip-name" type="text" placeholder="Recipient contact name" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+          </div>
         </div>
         <div style="flex:2;min-width:0;">
           <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Contact Person</div>
@@ -20440,15 +20495,24 @@ window.loadBoms = async function initBoms() {
         <div style="flex-shrink:0;">
           <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Status</div>
           <select id="smp-modal-status" onchange="window._smpStatusColor()" style="background:transparent;border:1px solid var(--navy-border);color:var(--text);font-size:11px;font-weight:700;padding:5px 10px;border-radius:3px;font-family:Lato,sans-serif;cursor:pointer;outline:none;">
-            <option value="pending">Pending</option>
-            <option value="awaiting_feedback">Shipped</option>
-            <option value="approved">Approved</option>
+            <option value="submitted">Submitted</option>
+            <option value="under_review">Under Review</option>
+            <option value="ready_to_prepare">Ready to Prepare</option>
+            <option value="prepared">Prepared</option>
+            <option value="qc_checked">QC Checked</option>
+            <option value="dispatched">Dispatched</option>
+            <option value="closed">Closed</option>
+            <option value="on_hold">On Hold</option>
             <option value="rejected">Rejected</option>
           </select>
         </div>
-        <div style="flex:3;min-width:0;">
-          <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Address</div>
-          <input id="smp-modal-address" type="text" placeholder="Delivery / client address" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+        <div style="flex:2.4;min-width:0;">
+          <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Delivery Address</div>
+          <input id="smp-modal-address" type="text" placeholder="Delivery address" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+        </div>
+        <div style="flex:1.6;min-width:0;">
+          <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Contact Email *</div>
+          <input id="smp-modal-email" type="email" placeholder="name@company.com" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
         </div>
         <div style="flex:1.5;min-width:0;">
           <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Linked Deal</div>
@@ -20465,11 +20529,47 @@ window.loadBoms = async function initBoms() {
       <!-- LEFT: numbers + secondary fields -->
       <div style="overflow-y:auto;overflow-x:hidden;padding:20px 18px 20px 24px;border-right:1px solid var(--navy-border);display:flex;flex-direction:column;gap:14px;">
 
+        <div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;">Request Details</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div>
+            <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Quantity (bottles)</div>
+            <input id="smp-modal-qty" type="number" min="1" step="1" placeholder="e.g. 2" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+          </div>
+          <div>
+            <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Bottle Size</div>
+            <select id="smp-modal-bottle-size" onchange="window._smpOnBottleSizeChange()" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+              <option value="">—</option>
+              <option value="50ml">50ml</option>
+              <option value="100ml">100ml</option>
+              <option value="200ml">200ml</option>
+              <option value="500ml">500ml</option>
+              <option value="700ml">700ml</option>
+              <option value="750ml">750ml</option>
+              <option value="1000ml">1000ml</option>
+              <option value="__other__">Other…</option>
+            </select>
+            <input id="smp-modal-bottle-size-other" type="text" placeholder="e.g. 375ml" style="display:none;margin-top:6px;width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+          </div>
+          <div>
+            <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Liquid Type</div>
+            <input id="smp-modal-liquid-type" list="smp-liquid-type-list" type="text" placeholder="e.g. Whiskey, or a liqueur" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+            <datalist id="smp-liquid-type-list"><option value="Whiskey"></option><option value="Gin"></option><option value="Vodka"></option></datalist>
+            <datalist id="smp-product-list"></datalist>
+          </div>
+          <div>
+            <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Mix</div>
+            <select id="smp-modal-mix-type" onchange="window._smpOnMixChange()" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
+              <option value="straight">Straight</option>
+              <option value="blend">Blend</option>
+            </select>
+          </div>
+        </div>
+
         <div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;">Sample Measurements</div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
           <div>
-            <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Total Volume</div>
+            <div style="font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Total Volume <span style="text-transform:none;letter-spacing:0;font-weight:400;">(optional)</span></div>
             <input id="smp-modal-vol" type="text" placeholder="e.g. 100ml" oninput="window._smpRecalcPct()" style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:12px;padding:7px 9px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">
           </div>
           <div>
@@ -20522,9 +20622,12 @@ window.loadBoms = async function initBoms() {
 
       <!-- RIGHT: blend components — the heart of the record -->
       <div style="overflow-y:auto;overflow-x:hidden;padding:20px 24px 20px 20px;display:flex;flex-direction:column;">
-        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px;">
-          <div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;">Blend Components</div>
-          <div style="font-size:10px;color:var(--muted);">One row per spirit in the blend</div>
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px;gap:10px;">
+          <div style="font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;" id="smp-comp-title">Blend Components</div>
+          <div style="display:flex;align-items:center;gap:12px;">
+            <span style="font-size:10px;color:var(--muted);">Total: <strong id="smp-blend-total" style="color:var(--gold);">0%</strong></span>
+            <label id="smp-blend-override-wrap" style="display:none;align-items:center;gap:5px;font-size:10px;color:var(--muted);cursor:pointer;"><input type="checkbox" id="smp-blend-override" style="cursor:pointer;">Override (allow &ne;100%)</label>
+          </div>
         </div>
 
         <div style="overflow-x:auto;flex:1;margin-top:8px;">
@@ -20532,9 +20635,9 @@ window.loadBoms = async function initBoms() {
             <thead>
               <tr style="border-bottom:2px solid var(--navy-border);">
                 <th style="text-align:left;padding:6px 8px 8px;color:var(--muted);font-weight:700;letter-spacing:0.05em;font-size:9px;text-transform:uppercase;white-space:nowrap;">Product Name</th>
+                <th style="text-align:left;padding:6px 8px 8px;color:var(--muted);font-weight:700;letter-spacing:0.05em;font-size:9px;text-transform:uppercase;white-space:nowrap;">Blend %</th>
                 <th style="text-align:left;padding:6px 8px 8px;color:var(--muted);font-weight:700;letter-spacing:0.05em;font-size:9px;text-transform:uppercase;white-space:nowrap;">Vol in Sample</th>
                 <th style="text-align:left;padding:6px 8px 8px;color:var(--muted);font-weight:700;letter-spacing:0.05em;font-size:9px;text-transform:uppercase;white-space:nowrap;">ABV %</th>
-                <th style="text-align:center;padding:6px 8px 8px;color:var(--muted);font-weight:700;letter-spacing:0.05em;font-size:9px;text-transform:uppercase;white-space:nowrap;">% of Sample</th>
                 <th style="width:32px;"></th>
               </tr>
             </thead>
@@ -55339,12 +55442,39 @@ var esc = window.escapeHtml || function(s){ return String(s==null?'':s).replace(
 // Resolve db at call time so we never capture it before window.db is initialised
 function _smpDB(){ return window.db; }
 
+// Status state machine (Sample Request Flow). `flag` = RAG dot colour key.
+// Legacy keys (pending/awaiting_feedback/approved) are kept as aliases so old
+// rows still render before/without the DB backfill; `_legacy` gives the canonical.
 var _SMP_STATUS = {
-  pending:           { label:'Pending',            color:'var(--amber)' },
-  awaiting_feedback: { label:'Shipped',  color:'var(--blue)'  },
-  approved:          { label:'Approved',            color:'var(--green)' },
-  rejected:          { label:'Rejected',            color:'var(--red)'   }
+  submitted:        { label:'Submitted',        color:'var(--muted)', flag:'grey'  },
+  under_review:     { label:'Under Review',     color:'var(--amber)', flag:'amber' },
+  ready_to_prepare: { label:'Ready to Prepare', color:'var(--amber)', flag:'amber' },
+  prepared:         { label:'Prepared',         color:'var(--amber)', flag:'amber' },
+  qc_checked:       { label:'QC Checked',       color:'var(--green)', flag:'green' },
+  dispatched:       { label:'Dispatched',       color:'var(--blue)',  flag:'blue'  },
+  closed:           { label:'Closed',           color:'var(--muted)', flag:'grey'  },
+  on_hold:          { label:'On Hold',          color:'var(--amber)', flag:'amber' },
+  rejected:         { label:'Rejected',         color:'var(--red)',   flag:'red'   },
+  // ── legacy aliases ──
+  pending:           { label:'Submitted',  color:'var(--muted)', flag:'grey', _legacy:'submitted'  },
+  awaiting_feedback: { label:'Dispatched', color:'var(--blue)',  flag:'blue', _legacy:'dispatched' },
+  approved:          { label:'Approved',   color:'var(--green)', flag:'green', _legacy:'closed'    }
 };
+// Ordered pipeline used to drive "next step" guarding.
+var _SMP_FLOW = ['submitted','under_review','ready_to_prepare','prepared','qc_checked','dispatched','closed'];
+var _SMP_FLAG_COLOR = { grey:'var(--muted)', amber:'var(--amber)', green:'var(--green)', blue:'var(--blue)', red:'var(--red)' };
+
+// Resolve a (possibly legacy) status to its canonical key.
+function _smpCanon(status) {
+  var s = _SMP_STATUS[status];
+  if (s && s._legacy) return s._legacy;
+  return _SMP_STATUS[status] ? status : 'submitted';
+}
+function _smpFlagKey(status) { var s = _SMP_STATUS[status]; return (s && s.flag) || 'grey'; }
+function _smpFlagDot(status) {
+  var c = _SMP_FLAG_COLOR[_smpFlagKey(status)] || 'var(--muted)';
+  return '<span title="'+_smpFlagKey(status)+'" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+c+';margin-right:6px;vertical-align:middle;flex:0 0 auto;"></span>';
+}
 
 function _smpFmtDate(d) {
   if (!d) return '—';
@@ -55353,8 +55483,12 @@ function _smpFmtDate(d) {
 }
 
 function _smpStatusPill(status) {
-  var s = _SMP_STATUS[status] || _SMP_STATUS.pending;
-  return '<span style="display:inline-block;border:1px solid '+s.color+';color:'+s.color+';font-size:10px;font-weight:700;letter-spacing:0.04em;padding:2px 7px;border-radius:3px;">'+s.label+'</span>';
+  var s = _SMP_STATUS[status] || _SMP_STATUS.submitted;
+  return '<span style="display:inline-flex;align-items:center;border:1px solid '+s.color+';color:'+s.color+';font-size:10px;font-weight:700;letter-spacing:0.04em;padding:2px 7px;border-radius:3px;white-space:nowrap;">'+_smpFlagDot(status)+s.label+'</span>';
+}
+// Recipient display: client name, else off-Pulse company, else dash.
+function _smpRecipientName(s) {
+  return (s && (s.client_name || s.recipient_company)) || '—';
 }
 
 // ─── ID generation ────────────────────────────────────────────────────────
@@ -55415,7 +55549,7 @@ window.loadSamplesPage = async function() {
 
     rows.forEach(function(r){
       r.components    = comps.filter(function(c){ return c.sample_id === r.id; });
-      r.client_name   = clientMap[r.client_id] || window._clientName(r.client_id);
+      r.client_name   = r.client_id ? (clientMap[r.client_id] || window._clientName(r.client_id)) : (r.recipient_company || '');
     });
     window._SAMPLES = rows;
     window._smpRender();
@@ -55438,9 +55572,10 @@ window._smpRender = function() {
   var statusF = (document.getElementById('smp-status-filter') ? document.getElementById('smp-status-filter').value : '');
 
   var list = (window._SAMPLES || []).filter(function(s){
-    if (statusF && s.status !== statusF) return false;
+    if (statusF && _smpCanon(s.status) !== statusF) return false;
     if (search) {
-      var hay = [s.id, s.contact_name, s.requested_by, s.notes, s.address, s.client_name,
+      var hay = [s.id, s.contact_name, s.contact_email, s.requested_by, s.notes, s.address,
+                 s.client_name, s.recipient_company, s.recipient_name, s.liquid_type,
                  (s.components||[]).map(function(c){ return c.product_name||''; }).join(' ')
                 ].join(' ').toLowerCase();
       if (hay.indexOf(search) < 0) return false;
@@ -55458,7 +55593,7 @@ window._smpRender = function() {
     return '<tr style="cursor:pointer;" onclick="window.openSampleDetail(\''+esc(s.id)+'\')">'
       +'<td style="color:var(--muted);font-size:11px;">'+esc(s.id)+'</td>'
       +'<td>'+_smpFmtDate(s.date_shared)+'</td>'
-      +'<td style="font-weight:700;color:var(--white);">'+esc(s.client_name)+'</td>'
+      +'<td style="font-weight:700;color:var(--white);">'+esc(_smpRecipientName(s))+(s.client_id?'':' <span style="font-weight:400;color:var(--muted);font-size:9px;">(off-Pulse)</span>')+'</td>'
       +'<td style="color:var(--muted);">'+esc(s.contact_name||'—')+'</td>'
       +'<td style="font-size:11px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="'+esc(prods)+'">'+prods+'</td>'
       +'<td>'+esc(s.total_volume||'—')+'</td>'
@@ -55519,6 +55654,9 @@ async function _smpFillDropdowns(presetClientId, presetDealId) {
       });
     } catch(_) {}
   }
+
+  // Product-name suggestions for blend/straight component rows
+  _smpFillProductDatalist();
 }
 
 // ─── Open modal (new) ─────────────────────────────────────────────────────
@@ -55530,16 +55668,27 @@ window.openNewSample = async function(presets) {
   // Reset header
   var _idEl = document.getElementById('smp-modal-id'); if (_idEl) _idEl.textContent = await _smpNextId() + '  ·  New Sample';
   document.getElementById('smp-modal-hidden-id').value = '';
-  document.getElementById('smp-modal-status').value = 'pending';
+  document.getElementById('smp-modal-status').value = 'submitted';
   window._smpStatusColor();
 
+  // Recipient mode — default to existing client (or off-Pulse if requested)
+  window._smpSetRecipientMode(presets.recipient_mode === 'off' ? 'off' : 'client');
+  ['recip-company','recip-name'].forEach(function(k){ var el=document.getElementById('smp-modal-'+k); if(el) el.value=''; });
+
   // Reset fields
-  ['contact','address','reqby','vol','dilution'].forEach(function(k){
+  ['contact','address','reqby','vol','dilution','email','qty','liquid-type','bottle-size-other'].forEach(function(k){
     var el = document.getElementById('smp-modal-'+k); if(el) el.value = '';
   });
   ['abv-target','abv-tested','density'].forEach(function(k){
     var el = document.getElementById('smp-modal-'+k); if(el) el.value = '';
   });
+  var bsEl = document.getElementById('smp-modal-bottle-size'); if (bsEl) bsEl.value = '';
+  window._smpOnBottleSizeChange();
+  var mixEl = document.getElementById('smp-modal-mix-type'); if (mixEl) mixEl.value = 'straight';
+  var ovEl = document.getElementById('smp-blend-override'); if (ovEl) ovEl.checked = false;
+  // Default the requester to the current user
+  var reqbyEl = document.getElementById('smp-modal-reqby');
+  if (reqbyEl) reqbyEl.value = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.name)) || '';
   var dateEl = document.getElementById('smp-modal-date');
   if (dateEl) dateEl.value = new Date().toISOString().slice(0,10);
   var notesEl = document.getElementById('smp-modal-notes');
@@ -55550,9 +55699,11 @@ window.openNewSample = async function(presets) {
   _smpSetFinishedLogDisplay(nextLog);
 
   await _smpFillDropdowns(presets.client_id || '', presets.deal_id || '');
+  if (presets.client_id) window._smpOnClientChange();
 
-  // Components
+  // Components — start Straight requests with a single 100% row
   _smpResetCompTbody([]);
+  window._smpOnMixChange();
 
   // Task section — reset
   _smpRenderTaskSection(null, null);
@@ -55592,19 +55743,42 @@ window.openSampleDetail = async function(id) {
 
   var _idEl2 = document.getElementById('smp-modal-id'); if (_idEl2) _idEl2.textContent = s.id;
   document.getElementById('smp-modal-hidden-id').value = s.id;
-  document.getElementById('smp-modal-status').value = s.status || 'pending';
+  document.getElementById('smp-modal-status').value = _smpCanon(s.status);
   window._smpStatusColor();
 
-  var setV = function(eid, val){ var el=document.getElementById(eid); if(el) el.value = val||''; };
+  var setV = function(eid, val){ var el=document.getElementById(eid); if(el) el.value = (val==null?'':val); };
   setV('smp-modal-contact',      s.contact_name);
   setV('smp-modal-address',      s.address);
   setV('smp-modal-reqby',        s.requested_by);
+  setV('smp-modal-email',        s.contact_email);
+  setV('smp-modal-qty',          s.quantity);
+  setV('smp-modal-liquid-type',  s.liquid_type);
   setV('smp-modal-vol',          s.total_volume);
   setV('smp-modal-dilution',     s.dilution_amount);
   setV('smp-modal-abv-target',   s.abv_target);
   setV('smp-modal-abv-tested',   s.abv_tested);
   setV('smp-modal-density',      s.density);
   setV('smp-modal-notes',  s.notes);
+
+  // Recipient mode: off-Pulse if there's no client_id but a recipient_company
+  var offMode = (!s.client_id && s.recipient_company);
+  window._smpSetRecipientMode(offMode ? 'off' : 'client');
+  setV('smp-modal-recip-company', s.recipient_company);
+  setV('smp-modal-recip-name',    s.recipient_name);
+
+  // Bottle size: match a known option or fall back to "Other"
+  var bsEl = document.getElementById('smp-modal-bottle-size');
+  var bsOther = document.getElementById('smp-modal-bottle-size-other');
+  if (bsEl) {
+    var known = ['50ml','100ml','200ml','500ml','700ml','750ml','1000ml'];
+    if (s.bottle_size && known.indexOf(s.bottle_size) < 0) { bsEl.value = '__other__'; if (bsOther) bsOther.value = s.bottle_size; }
+    else { bsEl.value = s.bottle_size || ''; if (bsOther) bsOther.value = ''; }
+  }
+  window._smpOnBottleSizeChange();
+
+  var mixEl = document.getElementById('smp-modal-mix-type'); if (mixEl) mixEl.value = s.mix_type || 'straight';
+  var ovEl = document.getElementById('smp-blend-override'); if (ovEl) ovEl.checked = !!s.blend_override;
+
   // Finished log — display-only badge
   _smpSetFinishedLogDisplay(s.finished_log_no || '—');
   var dateEl = document.getElementById('smp-modal-date');
@@ -55612,6 +55786,7 @@ window.openSampleDetail = async function(id) {
 
   await _smpFillDropdowns(s.client_id, s.deal_id);
   _smpResetCompTbody(s.components || []);
+  _smpMixRefreshUI();
 
   // Task section
   await _smpRenderTaskSection(s.id, s.mixing_task_id || null);
@@ -55632,11 +55807,11 @@ window.closeSampleModal = function() {
 window._smpStatusColor = function() {
   var sel = document.getElementById('smp-modal-status');
   if (!sel) return;
-  var s = _SMP_STATUS[sel.value] || _SMP_STATUS.pending;
+  var s = _SMP_STATUS[sel.value] || _SMP_STATUS.submitted;
   sel.style.borderColor = s.color;
   sel.style.color       = s.color;
-  // Auto-fill Date Shipped when status is set to Shipped
-  if (sel.value === 'awaiting_feedback') {
+  // Auto-fill dispatch date when status is set to Dispatched
+  if (_smpCanon(sel.value) === 'dispatched') {
     var dateEl = document.getElementById('smp-modal-date');
     if (dateEl && !dateEl.value) {
       dateEl.value = new Date().toISOString().slice(0, 10);
@@ -55644,45 +55819,109 @@ window._smpStatusColor = function() {
   }
 };
 
-// ─── Component table rows ─────────────────────────────────────────────────
-function _smpCompRowHtml(idx, comp) {
-  comp = comp || {};
-  var inp = function(n,v,ph,tp,extra){
-    return '<input data-comp="'+idx+'" data-field="'+n+'" value="'+esc(v||'')+'" placeholder="'+esc(ph||'')+'" type="'+(tp||'text')+'" '+(extra||'')+' style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:11px;padding:4px 6px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">';
-  };
-  return '<tr data-comp-row="'+idx+'">'
-    +'<td style="padding:3px 4px;">'+inp('product_name',comp.product_name,'e.g. 3yr Grain AB')+'</td>'
-    +'<td style="padding:3px 4px;">'+inp('vol_in_sample',comp.vol_in_sample,'90ml','text','oninput="window._smpRecalcPct()"')+'</td>'
-    +'<td style="padding:3px 4px;">'+inp('abv','','40','number')+'</td>'
-    +'<td style="padding:3px 8px;text-align:center;white-space:nowrap;"><span data-pct style="color:var(--gold);font-weight:700;font-size:12px;">—</span></td>'
-    +'<td style="padding:3px 4px;text-align:center;"><button onclick="this.closest(\'tr\').remove();window._smpRecalcPct();" style="background:transparent;border:none;color:var(--red);cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;">&#x2715;</button></td>'
-    +'</tr>';
+// ─── Recipient mode (existing client vs off-Pulse) ────────────────────────
+window._smpSetRecipientMode = function(mode) {
+  mode = (mode === 'off') ? 'off' : 'client';
+  var modeEl = document.getElementById('smp-modal-recip-mode'); if (modeEl) modeEl.value = mode;
+  var cw = document.getElementById('smp-recip-client-wrap');
+  var ow = document.getElementById('smp-recip-off-wrap');
+  if (cw) cw.style.display = (mode === 'client') ? '' : 'none';
+  if (ow) ow.style.display = (mode === 'off') ? 'flex' : 'none';
+  var tc = document.getElementById('smp-recip-tab-client');
+  var to = document.getElementById('smp-recip-tab-off');
+  if (tc) { tc.style.background = mode === 'client' ? 'var(--gold)' : 'transparent'; tc.style.color = mode === 'client' ? 'var(--navy)' : 'var(--muted)'; }
+  if (to) { to.style.background = mode === 'off' ? 'var(--gold)' : 'transparent'; to.style.color = mode === 'off' ? 'var(--navy)' : 'var(--muted)'; }
+};
+
+// Prefill contact / email / address from the client profile (only empty fields)
+window._smpOnClientChange = async function() {
+  var cid = (document.getElementById('smp-modal-client') || {}).value || '';
+  if (!cid) return;
+  var fillIfEmpty = function(id, val) { var el = document.getElementById(id); if (el && !el.value && val) el.value = val; };
+  var c = (window.CLIENTS || []).find(function(x){ return x.id === cid; }) || {};
+  fillIfEmpty('smp-modal-contact', c.contact);
+  fillIfEmpty('smp-modal-email',   c.email);
+  try {
+    var rows = await _smpDB().select('clients', '?id=eq.' + encodeURIComponent(cid) + '&select=address,email,contact&limit=1');
+    if (rows && rows[0]) {
+      fillIfEmpty('smp-modal-address', rows[0].address);
+      fillIfEmpty('smp-modal-email',   rows[0].email);
+      fillIfEmpty('smp-modal-contact', rows[0].contact);
+    }
+  } catch(_) {}
+};
+
+window._smpOnBottleSizeChange = function() {
+  var sel = document.getElementById('smp-modal-bottle-size');
+  var other = document.getElementById('smp-modal-bottle-size-other');
+  if (!sel || !other) return;
+  other.style.display = (sel.value === '__other__') ? '' : 'none';
+};
+
+// Visibility/title only — safe to call on load (does not mutate rows)
+function _smpMixRefreshUI() {
+  var mix = (document.getElementById('smp-modal-mix-type') || {}).value || 'straight';
+  var ow = document.getElementById('smp-blend-override-wrap');
+  var title = document.getElementById('smp-comp-title');
+  if (ow) ow.style.display = (mix === 'blend') ? 'inline-flex' : 'none';
+  if (title) title.textContent = (mix === 'blend') ? 'Blend Components' : 'Liquid';
 }
 
+// User-triggered: refresh UI and, for Straight, collapse to a single 100% row
+window._smpOnMixChange = function() {
+  _smpMixRefreshUI();
+  var mix = (document.getElementById('smp-modal-mix-type') || {}).value || 'straight';
+  if (mix === 'straight') {
+    var tb = document.getElementById('smp-comp-tbody');
+    if (tb) {
+      var rows = tb.querySelectorAll('tr[data-comp-row]');
+      if (!rows.length) { window._smpAddCompRow(); }
+      else { for (var i = 1; i < rows.length; i++) rows[i].remove(); }
+      var pEl = tb.querySelector('tr[data-comp-row] [data-field="percentage"]');
+      if (pEl && !pEl.value) pEl.value = '100';
+    }
+  }
+  window._smpRecalcPct();
+};
+
+async function _smpFillProductDatalist() {
+  var dl = document.getElementById('smp-product-list'); if (!dl) return;
+  try {
+    var rows = (window._liquidProducts && window._liquidProducts.length)
+      ? window._liquidProducts
+      : await _smpDB().select('liquid_products', '?is_active=eq.true&order=sort_order.asc,name.asc&limit=500');
+    dl.innerHTML = (rows || []).map(function(p){ return '<option value="' + esc(p.name || '') + '"></option>'; }).join('');
+  } catch(_) {}
+}
+
+// ─── Component table rows ─────────────────────────────────────────────────
 function _smpCompRowHtmlWithAbv(idx, comp) {
   comp = comp || {};
   var inp = function(n,v,ph,tp,extra){
     return '<input data-comp="'+idx+'" data-field="'+n+'" value="'+esc(v==null?'':v)+'" placeholder="'+esc(ph||'')+'" type="'+(tp||'text')+'" '+(extra||'')+' style="width:100%;background:var(--navy-mid);border:1px solid var(--navy-border);color:var(--text);font-size:11px;padding:4px 6px;border-radius:3px;font-family:Lato,sans-serif;outline:none;box-sizing:border-box;">';
   };
   return '<tr data-comp-row="'+idx+'">'
-    +'<td style="padding:3px 4px;">'+inp('product_name',comp.product_name,'e.g. 3yr Grain AB')+'</td>'
-    +'<td style="padding:3px 4px;">'+inp('vol_in_sample',comp.vol_in_sample,'90ml','text','oninput="window._smpRecalcPct()"')+'</td>'
+    +'<td style="padding:3px 4px;">'+inp('product_name',comp.product_name,'e.g. 3yr Grain AB','text','list="smp-product-list"')+'</td>'
+    +'<td style="padding:3px 4px;width:74px;">'+inp('percentage',comp.percentage,'%','number','step="0.1" min="0" max="100" oninput="window._smpRecalcPct()"')+'</td>'
+    +'<td style="padding:3px 4px;">'+inp('vol_in_sample',comp.vol_in_sample,'90ml','text')+'</td>'
     +'<td style="padding:3px 4px;">'+inp('abv',comp.abv,'40','number')+'</td>'
-    +'<td style="padding:3px 8px;text-align:center;white-space:nowrap;"><span data-pct style="color:var(--gold);font-weight:700;font-size:12px;">—</span></td>'
     +'<td style="padding:3px 4px;text-align:center;"><button onclick="this.closest(\'tr\').remove();window._smpRecalcPct();" style="background:transparent;border:none;color:var(--red);cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;">&#x2715;</button></td>'
     +'</tr>';
 }
 
 window._smpRecalcPct = function() {
-  var totalVolEl = document.getElementById('smp-modal-vol');
-  var totalVol = totalVolEl ? parseFloat(totalVolEl.value) || 0 : 0;
+  var total = 0;
   document.querySelectorAll('#smp-comp-tbody tr[data-comp-row]').forEach(function(row) {
-    var volEl = row.querySelector('[data-field="vol_in_sample"]');
-    var pctEl = row.querySelector('[data-pct]');
-    if (!volEl || !pctEl) return;
-    var vol = parseFloat(volEl.value) || 0;
-    pctEl.textContent = (totalVol && vol) ? Math.round(vol / totalVol * 100) + '%' : '—';
+    var pEl = row.querySelector('[data-field="percentage"]');
+    if (pEl) total += parseFloat(pEl.value) || 0;
   });
+  var totalEl = document.getElementById('smp-blend-total');
+  if (totalEl) {
+    var rounded = Math.round(total * 10) / 10;
+    totalEl.textContent = rounded + '%';
+    // ~100% is good; anything else is amber (needs override to save on a blend)
+    totalEl.style.color = (Math.abs(rounded - 100) < 0.5) ? 'var(--green)' : 'var(--amber)';
+  }
 };
 
 function _smpResetCompTbody(comps) {
@@ -55713,51 +55952,166 @@ function _smpReadComps() {
       product_name:  get('product_name'),
       vol_in_sample: get('vol_in_sample'),
       abv:           parseFloat(get('abv')) || null,
+      percentage:    (get('percentage') === '' ? null : (parseFloat(get('percentage')) || 0)),
       sort_order:    i
     });
   });
-  return result.filter(function(r){ return r.product_name || r.sample_log_no; });
+  return result.filter(function(r){ return r.product_name; });
+}
+
+// ─── Task helpers (review tasks + role resolution) ────────────────────────
+function _smpUuid() {
+  return (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){ var r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8); return v.toString(16); });
+}
+
+async function _smpResolveRoleUser(role) {
+  try {
+    var rows = await _smpDB().select('app_users','?role=eq.'+encodeURIComponent(role)+'&status=eq.active&select=id,display_name,email&order=display_name.asc');
+    return (rows && rows[0]) || null;
+  } catch(_) { return null; }
+}
+
+// Insert a new sample, allocating an SMP-xxx id with retry on PK collision.
+async function _smpInsertWithId(payload) {
+  for (var attempt = 0; attempt < 4; attempt++) {
+    payload.id = await _smpNextId();
+    try {
+      await _smpDB().insert('samples', payload);
+      return payload.id;
+    } catch(e) {
+      var msg = (e && e.message || '').toLowerCase();
+      var collision = msg.indexOf('duplicate') >= 0 || msg.indexOf('conflict') >= 0 || msg.indexOf('unique') >= 0 || msg.indexOf('409') >= 0;
+      if (attempt < 3 && collision) continue;
+      throw e;
+    }
+  }
+  throw new Error('Could not allocate a sample ID');
+}
+
+// On a brand-new submitted request, create a review task for BOTH Quality &
+// Compliance (owner) and Commercial (backup); the sibling auto-closes when
+// either is actioned (see the task-completion hook).
+async function _smpCreateReviewTasks(sampleId, recipName, clientId, dealId, reqBy) {
+  var roles = [ { role:'quality_compliance', primary:true }, { role:'commercial_manager', primary:false } ];
+  var meId  = (window.CURRENT_USER && window.CURRENT_USER.id) || null;
+  for (var i = 0; i < roles.length; i++) {
+    var u = await _smpResolveRoleUser(roles[i].role);
+    if (!u) continue;
+    var taskId = _smpUuid();
+    var task = {
+      id:          taskId,
+      title:       'Sample Request — ' + (recipName || sampleId),
+      description: 'Review sample request ' + sampleId + ' (' + (recipName || '—') + ').'
+                   + (reqBy ? ' Raised by ' + reqBy + '.' : '')
+                   + (roles[i].primary
+                       ? '\nOwner: Quality & Compliance — confirm details and delegate preparation.'
+                       : '\nBackup (Commercial) — closes automatically once Quality actions it.'),
+      assignee_id: u.id,
+      status:      'pending',
+      priority:    roles[i].primary ? 'high' : 'normal',
+      client_id:   clientId || null,
+      deal_id:     dealId || null,
+      sample_id:   sampleId,
+      task_kind:   'review',
+      created_by:  meId,
+      created_at:  new Date().toISOString()
+    };
+    try {
+      await _smpDB().insert('job_tasks', task);
+      if (window.createCRMNotification) {
+        window.createCRMNotification({ user_id:u.id, type:'task_assigned', task_id:taskId, client_id:clientId||null, deal_id:dealId||null,
+          body:'New sample request ' + sampleId + ' for review' + (recipName ? (' — ' + recipName) : '') });
+      }
+      if (u.email && window.sendEmail) {
+        window.sendEmail({ to:u.email, subject:'Sample Request ' + sampleId + (recipName ? (' — ' + recipName) : ''),
+          html:'<p>A new sample request has been logged in Pulse.</p>'
+             + '<p><strong>' + sampleId + '</strong>' + (recipName ? (' for ' + recipName) : '') + '.</p>'
+             + (reqBy ? ('<p>Raised by ' + reqBy + '.</p>') : '')
+             + '<p>' + (roles[i].primary ? 'You are the owner (Quality &amp; Compliance).' : 'You are the backup (Commercial) — this closes automatically once Quality actions it.') + '</p>'
+             + '<p style="color:#999;font-size:12px;">Automated notification from Lighthouse Pulse.</p>' });
+      }
+    } catch(_) {}
+  }
+  if (typeof window.updateMyTasksBadge === 'function') window.updateMyTasksBadge();
 }
 
 // ─── Save ─────────────────────────────────────────────────────────────────
 window.saveSample = async function() {
   var gv = function(id){ var el=document.getElementById(id); return el ? el.value.trim() : ''; };
+  var toast = function(m,t){ if (window.toast) window.toast(m,t); };
 
-  var clientId = gv('smp-modal-client');
-  if (!clientId) { if(window.toast) window.toast('Please select a client.','error'); return; }
+  var mode        = gv('smp-modal-recip-mode') || 'client';
+  var clientId    = gv('smp-modal-client');
+  var recipCompany= gv('smp-modal-recip-company');
+
+  // Recipient required: existing client OR off-Pulse company
+  if (mode === 'client' && !clientId)     { toast('Please select a client, or switch to "Not on Pulse".','error'); return; }
+  if (mode === 'off'    && !recipCompany) { toast('Please enter the recipient company / name.','error'); return; }
+
+  // Contact email required (drives the dispatch "Samples Sent" email)
+  var email = gv('smp-modal-email');
+  if (!email) { toast('Please enter a contact email for the recipient.','error'); return; }
+
+  var mix   = gv('smp-modal-mix-type') || 'straight';
+  var comps = _smpReadComps();
+  if (!comps.length) { toast('Add at least one product/liquid.','error'); return; }
+
+  // Blend percentages must total 100% unless override ticked
+  var override = !!(document.getElementById('smp-blend-override') && document.getElementById('smp-blend-override').checked);
+  if (mix === 'blend' && !override) {
+    var total = comps.reduce(function(a,c){ return a + (parseFloat(c.percentage)||0); }, 0);
+    if (Math.abs(total - 100) >= 0.5) {
+      toast('Blend percentages total ' + (Math.round(total*10)/10) + '% — they must add up to 100%, or tick Override.','error');
+      return;
+    }
+  }
 
   var existingId = gv('smp-modal-hidden-id');
   var isNew      = !existingId;
-  var sampleId   = isNew ? await _smpNextId() : existingId;
+
+  var bottleSize = gv('smp-modal-bottle-size');
+  if (bottleSize === '__other__') bottleSize = gv('smp-modal-bottle-size-other');
+
+  var status = gv('smp-modal-status') || 'submitted';
 
   var payload = {
-    id:             sampleId,
-    client_id:      clientId,
-    deal_id:        gv('smp-modal-deal')  || null,
-    contact_name:   gv('smp-modal-contact') || null,
-    address:        gv('smp-modal-address') || null,
-    date_shared:    gv('smp-modal-date')    || null,
-    requested_by:   gv('smp-modal-reqby')   || null,
-    total_volume:   gv('smp-modal-vol')     || null,
-    abv_target:     parseFloat(gv('smp-modal-abv-target')) || null,
-    abv_tested:     parseFloat(gv('smp-modal-abv-tested')) || null,
-    dilution_amount:gv('smp-modal-dilution') || null,
-    density:        parseFloat(gv('smp-modal-density')) || null,
-    status:         gv('smp-modal-status')       || 'pending',
-    notes:          gv('smp-modal-notes')         || null,
-    finished_log_no: (function(){ var el=document.getElementById('smp-modal-finished-log'); return el && el.dataset.value ? el.dataset.value : null; })()
+    client_id:        (mode === 'client') ? (clientId || null) : null,
+    recipient_company:(mode === 'off')    ? (recipCompany || null) : null,
+    recipient_name:   (mode === 'off')    ? (gv('smp-modal-recip-name') || null) : null,
+    deal_id:          gv('smp-modal-deal')  || null,
+    contact_name:     gv('smp-modal-contact') || null,
+    contact_email:    email || null,
+    address:          gv('smp-modal-address') || null,
+    date_shared:      gv('smp-modal-date')    || null,
+    requested_by:     gv('smp-modal-reqby')   || null,
+    requested_by_id:  (window.CURRENT_USER && window.CURRENT_USER.id) || null,
+    quantity:         parseInt(gv('smp-modal-qty'),10) || null,
+    bottle_size:      bottleSize || null,
+    liquid_type:      gv('smp-modal-liquid-type') || null,
+    mix_type:         mix,
+    blend_override:   override,
+    total_volume:     gv('smp-modal-vol')     || null,
+    abv_target:       parseFloat(gv('smp-modal-abv-target')) || null,
+    abv_tested:       parseFloat(gv('smp-modal-abv-tested')) || null,
+    dilution_amount:  gv('smp-modal-dilution') || null,
+    density:          parseFloat(gv('smp-modal-density')) || null,
+    status:           status,
+    notes:            gv('smp-modal-notes')         || null,
+    finished_log_no:  (function(){ var el=document.getElementById('smp-modal-finished-log'); return el && el.dataset.value ? el.dataset.value : null; })()
   };
 
-  var comps = _smpReadComps();
-
   try {
+    var sampleId;
     if (isNew) {
-      await _smpDB().insert('samples', payload);
+      sampleId = await _smpInsertWithId(payload);
     } else {
+      sampleId = existingId;
       var upd = Object.assign({}, payload);
       delete upd.id;
       await _smpDB().update('samples', '?id=eq.'+encodeURIComponent(sampleId), upd);
     }
+
     // Replace components: delete then re-insert
     await _smpDB().delete('sample_components', '?sample_id=eq.'+encodeURIComponent(sampleId));
     for (var i = 0; i < comps.length; i++) {
@@ -55765,20 +56119,28 @@ window.saveSample = async function() {
       await _smpDB().insert('sample_components', comps[i]);
     }
 
-    if (window.toast) window.toast('Sample '+sampleId+' saved.', 'success');
+    // Create review tasks exactly once, only for a brand-new submitted request
+    if (isNew && _smpCanon(status) === 'submitted') {
+      var recipName = (mode === 'client')
+        ? (((window.CLIENTS||[]).find(function(c){ return c.id === clientId; })||{}).company || clientId)
+        : recipCompany;
+      try { await _smpCreateReviewTasks(sampleId, recipName, payload.client_id, payload.deal_id, payload.requested_by); }
+      catch(taskErr) { window.logError && window.logError('smpCreateReviewTasks', taskErr); }
+    }
+
+    toast('Sample '+sampleId+' saved.', 'success');
     window.closeSampleModal();
 
     // Refresh lists
     if (typeof window.loadSamplesPage === 'function') window.loadSamplesPage();
-    if (window._c360ClientId && window._c360ClientId === clientId && typeof window.loadC360Samples === 'function') {
-      window.loadC360Samples(clientId);
+    if (window._c360ClientId && window._c360ClientId === payload.client_id && typeof window.loadC360Samples === 'function') {
+      window.loadC360Samples(payload.client_id);
     }
-    // Refresh deal detail linked samples
     if (window._ddCurrentId && payload.deal_id === window._ddCurrentId && typeof window._ddLoadLinkedSamples === 'function') {
       window._ddLoadLinkedSamples(window._ddCurrentId);
     }
   } catch(e) {
-    if (window.toast) window.toast('Save failed: '+e.message,'error');
+    toast('Save failed: '+(e.message||e), 'error');
   }
 };
 
@@ -55854,6 +56216,8 @@ window._smpAssignTask = async function() {
     status:      'pending',
     priority:    'normal',
     client_id:   clientId || null,
+    sample_id:   sampleId,
+    task_kind:   'prepare',
     created_by:  (window.CURRENT_USER && window.CURRENT_USER.id) || null,
     created_at:  new Date().toISOString()
   };
@@ -55938,11 +56302,10 @@ window._ddLoadLinkedSamples = async function(dealId) {
     var rows = await _smpDB().select('samples','?deal_id=eq.'+encodeURIComponent(dealId)+'&order=date_shared.desc');
     if (!rows || !rows.length) { container.innerHTML = '<div style="font-size:11px;color:var(--muted);">None linked yet.</div>'; return; }
     container.innerHTML = rows.map(function(s){
-      var st = _SMP_STATUS[s.status]||_SMP_STATUS.pending;
-      return '<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 8px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:3px;cursor:pointer;" onclick="window.openSampleDetail(\''+esc(s.id)+'\')">'
+      return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:3px;cursor:pointer;" onclick="window.openSampleDetail(\''+esc(s.id)+'\')">'
         +'<div style="font-size:11px;font-weight:700;color:var(--text);">'+esc(s.id)+'</div>'
         +'<div style="font-size:10px;color:var(--muted);">'+_smpFmtDate(s.date_shared)+'</div>'
-        +'<div style="border:1px solid '+st.color+';color:'+st.color+';font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;">'+st.label+'</div>'
+        +_smpStatusPill(s.status)
         +'</div>';
     }).join('');
   } catch(_) { container.innerHTML = ''; }
@@ -60785,10 +61148,12 @@ window.attendanceReject=async function(reqId,btn){
   function ragBadge(s){ var m=ragMeta(s); return '<span class="mh-rag" style="color:'+m.c+';background:'+m.bg+';"><span aria-hidden="true">'+m.icon+'</span>'+m.label+'</span>'; }
   // Compact history: a row of RAG-coloured dots for the last N periods up to and
   // including the "week in question" (refDate). Weekly by default; monthly when
-  // the KPI's cadence says so. The last known status carries forward across weeks
-  // with no new reading (a KPI holds its RAG until someone changes it), so only
-  // periods before the very first reading show as a hollow grey dot. Each dot is
-  // labelled with its ISO week number (or month) so ordering is unambiguous.
+  // the KPI's cadence says so. A status carries forward ONLY to bridge gaps
+  // between real readings (a red stays red across a skipped week until it's
+  // reviewed again); it is never extrapolated past the most recent actual
+  // reading, so a single reading can't bloom into a fake streak. Periods before
+  // the first reading, and after the last one, show as a hollow grey dot. Each
+  // dot is labelled with its ISO week number (or month) so ordering is clear.
   function ragTrend(kpi, es, refDate){
     var N=8;
     var monthly = /month/i.test((kpi&&kpi.cadence)||'');
@@ -60811,12 +61176,17 @@ window.attendanceReject=async function(reqId,btn){
         buckets.push({ start:ws, end:we, tag:'W'+isoWeek(ws), full:'W'+isoWeek(ws)+' \u00b7 w/c '+ws.toLocaleDateString('en-GB') });
       }
     }
-    var sorted=(es||[]).filter(function(e){return e.period_start;}).slice()
+    // Only readings that resolve to a RAG count towards the trend (note-only
+    // entries with no status/number don't blank out a week).
+    var sorted=(es||[]).filter(function(e){ return e.period_start && (e.status || computeRag(kpi, e.numeric_value)); }).slice()
       .sort(function(a,c){ return (new Date(a.period_start)-new Date(c.period_start)) || (new Date(a.recorded_at)-new Date(c.recorded_at)); });
+    var lastDate = sorted.length ? new Date(sorted[sorted.length-1].period_start) : null;
     var items=buckets.map(function(b){
-      var hit=null, inWeek=false; // carry-forward: latest reading recorded on or before the end of this period
+      var hit=null, inWeek=false; // latest reading on or before the end of this period (carries forward to bridge gaps)
       for (var k=0;k<sorted.length;k++){ var d=new Date(sorted[k].period_start);
         if (d<b.end){ hit=sorted[k]; inWeek=(d>=b.start); } else break; }
+      // Never extrapolate beyond the most recent actual reading.
+      if (hit && lastDate && b.start > lastDate){ hit=null; inWeek=false; }
       var st=hit?(hit.status||computeRag(kpi,hit.numeric_value)):null;
       var m=ragMeta(st), filled=(st!=null);
       var tip=b.full+(hit?(' \u00b7 '+m.label+(hit.value?(' \u00b7 '+hit.value):'')+(inWeek?'':' (carried)')):' \u00b7 no reading');
