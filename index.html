@@ -60783,6 +60783,43 @@ window.attendanceReject=async function(reqId,btn){
     return {c:'var(--muted)', bg:'rgba(255,255,255,0.05)', icon:'\u2014', label:'No data'};
   }
   function ragBadge(s){ var m=ragMeta(s); return '<span class="mh-rag" style="color:'+m.c+';background:'+m.bg+';"><span aria-hidden="true">'+m.icon+'</span>'+m.label+'</span>'; }
+  // Compact history: a row of RAG-coloured dots for the 5 calendar periods
+  // preceding the "week in question" (refDate). Weekly by default; monthly when
+  // the KPI's cadence says so. A period with no reading shows a hollow grey dot.
+  function ragTrend(kpi, es, refDate){
+    var N=5;
+    var monthly = /month/i.test((kpi&&kpi.cadence)||'');
+    var ref = (refDate instanceof Date && !isNaN(refDate)) ? refDate : new Date();
+    function startOfWeek(d){ var x=new Date(d.getFullYear(), d.getMonth(), d.getDate()); var day=(x.getDay()+6)%7; x.setDate(x.getDate()-day); return x; }
+    var buckets=[];
+    if (monthly){
+      var m0=new Date(ref.getFullYear(), ref.getMonth(), 1);
+      for (var i=N;i>=1;i--){
+        var ms=new Date(m0.getFullYear(), m0.getMonth()-i, 1);
+        var me=new Date(m0.getFullYear(), m0.getMonth()-i+1, 1);
+        buckets.push({ start:ms, end:me, label:ms.toLocaleDateString('en-GB',{month:'short',year:'numeric'}) });
+      }
+    } else {
+      var w0=startOfWeek(ref);
+      for (var j=N;j>=1;j--){
+        var ws=new Date(w0); ws.setDate(ws.getDate()-j*7);
+        var we=new Date(ws); we.setDate(we.getDate()+7);
+        buckets.push({ start:ws, end:we, label:'w/c '+ws.toLocaleDateString('en-GB') });
+      }
+    }
+    var dots=buckets.map(function(b){
+      var hit=(es||[]).filter(function(e){ if(!e.period_start) return false; var d=new Date(e.period_start); return d>=b.start && d<b.end; })
+        .sort(function(a,c){ return (new Date(c.period_start)-new Date(a.period_start)) || (new Date(c.recorded_at)-new Date(a.recorded_at)); })[0];
+      var st=hit?(hit.status||computeRag(kpi,hit.numeric_value)):null;
+      var m=ragMeta(st), filled=(st!=null);
+      var tip=b.label+(hit?(' \u00b7 '+m.label+(hit.value?(' \u00b7 '+hit.value):'')):' \u00b7 no reading');
+      return '<span title="'+esc(tip)+'" style="width:10px;height:10px;border-radius:50%;display:inline-block;flex:none;'
+        + (filled?('background:'+m.c+';'):'background:transparent;border:1.5px solid var(--navy-border);')+'"></span>';
+    }).join('');
+    return '<div style="display:flex;align-items:center;gap:5px;margin:2px 0;">'
+      + '<span style="font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);flex:none;">'+(monthly?'5 mo':'5 wk')+'</span>'
+      + dots + '</div>';
+  }
 
   // ── Users ──────────────────────────────────────────────
   async function ensureUsers(){
@@ -61216,6 +61253,7 @@ window.attendanceReject=async function(reqId,btn){
       + (ownTxt?'<div class="own">'+esc(ownTxt)+'</div>':'')
       + ((valTxt!==''&&valTxt!=null)?'<div class="val">'+esc(valTxt)+'</div>':'')
       + ragBadge(status)
+      + ragTrend(kpi, entries, new Date((S.detail&&S.detail.meeting&&S.detail.meeting.starts_at)||Date.now()))
       + '<div class="rule">'+(kpi.target?('Target: '+esc(kpi.target)):(kpi.rag_rule?esc(kpi.rag_rule):'\u2014'))+'</div>'
       + '<button class="mh-btn upd" style="padding:5px 8px;font-size:11px;" onclick="MH.kpiEntry(\''+kpi.id+'\')">Update reading</button>'
       + '</div>';
@@ -61452,7 +61490,7 @@ window.attendanceReject=async function(reqId,btn){
       +   (inactive?'<span class="mh-pill" style="background:rgba(255,255,255,0.08);color:var(--muted);flex:none;">On hold</span>':'')+'</div>'
       + '<div style="font-size:20px;font-weight:800;color:var(--white);">'+esc(latest?(latest.value||latest.numeric_value||'\u2014'):'\u2014')+'</div>'
       + ragBadge(status)
-      + sparkline(es)
+      + ragTrend(k, es, new Date())
       + '<div style="font-size:11px;color:var(--muted);">'+meta+'</div>'
       + (function(){ var o=kpiOwnerLabel(k); return o?('<div style="font-size:11px;color:var(--muted);">Owner: '+esc(o)+'</div>'):''; })()
       + (latest&&latest.period_start?('<div style="font-size:10px;color:var(--muted);">Last: '+esc(new Date(latest.period_start).toLocaleDateString('en-GB'))+'</div>'):'')
@@ -61509,13 +61547,6 @@ window.attendanceReject=async function(reqId,btn){
   // Accountable person: prefer the linked staff member (owner_id), fall back to
   // the legacy free-text owner_role until a KPI is reassigned.
   function kpiOwnerLabel(k){ if(!k) return ''; if(k.owner_id){ var n=userName(k.owner_id); if(n) return n; } return k.owner_role?roleLabel(k.owner_role):''; }
-  function sparkline(es){
-    var pts=es.slice(0,12).reverse().map(function(e){ return (e.numeric_value!=null)?e.numeric_value:null; }).filter(function(x){return x!=null;});
-    if(pts.length<2) return '<div style="height:24px;"></div>';
-    var min=Math.min.apply(null,pts), max=Math.max.apply(null,pts), rng=(max-min)||1, W=160,Hh=24;
-    var d=pts.map(function(p,i){ var x=(i/(pts.length-1))*W; var y=Hh-((p-min)/rng)*Hh; return (i?'L':'M')+x.toFixed(1)+' '+y.toFixed(1); }).join(' ');
-    return '<svg width="'+W+'" height="'+Hh+'" style="display:block;"><path d="'+d+'" fill="none" stroke="var(--gold)" stroke-width="1.5"/></svg>';
-  }
   MH.kpiEntryStandalone = function(kpiId){
     var kpi=(S._kpis||[]).find(function(x){return x.id===kpiId;}); if(!kpi) return;
     var numeric=kpi.kpi_type==='numeric'; var today=new Date().toISOString().substring(0,10);
