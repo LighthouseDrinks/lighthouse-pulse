@@ -35203,27 +35203,20 @@ window.saveAdjModal = async function() {
         supaGet('boms?id=eq.' + (job.bom_id||'__none') + '&select=id,bottles_per_shipper,additional_info,volume_cl,abv,bottling_abv,product_name&limit=1'),
         supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1'),
         supaGet('clients?id=eq.' + job.client_id + '&select=id,name,email&limit=1'),
-        supaGet('job_drygoods_prep_items?job_id=eq.' + jobId + '&select=sku_id,item_name,qty_required,qty_picked'),
         supaGet('job_quality_checks?job_id=eq.' + jobId + '&order=checked_at.asc')
       ]);
       var bom      = results[0][0] || {};
       if (bom && bom.id && window._mergeBomMap) window._mergeBomMap([bom]);
       var lso      = results[1][0] || {};
       var client   = results[2][0] || {};
-      var dgItems  = results[3] || [];
-      var qcChecks = results[4] || [];
+      var qcChecks = results[3] || [];
       var ai       = (typeof bom.additional_info === 'object' && bom.additional_info) || {};
       try { if (typeof bom.additional_info === 'string') ai = JSON.parse(bom.additional_info); } catch(e2){}
 
-      // Fetch SKU details for dry goods descriptions
-      var skuDetails = {};
-      var skuIds = dgItems.map(function(i){ return i.sku_id; }).filter(Boolean);
-      if (skuIds.length) {
-        try {
-          var skuRows = await supaGet('dry_goods_skus?id=in.(' + skuIds.join(',') + ')&select=id,description,volume,abv,region');
-          skuRows.forEach(function(s){ skuDetails[s.id] = s; });
-        } catch(e2){}
-      }
+      // Dry-goods used vs wasted, from real stock movements (see _jobDryGoodsUsage)
+      var dgUsage = { rows: [], totals: { used:0, waste:0, consumed:0, wastePct:0 } };
+      try { dgUsage = await window._jobDryGoodsUsage(jobId, job, bom); }
+      catch(eDg){ window.logError && window.logError('openBottlingReport:dgUsage', eDg); }
 
       // Resolve spirit type from linked containers
       var spiritType = '—';
@@ -35320,39 +35313,45 @@ window.saveAdjModal = async function() {
         kv('Liquid Waste / Variance',     liqOrZero(trWaste))
       ]);
 
-      // ── Section 3: Dry Goods Reconciliation ─────────────────────────────────
+      // ── Section 3: Dry Goods Reconciliation (Used vs Wasted) ────────────────
       var s3;
-      if (!dgItems.length) {
-        s3 = '<div style="color:var(--muted);font-size:12px;">No dry goods prep data recorded for this job.</div>';
+      if (!dgUsage.rows.length) {
+        s3 = '<div style="color:var(--muted);font-size:12px;">No dry goods data recorded for this job.</div>';
       } else {
         var dgHtml = '<div style="overflow-x:auto;"><table class="data-table" style="width:100%;min-width:520px;">'
           + '<thead><tr>'
           + '<th>Description</th>'
           + '<th style="width:90px;">SKU</th>'
-          + '<th style="text-align:right;width:100px;">Required</th>'
-          + '<th style="text-align:right;width:100px;">Picked</th>'
-          + '<th style="text-align:right;width:110px;">Variance</th>'
+          + '<th style="text-align:right;width:100px;">Units Used</th>'
+          + '<th style="text-align:right;width:110px;">Units Wasted</th>'
+          + '<th style="text-align:right;width:90px;">Waste %</th>'
           + '</tr></thead><tbody>';
-        dgItems.forEach(function(item) {
-          var skuObj   = skuDetails[item.sku_id] || {};
-          var desc     = _e((skuObj && skuObj.id ? window.skuDisplayName(skuObj) : null) || item.item_name || item.sku_id || '—');
-          var reqd     = item.qty_required != null ? Number(item.qty_required).toLocaleString() : '—';
-          var picked   = item.qty_picked   != null ? Number(item.qty_picked).toLocaleString()   : '—';
-          var variance = (item.qty_required != null && item.qty_picked != null)
-                          ? (Number(item.qty_picked) - Number(item.qty_required)) : null;
-          var varCol   = variance == null ? 'var(--muted)' : (variance < 0 ? 'var(--red)' : variance > 0 ? 'var(--gold)' : 'var(--muted)');
-          var varDisp  = variance != null
-            ? '<span style="color:' + varCol + ';font-weight:600;">' + (variance > 0 ? '+' : '') + variance.toLocaleString() + '</span>'
-            : '—';
+        dgUsage.rows.forEach(function(r) {
+          var desc = _e(r.name || r.sku_id || '—');
+          var note = r.noMovement
+            ? '<div style="font-size:10px;color:var(--muted);margin-top:2px;">No deduction recorded</div>'
+            : (r.short ? '<div style="font-size:10px;color:#ffa000;margin-top:2px;">Under-deducted (stock-capped)</div>' : '');
+          var wasteCol = r.waste > 0 ? 'var(--red)' : 'var(--muted)';
+          var pctStr   = r.consumed > 0 ? (Math.round(r.wastePct * 10) / 10) + '%' : '—';
           dgHtml += '<tr>'
-            + '<td>' + desc + '</td>'
-            + '<td><span style="font-size:10px;font-weight:700;color:var(--gold);background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.2);padding:1px 6px;border-radius:2px;letter-spacing:0.06em;">' + _e(item.sku_id || '—') + '</span></td>'
-            + '<td style="text-align:right;">' + reqd   + '</td>'
-            + '<td style="text-align:right;">' + picked + '</td>'
-            + '<td style="text-align:right;">' + varDisp + '</td>'
+            + '<td>' + desc + note + '</td>'
+            + '<td><span style="font-size:10px;font-weight:700;color:var(--gold);background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.2);padding:1px 6px;border-radius:2px;letter-spacing:0.06em;">' + _e(r.sku_id || '—') + '</span></td>'
+            + '<td style="text-align:right;">' + numFmt(r.used) + '</td>'
+            + '<td style="text-align:right;color:' + wasteCol + ';font-weight:600;">' + numFmt(r.waste) + '</td>'
+            + '<td style="text-align:right;color:' + wasteCol + ';">' + pctStr + '</td>'
             + '</tr>';
         });
-        dgHtml += '</tbody></table></div>';
+        dgHtml += '</tbody>';
+        var tot = dgUsage.totals;
+        var totCol = tot.waste > 0 ? 'var(--red)' : 'var(--muted)';
+        dgHtml += '<tfoot><tr style="border-top:2px solid var(--navy-border);font-weight:700;">'
+          + '<td style="padding-top:8px;">Total</td>'
+          + '<td></td>'
+          + '<td style="text-align:right;padding-top:8px;">' + numFmt(tot.used) + '</td>'
+          + '<td style="text-align:right;padding-top:8px;color:' + totCol + ';">' + numFmt(tot.waste) + '</td>'
+          + '<td style="text-align:right;padding-top:8px;color:' + totCol + ';">' + (tot.consumed > 0 ? (Math.round(tot.wastePct * 10) / 10) + '%' : '—') + '</td>'
+          + '</tr></tfoot>';
+        dgHtml += '</table></div>';
         s3 = dgHtml;
       }
 
@@ -35475,23 +35474,13 @@ window.saveAdjModal = async function() {
       var d        = await _gatherReportData(jobId);
       var j = d.j, bom = d.bom, ai = d.ai, lso = d.lso, client = d.client, contDetails = d.contDetails;
 
-      // Extra data: dry goods + QC
+      // Extra data: dry goods used/wasted + QC
       var extra    = await Promise.all([
-        supaGet('job_drygoods_prep_items?job_id=eq.' + jobId + '&select=sku_id,item_name,qty_required,qty_picked'),
+        window._jobDryGoodsUsage(jobId, j, bom).catch(function(eDg){ window.logError && window.logError('_sendBottlingReport:dgUsage', eDg); return { rows: [], totals: { used:0, waste:0, consumed:0, wastePct:0 } }; }),
         supaGet('job_quality_checks?job_id=eq.' + jobId + '&order=checked_at.asc')
       ]);
-      var dgItems  = extra[0] || [];
+      var dgUsage  = extra[0] || { rows: [], totals: { used:0, waste:0, consumed:0, wastePct:0 } };
       var qcChecks = extra[1] || [];
-
-      // SKU names for dry goods
-      var skuNames = {};
-      var dgSkuIds = dgItems.map(function(i){ return i.sku_id; }).filter(Boolean);
-      if (dgSkuIds.length) {
-        try {
-          var skuR = await supaGet('dry_goods_skus?id=in.(' + dgSkuIds.join(',') + ')&select=id,description,volume,abv,region');
-          skuR.forEach(function(s){ skuNames[s.id] = window.skuDisplayName(s) || s.id; });
-        } catch(e2){}
-      }
 
       var spiritType = (contDetails[0] && contDetails[0].spirit_type) || '—';
 
@@ -35527,34 +35516,40 @@ window.saveAdjModal = async function() {
       function _lf0(n) { return n == null ? '—' : (Number(n) === 0 ? '0 L' : _lf(n)); }
       function _nf(n) { return (n != null && !isNaN(n)) ? Number(n).toLocaleString() : '—'; }
 
-      // Dry goods table HTML for email
+      // Dry goods used vs wasted table for email
       var dgEmailHtml;
-      if (dgItems.length) {
+      if (dgUsage.rows.length) {
         dgEmailHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">'
           + '<thead><tr style="background:#f3f4f6;">'
           + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Description</th>'
           + '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">SKU</th>'
-          + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Required</th>'
           + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Used</th>'
-          + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Variance</th>'
+          + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Wasted</th>'
+          + '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid #e5e7eb;color:#374151;">Waste %</th>'
           + '</tr></thead><tbody>';
-        dgItems.forEach(function(item) {
-          var desc     = skuNames[item.sku_id] || item.item_name || item.sku_id || '—';
-          var variance = (item.qty_required != null && item.qty_picked != null)
-                          ? (Number(item.qty_picked) - Number(item.qty_required)) : null;
-          var varStr   = variance != null ? ((variance > 0 ? '+' : '') + Number(variance).toLocaleString()) : '—';
-          var varCol   = variance == null ? '#6b7280' : (variance < 0 ? '#dc2626' : (variance > 0 ? '#d97706' : '#6b7280'));
+        dgUsage.rows.forEach(function(r) {
+          var desc     = r.name || r.sku_id || '—';
+          var wasteCol = r.waste > 0 ? '#dc2626' : '#6b7280';
+          var pctStr   = r.consumed > 0 ? (Math.round(r.wastePct * 10) / 10) + '%' : '—';
           dgEmailHtml += '<tr>'
             + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;color:#374151;">' + String(desc||'') + '</td>'
-            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;color:#6b7280;font-size:11px;">' + String(item.sku_id||'—') + '</td>'
-            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:#374151;">' + (item.qty_required != null ? Number(item.qty_required).toLocaleString() : '—') + '</td>'
-            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:#374151;font-weight:600;">' + (item.qty_picked != null ? Number(item.qty_picked).toLocaleString() : '—') + '</td>'
-            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:' + varCol + ';font-weight:600;">' + varStr + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;color:#6b7280;font-size:11px;">' + String(r.sku_id||'—') + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:#374151;font-weight:600;">' + _nf(r.used) + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:' + wasteCol + ';font-weight:600;">' + _nf(r.waste) + '</td>'
+            + '<td style="padding:5px 8px;border-bottom:1px solid #f3f4f6;text-align:right;color:' + wasteCol + ';">' + pctStr + '</td>'
             + '</tr>';
         });
-        dgEmailHtml += '</tbody></table>';
+        var dgTot    = dgUsage.totals;
+        var dgTotCol = dgTot.waste > 0 ? '#dc2626' : '#6b7280';
+        dgEmailHtml += '</tbody><tfoot><tr style="font-weight:700;">'
+          + '<td style="padding:6px 8px;border-top:2px solid #e5e7eb;color:#374151;">Total</td>'
+          + '<td style="border-top:2px solid #e5e7eb;"></td>'
+          + '<td style="padding:6px 8px;border-top:2px solid #e5e7eb;text-align:right;color:#374151;">' + _nf(dgTot.used) + '</td>'
+          + '<td style="padding:6px 8px;border-top:2px solid #e5e7eb;text-align:right;color:' + dgTotCol + ';">' + _nf(dgTot.waste) + '</td>'
+          + '<td style="padding:6px 8px;border-top:2px solid #e5e7eb;text-align:right;color:' + dgTotCol + ';">' + (dgTot.consumed > 0 ? (Math.round(dgTot.wastePct * 10) / 10) + '%' : '—') + '</td>'
+          + '</tr></tfoot></table>';
       } else {
-        dgEmailHtml = '<p style="color:#9ca3af;font-size:12px;margin-top:8px;">No dry goods prep data recorded.</p>';
+        dgEmailHtml = '<p style="color:#9ca3af;font-size:12px;margin-top:8px;">No dry goods data recorded.</p>';
       }
 
       // QC table HTML for email
@@ -48167,6 +48162,95 @@ window.saveAdjModal = async function() {
       return n || id;
     };
   }
+
+  // Dry-goods "used vs wasted" for a job, derived from actual stock movements.
+  // Waste is not stored anywhere reliable (the job_waste/stock_movements inserts
+  // fail silently on a uuid/text sku_id mismatch), so it is derived as
+  // consumed - expected. Two things must be handled or the numbers explode:
+  //   1) A job can be deducted more than once; each completion run appends one
+  //      job_depletion row per component. We keep ONLY the latest run per sku
+  //      (never sum runs) - otherwise a 3-run job (e.g. JOB-3) shows ~3x the
+  //      consumption and a fabricated ~6,600-unit "waste".
+  //   2) "Expected" is per-component: ceil((qty_required / bottle_target) * bottles)
+  //      from job_components (the popup's own baseDeduct math). Because case-item
+  //      qty_required is already stored in cases, this one formula covers both
+  //      per-bottle and case items. Assuming 1-per-bottle would fabricate waste.
+  window._jobDryGoodsUsage = async function(jobId, job, bom){
+    job = job || {};
+    bom = bom || {};
+    var bottles = parseInt(job.actual_bottles_produced || 0) || 0;
+    var target  = parseInt(job.bottle_target || 0) || 0;
+    var bps     = parseInt(bom.bottles_per_shipper || 0) || 0;
+
+    var batch = await Promise.all([
+      _sel('job_components', '?job_id=eq.' + jobId + '&sku_id=not.is.null&select=sku_id,item_name,qty_required&order=created_at.asc'),
+      _sel('dry_goods_movements', '?job_id=eq.' + jobId + '&movement_type=in.(job_depletion,client_collection)&select=sku_id,movement_type,quantity,created_at&order=created_at.asc')
+    ]);
+    var comps = batch[0] || [];
+    var moves = batch[1] || [];
+
+    // Keep only the LATEST run per (sku, movement_type): one job_depletion row is
+    // written per component per completion run, so N rows for a sku == N runs.
+    var latest = {};
+    moves.forEach(function(m){
+      var key = m.sku_id + '|' + m.movement_type;
+      var at  = m.created_at ? new Date(m.created_at).getTime() : 0;
+      if (!latest[key] || at >= latest[key].at) latest[key] = { qty: Math.abs(_n(m.quantity) || 0), at: at };
+    });
+    function lastQty(sku, type){ var r = latest[sku + '|' + type]; return r ? r.qty : 0; }
+
+    // Component list = job_components (BOM order) unioned with any movement-only
+    // skus, so every used component shows even if it was skipped at prep/no-stock.
+    var order = [], seen = {}, reqMap = {}, nameMap = {};
+    comps.forEach(function(c){
+      if (!c.sku_id || seen[c.sku_id]) return;
+      seen[c.sku_id] = 1; order.push(c.sku_id);
+      reqMap[c.sku_id]  = _n(c.qty_required);
+      nameMap[c.sku_id] = c.item_name || null;
+    });
+    moves.forEach(function(m){
+      if (m.movement_type !== 'job_depletion' || !m.sku_id || seen[m.sku_id]) return;
+      seen[m.sku_id] = 1; order.push(m.sku_id);
+    });
+
+    var skuInfo = {};
+    if (order.length) {
+      try {
+        var rows = await _sel('dry_goods_skus', '?id=in.(' + order.join(',') + ')&select=id,description,volume,abv,region');
+        (rows || []).forEach(function(s){ skuInfo[s.id] = s; });
+      } catch(e){}
+    }
+
+    var totals = { used: 0, waste: 0, consumed: 0 };
+    var out = order.map(function(sku){
+      var info   = skuInfo[sku] || {};
+      var name   = (info.id ? window.skuDisplayName(info) : null) || nameMap[sku] || sku;
+      var qtyReq = reqMap[sku];
+      var isCase = /shipper|divider/i.test(name || '');
+      var consumed  = lastQty(sku, 'job_depletion');
+      var collected = lastQty(sku, 'client_collection');
+      var expected;
+      if (bottles <= 0)                      expected = consumed;
+      else if (isCase && bps > 0)            expected = Math.ceil(bottles / bps); // exact case count
+      else if (qtyReq != null && target > 0) expected = Math.ceil((qtyReq / target) * bottles);
+      else                                   expected = bottles;
+      // Absorb tiny rounding (e.g. a pre-rounded case count scaled back up giving
+      // 189 vs a real 188) so it doesn't surface as a phantom shortfall / waste.
+      var tol = Math.max(1, Math.round(expected * 0.005));
+      if (consumed > 0 && expected > consumed && (expected - consumed) <= tol) expected = consumed;
+      var used     = expected;
+      var waste    = Math.max(0, consumed - expected);
+      var short    = consumed > 0 && (expected - consumed) > tol;
+      var wastePct = consumed > 0 ? (waste / consumed) * 100 : 0;
+      totals.used     += used;
+      totals.waste    += waste;
+      totals.consumed += consumed;
+      return { sku_id: sku, name: name, used: used, waste: waste, consumed: consumed,
+               collected: collected, short: short, wastePct: wastePct, noMovement: consumed === 0 };
+    });
+    totals.wastePct = totals.consumed > 0 ? (totals.waste / totals.consumed) * 100 : 0;
+    return { rows: out, totals: totals };
+  };
 
   window._buildJobLiquidTrace = async function(jobId){
     var job = (window._jobs && window._jobs.find) ? window._jobs.find(function(x){ return x.id === jobId; }) : null;
