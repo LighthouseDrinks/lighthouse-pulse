@@ -23451,6 +23451,9 @@ window.ccxPrintRecord = function() {
   var NODE_W = 214, NODE_H = 104, H_GAP = 34, V_GAP = 54;
   var COL = NODE_W + H_GAP, ROW = NODE_H + V_GAP;
   var ROOT_GAP = COL, LANE_GAP = Math.round(COL * 1.3);
+  // Large flat teams (STACK_MIN+ reports that are all leaves) collapse into a
+  // compact vertical list so one wide branch can't inflate the whole chart.
+  var STACK_MIN = 3, STACK_TOP = 26, STACK_VGAP = 14, STACK_ROW = NODE_H + STACK_VGAP, LEAF_INDENT = 18;
 
   // ── Rendering ──────────────────────────────────────────────────────────────
   function renderNode(u, rec){
@@ -23494,13 +23497,40 @@ window.ccxPrintRecord = function() {
     var topOffset = state.editMode ? 46 : 0;
     if (state.unassigned.length) topOffset = Math.max(topOffset, 26);
 
+    function isLeafSlot(k){
+      var kk = state.collapsed[k.id] ? [] : (state.children[k.id] || []);
+      return kk.length === 0;
+    }
+
     function place(u, depth){
       var collapsed = !!state.collapsed[u.id];
       var kids = collapsed ? [] : (state.children[u.id] || []);
       var rec = { u: u, depth: depth, x: 0, y: depth * ROW + topOffset };
+
       if (!kids.length){
         rec.x = nextX + NODE_W / 2;
         nextX += COL;
+        nodes.push(rec);
+        return rec;
+      }
+
+      var allLeaves = true;
+      for (var a = 0; a < kids.length; a++){ if (!isLeafSlot(kids[a])){ allLeaves = false; break; } }
+
+      if (allLeaves && kids.length >= STACK_MIN){
+        // Compact vertical list: parent top-left, reports stacked down its right.
+        var px = nextX + NODE_W / 2;
+        rec.x = px;
+        var leafRecs = [];
+        for (var b = 0; b < kids.length; b++){
+          var lrec = { u: kids[b], depth: depth + 1,
+                       x: px + LEAF_INDENT + NODE_W / 2,
+                       y: rec.y + NODE_H + STACK_TOP + b * STACK_ROW };
+          nodes.push(lrec);
+          leafRecs.push(lrec);
+        }
+        nextX += (LEAF_INDENT + NODE_W + NODE_W / 2) + H_GAP;
+        links.push({ type: 'stack', parent: rec, leaves: leafRecs });
       } else {
         var childRecs = [];
         for (var i = 0; i < kids.length; i++) childRecs.push(place(kids[i], depth + 1));
@@ -23564,7 +23594,20 @@ window.ccxPrintRecord = function() {
     // Connector layer — one SVG path built from the computed coordinates.
     var d = '';
     L.links.forEach(function(lk){
-      var p = lk.parent, ch = lk.children;
+      var p = lk.parent;
+      if (lk.type === 'stack'){
+        // Vertical spine down the parent, a short tick out to each stacked report.
+        var lv = lk.leaves;
+        var spineX = p.x;
+        var lastY = lv[lv.length - 1].y + NODE_H / 2;
+        d += 'M' + spineX + ' ' + (p.y + NODE_H) + 'V' + lastY;
+        for (var s = 0; s < lv.length; s++){
+          var cy = lv[s].y + NODE_H / 2;
+          d += 'M' + spineX + ' ' + cy + 'H' + (lv[s].x - NODE_W / 2);
+        }
+        return;
+      }
+      var ch = lk.children;
       var busY = p.y + NODE_H + V_GAP / 2;
       d += 'M' + p.x + ' ' + (p.y + NODE_H) + 'V' + busY;
       var minX = ch[0].x, maxX = ch[ch.length - 1].x;
