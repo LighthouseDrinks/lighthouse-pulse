@@ -60783,42 +60783,49 @@ window.attendanceReject=async function(reqId,btn){
     return {c:'var(--muted)', bg:'rgba(255,255,255,0.05)', icon:'\u2014', label:'No data'};
   }
   function ragBadge(s){ var m=ragMeta(s); return '<span class="mh-rag" style="color:'+m.c+';background:'+m.bg+';"><span aria-hidden="true">'+m.icon+'</span>'+m.label+'</span>'; }
-  // Compact history: a row of RAG-coloured dots for the 5 calendar periods
-  // preceding the "week in question" (refDate). Weekly by default; monthly when
-  // the KPI's cadence says so. A period with no reading shows a hollow grey dot.
+  // Compact history: a row of RAG-coloured dots for the last N periods up to and
+  // including the "week in question" (refDate). Weekly by default; monthly when
+  // the KPI's cadence says so. The last known status carries forward across weeks
+  // with no new reading (a KPI holds its RAG until someone changes it), so only
+  // periods before the very first reading show as a hollow grey dot. Each dot is
+  // labelled with its ISO week number (or month) so ordering is unambiguous.
   function ragTrend(kpi, es, refDate){
     var N=8;
     var monthly = /month/i.test((kpi&&kpi.cadence)||'');
     var ref = (refDate instanceof Date && !isNaN(refDate)) ? refDate : new Date();
     function startOfWeek(d){ var x=new Date(d.getFullYear(), d.getMonth(), d.getDate()); var day=(x.getDay()+6)%7; x.setDate(x.getDate()-day); return x; }
+    function isoWeek(d){ var t=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())); var dy=(t.getUTCDay()+6)%7; t.setUTCDate(t.getUTCDate()-dy+3); var f=new Date(Date.UTC(t.getUTCFullYear(),0,4)); var fdy=(f.getUTCDay()+6)%7; f.setUTCDate(f.getUTCDate()-fdy+3); return 1+Math.round((t-f)/6048e5); }
     var buckets=[];
     if (monthly){
       var m0=new Date(ref.getFullYear(), ref.getMonth(), 1);
-      for (var i=N;i>=1;i--){
+      for (var i=N-1;i>=0;i--){
         var ms=new Date(m0.getFullYear(), m0.getMonth()-i, 1);
         var me=new Date(m0.getFullYear(), m0.getMonth()-i+1, 1);
-        buckets.push({ start:ms, end:me, label:ms.toLocaleDateString('en-GB',{month:'short',year:'numeric'}) });
+        buckets.push({ start:ms, end:me, tag:ms.toLocaleDateString('en-GB',{month:'short'}), full:ms.toLocaleDateString('en-GB',{month:'short',year:'numeric'}) });
       }
     } else {
       var w0=startOfWeek(ref);
-      for (var j=N;j>=1;j--){
+      for (var j=N-1;j>=0;j--){
         var ws=new Date(w0); ws.setDate(ws.getDate()-j*7);
         var we=new Date(ws); we.setDate(we.getDate()+7);
-        buckets.push({ start:ws, end:we, label:'w/c '+ws.toLocaleDateString('en-GB') });
+        buckets.push({ start:ws, end:we, tag:'W'+isoWeek(ws), full:'W'+isoWeek(ws)+' \u00b7 w/c '+ws.toLocaleDateString('en-GB') });
       }
     }
-    var dots=buckets.map(function(b){
-      var hit=(es||[]).filter(function(e){ if(!e.period_start) return false; var d=new Date(e.period_start); return d>=b.start && d<b.end; })
-        .sort(function(a,c){ return (new Date(c.period_start)-new Date(a.period_start)) || (new Date(c.recorded_at)-new Date(a.recorded_at)); })[0];
+    var sorted=(es||[]).filter(function(e){return e.period_start;}).slice()
+      .sort(function(a,c){ return (new Date(a.period_start)-new Date(c.period_start)) || (new Date(a.recorded_at)-new Date(c.recorded_at)); });
+    var items=buckets.map(function(b){
+      var hit=null, inWeek=false; // carry-forward: latest reading recorded on or before the end of this period
+      for (var k=0;k<sorted.length;k++){ var d=new Date(sorted[k].period_start);
+        if (d<b.end){ hit=sorted[k]; inWeek=(d>=b.start); } else break; }
       var st=hit?(hit.status||computeRag(kpi,hit.numeric_value)):null;
       var m=ragMeta(st), filled=(st!=null);
-      var tip=b.label+(hit?(' \u00b7 '+m.label+(hit.value?(' \u00b7 '+hit.value):'')):' \u00b7 no reading');
-      return '<span title="'+esc(tip)+'" style="width:13px;height:13px;border-radius:50%;display:inline-block;flex:none;'
+      var tip=b.full+(hit?(' \u00b7 '+m.label+(hit.value?(' \u00b7 '+hit.value):'')+(inWeek?'':' (carried)')):' \u00b7 no reading');
+      var dot='<span style="width:13px;height:13px;border-radius:50%;display:inline-block;'
         + (filled?('background:'+m.c+';'):'background:transparent;border:1.5px solid var(--navy-border);')+'"></span>';
+      var lbl='<span style="font-size:8px;line-height:1;color:var(--muted);margin-top:3px;white-space:nowrap;">'+esc(b.tag)+'</span>';
+      return '<span title="'+esc(tip)+'" style="display:inline-flex;flex-direction:column;align-items:center;flex:none;">'+dot+lbl+'</span>';
     }).join('');
-    return '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:5px;row-gap:5px;margin:2px 0;">'
-      + '<span style="font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);flex:none;">'+N+(monthly?' mo':' wk')+'</span>'
-      + dots + '</div>';
+    return '<div style="display:flex;align-items:flex-start;flex-wrap:wrap;gap:6px;row-gap:6px;margin:4px 0 2px;">'+items+'</div>';
   }
 
   // ── Users ──────────────────────────────────────────────
