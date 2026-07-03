@@ -148,7 +148,7 @@ PER-JOB BOM CLIENT CONFIRMATION
 BOM component SKU links: bottle_sku_id, cork_sku_id, ropp_sku_id, foil_sku_id,
 label_front_sku_id / label_back_sku_id / label_neck_sku_id, outer_case_label_sku_id (Outer Shipper Case Label),
 shipper_sku_id, divider_sku_id,
-string_twine_sku_id, monocarton_sku_id, gift_tube_sku_id, tube_lid_sku_id, tin_sku_id
+string_twine_sku_id, monocarton_sku_id, gift_tube_sku_id, tube_lid_sku_id, tin_sku_id, wire_sku_id, medallion_sku_id, coa_sku_id
 
 Key BOM fields: product_name, volume_cl (bottle size in centilitres — NOT ml), abv (%),
 liquid_spec, chill_filtration, colouring, colour_spec, bottles_per_shipper, revision_number, revised_at, revised_by.
