@@ -23594,6 +23594,11 @@ window.ccxPrintRecord = function() {
       <button class="oc-btn oc-icon-btn" title="Zoom in" onclick="window._ocZoom&&window._ocZoom(1)">+</button>
       <button class="oc-btn" title="Fit chart to screen" onclick="window._ocFit&&window._ocFit()">Fit</button>
     </div>
+    <div class="oc-tool-group">
+      <button class="oc-btn" title="Download the full chart as a printable PDF" onclick="window._ocExportPdf&&window._ocExportPdf()">
+        <svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12" style="margin-right:6px;vertical-align:-1px;"><path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5"/><path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708z"/></svg>Download PDF
+      </button>
+    </div>
     <button id="oc-edit-toggle" class="oc-btn oc-edit-btn" style="display:none;" onclick="window._ocToggleEdit&&window._ocToggleEdit()">
       <svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12" style="margin-right:6px;vertical-align:-1px;"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207zM2.5 11.207l-.5 1.5 1.5-.5-1-1z"/></svg>Edit Mode
     </button>
@@ -23942,6 +23947,166 @@ window.ccxPrintRecord = function() {
     render();
   };
   window._ocExpandAll = function(){ state.collapsed = {}; render(); };
+
+  // ── PDF export ───────────────────────────────────────────────────────────────
+  // Opens a print-ready, light-themed copy of the FULL (expanded) chart in a new
+  // window and triggers the browser's Save-as-PDF. The whole forest is scaled to
+  // fit a single landscape page so nodes stay well spaced and never overlap.
+  window._ocExportPdf = function(){
+    function notify(msg, type){
+      if (window.toast) window.toast(msg, type || 'error');
+      else alert(msg);
+    }
+    if (!state.users.length){ notify('Nothing to export yet.', 'warn'); return; }
+
+    // Full expanded layout without disturbing the on-screen view.
+    var savedCollapsed = state.collapsed, savedEdit = state.editMode, savedSearch = state.search, savedFocus = state.focusId;
+    state.collapsed = {}; state.editMode = false; state.search = ''; state.focusId = null;
+    var L;
+    try { L = layoutTree(); }
+    finally {
+      state.collapsed = savedCollapsed; state.editMode = savedEdit; state.search = savedSearch; state.focusId = savedFocus;
+    }
+    if (!L || !L.nodes.length){ notify('Nothing to export yet.', 'warn'); return; }
+
+    // Resolve exact theme colours so the PDF stays in sync with the app theme.
+    var cs = getComputedStyle(document.documentElement);
+    function cssVar(name, fallback){ var v = (cs.getPropertyValue(name) || '').trim(); return v || fallback; }
+    var C = {
+      gold:  cssVar('--gold',  '#c9a84c'),
+      green: cssVar('--green', '#3dba78'),
+      amber: cssVar('--amber', '#e89c3a'),
+      muted: cssVar('--muted', '#7a93a8'),
+      red:   cssVar('--red',   '#e05757'),
+      navy:  cssVar('--navy',  '#0d1b2a')
+    };
+    var DEPT_HEX = { management: C.gold, production: C.green, ecom: C.amber, other: C.muted };
+    var DEPT_LABEL = { management: 'Management', production: 'Production', ecom: 'E-commerce', other: 'Other' };
+    var STATUS_HEX = { 'oc-st-green': C.green, 'oc-st-amber': C.amber, 'oc-st-red': C.red };
+
+    // Light-themed, fully self-contained node card (new window has no style.css).
+    function printNode(rec){
+      var u = rec.u;
+      var kids = state.children[u.id] || [];
+      var count = kids.length;
+      var accent = DEPT_HEX[deptOf(u.role)] || C.muted;
+      var st = statusInfo(u.status);
+      var dot = STATUS_HEX[st.cls] || C.green;
+      var name = esc(u.display_name || u.email || '\u2014');
+      var role = esc((window.roleLabel ? window.roleLabel(u.role) : u.role) || '');
+      var reports = count > 0
+        ? '<span style="font-size:10px;font-weight:700;color:' + accent + ';letter-spacing:0.04em;">' + count + ' report' + (count > 1 ? 's' : '') + '</span>'
+        : '<span style="font-size:10px;font-weight:600;color:#94a3b8;letter-spacing:0.04em;">Individual</span>';
+      var left = rec.x - NODE_W / 2;
+      return '<div class="pnode" style="left:' + left + 'px;top:' + rec.y + 'px;border-top-color:' + accent + ';">'
+        +   '<span class="pdot" style="background:' + dot + ';" title="' + esc(st.label) + '"></span>'
+        +   '<div class="phead">'
+        +     '<div class="pavatar" style="color:' + accent + ';border-color:' + accent + ';">' + esc(initials(u.display_name || u.email)) + '</div>'
+        +     '<div class="pmeta"><div class="pname">' + name + '</div><div class="prole">' + (role || '&mdash;') + '</div></div>'
+        +   '</div>'
+        +   '<div class="pfoot">' + reports + '</div>'
+        + '</div>';
+    }
+
+    // Connector layer — mirrors the exact path-building used by render().
+    var d = '';
+    L.links.forEach(function(lk){
+      var p = lk.parent;
+      if (lk.type === 'stack'){
+        var lv = lk.leaves, spineX = p.x, lastY = lv[lv.length - 1].y + NODE_H / 2;
+        d += 'M' + spineX + ' ' + (p.y + NODE_H) + 'V' + lastY;
+        for (var s = 0; s < lv.length; s++){
+          var cy = lv[s].y + NODE_H / 2;
+          d += 'M' + spineX + ' ' + cy + 'H' + (lv[s].x - NODE_W / 2);
+        }
+        return;
+      }
+      var ch = lk.children;
+      var busY = p.y + NODE_H + V_GAP / 2;
+      d += 'M' + p.x + ' ' + (p.y + NODE_H) + 'V' + busY;
+      var minX = ch[0].x, maxX = ch[ch.length - 1].x;
+      if (maxX > minX) d += 'M' + minX + ' ' + busY + 'H' + maxX;
+      for (var c = 0; c < ch.length; c++) d += 'M' + ch[c].x + ' ' + busY + 'V' + ch[c].y;
+    });
+
+    var chart = [];
+    if (d) chart.push('<svg class="plinks" width="' + L.width + '" height="' + L.height + '"><path d="' + d + '"/></svg>');
+    for (var n = 0; n < L.nodes.length; n++) chart.push(printNode(L.nodes[n]));
+    if (L.lane){
+      chart.push('<div class="plane" style="left:' + L.lane.left + 'px;top:' + Math.max(0, L.lane.labelY) + 'px;width:' + Math.max(0, L.lane.right - L.lane.left) + 'px;">Unassigned \u00b7 manager not found</div>');
+    }
+
+    // Scale the whole forest to fit a single A4 landscape page (approx. content
+    // box at 96dpi with 10mm margins). layoutTree() already spaces every node,
+    // so a uniform scale keeps it readable and non-overlapping.
+    var TARGET_W = 1040, TARGET_H = 700;
+    var scale = Math.min(1, TARGET_W / L.width, TARGET_H / L.height);
+    var holderW = Math.ceil(L.width * scale), holderH = Math.ceil(L.height * scale);
+
+    // Legend swatches.
+    var deptKeys = ['management', 'production', 'ecom', 'other'];
+    var deptLegend = deptKeys.map(function(k){
+      return '<span class="lg-item"><span class="lg-bar" style="background:' + DEPT_HEX[k] + ';"></span>' + DEPT_LABEL[k] + '</span>';
+    }).join('');
+    var statusLegend = ''
+      + '<span class="lg-item"><span class="lg-dot" style="background:' + C.green + ';"></span>Active</span>'
+      + '<span class="lg-item"><span class="lg-dot" style="background:' + C.amber + ';"></span>Pending termination</span>'
+      + '<span class="lg-item"><span class="lg-dot" style="background:' + C.red + ';"></span>Terminated</span>';
+
+    var generated = new Date().toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
+    var headcount = state.users.length;
+
+    var html = '<!doctype html><html><head><meta charset="utf-8">'
+      + '<title>Org Chart \u2014 Lighthouse Drinks</title>'
+      + '<style>'
+      +   '@page { size: A4 landscape; margin: 10mm; }'
+      +   '* { box-sizing: border-box; }'
+      +   'body { margin:0; font-family:Arial,Helvetica,sans-serif; color:#2d3748; background:#f1f5f9; }'
+      +   '.sheet { max-width:1100px; margin:22px auto; }'
+      +   '.brand { display:flex; align-items:flex-end; justify-content:space-between; border-bottom:2px solid #c9a84c; padding-bottom:12px; margin-bottom:8px; }'
+      +   '.brand-name { font-size:22px; font-weight:800; color:#0b2540; letter-spacing:-0.01em; }'
+      +   '.brand-tag { font-size:10px; letter-spacing:0.18em; text-transform:uppercase; color:#c9a84c; font-weight:700; margin-top:4px; }'
+      +   '.doc-meta { text-align:right; font-size:11px; color:#718096; line-height:1.6; }'
+      +   '.doc-meta strong { color:#1a202c; }'
+      +   '.legend { display:flex; flex-wrap:wrap; gap:16px; margin:12px 0 14px; font-size:10.5px; color:#4a5568; }'
+      +   '.lg-item { display:inline-flex; align-items:center; gap:6px; font-weight:700; letter-spacing:0.02em; }'
+      +   '.lg-bar { width:16px; height:6px; border-radius:2px; display:inline-block; }'
+      +   '.lg-dot { width:9px; height:9px; border-radius:50%; display:inline-block; }'
+      +   '.holder { width:' + holderW + 'px; height:' + holderH + 'px; margin:0 auto; }'
+      +   '.chart { position:relative; width:' + L.width + 'px; height:' + L.height + 'px; transform:scale(' + scale + '); transform-origin:top left; }'
+      +   '.plinks { position:absolute; top:0; left:0; overflow:visible; }'
+      +   '.plinks path { fill:none; stroke:#cbd5e0; stroke-width:2; stroke-linecap:round; }'
+      +   '.pnode { position:absolute; width:' + NODE_W + 'px; height:' + NODE_H + 'px; background:#fff; border:1px solid #e2e8f0; border-top:3px solid #c9a84c; border-radius:9px; padding:13px 14px 11px; box-shadow:0 1px 3px rgba(0,0,0,0.10); }'
+      +   '.pdot { position:absolute; top:10px; right:10px; width:8px; height:8px; border-radius:50%; }'
+      +   '.phead { display:flex; align-items:center; gap:11px; }'
+      +   '.pavatar { width:40px; height:40px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:14px; background:#fff; border:2px solid #c9a84c; }'
+      +   '.pmeta { min-width:0; }'
+      +   '.pname { font-family:Georgia,\'Times New Roman\',serif; font-size:13.5px; font-weight:700; color:#1a202c; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:132px; }'
+      +   '.prole { font-size:9.5px; font-weight:700; letter-spacing:0.09em; text-transform:uppercase; color:#718096; margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:132px; }'
+      +   '.pfoot { display:flex; align-items:center; gap:6px; margin-top:11px; padding-top:9px; border-top:1px solid #e2e8f0; }'
+      +   '.plane { position:absolute; font-size:10px; font-weight:700; letter-spacing:0.12em; text-transform:uppercase; color:#94a3b8; text-align:center; }'
+      +   '.no-print { text-align:center; margin:16px 0 6px; }'
+      +   '.btn { background:#c9a84c; color:#0b2540; border:none; font-weight:700; padding:10px 22px; border-radius:4px; font-size:13px; cursor:pointer; letter-spacing:0.03em; }'
+      +   '@media print { .no-print { display:none; } body { background:#fff; -webkit-print-color-adjust:exact; print-color-adjust:exact; } .sheet { margin:0; max-width:none; } }'
+      + '</style></head><body>'
+      + '<div class="no-print"><button class="btn" onclick="window.print()">\u2B07 Save as PDF / Print</button></div>'
+      + '<div class="sheet">'
+      +   '<div class="brand">'
+      +     '<div><div class="brand-name">Lighthouse Drinks</div><div class="brand-tag">Organisational Chart</div></div>'
+      +     '<div class="doc-meta"><div>Generated <strong>' + esc(generated) + '</strong></div><div><strong>' + headcount + '</strong> ' + (headcount === 1 ? 'person' : 'people') + '</div></div>'
+      +   '</div>'
+      +   '<div class="legend">' + deptLegend + '<span style="width:1px;height:14px;background:#e2e8f0;"></span>' + statusLegend + '</div>'
+      +   '<div class="holder"><div class="chart">' + chart.join('') + '</div></div>'
+      + '</div>'
+      + '<script>window.onload=function(){setTimeout(function(){window.print();},250);};<\/script>'
+      + '</body></html>';
+
+    var win = window.open('', '_blank');
+    if (!win){ notify('Please allow pop-ups to download the PDF.', 'error'); return; }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+  };
 
   window._ocToggleEdit = function(){
     if (!(window.isExec && window.isExec())) return;
@@ -29019,6 +29184,18 @@ window.saveTransfer = async function() {
     var _srcOwnerKeys = Object.keys(_srcOwnerSet);
     var _singleSrcOwner = _srcOwnerKeys.length === 1 ? _srcOwnerKeys[0] : null;
 
+    // Spirit type of contributing sources. If every source shares one spirit_type,
+    // destinations without a spirit of their own inherit it so the product name
+    // isn't lost when liquid moves into a blank vessel.
+    var _srcSpiritSet = {};
+    sources.forEach(function(x){
+      if (!x.litres_actual) return;
+      var c = _liquid.find(function(cc){ return cc.id === x.container_id; });
+      if (c && c.spirit_type) _srcSpiritSet[c.spirit_type] = true;
+    });
+    var _srcSpiritKeys = Object.keys(_srcSpiritSet);
+    var _singleSrcSpirit = _srcSpiritKeys.length === 1 ? _srcSpiritKeys[0] : null;
+
     for (var j=0; j<dests.length; j++) {
       var d = dests[j];
       var cont2 = _liquid.find(function(c){ return c.id===d.container_id; });
@@ -29039,6 +29216,9 @@ window.saveTransfer = async function() {
         abv:            Math.round(newAbv * 100) / 100,
         status:         newL2 <= 0 ? 'empty' : (cap2 > 0 && newL2 >= cap2 ? 'full' : 'partially_full')
       };
+      // Inherit the source spirit when the destination has none of its own
+      // (don't overwrite an existing spirit — that's a blend the operator owns).
+      if (!cont2.spirit_type && _singleSrcSpirit) _dstUpd.spirit_type = _singleSrcSpirit;
       // Carry the liquid owner onto tank/tanker destinations so it isn't lost when
       // client spirit moves into an LH-owned vessel.
       if (cont2.type === 'tank' || cont2.type === 'tanker') {
@@ -48991,6 +49171,14 @@ window.saveAdjModal = async function() {
           performed_by_id: pById, performed_by_name: pByName });
       }
       var totalDstL = dests.reduce(function(s,x){ return s+(x.litres_received||0); }, 0);
+      // Spirit type of contributing sources — a single shared value flows into
+      // destinations that have no spirit of their own.
+      var _btfSpiritSet = {};
+      sources.forEach(function(x){
+        if (x.litres_actual && x.cont && x.cont.spirit_type) _btfSpiritSet[x.cont.spirit_type] = true;
+      });
+      var _btfSpiritKeys = Object.keys(_btfSpiritSet);
+      var _btfSingleSpirit = _btfSpiritKeys.length === 1 ? _btfSpiritKeys[0] : null;
       for (var j=0; j<dests.length; j++) {
         var d = dests[j];
         var c2 = _bl.find(function(c){ return c.id === d.container_id; });
@@ -49000,10 +49188,13 @@ window.saveAdjModal = async function() {
         var lpaIn = totalSrcLPA * prop;
         var nL2 = eL + d.litres_received, nLP2 = eLP + lpaIn;
         var nAbv2 = nL2 > 0 ? nLP2/nL2*100 : (c2.abv||null);
-        await window.db.update('liquid_containers', '?id=eq.'+d.container_id, {
+        var _btfDstUpd = {
           current_litres: Math.round(nL2*1e4)/1e4, current_lpa: Math.round(nLP2*1e4)/1e4,
           abv: Math.round(nAbv2*100)/100, status: autoStatus(nL2, parseFloat(c2.capacity_litres||0))
-        });
+        };
+        // Inherit the source spirit when the destination has none of its own.
+        if (!c2.spirit_type && _btfSingleSpirit) _btfDstUpd.spirit_type = _btfSingleSpirit;
+        await window.db.update('liquid_containers', '?id=eq.'+d.container_id, _btfDstUpd);
         await writeHistory({ container_id: d.container_id, event_type: 'transfer_to', event_group_id: egid,
           container_ref: c2.reference,
           litres_before: eL, litres_after: nL2, litres_changed: d.litres_received,
