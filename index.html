@@ -36097,11 +36097,6 @@ window.saveAdjModal = async function() {
           if (cRows && cRows[0] && cRows[0].email) recipientEmail = cRows[0].email;
         } catch(e2) {}
       }
-      if (!isTest && !recipientEmail) {
-        window.toast && window.toast('No email address on file for this client. Add one in the Customers section first.', 'error');
-        return;
-      }
-
       var j0 = _jobs.find(function(x){ return x.id === jobId; });
       if (j0 && j0.client_report_sent_at && !isTest) {
         if (!confirm('Client report already sent on ' + _fmtDate(j0.client_report_sent_at) + '. Send again?')) return;
@@ -36160,14 +36155,18 @@ window.saveAdjModal = async function() {
         + _emailFooter()
         + '</div>';
 
-      var to = isTest ? testEmail : recipientEmail;
+      var to = testEmail;
+      if (!isTest) {
+        to = await window._promptRecipientEmail({ title: 'Email Client Report', clientName: client.name, defaultEmail: recipientEmail || '' });
+        if (!to) return;
+      }
       await window.sendEmail({ to: to, subject: subject, html: html, from: 'reports@lighthousedrinks.com' });
 
       if (!isTest) {
         await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, { client_report_sent_at: new Date().toISOString() });
         await loadJobs();
         if (window._currentJobId === jobId) loadResultsTab(jobId);
-        window.toast && window.toast('Client report sent to ' + recipientEmail, 'success');
+        window.toast && window.toast('Client report sent to ' + to, 'success');
       } else {
         window.toast && window.toast('Test client report sent to ' + testEmail, 'success');
       }
@@ -36540,19 +36539,79 @@ window.saveAdjModal = async function() {
     document.body.style.overflow = '';
   };
 
+  // Reusable dialog to confirm / edit the recipient before sending a report.
+  // Pre-fills the on-file email but lets the user overwrite it.
+  // Returns Promise<string|null> — the trimmed email, or null if cancelled.
+  window._promptRecipientEmail = function(opts) {
+    opts = opts || {};
+    return new Promise(function(resolve) {
+      var overlay = document.getElementById('recipient-email-overlay');
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'recipient-email-overlay';
+        overlay.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;align-items:center;justify-content:center;padding:24px 16px;';
+        overlay.innerHTML =
+          '<div style="max-width:440px;width:100%;box-sizing:border-box;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:8px;padding:22px 24px;">'
+          + '<div id="recipient-email-title" style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;">Send Report</div>'
+          + '<div id="recipient-email-sub" style="font-size:12px;color:var(--muted);margin-bottom:14px;"></div>'
+          + '<label style="display:block;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Recipient Email</label>'
+          + '<input id="recipient-email-input" type="email" autocomplete="email" style="width:100%;box-sizing:border-box;background:var(--navy-dark,#0d1526);border:1px solid var(--navy-border);color:#fff;font-size:13px;padding:9px 11px;border-radius:5px;font-family:Lato,sans-serif;" />'
+          + '<div id="recipient-email-err" style="display:none;font-size:11px;color:#ef6b6b;margin-top:6px;"></div>'
+          + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">'
+          + '<button id="recipient-email-cancel" class="btn btn-outline" style="font-size:12px;padding:7px 16px;">Cancel</button>'
+          + '<button id="recipient-email-send" class="btn btn-gold" style="font-size:12px;padding:7px 16px;">&#9993; Send</button>'
+          + '</div>'
+          + '</div>';
+        document.body.appendChild(overlay);
+      }
+      var input     = overlay.querySelector('#recipient-email-input');
+      var err       = overlay.querySelector('#recipient-email-err');
+      var title     = overlay.querySelector('#recipient-email-title');
+      var sub       = overlay.querySelector('#recipient-email-sub');
+      var sendBtn   = overlay.querySelector('#recipient-email-send');
+      var cancelBtn = overlay.querySelector('#recipient-email-cancel');
+
+      title.textContent = opts.title || 'Send Report';
+      sub.textContent   = opts.clientName ? ('Client: ' + opts.clientName) : '';
+      sub.style.display = opts.clientName ? '' : 'none';
+      input.value       = opts.defaultEmail || '';
+      err.style.display = 'none';
+
+      function cleanup() {
+        overlay.style.display = 'none';
+        document.removeEventListener('keydown', onKey);
+        sendBtn.onclick = cancelBtn.onclick = overlay.onclick = null;
+      }
+      function done(val) { cleanup(); resolve(val); }
+      function submit() {
+        var v = (input.value || '').trim();
+        if (!v || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) {
+          err.textContent = 'Please enter a valid email address.';
+          err.style.display = '';
+          input.focus();
+          return;
+        }
+        done(v);
+      }
+      function onKey(e) {
+        if (e.key === 'Escape') done(null);
+        else if (e.key === 'Enter' && document.activeElement === input) { e.preventDefault(); submit(); }
+      }
+      sendBtn.onclick   = submit;
+      cancelBtn.onclick = function() { done(null); };
+      overlay.onclick   = function(e) { if (e.target === overlay) done(null); };
+      document.addEventListener('keydown', onKey);
+
+      overlay.style.display = 'flex';
+      setTimeout(function() { input.focus(); input.select(); }, 30);
+    });
+  };
+
   // Send full bottling report as email to client
   window._sendBottlingReport = async function() {
     var overlay = document.getElementById('bottling-report-overlay');
     var jobId   = overlay && overlay.dataset.jobId;
     if (!jobId) { window.toast && window.toast('No report open.', 'error'); return; }
-
-    var isTest    = false;
-    var testEmail = null;
-    if (!confirm('Send full bottling report to the client email on record?')) {
-      testEmail = window.prompt('Or enter an email address to send a test copy:');
-      if (!testEmail) return;
-      isTest = true;
-    }
 
     window.toast && window.toast('Building report email…');
     try {
@@ -36719,11 +36778,12 @@ window.saveAdjModal = async function() {
         + _emailFooter()
         + '</div>';
 
-      var recipientEmail = isTest ? testEmail : (client.email || (window.CURRENT_USER && window.CURRENT_USER.email));
-      if (!recipientEmail) { window.toast && window.toast('No client email address on record.', 'error'); return; }
+      var defaultEmail = client.email || (window.CURRENT_USER && window.CURRENT_USER.email) || '';
+      var recipientEmail = await window._promptRecipientEmail({ title: 'Send Bottling Report', clientName: client.name, defaultEmail: defaultEmail });
+      if (!recipientEmail) return;
       var subject = 'Full Bottling Report — ' + ((window.jobLabel && window.jobLabel(j)) || j.product_name || 'Production Run') + (j.lot_number ? ' (' + j.lot_number + ')' : '');
       await window.sendEmail({ to: recipientEmail, subject: subject, html: emailHtml, from: 'reports@lighthousedrinks.com' });
-      window.toast && window.toast(isTest ? 'Test report sent to ' + testEmail : 'Report sent to ' + recipientEmail, 'success');
+      window.toast && window.toast('Report sent to ' + recipientEmail, 'success');
     } catch(e) {
       window.toast && window.toast('Error sending report: ' + (e.message || e), 'error');
       window.logError && window.logError('_sendBottlingReport', e);
