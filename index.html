@@ -36875,6 +36875,31 @@ window.saveAdjModal = async function() {
   }
   window._lsoEffAbv = _lsoEffAbv;
 
+  // Snapshot-first per-container totals: reflects what was committed to the job at
+  // link time; live liquid_containers values are only a fallback for legacy links
+  // that never captured a snapshot. Keeps the requirement bar from drifting when a
+  // linked vessel is drawn down after linking.
+  window._lsoLinkedTotals = function (linkedConts, allConts) {
+    var litres = 0, lpa = 0;
+    (linkedConts || []).forEach(function (lc) {
+      var cont = (allConts || []).find(function (c) { return c.id === lc.id; });
+      var snapL   = (lc.litres != null) ? parseFloat(lc.litres) : null;
+      var snapAbv = (lc.abv    != null) ? parseFloat(lc.abv)    : null;
+      var snapLpa = (lc.lpa    != null) ? parseFloat(lc.lpa)    : null;
+      // Litres: snapshot first, else live
+      var l = (snapL != null) ? snapL : (cont ? parseFloat(cont.current_litres || 0) : 0);
+      // LPA: snapshot lpa, else snapshot litres*abv, else live lpa, else live litres*abv
+      var a;
+      if (snapLpa != null && snapLpa > 0)        a = snapLpa;
+      else if (snapL != null && snapAbv != null) a = snapL * snapAbv / 100;
+      else if (cont && parseFloat(cont.current_lpa || 0) > 0) a = parseFloat(cont.current_lpa);
+      else if (cont)                             a = parseFloat(cont.current_litres || 0) * parseFloat(cont.abv || 0) / 100;
+      else                                       a = 0;
+      litres += l; lpa += a;
+    });
+    return { litres: litres, lpa: lpa };
+  };
+
   // Liquid-identity badge: register membership + BOM liquid description match.
   // Independent of the ABV badge — "ABV matches BOM" says nothing about WHICH
   // liquid is in the container, so this surfaces identity separately.
@@ -37009,21 +37034,14 @@ window.saveAdjModal = async function() {
         } catch(e5) { /* non-critical */ }
       }
 
-      var _linkedTotalLitres = _linkedConts.reduce(function(s, lc) {
-        var cont = _allConts.find(function(c){ return c.id === lc.id; });
-        return s + parseFloat((cont && cont.current_litres) || lc.litres || 0);
-      }, 0);
-
-      // Linked alcohol (effective ABV / stored LPA) — angel-share decayed casks
-      // reconcile correctly. Computed before _reqMet so the requirement is judged
-      // on alcohol, not raw litres (a cask-strength IBC yields more bottling litres).
-      var _linkedWeightedLPA = _linkedConts.reduce(function(s, lc) {
-        var cont = _allConts.find(function(c){ return c.id === lc.id; });
-        if (!cont) return s;
-        var lpa = parseFloat(cont.current_lpa || 0);
-        if (lpa > 0) return s + lpa;
-        return s + parseFloat(cont.current_litres || 0) * parseFloat(cont.abv || 0) / 100;
-      }, 0);
+      // Snapshot-first totals: litres/LPA committed to the job at link time (falls
+      // back to live liquid_containers only for legacy links). Angel-share decayed
+      // casks reconcile because the snapshot captured their stored LPA. Computed
+      // before _reqMet so the requirement is judged on alcohol, not raw litres (a
+      // cask-strength IBC yields more bottling litres).
+      var _lsoTot = window._lsoLinkedTotals(_linkedConts, _allConts);
+      var _linkedTotalLitres = _lsoTot.litres;
+      var _linkedWeightedLPA = _lsoTot.lpa;
       // Bottling-strength litres the linked liquid will yield once diluted.
       var _linkedYieldLitres = _bottlingAbv > 0 ? (_linkedWeightedLPA / (_bottlingAbv / 100)) : _linkedTotalLitres;
       // Requirement is met on alcohol (LPA); fall back to raw litres only when no
@@ -37216,8 +37234,10 @@ window.saveAdjModal = async function() {
       html += '<div id="lso-linked-list" style="margin-bottom:10px;">';
       _linkedConts.forEach(function(lc, idx) {
         var cont = _allConts.find(function(c){ return c.id === lc.id; });
-        var _ll = cont && parseFloat(cont.current_litres||0) > 0 ? parseFloat(cont.current_litres).toFixed(0) + 'L' : 'no liquid tracked';
-        var _effAbv = _lsoEffAbv(cont);
+        // Snapshot-first litres/ABV so the row matches the committed requirement bar.
+        var _snapL = (lc.litres != null) ? parseFloat(lc.litres) : (cont ? parseFloat(cont.current_litres||0) : 0);
+        var _ll = _snapL > 0 ? _snapL.toFixed(0) + 'L' : 'no liquid tracked';
+        var _effAbv = (lc.abv != null && parseFloat(lc.abv) > 0) ? parseFloat(lc.abv) : _lsoEffAbv(cont);
         var label = cont
           ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + _ll + ' @ ' + (_effAbv > 0 ? _effAbv.toFixed(1) : (cont.abv||'?')) + '%'
           : lc.id;
@@ -38822,8 +38842,9 @@ window.saveAdjModal = async function() {
     var _eff = function(c){ return window._lsoEffAbv ? window._lsoEffAbv(c) : parseFloat((c && c.abv) || 0); };
     list.innerHTML = linked.map(function(lc, idx) {
       var cont = allConts.find(function(c){ return c.id === lc.id; });
-      var contLitres = cont ? parseFloat(cont.current_litres||0) : parseFloat(lc.litres||0);
-      var effAbv = cont ? _eff(cont) : parseFloat(lc.abv || 0);
+      // Snapshot-first litres/ABV so the row matches the committed requirement bar.
+      var contLitres = (lc.litres != null) ? parseFloat(lc.litres||0) : (cont ? parseFloat(cont.current_litres||0) : 0);
+      var effAbv = (lc.abv != null && parseFloat(lc.abv) > 0) ? parseFloat(lc.abv) : (cont ? _eff(cont) : 0);
       var label = cont
         ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + contLitres.toFixed(0) + 'L @ ' + (effAbv > 0 ? effAbv.toFixed(1) : (cont.abv||'?')) + '%'
         : (lc.reference || lc.id);
@@ -38861,17 +38882,11 @@ window.saveAdjModal = async function() {
     // bottling-strength litre yield, mirroring the initial render.
     var reqLitres = window._lsoReqLitres || 0;
     var reqLPA    = reqLitres * (_bottAbv / 100);
-    var totalLinked = linked.reduce(function(s, lc) {
-      var cont = allConts.find(function(c){ return c.id === lc.id; });
-      return s + parseFloat((cont && cont.current_litres) || lc.litres || 0);
-    }, 0);
-    var linkedLPA = linked.reduce(function(s, lc) {
-      var cont = allConts.find(function(c){ return c.id === lc.id; });
-      if (!cont) return s + parseFloat(lc.lpa || 0);
-      var lpa = parseFloat(cont.current_lpa || 0);
-      if (lpa > 0) return s + lpa;
-      return s + parseFloat(cont.current_litres || 0) * parseFloat(cont.abv || 0) / 100;
-    }, 0);
+    // Snapshot-first totals (shared with the initial render) so the live re-paint
+    // and the first paint never disagree, and the bar reflects committed volumes.
+    var _lsoTotLive = window._lsoLinkedTotals(linked, allConts);
+    var totalLinked = _lsoTotLive.litres;
+    var linkedLPA   = _lsoTotLive.lpa;
     var yieldLitres = _bottAbv > 0 ? (linkedLPA / (_bottAbv / 100)) : totalLinked;
 
     if (reqLitres > 0) {
@@ -49676,7 +49691,8 @@ window.saveAdjModal = async function() {
         abv: d.abv ? Math.round(d.abv * 100) / 100 : null,
         litresAfter: d.litresAfter != null ? d.litresAfter : (c.current_litres != null ? _n(c.current_litres) : null),
         by: d.by || '—',
-        at: d.at
+        at: d.at,
+        cbw: c.cbw_rotation || null
       };
     });
 
