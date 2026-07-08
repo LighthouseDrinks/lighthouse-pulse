@@ -19920,6 +19920,10 @@ window.loadBoms = async function initBoms() {
         style="padding:8px 12px;background:var(--navy-card);border:1px solid var(--navy-border);color:var(--text);font-family:Lato,sans-serif;font-size:12px;outline:none;">
         <option value="">All Spirits</option>
       </select>
+      <button id="liq-empty-toggle" onclick="window.toggleHideEmptyContainers()"
+        style="padding:8px 12px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-family:Lato,sans-serif;font-size:12px;cursor:pointer;border-radius:3px;white-space:nowrap;">
+        Hide Empty
+      </button>
       <button id="liq-archived-toggle" onclick="window.toggleArchivedContainers()"
         style="padding:8px 12px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-family:Lato,sans-serif;font-size:12px;cursor:pointer;border-radius:3px;white-space:nowrap;">
         Show Archived
@@ -24846,6 +24850,7 @@ window.ccxPrintRecord = function() {
 // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
 var _liquid       = [];
 var _showArchived = false;
+var _hideEmpty    = false;
 var _dryGoods = [];
 var _goodsIn  = [];
 var _clients  = [];
@@ -27675,6 +27680,7 @@ window.renderLiquid = function() {
   var list = _liquid.filter(function(c){
     // Show archived or active based on toggle
     if (_showArchived ? !c.archived : c.archived) return false;
+    if (_hideEmpty && parseFloat(c.current_litres || 0) <= 0) return false;
     if (typef   && c.type       !== typef)   return false;
     if (statf   && c.status     !== statf)   return false;
     if (clif    && c.client_id  !== clif)    return false;
@@ -28769,6 +28775,17 @@ window.toggleArchivedContainers = function() {
     btn.textContent = _showArchived ? 'Show Active' : 'Show Archived';
     btn.style.color = _showArchived ? 'var(--gold)' : 'var(--muted)';
     btn.style.borderColor = _showArchived ? 'var(--gold)' : 'var(--navy-border)';
+  }
+  renderLiquid();
+};
+
+window.toggleHideEmptyContainers = function() {
+  _hideEmpty = !_hideEmpty;
+  var btn = document.getElementById('liq-empty-toggle');
+  if (btn) {
+    btn.textContent = _hideEmpty ? 'Show Empty' : 'Hide Empty';
+    btn.style.color = _hideEmpty ? 'var(--gold)' : 'var(--muted)';
+    btn.style.borderColor = _hideEmpty ? 'var(--gold)' : 'var(--navy-border)';
   }
   renderLiquid();
 };
@@ -38006,17 +38023,20 @@ window.saveAdjModal = async function() {
               (_woPlan.donors || []).forEach(function(d) { _drawByRef[d.reference] = (_drawByRef[d.reference] || 0) + (parseFloat(d.drawLitres) || 0); });
             }
           }
-          h += '<div style="display:grid;grid-template-columns:1.5fr 1fr 1fr 1fr;gap:0 10px;font-size:12px;">';
+          h += '<div style="display:grid;grid-template-columns:1.3fr 0.9fr 1fr 1fr 1fr 1fr;gap:0 10px;font-size:12px;">';
           h += '<div style="' + S.label + 'margin-bottom:4px;">Vessel</div>'
             + '<div style="' + S.label + 'margin-bottom:4px;text-align:right;">Starting</div>'
-            + '<div style="' + S.label + 'margin-bottom:4px;text-align:right;">Take Out</div>'
-            + '<div style="' + S.label + 'margin-bottom:4px;text-align:right;">Remaining</div>';
+            + '<div style="' + S.label + 'margin-bottom:4px;text-align:right;">Planned Take Out</div>'
+            + '<div style="' + S.label + 'margin-bottom:4px;text-align:right;">Planned Remaining</div>'
+            + '<div style="' + S.label + 'margin-bottom:4px;text-align:right;">Actual Take Out</div>'
+            + '<div style="' + S.label + 'margin-bottom:4px;text-align:right;">Actual Remaining</div>';
           linkedContainers.forEach(function(c) {
             var _tot = parseFloat(c.current_litres || 0);
             var _drawn = _drawByRef[c.reference] || 0;
             var _rem = Math.max(0, _tot - _drawn);
             var _isLeft = _rem > 0.5;
             var _cell = 'border-top:1px solid #ededed;padding:5px 0;';
+            var _writeIn = _cell + 'border-bottom:1px solid #999;min-height:18px;';
             var _spirit = c.spirit_type
               ? c.spirit_type.replace(/_/g,' ').replace(/\b\w/g,function(x){return x.toUpperCase();})
               : '';
@@ -38025,7 +38045,9 @@ window.saveAdjModal = async function() {
               + '<div style="' + _cell + 'text-align:right;color:#0d3349;">' + (_tot > 0 ? '~' + _tot.toFixed(0) + ' L' : '—') + '</div>'
               + '<div style="' + _cell + 'text-align:right;color:#0d3349;">' + (_drawn > 0.5 ? '~' + _drawn.toFixed(0) + ' L' : '—') + '</div>'
               + '<div style="' + _cell + 'text-align:right;font-weight:700;color:' + (_isLeft ? '#0d3349' : '#2e7d32') + ';">'
-              + (_isLeft ? '~' + _rem.toFixed(0) + ' L' : 'Emptied') + '</div>';
+              + (_isLeft ? '~' + _rem.toFixed(0) + ' L' : 'Emptied') + '</div>'
+              + '<div style="' + _writeIn + '"></div>'
+              + '<div style="' + _writeIn + '"></div>';
           });
           h += '</div>';
         }
@@ -39790,6 +39812,19 @@ window.saveAdjModal = async function() {
             var clientBadge = row.clientId
               ? '<span style="font-size:9px;font-weight:700;color:var(--amber);background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.4);border-radius:3px;padding:1px 6px;margin-left:6px;">CLIENT-OWNED</span>'
               : '';
+            // Surface what's in the vessel here so the operator doesn't have to
+            // scroll back to the top table to check the spirit type per IBC.
+            var _loSpiritDisp = row.spiritType
+              ? String(row.spiritType).replace(/_/g,' ').replace(/\b\w/g, function(x){ return x.toUpperCase(); })
+              : '';
+            var _loTypeLbl = _destTypeLbl[row.type] || (row.type || '');
+            var _loContentParts = [];
+            if (_loSpiritDisp) _loContentParts.push(esc(_loSpiritDisp));
+            if (_loTypeLbl) _loContentParts.push(esc(_loTypeLbl));
+            _loContentParts.push(row.abv.toFixed(1) + '% ABV');
+            var contentSub = '<div style="font-size:10px;font-weight:600;color:var(--gold-light);margin:-4px 0 8px;">'
+              + _loContentParts.join(' &middot; ')
+              + '</div>';
             // Before-state drift: the litres we are reconciling against (snapshot at
             // link time) no longer matches the vessel's live litres. Surface it so a
             // stale/overwritten figure is caught before it is frozen into history.
@@ -39799,10 +39834,14 @@ window.saveAdjModal = async function() {
                 + '&#9888; This vessel held <strong>' + row.snapLitres.toFixed(1) + ' L</strong> when linked but now shows <strong>' + row.liveLitres.toFixed(1) + ' L</strong> live. The job uses the linked figure; check it is correct before completing.'
                 + '</div>';
             }
-            var ownerSel = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">'
-              + '<span style="font-size:11px;color:var(--muted);white-space:nowrap;">Leftover owner:</span>'
-              + '<select id="lq-lo-owner-' + idx + '" style="' + _selStyle + 'width:auto;min-width:180px;flex:1 1 180px;">' + _ownerOpts(row.ownerBeforeId) + '</select>'
-              + '<span style="font-size:10px;color:var(--muted);">owns the liquid left over (undrawn) in this vessel</span>'
+            // Resolve the current owner's display name so the operator can see who
+            // owns the leftover now versus who they're reassigning it to.
+            var _curOwner = (_ownerClients || []).filter(function(c){ return c.id === row.ownerBeforeId; })[0];
+            var _curOwnerName = _curOwner ? (_curOwner.name || _curOwner.id) : (row.ownerBeforeId ? row.ownerBeforeId : 'Not set');
+            var ownerSel = '<div style="margin-bottom:10px;padding:10px 12px;background:rgba(201,168,76,0.06);border:1px solid var(--gold-dim);border-left:3px solid var(--gold);border-radius:4px;">'
+              + '<div style="font-size:11px;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;color:var(--gold-light);margin-bottom:2px;">Change owner of leftover liquid</div>'
+              + '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;">Currently owned by <strong style="color:var(--white);">' + esc(_curOwnerName) + '</strong>. Select a new owner below to reassign the undrawn liquid in this vessel.</div>'
+              + '<select id="lq-lo-owner-' + idx + '" style="' + _selStyle + 'width:100%;font-size:13px;padding:8px 10px;">' + _ownerOpts(row.ownerBeforeId) + '</select>'
               + '</div>';
             var canDilute = bottlingAbv > 0 && row.abv > bottlingAbv + 0.5;
             var srcCapTxt = row.capacity > 0 ? row.capacity.toFixed(0) + 'L capacity' : 'capacity unknown';
@@ -39820,6 +39859,7 @@ window.saveAdjModal = async function() {
               + '</div>';
             return '<div style="border:1px solid var(--navy-border);border-radius:4px;padding:10px 12px;margin-bottom:8px;">'
               + '<div style="font-size:11px;font-weight:700;color:var(--white);margin-bottom:8px;">' + esc(row.reference) + ' — leftover <span id="lq-leftover-litres-' + idx + '">' + fifoRemaining[idx].toFixed(1) + '</span> L' + clientBadge + '</div>'
+              + contentSub
               + driftNote
               + ownerSel
               + strengthRadios
@@ -40119,7 +40159,7 @@ window.saveAdjModal = async function() {
           lines: contRows.map(function(row, idx) {
             var rem   = getRemaining(idx);
             var drawn = Math.max(0, row.before - rem);
-            return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv, lpaBefore: row.lpaBefore, clientId: row.clientId, ownerBefore: row.ownerBeforeId, ownerAfter: getLeftoverOwner(idx) };
+            return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv, lpaBefore: row.lpaBefore, clientId: row.clientId, ownerBefore: row.ownerBeforeId, ownerAfter: getLeftoverOwner(idx), type: row.type };
           }).filter(function(l){ return l.litreDrawn > 0.001 && alreadyDeductedIds.indexOf(l.containerId) < 0; }),
           isPartial:          alreadyDeductedIds.length > 0,
           waste:      { litres: getWasteLitres(),    reason: getWasteReason() },
@@ -40153,6 +40193,7 @@ window.saveAdjModal = async function() {
               ownerBefore: row.ownerBeforeId,
               ownerAfter:  getLeftoverOwner(idx),
               fillDate:    row.fillDate,
+              type:        row.type,
               strength:    strength,
               allocations: allocs,
               _nonDefault: rem > 0.05 && (toBottle || movedOut)
@@ -40195,9 +40236,14 @@ window.saveAdjModal = async function() {
           current_lpa:    Math.round(remainLP * 1e4) / 1e4,
           status:         newStatus
         };
-        // Stamp the chosen liquid owner onto whatever stays in the source. Absolute
-        // set (idempotent on re-completion); only when liquid remains to be owned.
-        if (line.ownerAfter && line.litreRemaining > 0.05) _cUpd.liquid_owner_client_id = line.ownerAfter;
+        // Stamp the chosen owner onto whatever stays in the source. Absolute set
+        // (idempotent on re-completion); only when liquid remains to be owned.
+        // Tanks/tankers are LH-owned vessels, so the owner goes on the liquid owner
+        // field; every other type (ibc, cask, blue_drum) owns via client_id.
+        if (line.ownerAfter && line.litreRemaining > 0.05) {
+          if (window._cmIsLhFleetType(line.type)) _cUpd.liquid_owner_client_id = line.ownerAfter;
+          else _cUpd.client_id = line.ownerAfter;
+        }
         await window.db.update('liquid_containers', '?id=eq.' + line.containerId, _cUpd);
       } catch(lineErr) {
         console.error('Liquid container update failed for ' + line.containerId + ':', lineErr.message);
@@ -40452,9 +40498,14 @@ window.saveAdjModal = async function() {
       status:         srcLit <= 0 ? 'empty' : 'partially_full'
     };
     if (srcAlloc.cbw) srcUpd.cbw_rotation = srcAlloc.cbw;
-    // Owner chosen at close-out for the liquid that stays in the source.
+    // Owner chosen at close-out for the liquid that stays in the source. Tanks/tankers
+    // are LH-owned vessels (owner on liquid_owner_client_id); every other type owns
+    // via client_id.
     var _ownerAfter = lo.ownerAfter || lo.clientId || null;
-    if (_ownerAfter && srcLit > 0.05) srcUpd.liquid_owner_client_id = _ownerAfter;
+    if (_ownerAfter && srcLit > 0.05) {
+      if (window._cmIsLhFleetType(lo.type)) srcUpd.liquid_owner_client_id = _ownerAfter;
+      else srcUpd.client_id = _ownerAfter;
+    }
     await window.db.update('liquid_containers', '?id=eq.' + srcId, srcUpd);
 
     var dilNote = toBott ? (loAbv.toFixed(1) + '% → ' + targetAbv.toFixed(1) + '%, +' + Math.max(0, (loLpa / (targetAbv / 100)) - loLit).toFixed(1) + 'L water') : 'at ' + targetAbv.toFixed(1) + '%';
@@ -40493,9 +40544,11 @@ window.saveAdjModal = async function() {
       if (dLit <= 0.001 && lo.fillDate) destUpd.fill_date = lo.fillDate;
       if (a.cbw) destUpd.cbw_rotation = a.cbw;
       // Carry the chosen owner onto any destination that was empty before the move
-      // (blending into already-owned liquid keeps the destination's owner).
+      // (blending into already-owned liquid keeps the destination's owner). Tanks/
+      // tankers own via liquid_owner_client_id; every other type owns via client_id.
       if (dLit <= 0.001 && _ownerAfter) {
-        destUpd.liquid_owner_client_id = _ownerAfter;
+        if (window._cmIsLhFleetType(d.type)) destUpd.liquid_owner_client_id = _ownerAfter;
+        else destUpd.client_id = _ownerAfter;
       }
       await window.db.update('liquid_containers', '?id=eq.' + a.vesselId, destUpd);
 
