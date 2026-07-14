@@ -11206,8 +11206,12 @@ window._BOM_SKU_COLUMNS = [
 //          linked container (not mirrored onto the job row) still dilute.
 //       3. raw liquid_litres when no strength information is available.
 // `bom` may be a full BOM row (preferred) or a bare { volume_cl } shim.
+// `abvInOverride` (optional) supplies the incoming ABV recovered from the
+// sign-off's linked containers for jobs that never wrote jobs.abv_in (liquid
+// linked via the Liquid Sign-Off tab). It is only consulted when the job row
+// itself carries no abv_in, so a real stored value always wins.
 // Returns a rounded bottle count, or null when it can't be derived.
-window._deriveBottleCount = function(job, bom) {
+window._deriveBottleCount = function(job, bom, abvInOverride) {
   if (!job || !bom) return null;
   if (job.bottle_target) return parseInt(job.bottle_target, 10) || null;
   if (job.job_target_type !== 'liquid') return null;
@@ -11221,7 +11225,7 @@ window._deriveBottleCount = function(job, bom) {
   // liquid-assignment paths persist UN-diluted (== liquid_litres) when the BOM
   // wasn't loaded at calc time — that stale value would otherwise peg the count
   // at the raw litres (e.g. 800 L / 0.7 = 1,143 instead of the diluted 2,620).
-  var abvIn       = parseFloat(job.abv_in);
+  var abvIn       = parseFloat(job.abv_in) || parseFloat(abvInOverride);
   var bottlingAbv = parseFloat(job.bottling_abv) || parseFloat(bom.bottling_abv) || parseFloat(bom.abv);
   var workingLitres;
   if (abvIn > 0 && bottlingAbv > 0) {
@@ -35283,11 +35287,13 @@ window.saveAdjModal = async function() {
   //   • Liquid-target jobs:  derives bottles via _deriveBottleCount (derived:true).
   // The second arg may be a full BOM row (preferred — enables the BOM bottling_abv
   // fallback) or a bare volume-in-cl number.
-  window._calcEffectiveBottles = function(job, bomOrVolCl) {
+  // `abvInOverride` (optional) is the incoming ABV recovered from the sign-off's
+  // linked containers, so views can dilute jobs that never wrote jobs.abv_in.
+  window._calcEffectiveBottles = function(job, bomOrVolCl, abvInOverride) {
     if (!job) return { bottles: null, derived: false };
     if (job.bottle_target) return { bottles: parseInt(job.bottle_target, 10), derived: false };
     var bom = (bomOrVolCl && typeof bomOrVolCl === 'object') ? bomOrVolCl : { volume_cl: bomOrVolCl };
-    var n = window._deriveBottleCount(job, bom);
+    var n = window._deriveBottleCount(job, bom, abvInOverride);
     return { bottles: n, derived: !!n };
   };
 
@@ -35912,7 +35918,7 @@ window.saveAdjModal = async function() {
     html += '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">Final Yield</div>';
 
     html += frow('Batch / Lot No', inp('lot-no', j.lot_number, 'e.g. B-0042'), true);
-    var _resEff = window._calcEffectiveBottles(j, bom);
+    var _resEff = window._calcEffectiveBottles(j, bom, window._weightedContainerAbv(_psLinked));
     var _resPlannedLabel = 'Planned: ' + (_resEff.bottles ? _resEff.bottles.toLocaleString() : '—') + ' bottles'
       + (_resEff.derived ? ' (calc.)' : '');
     html += frow('Total Bottles Produced', inp('bottles', j.actual_bottles_produced, 'e.g. 6820', 'number') + sub(_resPlannedLabel), true);
@@ -36315,7 +36321,7 @@ window.saveAdjModal = async function() {
         : 'Bottled at ' + (bottlingAbv ? bottlingAbv.toFixed(1) + '% ABV' : 'specified strength');
 
       var totalPallets = (casesPerPallet && j.actual_cases) ? Math.ceil(j.actual_cases / casesPerPallet) : null;
-      var _emEff = window._calcEffectiveBottles(j, { volume_cl: volumeCl, bottling_abv: bottlingAbv });
+      var _emEff = window._calcEffectiveBottles(j, { volume_cl: volumeCl, bottling_abv: bottlingAbv }, window._weightedContainerAbv(contDetails));
 
       var _bcJobLabel = (window.jobLabel && window.jobLabel(j)) || j.product_name || j.id;
       var subject = 'Bottling Confirmation — ' + _bcJobLabel + ' · Lot ' + (j.lot_number || '—');
@@ -37324,7 +37330,10 @@ window.saveAdjModal = async function() {
           + '</span>'
           + _specBlendNote);
       }
-      var _lsoEff = window._calcEffectiveBottles(j, _bomVolCl);
+      // Pass the BOM bottling ABV + the linked-container incoming ABV so jobs whose
+      // liquid was linked via this tab (never wrote jobs.abv_in) still dilute:
+      // 800 L @ 94% → 41% ≈ 2,620 btls, not the raw 800 L / 0.7 = 1,143.
+      var _lsoEff = window._calcEffectiveBottles(j, { volume_cl: _bomVolCl, bottling_abv: _bottlingAbv }, _linkedAvgAbv);
       html += frow('Target bottles',
         '<span style="font-size:13px;color:var(--white);font-weight:600;">'
         + (_lsoEff.bottles ? _lsoEff.bottles.toLocaleString() + ' btls' : '—')
@@ -38111,7 +38120,7 @@ window.saveAdjModal = async function() {
     h += frow('PO Number', esc(j.po_number || '—'));
     h += '</div><div>';
     h += frow('Scheduled Date', esc(schedDate));
-    var _woEff = window._calcEffectiveBottles(j, bom);
+    var _woEff = window._calcEffectiveBottles(j, bom, _contWeightedAvgAbv);
     h += frow('Bottle Target',
       (_woEff.bottles ? _woEff.bottles.toLocaleString() + ' btls' : '—')
       + (_woEff.derived ? ' <span style="font-size:10px;color:#888;font-weight:600;">(calculated from litres)</span>' : ''));
