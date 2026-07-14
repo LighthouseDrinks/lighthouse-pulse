@@ -32728,6 +32728,7 @@ window.saveAdjModal = async function() {
   // ── ASSIGN LIQUID MODAL ────────────────────────────────────────────────────────
   var _almJobId = null;
   var _almJob   = null;
+  var _almBom   = null;   // BOM row fetched live from Supabase (reliable volume/ABV)
   var _almAllContainers = [];
   var _almSelectedIds   = new Set();
 
@@ -32760,6 +32761,24 @@ window.saveAdjModal = async function() {
       stage:       rawJob.stage || ''
     };
 
+    // Fetch the BOM live so dilution/final-litres never depend on whether the
+    // BOMS page happens to be loaded. Normalised to the camelCase keys the modal
+    // uses (volume in cl, bottlingAbv, abv). Falls back to the BOMS global on error.
+    _almBom = null;
+    if (_almJob.bomId) {
+      try {
+        var _almBomRows = await supaGet('boms?id=eq.' + _almJob.bomId + '&select=volume_cl,bottling_abv,abv,liquid_spec&limit=1');
+        if (_almBomRows && _almBomRows[0]) {
+          _almBom = {
+            volume:      _almBomRows[0].volume_cl,
+            bottlingAbv: _almBomRows[0].bottling_abv,
+            abv:         _almBomRows[0].abv,
+            liquid:      _almBomRows[0].liquid_spec
+          };
+        }
+      } catch(_e) { window.logError && window.logError('openAssignLiquidModal: BOM fetch', _e); }
+    }
+
     var ov = document.getElementById('assign-liquid-overlay');
     if (!ov) return;
 
@@ -32770,7 +32789,7 @@ window.saveAdjModal = async function() {
     if (metaEl)  metaEl.textContent  = _almJob.id + ' · ' + _almJob.client + ' · ' + (_almJob.target === 'Liquid' ? (_almJob.litres || '?') + ' L requested' : (_almJob.bottles || '?') + ' bottles target');
 
     // Requirement bar
-    var bom = (typeof BOMS !== 'undefined' ? BOMS : []).find(function(b){ return b.id === _almJob.bomId || b.id === _almJob.specId; });
+    var bom = _almBom || (typeof BOMS !== 'undefined' ? BOMS : []).find(function(b){ return b.id === _almJob.bomId || b.id === _almJob.specId; });
     var bomAbv = bom ? (bom.abv || bom.bottlingAbv || '') : (_almJob.bottlingAbv || '');
     var bomSpec = bom ? (bom.liquid || bom.liquidSpec || '') : '';
     var targetTxt = _almJob.target === 'Liquid'
@@ -32857,7 +32876,7 @@ window.saveAdjModal = async function() {
   window._almCalc = function() {
     var litres   = parseFloat((document.getElementById('alm-litres')||{}).value) || 0;
     var abvIn    = parseFloat((document.getElementById('alm-abv')||{}).value)    || 0;
-    var bom      = (typeof BOMS !== 'undefined' ? BOMS : []).find(function(b){ return _almJob && (b.id === _almJob.bomId || b.id === _almJob.specId); });
+    var bom      = _almBom || (typeof BOMS !== 'undefined' ? BOMS : []).find(function(b){ return _almJob && (b.id === _almJob.bomId || b.id === _almJob.specId); });
     var bottAbv  = bom ? parseFloat(bom.bottlingAbv || bom.abv || 0) : 0;
     var volCl    = bom ? parseFloat(bom.volume || 0) : 0;
     var panel    = document.getElementById('alm-calc-panel');
@@ -32894,7 +32913,7 @@ window.saveAdjModal = async function() {
     var ov = document.getElementById('assign-liquid-overlay');
     if (ov) ov.style.display = 'none';
     document.body.style.overflow = '';
-    _almJobId = null; _almJob = null; _almSelectedIds = new Set();
+    _almJobId = null; _almJob = null; _almBom = null; _almSelectedIds = new Set();
   };
 
   window.saveAssignLiquid = async function() {
