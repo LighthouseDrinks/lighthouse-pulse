@@ -11216,14 +11216,19 @@ window._deriveBottleCount = function(job, bom) {
   if (!(litres > 0) || !(volCl > 0)) return null;
   var capL = volCl / 100;
 
+  // Prefer the authoritative strength-based dilution when the incoming ABV and a
+  // bottling ABV are both known. This beats trusting job.final_litres, which some
+  // liquid-assignment paths persist UN-diluted (== liquid_litres) when the BOM
+  // wasn't loaded at calc time — that stale value would otherwise peg the count
+  // at the raw litres (e.g. 800 L / 0.7 = 1,143 instead of the diluted 2,620).
+  var abvIn       = parseFloat(job.abv_in);
+  var bottlingAbv = parseFloat(job.bottling_abv) || parseFloat(bom.bottling_abv) || parseFloat(bom.abv);
   var workingLitres;
-  var finalLitres = parseFloat(job.final_litres);
-  if (finalLitres > 0) {
-    workingLitres = finalLitres;
+  if (abvIn > 0 && bottlingAbv > 0) {
+    workingLitres = (litres * abvIn) / bottlingAbv;
   } else {
-    var abvIn       = parseFloat(job.abv_in);
-    var bottlingAbv = parseFloat(job.bottling_abv) || parseFloat(bom.bottling_abv) || parseFloat(bom.abv);
-    workingLitres = (abvIn > 0 && bottlingAbv > 0) ? (litres * abvIn) / bottlingAbv : litres;
+    var finalLitres = parseFloat(job.final_litres);
+    workingLitres = finalLitres > 0 ? finalLitres : litres;
   }
   return Math.round(workingLitres / capL) || null;
 };
@@ -34589,6 +34594,24 @@ window.saveAdjModal = async function() {
         comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
       }
 
+      // Self-heal stored quantities for liquid-target jobs. They're seeded at job
+      // creation (before liquid/ABV are known), so an assigned dilution must be
+      // re-derived here to flow in without a manual re-save. resyncComponentQtys
+      // patches only qty_required (preserves PO/order/exclusions) and no-ops when
+      // already in sync, so this is cheap on repeat loads.
+      if (j_preseed && j_preseed.job_target_type === 'liquid' && j_preseed.bom_id && comps.length) {
+        var _healed = await window.resyncComponentQtys(jobId, {
+          bom_id:          j_preseed.bom_id,
+          job_target_type: 'liquid',
+          bottle_target:   j_preseed.bottle_target || null,
+          liquid_litres:   j_preseed.liquid_litres,
+          abv_in:          j_preseed.abv_in,
+          bottling_abv:    j_preseed.bottling_abv,
+          final_litres:    j_preseed.final_litres
+        });
+        if (_healed) comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
+      }
+
       if (!comps.length) {
         el.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">No BOM items found for this job.</div>';
         return;
@@ -35308,18 +35331,21 @@ window.saveAdjModal = async function() {
   // Patches only qty_required on existing job_components rows — preserves PO numbers,
   // order status, delivery dates, exclusions, and all other tracking fields.
   // jobData must contain: bom_id, job_target_type, bottle_target, liquid_litres, abv_in, bottling_abv
+  // Returns the number of rows whose qty_required actually changed, so callers
+  // (e.g. loadComponentsTab self-heal) can avoid a redundant reload when nothing moved.
   window.resyncComponentQtys = async function(jobId, jobData) {
-    if (!jobData || !jobData.bom_id) return;
+    if (!jobData || !jobData.bom_id) return 0;
+    var changed = 0;
     try {
       var bomRows = await supaGet('boms?id=eq.' + jobData.bom_id + '&select=liquid_sku_id,bottle_sku_id,shipper_sku_id,divider_sku_id,volume_cl,bottles_per_shipper,bottling_abv,abv');
-      if (!bomRows || !bomRows.length) return;
+      if (!bomRows || !bomRows.length) return 0;
       var bom = bomRows[0];
 
       // Compute effective bottle count once — shared with initComponentsFromBOM
       var effectiveBottles = window._deriveBottleCount(jobData, bom);
 
       var comps = await supaGet('job_components?job_id=eq.' + jobId);
-      if (!comps || !comps.length) return;
+      if (!comps || !comps.length) return 0;
 
       for (var i = 0; i < comps.length; i++) {
         var c = comps[i];
@@ -35333,10 +35359,19 @@ window.saveAdjModal = async function() {
         } else {
           qty = effectiveBottles;
         }
-        try { await supaMut('PATCH', 'job_components', '?id=eq.' + c.id, { qty_required: qty }); }
+        // Skip rows that already hold the right value — keeps the on-load
+        // self-heal cheap (0 writes when a job is already in sync).
+        var cur  = c.qty_required == null ? null : Number(c.qty_required);
+        var next = qty == null ? null : Number(qty);
+        if (cur === next) continue;
+        try {
+          await supaMut('PATCH', 'job_components', '?id=eq.' + c.id, { qty_required: qty });
+          changed++;
+        }
         catch(pErr) { window.logError && window.logError('resyncComponentQtys patch', pErr); }
       }
     } catch(e) { window.logError && window.logError('resyncComponentQtys', e); }
+    return changed;
   };
 
   window.updateComponent = async function(id, field, value) {
