@@ -11233,6 +11233,26 @@ window._deriveBottleCount = function(job, bom) {
   return Math.round(workingLitres / capL) || null;
 };
 
+// LPA-weighted average ABV of a set of linked liquid containers, as stored in
+// job_liquid_signoff.linked_containers_json (each entry is a liquid_containers
+// row with abv / current_litres / current_lpa). Liquid linked via the Liquid
+// Sign-Off tab never writes jobs.abv_in, so this recovers the incoming strength
+// (e.g. 94%) needed to compute the dilution for the Supply Chain quantities.
+// Falls back to a simple average when litres are unavailable; returns 0 if none.
+window._weightedContainerAbv = function(linked) {
+  if (!Array.isArray(linked) || !linked.length) return 0;
+  var litSum = 0, lpaSum = 0, abvSum = 0, n = 0;
+  linked.forEach(function(c) {
+    var abv = parseFloat(c.abv || 0) || 0;
+    var lit = parseFloat(c.current_litres || 0) || 0;
+    var lpa = parseFloat(c.current_lpa || 0) || (lit * abv / 100);
+    if (lit > 0) { litSum += lit; lpaSum += lpa; }
+    if (abv > 0) { abvSum += abv; n++; }
+  });
+  if (litSum > 0 && lpaSum > 0) return (lpaSum / litSum) * 100;
+  return n > 0 ? abvSum / n : 0;
+};
+
 // Compute the per-job qty_required for one BOM SKU column.
 // Shippers and dividers are case items (ceil(bottles / bottles_per_shipper)).
 // Liquid SKU has no bottle-based qty (qty tracked in litres elsewhere).
@@ -34619,12 +34639,26 @@ window.saveAdjModal = async function() {
       // patches only qty_required (preserves PO/order/exclusions) and no-ops when
       // already in sync, so this is cheap on repeat loads.
       if (j_preseed && j_preseed.job_target_type === 'liquid' && j_preseed.bom_id && comps.length) {
+        // Liquid linked via the Liquid Sign-Off tab is stored in
+        // job_liquid_signoff.linked_containers_json and NEVER written to jobs.abv_in.
+        // When the job row has no incoming ABV, recover it from the linked containers
+        // so the dilution (e.g. 94% -> 41%) reaches the Supply Chain quantities.
+        var _healAbvIn = j_preseed.abv_in;
+        if (!(parseFloat(_healAbvIn) > 0)) {
+          try {
+            var _lsoRows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&select=linked_containers_json&limit=1');
+            var _linked = [];
+            if (_lsoRows && _lsoRows[0]) { try { _linked = JSON.parse(_lsoRows[0].linked_containers_json || '[]'); } catch(_pe) {} }
+            var _cAbv = window._weightedContainerAbv(_linked);
+            if (_cAbv > 0) _healAbvIn = _cAbv;
+          } catch(_le) { window.logError && window.logError('loadComponentsTab: LSO abv', _le); }
+        }
         var _healed = await window.resyncComponentQtys(jobId, {
           bom_id:          j_preseed.bom_id,
           job_target_type: 'liquid',
           bottle_target:   j_preseed.bottle_target || null,
           liquid_litres:   j_preseed.liquid_litres,
-          abv_in:          j_preseed.abv_in,
+          abv_in:          _healAbvIn,
           bottling_abv:    j_preseed.bottling_abv,
           final_litres:    j_preseed.final_litres
         });
