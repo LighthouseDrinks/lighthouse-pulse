@@ -11193,23 +11193,47 @@ window._BOM_SKU_COLUMNS = [
   { col: 'coa_sku_id',          label: 'Certificate of Authenticity' }
 ];
 
+// Single source of truth for turning a job into an effective bottle count.
+// Used by _bomQtyFor, _calcEffectiveBottles, initComponentsFromBOM and
+// resyncComponentQtys so every view agrees on the same number.
+//   • Bottles-target jobs: returns the stored bottle_target.
+//   • Liquid-target jobs:  derives bottles from liquid_litres + BOM volume_cl,
+//     applying dilution in priority order:
+//       1. job.final_litres — already dilution-adjusted at liquid assignment.
+//       2. liquid_litres * abv_in / bottling_abv, where bottling_abv falls back
+//          to the BOM (bottling_abv || abv) so jobs whose ABV lives on the BOM /
+//          linked container (not mirrored onto the job row) still dilute.
+//       3. raw liquid_litres when no strength information is available.
+// `bom` may be a full BOM row (preferred) or a bare { volume_cl } shim.
+// Returns a rounded bottle count, or null when it can't be derived.
+window._deriveBottleCount = function(job, bom) {
+  if (!job || !bom) return null;
+  if (job.bottle_target) return parseInt(job.bottle_target, 10) || null;
+  if (job.job_target_type !== 'liquid') return null;
+  var litres = parseFloat(job.liquid_litres);
+  var volCl  = parseFloat(bom.volume_cl);
+  if (!(litres > 0) || !(volCl > 0)) return null;
+  var capL = volCl / 100;
+
+  var workingLitres;
+  var finalLitres = parseFloat(job.final_litres);
+  if (finalLitres > 0) {
+    workingLitres = finalLitres;
+  } else {
+    var abvIn       = parseFloat(job.abv_in);
+    var bottlingAbv = parseFloat(job.bottling_abv) || parseFloat(bom.bottling_abv) || parseFloat(bom.abv);
+    workingLitres = (abvIn > 0 && bottlingAbv > 0) ? (litres * abvIn) / bottlingAbv : litres;
+  }
+  return Math.round(workingLitres / capL) || null;
+};
+
 // Compute the per-job qty_required for one BOM SKU column.
 // Shippers and dividers are case items (ceil(bottles / bottles_per_shipper)).
 // Liquid SKU has no bottle-based qty (qty tracked in litres elsewhere).
-// All other items use the bottle target directly.
-// For liquid-target jobs, derives bottle count from liquid_litres + BOM volume,
-// applying dilution adjustment when ABV in/out are both known.
+// All other items use the effective bottle count from _deriveBottleCount.
 window._bomQtyFor = function(skuCol, job, bom) {
   if (!job || !bom) return null;
-  var effectiveBottles = job.bottle_target || null;
-  if (!effectiveBottles && job.job_target_type === 'liquid' && job.liquid_litres && bom.volume_cl) {
-    var capL = bom.volume_cl / 100;
-    var workingLitres = job.liquid_litres;
-    if (job.abv_in && job.bottling_abv) {
-      workingLitres = (job.liquid_litres * job.abv_in) / job.bottling_abv;
-    }
-    effectiveBottles = Math.round(workingLitres / capL) || null;
-  }
+  var effectiveBottles = window._deriveBottleCount(job, bom);
   if (skuCol === 'liquid_sku_id') return null;
   var isCaseItem = (skuCol === 'shipper_sku_id' || skuCol === 'divider_sku_id');
   if (isCaseItem) {
@@ -12476,7 +12500,7 @@ async function _propagateBomToActiveJobs(bomId) {
   var jobs = await window.db.select('jobs',
     '?bom_id=eq.' + bomId +
     '&stage=in.(new,active,on_hold)' +
-    '&select=id,bom_id,job_target_type,bottle_target,liquid_litres,abv_in,bottling_abv'
+    '&select=id,bom_id,job_target_type,bottle_target,liquid_litres,abv_in,bottling_abv,final_litres'
   );
   if (!Array.isArray(jobs) || !jobs.length) return summary;
 
@@ -27223,6 +27247,17 @@ window.loadLiquidProducts = async function() {
   try {
     var rows = await window.db.select('liquid_products', '?order=sort_order.asc,name.asc&limit=500');
     window._liquidProducts = rows;
+
+    // Populate the client cache BEFORE the first paint. The clients table's id
+    // IS the client code (e.g. "CLI-007") and the display name lives in
+    // `company`, so renderLiquidProducts must have this map ready or it falls
+    // back to showing the raw code. Rendering before this fetch (as it did
+    // previously) meant a cold load — landing straight on the Inventory page
+    // with empty CLIENTS/_clients caches — showed CLI-xxx codes until a revisit
+    // warmed the cache. Fetch first, then render, so it can't regress.
+    var clients = await window.db.select('clients', '?order=name.asc&limit=500').catch(function(){ return []; });
+    window._lpClientsCache = clients;
+
     renderLiquidProducts(rows);
 
     // Show Add button to anyone with the liquid_products_edit permission
@@ -27231,11 +27266,6 @@ window.loadLiquidProducts = async function() {
 
     // Check for containers needing retag
     var containers = await window.fetchAll('liquid_containers', '?archived=is.false&order=reference.asc').catch(function(){ return []; });
-    var clients = await window.db.select('clients', '?order=name.asc&limit=500').catch(function(){ return []; });
-    // Expose for the Add/Edit modal and the table client-name column — both
-    // were previously hitting empty `window.CLIENTS`/`window._clients` caches
-    // when the user landed straight on the Inventory page.
-    window._lpClientsCache = clients;
     var activeNames = new Set(rows.filter(function(r){ return r.is_active !== false; }).map(function(r){ return r.name; }));
     var unmatched = containers.filter(function(c){ return c.spirit_type && !activeNames.has(c.spirit_type); });
     var retagWrap = document.getElementById('lp-retag-wrap');
@@ -27345,7 +27375,7 @@ window.openLPModal = async function(editId) {
                : null;
     if (!source) {
       try {
-        source = await window.db.select('clients', '?select=id,name,lifecycle_stage&order=name.asc&limit=1000');
+        source = await window.db.select('clients', '?select=id,name,company,lifecycle_stage&order=name.asc&limit=1000');
         if (source) window._lpClientsCache = source;
       } catch(_) { source = []; }
     }
@@ -32587,7 +32617,10 @@ window.saveAdjModal = async function() {
         // Resync supply chain qty_required — abv_in is read from _jobs now (before loadJobs overwrites it)
         // because payload always sets abv_in: null (liquid assignment fields are managed separately)
         var _existingJob = (_jobs || []).find(function(x){ return x.id === editId; }) || {};
-        var _resyncData = Object.assign({}, payload, { abv_in: _existingJob.abv_in || null });
+        var _resyncData = Object.assign({}, payload, {
+          abv_in:       _existingJob.abv_in || null,
+          final_litres: _existingJob.final_litres || null
+        });
         try { await window.resyncComponentQtys(editId, _resyncData); } catch(e) { window.logError && window.logError('resyncComponentQtys', e); }
         window.toast && window.toast('Job updated.', 'success');
         window.closeNewJobModal();
@@ -35094,24 +35127,16 @@ window.saveAdjModal = async function() {
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
 
-  // Effective bottle count for a job:
+  // Effective bottle count for a job, wrapping the shared _deriveBottleCount.
   //   • Bottles-target jobs: returns the stored bottle_target (derived:false).
-  //   • Liquid-target jobs:  derives bottles from liquid_litres + BOM volume_cl,
-  //     adjusting for dilution when abv_in and bottling_abv are both present.
-  // Mirrors the formula used in initComponentsFromBOM / resyncComponentQtys.
-  window._calcEffectiveBottles = function(job, bomVolCl) {
+  //   • Liquid-target jobs:  derives bottles via _deriveBottleCount (derived:true).
+  // The second arg may be a full BOM row (preferred — enables the BOM bottling_abv
+  // fallback) or a bare volume-in-cl number.
+  window._calcEffectiveBottles = function(job, bomOrVolCl) {
     if (!job) return { bottles: null, derived: false };
     if (job.bottle_target) return { bottles: parseInt(job.bottle_target, 10), derived: false };
-    var volCl = parseFloat(bomVolCl || 0);
-    if (job.job_target_type !== 'liquid' || !job.liquid_litres || !volCl) {
-      return { bottles: null, derived: false };
-    }
-    var capL = volCl / 100;
-    var workingLitres = parseFloat(job.liquid_litres);
-    if (job.abv_in && job.bottling_abv) {
-      workingLitres = (parseFloat(job.liquid_litres) * parseFloat(job.abv_in)) / parseFloat(job.bottling_abv);
-    }
-    var n = Math.round(workingLitres / capL) || null;
+    var bom = (bomOrVolCl && typeof bomOrVolCl === 'object') ? bomOrVolCl : { volume_cl: bomOrVolCl };
+    var n = window._deriveBottleCount(job, bom);
     return { bottles: n, derived: !!n };
   };
 
@@ -35215,16 +35240,8 @@ window.saveAdjModal = async function() {
       if (!bomRows || !bomRows.length) return;
       var bom = bomRows[0];
 
-      // Compute effective bottle count once — same logic as initComponentsFromBOM
-      var effectiveBottles = jobData.bottle_target || null;
-      if (!effectiveBottles && jobData.job_target_type === 'liquid' && jobData.liquid_litres && bom.volume_cl) {
-        var capL = bom.volume_cl / 100;
-        var workingLitres = jobData.liquid_litres;
-        if (jobData.abv_in && jobData.bottling_abv) {
-          workingLitres = (jobData.liquid_litres * jobData.abv_in) / jobData.bottling_abv;
-        }
-        effectiveBottles = Math.round(workingLitres / capL) || null;
-      }
+      // Compute effective bottle count once — shared with initComponentsFromBOM
+      var effectiveBottles = window._deriveBottleCount(jobData, bom);
 
       var comps = await supaGet('job_components?job_id=eq.' + jobId);
       if (!comps || !comps.length) return;
@@ -35732,7 +35749,7 @@ window.saveAdjModal = async function() {
     html += '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--navy-border);">Final Yield</div>';
 
     html += frow('Batch / Lot No', inp('lot-no', j.lot_number, 'e.g. B-0042'), true);
-    var _resEff = window._calcEffectiveBottles(j, bom && bom.volume_cl);
+    var _resEff = window._calcEffectiveBottles(j, bom);
     var _resPlannedLabel = 'Planned: ' + (_resEff.bottles ? _resEff.bottles.toLocaleString() : '—') + ' bottles'
       + (_resEff.derived ? ' (calc.)' : '');
     html += frow('Total Bottles Produced', inp('bottles', j.actual_bottles_produced, 'e.g. 6820', 'number') + sub(_resPlannedLabel), true);
@@ -36135,7 +36152,7 @@ window.saveAdjModal = async function() {
         : 'Bottled at ' + (bottlingAbv ? bottlingAbv.toFixed(1) + '% ABV' : 'specified strength');
 
       var totalPallets = (casesPerPallet && j.actual_cases) ? Math.ceil(j.actual_cases / casesPerPallet) : null;
-      var _emEff = window._calcEffectiveBottles(j, volumeCl);
+      var _emEff = window._calcEffectiveBottles(j, { volume_cl: volumeCl, bottling_abv: bottlingAbv });
 
       var _bcJobLabel = (window.jobLabel && window.jobLabel(j)) || j.product_name || j.id;
       var subject = 'Bottling Confirmation — ' + _bcJobLabel + ' · Lot ' + (j.lot_number || '—');
@@ -37931,7 +37948,7 @@ window.saveAdjModal = async function() {
     h += frow('PO Number', esc(j.po_number || '—'));
     h += '</div><div>';
     h += frow('Scheduled Date', esc(schedDate));
-    var _woEff = window._calcEffectiveBottles(j, bom && bom.volume_cl);
+    var _woEff = window._calcEffectiveBottles(j, bom);
     h += frow('Bottle Target',
       (_woEff.bottles ? _woEff.bottles.toLocaleString() + ' btls' : '—')
       + (_woEff.derived ? ' <span style="font-size:10px;color:#888;font-weight:600;">(calculated from litres)</span>' : ''));
