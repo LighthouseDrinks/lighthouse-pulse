@@ -20047,6 +20047,7 @@ window.loadBoms = async function initBoms() {
     <div id="liq-bulk-bar" style="display:none;background:rgba(201,168,76,0.08);border:1px solid var(--gold-dim);border-radius:4px;padding:10px 16px;margin-bottom:10px;display:none;align-items:center;gap:12px;flex-wrap:wrap;">
       <span id="liq-bulk-count" style="font-size:12px;color:var(--gold);font-weight:700;"></span>
       <button onclick="window.bulkPrintQRSelected()" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">&#128424; Print QR Labels</button>
+      <button onclick="window.exportSelectedLiquidCSV()" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">&#8681; Export CSV</button>
       <button onclick="window.bulkArchiveSelected()" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Archive Selected</button>
       <button onclick="window.liqClearSelection()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Clear Selection</button>
       <button onclick="window.archiveAllCreatedToday()" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:5px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:auto;">⚠ Archive All Created Today</button>
@@ -28748,6 +28749,100 @@ window.bulkPrintQRSelected = function() {
   });
   if (!items.length) { window.toast && window.toast('Could not read IDs for selected rows.', 'warn'); return; }
   window._printBulkBLACQR(items);
+};
+
+// Export the currently tick-selected liquid containers to a CSV (Excel-friendly).
+window.exportSelectedLiquidCSV = function() {
+  var checked = Array.from(document.querySelectorAll('.liq-row-cb:checked'));
+  if (!checked.length) {
+    var msg = 'No containers selected.';
+    if (window.toast) window.toast(msg, 'warn');
+    else if (window.toastMsg) window.toastMsg(msg, 'error');
+    return;
+  }
+
+  var byId = {};
+  (typeof _liquid !== 'undefined' ? _liquid : []).forEach(function(c){ byId[c.id] = c; });
+
+  var recs = [];
+  checked.forEach(function(cb) {
+    var rec = byId[cb.getAttribute('data-cid')];
+    if (rec) recs.push(rec);
+  });
+  if (!recs.length) {
+    if (window.toast) window.toast('Could not read the selected rows.', 'warn');
+    return;
+  }
+
+  function csvEsc(v) {
+    if (v == null) return '';
+    var s = String(v);
+    if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  var _typMap = { cask:'Cask', ibc:'IBC', blue_drum:'Blue Drum', tank:'Tank', tanker:'Tanker' };
+  var _statusMap = { full:'Full', partially_full:'Partially Full', empty:'Empty' };
+
+  var lines = [];
+  lines.push([
+    'Reference','Type','Client / Owner','Spirit / Product','ABV',
+    'Current Litres','Capacity (L)','Fill %','Current LPA','Status',
+    'CBW Rotation','Fill Date','Age','Location'
+  ].join(','));
+
+  recs.forEach(function(c) {
+    var litres = parseFloat(c.current_litres || 0);
+    var cap    = parseFloat(c.capacity_litres || 0);
+    var pct    = cap > 0 ? Math.min(100, Math.round(litres / cap * 100)) : '';
+    var autoStatus = litres <= 0 ? 'empty' : (cap > 0 && litres >= cap ? 'full' : 'partially_full');
+
+    var ref = c.vessel_id || c.reference || '';
+    var typ = c.type ? (_typMap[c.type] || (c.type.charAt(0).toUpperCase() + c.type.slice(1))) : '';
+
+    // Owner: LH-owned vessels (tank/tanker) show the liquid owner when present.
+    var ownerId = ((c.type === 'tank' || c.type === 'tanker') && c.liquid_owner_client_id)
+      ? c.liquid_owner_client_id
+      : c.client_id;
+    var owner = ownerId ? (clientName(ownerId) || '') : '';
+
+    var spirit = c.spirit_type ? (window._fmtSpiritType ? _fmtSpiritType(c.spirit_type) : c.spirit_type) : '';
+
+    lines.push([
+      csvEsc(ref),
+      csvEsc(typ),
+      csvEsc(owner),
+      csvEsc(spirit),
+      c.abv != null && c.abv !== '' ? c.abv : '',
+      litres > 0 ? litres : '',
+      cap > 0 ? cap : '',
+      pct === '' ? '' : pct,
+      parseFloat(c.current_lpa || 0).toFixed(2),
+      csvEsc(_statusMap[autoStatus] || autoStatus),
+      csvEsc(c.cbw_rotation || ''),
+      csvEsc(c.fill_date ? fmtDate(c.fill_date) : ''),
+      csvEsc(c.type === 'cask' && c.fill_date ? ageStr(c.fill_date) : ''),
+      csvEsc(c.location || '')
+    ].join(','));
+  });
+
+  var stamp = new Date().toISOString().slice(0, 10);
+  // Prepend a UTF-8 BOM so Excel renders € and accented spirit names correctly.
+  var csv  = '\ufeff' + lines.join('\r\n');
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement('a');
+  a.href   = url;
+  a.download = 'liquid-inventory_selected_' + stamp + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+
+  var done = recs.length + ' container' + (recs.length !== 1 ? 's' : '') + ' exported.';
+  if (window.toast) window.toast(done, 'success');
+  else if (window.toastMsg) window.toastMsg(done, 'success');
 };
 
 window.archiveAllCreatedToday = async function() {
