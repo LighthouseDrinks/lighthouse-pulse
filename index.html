@@ -7589,7 +7589,6 @@ window.copyInviteLink = function() {
     </div>
     <div id="jd-tab-tasks" class="jd-tab-panel" style="display:none;">
       <div id="jd-bom-verif-tasks" style="margin:0 0 20px;padding:14px 16px;background:rgba(201,168,76,0.04);border:1px solid rgba(201,168,76,0.2);border-radius:5px;display:none;"></div>
-      <div id="jd-label-verif" style="margin:0 0 20px;"></div>
       <div id="jd-tasks-content" style="color:var(--muted);font-size:13px;">Loading…</div>
     </div>
     <div id="jd-tab-results" class="jd-tab-panel" style="display:none;">
@@ -33494,13 +33493,12 @@ window.saveAdjModal = async function() {
     if (!el) return;
     try {
       el.innerHTML = '<div style="font-size:12px;color:var(--muted);line-height:1.6;padding:0 0 4px 0;">'
-        + 'Send the BOM to the client for confirmation and capture the client label sign-off below. Supply chain and liquid sign-offs are done in their tabs; use '
+        + 'Send the BOM to the client for confirmation. Supply chain (including label verification) and liquid sign-offs are done in their tabs; use '
         + '<strong style="color:var(--white);">My Tasks</strong> to notify staff when needed.'
         + '</div>';
     } catch(e) { el.innerHTML = '<div style="color:var(--red);">Error: ' + e.message + '</div>'; }
     finally {
       _showBomVerifPanel(jobId);
-      if (typeof window._renderLabelVerification === 'function') window._renderLabelVerification(jobId);
     }
   }
 
@@ -34625,6 +34623,15 @@ window.saveAdjModal = async function() {
     if (!el) return;
     el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:20px 0;">Loading…</div>';
     try {
+      // Liquid-style numbered step header: gold circle badge + title + description.
+      // Defined up here so both the normal render and the no-BOM branch below can use it.
+      var stepHd = function(num, title, desc) {
+        return '<div style="display:flex;align-items:center;gap:12px;margin:24px 0 12px;padding-top:16px;border-top:1px solid var(--navy-border);">'
+          + '<div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--navy-dark,#0a1628);border:2px solid var(--gold);color:#ffffff;font-size:15px;font-weight:800;display:flex;align-items:center;justify-content:center;font-family:Lato,sans-serif;box-sizing:border-box;">' + num + '</div>'
+          + '<div><div style="font-size:16px;font-weight:700;color:var(--white);line-height:1.2;">' + title + '</div>'
+          + (desc ? '<div style="font-size:12px;color:var(--muted);margin-top:3px;">' + desc + '</div>' : '')
+          + '</div></div>';
+      };
       var comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
 
       // Auto-init from BOM if empty, stale, or a liquid-target job with no qty_required values yet
@@ -34670,7 +34677,10 @@ window.saveAdjModal = async function() {
       }
 
       if (!comps.length) {
-        el.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">No BOM items found for this job.</div>';
+        el.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">No BOM items found for this job.</div>'
+          + stepHd(4, 'Label verification', 'Photograph the picked labels and send them to the client for approval.')
+          + '<div id="jd-label-verif" style="margin:0 0 6px;"></div>';
+        if (typeof window._renderLabelVerification === 'function') window._renderLabelVerification(jobId);
         return;
       }
 
@@ -34794,6 +34804,11 @@ window.saveAdjModal = async function() {
       var isSignedOff = !!(compSignoff && compSignoff.signed_by_coordinator);
       var escH = window.escapeHtml || function(s){ return String(s==null?'':s); };
 
+      // Supply-chain sign-off (Step 5) is gated on the client having approved the labels (Step 4).
+      var labelRec = null;
+      try { labelRec = await _loadLabelApproval(jobId); } catch(e) { window.logError && window.logError('load label approval (sc)', e); }
+      var labelApproved = !!(labelRec && labelRec.client_decision === 'approved');
+
       var j = _jobs.find(function(x){ return x.id === jobId; });
       var bayNo   = j && j.job_bay ? j.job_bay : null;
       var bayHeld = !!(j && j.job_bay && !j.bay_released_at);
@@ -34801,14 +34816,6 @@ window.saveAdjModal = async function() {
         ? new Date(j.created_at).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' })
         : '\u2014';
 
-      // Liquid-style numbered step header: gold circle badge + title + description.
-      var stepHd = function(num, title, desc) {
-        return '<div style="display:flex;align-items:center;gap:12px;margin:24px 0 12px;padding-top:16px;border-top:1px solid var(--navy-border);">'
-          + '<div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--navy-dark,#0a1628);border:2px solid var(--gold);color:#ffffff;font-size:15px;font-weight:800;display:flex;align-items:center;justify-content:center;font-family:Lato,sans-serif;box-sizing:border-box;">' + num + '</div>'
-          + '<div><div style="font-size:16px;font-weight:700;color:var(--white);line-height:1.2;">' + title + '</div>'
-          + (desc ? '<div style="font-size:12px;color:var(--muted);margin-top:3px;">' + desc + '</div>' : '')
-          + '</div></div>';
-      };
       // Yellow rounded CTA — matches the Liquid Sign-Off "Liquid ready" button.
       var goldBtnStyle = 'background:var(--gold);color:var(--navy);font-weight:700;border:none;border-radius:6px;box-shadow:0 2px 8px rgba(201,168,76,0.35);font-size:12px;padding:9px 18px;cursor:pointer;font-family:Lato,sans-serif;display:inline-flex;align-items:center;gap:7px;';
 
@@ -34839,8 +34846,14 @@ window.saveAdjModal = async function() {
       if (bayHeld) html += '<div style="font-size:28px;font-weight:700;color:var(--white);line-height:1;margin:4px 0 12px;">Bay ' + escH(String(bayNo)) + '</div>';
       html += '<div style="margin:0 0 6px;"><button id="sc-print-btn" style="' + goldBtnStyle + '">&#128438; Print Picking List</button></div>';
 
-      // ── Step 4: sign off supply chain ──
-      html += stepHd(4, 'Sign off supply chain',
+      // ── Step 4: label verification ──
+      var _bayTxt = bayHeld ? ('Bay ' + escH(String(bayNo))) : 'the allocated bay';
+      html += stepHd(4, 'Label verification',
+        'Photograph the actual picked labels now sitting in ' + _bayTxt + ' and send them to the client. Supply-chain sign-off (Step 5) is blocked until the client approves these exact labels.');
+      html += '<div id="jd-label-verif" style="margin:0 0 6px;"></div>';
+
+      // ── Step 5: sign off supply chain ──
+      html += stepHd(5, 'Sign off supply chain',
         bayHeld
           ? ('When all dry goods are picked and physically in Bay ' + escH(String(bayNo)) + ', sign off the supply chain.')
           : 'When all dry goods are picked and physically in their allocated bay, sign off the supply chain.');
@@ -35147,17 +35160,25 @@ window.saveAdjModal = async function() {
       var printBtn = document.getElementById('sc-print-btn');
       if (printBtn) printBtn.addEventListener('click', function(){ window.printPickingList(jobId); });
 
-      // ── Step 4: sign off supply chain ──
+      // ── Step 5: sign off supply chain (gated on client label approval in Step 4) ──
       var signoffMount = document.getElementById('sc-signoff-mount');
       if (signoffMount) {
         if (isSignedOff) {
           signoffMount.innerHTML = '<div style="background:rgba(61,186,120,0.1);border:1px solid var(--green);border-radius:5px;padding:8px 14px;font-size:12px;color:var(--green);display:inline-block;">\u2713 Signed off by ' + escH(compSignoff.signed_by_coordinator) + (compSignoff.signed_at_coordinator ? ' on ' + compSignoff.signed_at_coordinator.slice(0,10) : '') + '</div>';
+        } else if (!labelApproved) {
+          // Blocked until the client approves the labels in Step 4.
+          var _disabledBtnStyle = 'background:rgba(201,168,76,0.15);color:rgba(201,168,76,0.45);font-weight:700;border:none;border-radius:6px;font-size:12px;padding:9px 18px;cursor:not-allowed;font-family:Lato,sans-serif;display:inline-flex;align-items:center;gap:7px;';
+          signoffMount.innerHTML = '<button id="comp-signoff-btn" disabled title="Client must approve the labels in Step 4 first" style="' + _disabledBtnStyle + '">Sign Off Supply Chain</button>'
+            + '<div style="font-size:11px;color:var(--muted);margin-top:6px;">Client must approve the labels in Step 4 before you can sign off supply chain.</div>';
         } else {
           signoffMount.innerHTML = '<button id="comp-signoff-btn" style="' + goldBtnStyle + '">Sign Off Supply Chain</button>';
           var sfBtn = document.getElementById('comp-signoff-btn');
           if (sfBtn) sfBtn.addEventListener('click', function() { window.signOffComponents(jobId); });
         }
       }
+
+      // Render the Step 4 label verification block into its mount.
+      if (typeof window._renderLabelVerification === 'function') window._renderLabelVerification(jobId);
 
     } catch(e) { el.innerHTML = '<div style="color:var(--red);">Error: ' + e.message + '</div>'; }
   }
@@ -35245,6 +35266,14 @@ window.saveAdjModal = async function() {
 
   window.signOffComponents = async function(jobId) {
     if (!(window.canDo && window.canDo('jobs_signoff_components'))) { window.toast && window.toast('You do not have permission to sign off components.', 'error'); return; }
+    // Gate: the client must have approved the labels (Step 4) before supply chain can be signed off.
+    try {
+      var _lr = (window._labelApprovalCache && window._labelApprovalCache[jobId]) || await _loadLabelApproval(jobId);
+      if (!(_lr && _lr.client_decision === 'approved')) {
+        window.toast && window.toast('Client must approve the labels (Step 4) before signing off supply chain.', 'warn');
+        return;
+      }
+    } catch(e) { window.logError && window.logError('signOffComponents label gate', e); }
     var name = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || '';
     var displayName = await window.lpPrompt('Enter your name to sign off the Supply Chain Tracker.', name, { title: 'Supply Chain sign-off', placeholder: 'Full name' });
     if (displayName === null || !String(displayName).trim()) return;
@@ -41546,11 +41575,9 @@ window.saveAdjModal = async function() {
         break;
     }
 
-    // Header
-    var header = '<div style="display:flex;align-items:center;gap:0;margin-bottom:12px;">'
-      + '<span style="font-size:10px;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);white-space:nowrap;padding-right:14px;">Label Verification</span>'
-      + '<div style="flex:1;height:1px;background:linear-gradient(to right,rgba(201,168,76,0.5),transparent);"></div>'
-      + '</div>';
+    // Header intentionally omitted — the Supply Chain "Step 4" numbered header now
+    // provides the title, so the internal eyebrow would duplicate it.
+    var header = '';
 
     // Photo grid (visible once a draft/sent/approved/rejected record exists)
     var grid = '';
