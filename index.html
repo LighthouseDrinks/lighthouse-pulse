@@ -33641,7 +33641,11 @@ window.saveAdjModal = async function() {
     // Load content on demand
     if (tab === 'jobsheet'   && _currentJobId) loadJobSheetTab(_currentJobId);
     if (tab === 'tasks'      && _currentJobId) loadTasksTab(_currentJobId);
-    if (tab === 'results'    && _currentJobId) loadResultsTab(_currentJobId);
+    if (tab === 'results'    && _currentJobId) loadResultsTab(_currentJobId).catch(function(err) {
+      window.logError && window.logError('loadResultsTab', err);
+      var _resEl = document.getElementById('jd-results-content');
+      if (_resEl) _resEl.innerHTML = '<div style="color:var(--red);font-size:12px;padding:16px 0;">Could not load Results. Please try again.</div>';
+    });
     if (tab === 'components' && _currentJobId) loadComponentsTab(_currentJobId);
     if (tab === 'liquid' && _currentJobId) loadLiquidTab(_currentJobId);
     if (tab === 'quality' && _currentJobId) loadQualityTab(_currentJobId);
@@ -36270,6 +36274,27 @@ window.saveAdjModal = async function() {
       var bomRows = await supaGet('boms?id=eq.' + j.bom_id + '&select=bottles_per_shipper,additional_info,volume_cl');
       bom = bomRows[0] || null;
     } catch(e) { window.logError('load BOM for weights/measures', e); }
+
+    // Linked liquid containers (with ABV) — used to derive the effective bottle
+    // count for liquid-target jobs. Defaults to [] so the tab still renders if
+    // the liquid data is unavailable; for bottle-target jobs the ABV override is
+    // ignored by _calcEffectiveBottles anyway.
+    var _psLinked = [];
+    try {
+      var _psLsoRows = await supaGet('job_liquid_signoff?job_id=eq.' + j.id + '&select=linked_containers_json&limit=1');
+      var _psLso = (_psLsoRows && _psLsoRows[0]) || null;
+      if (_psLso && _psLso.linked_containers_json) {
+        try { _psLinked = JSON.parse(_psLso.linked_containers_json) || []; } catch(e2) { _psLinked = []; }
+      }
+      if (_psLinked.length) {
+        var _psLcIds = _psLinked.map(function(lc){ return lc.id; }).filter(Boolean);
+        if (_psLcIds.length) {
+          var _psConts = await supaGet('liquid_containers?id=in.(' + _psLcIds.join(',') + ')&select=id,abv,current_litres,current_lpa');
+          _psLinked = _psConts || [];
+        }
+      }
+    } catch(e) { window.logError && window.logError('loadResultsTab linked containers', e); _psLinked = []; }
+
     var ai = (bom && bom.additional_info) || {};
     var bottlesPerCase  = (bom && bom.bottles_per_shipper) || null;
     var casesPerLayer   = ai.casesLayer || null;
