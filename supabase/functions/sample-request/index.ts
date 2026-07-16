@@ -68,14 +68,34 @@ async function nextFinishedLogNo(admin: ReturnType<typeof createClient>): Promis
   return max + 1;
 }
 
-async function sendEmail(to: string, subject: string, html: string): Promise<void> {
-  const apiKey = Deno.env.get('RESEND_API_KEY');
+// Resolve the Resend key + sender the same way the app does: from the
+// app_settings row key='system' (value.resend_key / value.from_email). Falls
+// back to a RESEND_API_KEY env secret if the setting is missing. This means no
+// separate secret has to be configured — the edge function reuses the key
+// staff already manage under Settings → System.
+async function resolveEmailConfig(admin: ReturnType<typeof createClient>): Promise<{ apiKey: string; from: string }> {
+  let apiKey = '';
+  let from = FROM_IDENTITY;
+  try {
+    const { data } = await admin.from('app_settings').select('value').eq('key', 'system').maybeSingle();
+    let v: Record<string, unknown> = {};
+    const raw = (data as { value?: unknown } | null)?.value;
+    if (typeof raw === 'string') { try { v = JSON.parse(raw); } catch (_) { v = {}; } }
+    else if (raw && typeof raw === 'object') { v = raw as Record<string, unknown>; }
+    if (v.resend_key) apiKey = String(v.resend_key).trim();
+    if (v.from_email) from = `Pulse by Lighthouse Drinks <${String(v.from_email).trim()}>`;
+  } catch (_) { /* fall through to env */ }
+  if (!apiKey) apiKey = (Deno.env.get('RESEND_API_KEY') || '').trim();
+  return { apiKey, from };
+}
+
+async function sendEmail(apiKey: string, from: string, to: string, subject: string, html: string): Promise<void> {
   if (!apiKey || !to) return;
   try {
     await fetch(RESEND_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: FROM_IDENTITY, to: [to], subject, html }),
+      body: JSON.stringify({ from, to: [to], subject, html }),
     });
   } catch (_) { /* email is best-effort; never block the submission */ }
 }
@@ -193,6 +213,9 @@ Deno.serve(async (req: Request) => {
       if (cl?.company) recipDisplay = cl.company as string;
     }
 
+    // Resolve the Resend key/sender from app_settings (same key the app uses).
+    const { apiKey: resendKey, from: emailFrom } = await resolveEmailConfig(admin);
+
     // Auto-create the Quality & Compliance coordinator review task.
     const { data: coordUser } = await admin.from('app_users')
       .select('id,display_name,email')
@@ -226,6 +249,7 @@ Deno.serve(async (req: Request) => {
       });
       // Alert email to the coordinator.
       await sendEmail(
+        resendKey, emailFrom,
         (coordUser.email as string) || '',
         'New sample request ' + sampleId + ' — ' + recipDisplay,
         '<p>A new external sample request has landed in Pulse.</p>'
@@ -238,6 +262,7 @@ Deno.serve(async (req: Request) => {
 
     // Confirmation email to the requester.
     await sendEmail(
+      resendKey, emailFrom,
       requesterEmail,
       'We\'ve received your sample request (' + sampleId + ')',
       '<p>Hi ' + esc(contactName || 'there') + ',</p>'
