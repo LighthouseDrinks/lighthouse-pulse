@@ -14898,6 +14898,10 @@ window.loadBoms = async function initBoms() {
             <div class="sp-svg-title">FEFCO 0201 RSC &mdash; keyline blank</div>
             <div id="sp-keyline"></div>
           </div>
+          <div class="sp-svg-wrap">
+            <div class="sp-svg-title">Cell layout &mdash; 3D preview</div>
+            <div id="sp-grid3d"></div>
+          </div>
         </div>
       </div>
 
@@ -64897,6 +64901,91 @@ window.attendanceReject=async function(reqId,btn){
     return s;
   }
 
+  // Isometric 3D preview of the selected grid option: bottles (cylinders)
+  // seated in divider cells inside an open-top case. Reuses the same
+  // projection and shading approach as isoSVG.
+  var GLASS = { top:'rgba(196,214,180,0.92)', side:'rgba(150,180,140,0.92)', edge:'#41562f' };
+  function gridIsoSVG(cc){
+    if (!cc || !cc.cols || !cc.rows) return '';
+    var A = 0.87, B = 0.5, SQ2 = Math.SQRT2;
+    function proj(X,Y,Z){ return { x:(X - Y)*A, y:(X + Y)*B - Z }; }
+    function poly(pts, fill, edge, sw){
+      return '<polygon points="'+pts.map(function(p){return r1(p.x)+','+r1(p.y);}).join(' ')+'" fill="'+fill+'" stroke="'+(edge||'#5c4a1f')+'" stroke-width="'+(sw==null?0.8:sw)+'" stroke-linejoin="round" />';
+    }
+    // Box: top + front-right (max X) + front-left (max Y) faces.
+    function boxFaces(rx,ry,rw,rh,zb,zt,top,s1,s2,edge){
+      var b=proj(rx+rw,ry,zb), c=proj(rx+rw,ry+rh,zb), d=proj(rx,ry+rh,zb),
+          Ap=proj(rx,ry,zt), Bp=proj(rx+rw,ry,zt), Cp=proj(rx+rw,ry+rh,zt), Dp=proj(rx,ry+rh,zt);
+      return poly([b,c,Cp,Bp], s1, edge) + poly([d,c,Cp,Dp], s2, edge) + poly([Ap,Bp,Cp,Dp], top, edge);
+    }
+    // Bottle cylinder: body + bottom/top discs via projected (transformed) circles.
+    function cylinder(cx,cy,r,z0,z1){
+      var W = A*r*SQ2;                         // half screen-width of the disc
+      var cb = proj(cx,cy,z0), ct = proj(cx,cy,z1);
+      var mat = function(p){ return 'matrix('+r1(A)+','+r1(B)+','+r1(-A)+','+r1(B)+','+r1(p.x)+','+r1(p.y)+')'; };
+      var body = '<polygon points="'
+        + r1(ct.x-W)+','+r1(ct.y)+' ' + r1(ct.x+W)+','+r1(ct.y)+' '
+        + r1(cb.x+W)+','+r1(cb.y)+' ' + r1(cb.x-W)+','+r1(cb.y)
+        + '" fill="'+GLASS.side+'" stroke="'+GLASS.edge+'" stroke-width="0.6" stroke-linejoin="round" />';
+      var bottom = '<ellipse rx="'+r1(r)+'" ry="'+r1(r)+'" transform="'+mat(cb)+'" fill="'+GLASS.side+'" stroke="'+GLASS.edge+'" stroke-width="0.4" />';
+      var topd  = '<ellipse rx="'+r1(r)+'" ry="'+r1(r)+'" transform="'+mat(ct)+'" fill="'+GLASS.top+'" stroke="'+GLASS.edge+'" stroke-width="0.6" />';
+      return bottom + body + topd;
+    }
+
+    var w = cc.cal;
+    var cell = cc.cell, cols = cc.cols, rows = cc.rows;
+    var extL = cc.extL, extW = cc.extW, extH = cc.extH, intH = cc.intH;
+    var ox = (extL - cc.intL)/2, oy = (extW - cc.intW)/2;
+    var pitch = cell + w;
+    var floorZ = w;
+    var bh = Math.max(1, state.bottle.heightMm || 0);
+    var br = Math.max(1, Math.min(state.bottle.diaMm || cell, cell)) / 2 * 0.92;
+
+    var out = '';
+    // Base slab.
+    out += boxFaces(0, 0, extL, extW, 0, floorZ, C.deckTop, C.deckSide, '#3a2f1c', '#2a2214');
+    // Two back walls (min X / min Y) so the open front reveals the interior.
+    out += boxFaces(0, 0, extL, w, 0, extH, C.caseTop, C.side1, C.side2, '#5c4a1f'); // along Y=0
+    out += boxFaces(0, 0, w, extW, 0, extH, C.caseTop, C.side1, C.side2, '#5c4a1f'); // along X=0
+
+    // Interior contents (dividers + bottles) painted back-to-front.
+    var items = [];
+    for (var j=0;j<rows;j++){
+      for (var i=0;i<cols;i++){
+        var cx = ox + i*pitch + cell/2;
+        var cy = oy + j*pitch + cell/2;
+        items.push({ depth: cx+cy, z2: 0, svg: cylinder(cx, cy, br, floorZ, floorZ+bh) });
+      }
+    }
+    for (var ci=0;ci<cols-1;ci++){
+      var dx = ox + (ci+1)*cell + ci*w;
+      items.push({ depth: (dx + w/2) + (oy + cc.intW/2), z2: 1,
+        svg: boxFaces(dx, oy, w, cc.intW, floorZ, floorZ+intH, C.caseTopB, C.side1b, C.side2b, '#5c4a1f') });
+    }
+    for (var rj=0;rj<rows-1;rj++){
+      var dy = oy + (rj+1)*cell + rj*w;
+      items.push({ depth: (ox + cc.intL/2) + (dy + w/2), z2: 1,
+        svg: boxFaces(ox, dy, cc.intL, w, floorZ, floorZ+intH, C.caseTopB, C.side1b, C.side2b, '#5c4a1f') });
+    }
+    items.sort(function(a,b){ return (a.depth - b.depth) || (a.z2 - b.z2); });
+    items.forEach(function(it){ out += it.svg; });
+
+    // viewBox from the projected bounding box.
+    var Ztop = Math.max(extH, floorZ + bh);
+    var pts = [];
+    [[0,0,0],[extL,0,0],[0,extW,0],[extL,extW,0],[0,0,Ztop],[extL,0,Ztop],[0,extW,Ztop],[extL,extW,Ztop]].forEach(function(cnr){ pts.push(proj(cnr[0], cnr[1], cnr[2])); });
+    var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+    pts.forEach(function(p){ minX=Math.min(minX,p.x); minY=Math.min(minY,p.y); maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y); });
+    var pad = 26;
+    var vbX = minX-pad, vbY = minY-pad, vbW = (maxX-minX)+pad*2, vbH = (maxY-minY)+pad*2;
+
+    var svg = '<svg viewBox="'+r1(vbX)+' '+r1(vbY)+' '+r1(vbW)+' '+r1(vbH)+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="3D cell layout '+cols+' by '+rows+'">';
+    svg += out;
+    svg += svgText(vbX + vbW/2, vbY + 15, cols + ' \u00d7 ' + rows + '  \u00b7  ' + (cols*rows) + ' bottles', C.dim, 11);
+    svg += '</svg>';
+    return svg;
+  }
+
   // ── Derived-state cache ──────────────────────────────────────────────────
   var current = { cc: null, patterns: [], Lp: 0, Wp: 0 };
 
@@ -64954,6 +65043,11 @@ window.attendanceReject=async function(reqId,btn){
   function renderKeyline(cc){
     var el = document.getElementById('sp-keyline');
     if (el) el.innerHTML = keylineSVG(cc);
+  }
+
+  function renderGrid3D(cc){
+    var el = document.getElementById('sp-grid3d');
+    if (el) el.innerHTML = gridIsoSVG(cc);
   }
 
   function renderPattern(cc){
@@ -65020,6 +65114,7 @@ window.attendanceReject=async function(reqId,btn){
     renderGridChips(cc);
     renderCaseTable(cc);
     renderKeyline(cc);
+    renderGrid3D(cc);
     renderPattern(cc);
   }
   window._spRecompute = recompute;
