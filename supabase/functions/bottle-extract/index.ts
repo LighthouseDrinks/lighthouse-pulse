@@ -18,8 +18,8 @@ const corsHeaders = {
 
 // Exact instruction text from the module brief — JSON-only output.
 const INSTRUCTION = `This is a glass bottle technical drawing. Extract ONLY what a case/carton designer needs. Respond with ONLY a JSON object, no markdown, no preamble:
-{"body_diameter_mm":number|null,"total_height_mm":number|null,"glass_weight_g":number|null,"fill_volume_ml":number|null,"notes":"short string"}
-Rules: body_diameter_mm is the widest body diameter of the bottle (not the finish/cap). total_height_mm is overall glass height to the lip. glass_weight_g is the stated empty bottle weight (may be listed in g or kg). fill_volume_ml is brimful or nominal capacity — prefer nominal. Use null for anything not stated. Convert units to mm/g/ml.`;
+{"product_name":string|null,"body_diameter_mm":number|null,"total_height_mm":number|null,"glass_weight_g":number|null,"fill_volume_ml":number|null,"notes":"short string"}
+Rules: product_name is the bottle / product / model name or the drawing title if stated (e.g. "Titus") — short, no dimensions. body_diameter_mm is the widest body diameter of the bottle (not the finish/cap). total_height_mm is overall glass height to the lip. glass_weight_g is the stated empty bottle weight (may be listed in g or kg). fill_volume_ml is brimful or nominal capacity — prefer nominal. Use null for anything not stated. Convert units to mm/g/ml.`;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -131,6 +131,7 @@ Deno.serve(async (req: Request) => {
     };
 
     return json({
+      product_name:     typeof parsed.product_name === 'string' ? parsed.product_name.trim().slice(0, 120) : null,
       body_diameter_mm: num(parsed.body_diameter_mm),
       total_height_mm:  num(parsed.total_height_mm),
       glass_weight_g:   num(parsed.glass_weight_g),
