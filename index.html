@@ -14866,7 +14866,7 @@ window.loadBoms = async function initBoms() {
         <div class="sp-split">
           <div>
             <table class="sp-kv-table"><tbody id="sp-case-table"></tbody></table>
-            <button type="button" class="sp-btn" id="sp-pdf-btn" onclick="window._spDownloadPdf && window._spDownloadPdf()">Download Keyline PDF</button>
+            <button type="button" class="sp-btn" id="sp-pdf-btn" onclick="window._spDownloadKeylinePdf && window._spDownloadKeylinePdf()">Download Keyline PDF</button>
             <div class="sp-btn-row">
               <button type="button" class="sp-btn" id="sp-save-btn" onclick="window._spSaveKeyline && window._spSaveKeyline()">Save Keyline</button>
               <button type="button" class="sp-btn sp-btn-ghost" id="sp-library-btn" onclick="window._spOpenLibrary && window._spOpenLibrary()">Saved Keylines</button>
@@ -14927,6 +14927,8 @@ window.loadBoms = async function initBoms() {
             <div class="sp-banner" id="sp-overhang-banner"></div>
 
             <table class="sp-kv-table"><tbody id="sp-pallet-table"></tbody></table>
+            <button type="button" class="sp-btn" id="sp-pallet-pdf-btn" onclick="window._spDownloadPalletPdf && window._spDownloadPalletPdf()">Download Pallet Plan PDF</button>
+            <div id="sp-pallet-pdf-status" class="sp-status" style="margin-top:8px;" aria-live="polite"></div>
           </div>
           <div>
             <div class="sp-svg-wrap">
@@ -65343,12 +65345,17 @@ window.attendanceReject=async function(reqId,btn){
     return drawLayers;
   }
 
-  function buildPdf(){
+  function _newPdf(){
     var jsPDFns = window.jspdf || window.jsPDF;
     var Ctor = jsPDFns && (jsPDFns.jsPDF || jsPDFns);
     if (!Ctor) throw new Error('jsPDF not loaded');
+    return new Ctor({ orientation:'landscape', unit:'mm', format:'a3' });
+  }
+
+  // ── Keyline sheet: keyline blank (page 1) + divider spec (page 2) ─────────
+  function buildKeylinePdf(){
     var cc = current.cc || calcCase(state.bottle, state.closure, state.caseSetup, state.caseSetup.flute, state.grid);
-    var doc = new Ctor({ orientation:'landscape', unit:'mm', format:'a3' });
+    var doc = _newPdf();
     var pageW = doc.internal.pageSize.getWidth();
     var pageH = doc.internal.pageSize.getHeight();
 
@@ -65396,41 +65403,50 @@ window.attendanceReject=async function(reqId,btn){
     doc.rect(bx2, by, cc.intL*sc, cc.intH*sc);
     doc.text('Short panel  '+r0(cc.intL)+'\u00d7'+r0(cc.intH)+' mm  (\u00d7'+(cc.rows-1)+')', bx2, by - 3);
 
-    // ── Page 3: pallet plan ──
+    return doc;
+  }
+
+  // ── Pallet plan sheet: pallet summary + top-down + isometric ──────────────
+  // Returns null when there's no usable pattern so the caller can message it.
+  function buildPalletPdf(){
     var pat = currentPattern();
-    if (pat){
-      var Lp = current.Lp, Wp = current.Wp;
-      var pInfo = PALLETS[state.pallet.type] || PALLETS.std;
-      var layers = Math.max(0, Math.floor((state.pallet.maxStackHeightMm - state.pallet.palletDeckHeightMm) / cc.extH));
-      var casesPallet = pat.count * layers;
-      var stackH = state.pallet.palletDeckHeightMm + layers * cc.extH;
-      var palletGross = casesPallet * cc.caseKg + state.pallet.palletWeightKg;
+    if (!pat) return null;
+    var cc = current.cc || calcCase(state.bottle, state.closure, state.caseSetup, state.caseSetup.flute, state.grid);
+    var doc = _newPdf();
+    var pageW = doc.internal.pageSize.getWidth();
+    var pageH = doc.internal.pageSize.getHeight();
+    var titleName = (state.bottle.name || '').trim();
 
-      doc.addPage('a3','landscape');
-      doc.setTextColor(20,27,42); doc.setFontSize(15); doc.setFont(undefined,'bold');
-      doc.text('LIGHTHOUSE DRINKS \u2014 ' + (titleName ? titleName.toUpperCase() + ' \u2014 ' : '') + 'PALLET PLAN \u00b7 ' + String(pat.name).toUpperCase(), 15, 16);
-      doc.setFont(undefined,'normal'); doc.setFontSize(10); doc.setTextColor(60,60,60);
-      var pl = [
-        'Pallet: ' + pInfo.label,
-        'Pattern: ' + pat.name + (pat.overL>0||pat.overW>0 ? '  (overhang ' + r1(pat.overL) + ' / ' + r1(pat.overW) + ' mm per side)' : ''),
-        'Cases per layer: ' + pat.count,
-        'Layers: ' + layers + '  (alternate layers mirrored to interlock)',
-        'Cases per pallet: ' + casesPallet,
-        'Bottles per pallet: ' + (casesPallet * cc.n),
-        'Stack height: ' + r0(stackH) + ' mm',
-        'Footprint used: ' + r0(pat.spanL) + ' \u00d7 ' + r0(pat.spanW) + ' mm',
-        'Pallet gross weight: ' + r1(palletGross) + ' kg'
-      ];
-      var py = 28; pl.forEach(function(t){ doc.text(t, 15, py); py += 6; });
+    var Lp = current.Lp, Wp = current.Wp;
+    var pInfo = PALLETS[state.pallet.type] || PALLETS.std;
+    var layers = Math.max(0, Math.floor((state.pallet.maxStackHeightMm - state.pallet.palletDeckHeightMm) / cc.extH));
+    var casesPallet = pat.count * layers;
+    var stackH = state.pallet.palletDeckHeightMm + layers * cc.extH;
+    var palletGross = casesPallet * cc.caseKg + state.pallet.palletWeightKg;
 
-      // Top-down (left) and isometric (right), below the text block.
-      var regTop = 92, regH = pageH - regTop - 20;
-      var halfW = (pageW - 45) / 2;
-      drawTopdownPdf(doc, pat, Lp, Wp, 15, regTop, halfW, regH);
-      var drew = drawIsoPdf(doc, pat, cc, Lp, Wp, layers, 30 + halfW, regTop, halfW, regH);
-      doc.setTextColor(70,70,70); doc.setFontSize(8);
-      doc.text('Packed pallet \u2014 ' + (drew < layers ? 'showing ' + drew + ' of ' + layers + ' layers' : layers + ' layers'), 30 + halfW, regTop - 3);
-    }
+    doc.setTextColor(20,27,42); doc.setFontSize(15); doc.setFont(undefined,'bold');
+    doc.text('LIGHTHOUSE DRINKS \u2014 ' + (titleName ? titleName.toUpperCase() + ' \u2014 ' : '') + 'PALLET PLAN \u00b7 ' + String(pat.name).toUpperCase(), 15, 16);
+    doc.setFont(undefined,'normal'); doc.setFontSize(10); doc.setTextColor(60,60,60);
+    var pl = [
+      'Pallet: ' + pInfo.label,
+      'Pattern: ' + pat.name + (pat.overL>0||pat.overW>0 ? '  (overhang ' + r1(pat.overL) + ' / ' + r1(pat.overW) + ' mm per side)' : ''),
+      'Cases per layer: ' + pat.count,
+      'Layers: ' + layers + '  (alternate layers mirrored to interlock)',
+      'Cases per pallet: ' + casesPallet,
+      'Bottles per pallet: ' + (casesPallet * cc.n),
+      'Stack height: ' + r0(stackH) + ' mm',
+      'Footprint used: ' + r0(pat.spanL) + ' \u00d7 ' + r0(pat.spanW) + ' mm',
+      'Pallet gross weight: ' + r1(palletGross) + ' kg'
+    ];
+    var py = 28; pl.forEach(function(t){ doc.text(t, 15, py); py += 6; });
+
+    // Top-down (left) and isometric (right), below the text block.
+    var regTop = 92, regH = pageH - regTop - 20;
+    var halfW = (pageW - 45) / 2;
+    drawTopdownPdf(doc, pat, Lp, Wp, 15, regTop, halfW, regH);
+    var drew = drawIsoPdf(doc, pat, cc, Lp, Wp, layers, 30 + halfW, regTop, halfW, regH);
+    doc.setTextColor(70,70,70); doc.setFontSize(8);
+    doc.text('Packed pallet \u2014 ' + (drew < layers ? 'showing ' + drew + ' of ' + layers + ' layers' : layers + ' layers'), 30 + halfW, regTop - 3);
 
     return doc;
   }
@@ -65443,34 +65459,58 @@ window.attendanceReject=async function(reqId,btn){
       .trim();
   }
 
-  function downloadPdf(){
-    var statusEl = document.getElementById('sp-pdf-status');
+  // Shared blob-download: anchor download + new-tab fallback + status text.
+  function _downloadDoc(doc, fname, okMsg, statusId){
+    var statusEl = document.getElementById(statusId || 'sp-pdf-status');
     var setP = function(msg, cls){ if (statusEl){ statusEl.textContent = msg||''; statusEl.className='sp-status'+(cls?' '+cls:''); } };
+    var blob = doc.output('blob');
+    var url = URL.createObjectURL(blob);
+    // Primary: programmatic anchor download.
+    var a = document.createElement('a');
+    a.href = url; a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Fallback: open in a new tab synchronously (same click handler) so it's
+    // reachable if a silent download is blocked. Not inside setTimeout.
+    window.open(url, '_blank');
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 30000);
+    setP(okMsg + fname, 'ok');
+  }
+
+  function _fnameBase(kind){
+    var nm = (state.bottle.name || '').trim();
+    var cells = state.caseSetup.bottleCount;
+    return safeFileName('Lighthouse Drinks' + (nm ? ' - ' + nm : '') + ' - ' + cells + ' cell ' + kind);
+  }
+
+  function downloadKeylinePdf(){
     try {
-      var doc = buildPdf();
-      var blob = doc.output('blob');
-      var url = URL.createObjectURL(blob);
-      var nm = (state.bottle.name || '').trim();
-      var cells = state.caseSetup.bottleCount;
-      var base = 'Lighthouse Drinks' + (nm ? ' - ' + nm : '') + ' - ' + cells + ' cell shipper keyline';
-      var fname = safeFileName(base) + '.pdf';
-      // Primary: programmatic anchor download.
-      var a = document.createElement('a');
-      a.href = url; a.download = fname;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      // Fallback: open in a new tab synchronously (same click handler) so it's
-      // reachable if a silent download is blocked. Not inside setTimeout.
-      window.open(url, '_blank');
-      setTimeout(function(){ URL.revokeObjectURL(url); }, 30000);
-      setP('PDF generated: ' + fname, 'ok');
+      _downloadDoc(buildKeylinePdf(), _fnameBase('shipper keyline') + '.pdf', 'Keyline PDF generated: ', 'sp-pdf-status');
     } catch (e){
-      console.error('[shipper] PDF export failed', e);
+      console.error('[shipper] keyline PDF export failed', e);
+      var s = document.getElementById('sp-pdf-status');
+      if (s){ s.textContent = 'PDF export failed: ' + (e && e.message ? e.message : 'unknown error') + '. Please try again.'; s.className = 'sp-status err'; }
+    }
+  }
+
+  function downloadPalletPdf(){
+    var s = document.getElementById('sp-pallet-pdf-status');
+    var setP = function(msg, cls){ if (s){ s.textContent = msg||''; s.className='sp-status'+(cls?' '+cls:''); } };
+    try {
+      var doc = buildPalletPdf();
+      if (!doc){ setP('No pallet pattern to export \u2014 adjust the case or pallet so at least one pattern fits.', 'err'); return; }
+      _downloadDoc(doc, _fnameBase('pallet plan') + '.pdf', 'Pallet plan PDF generated: ', 'sp-pallet-pdf-status');
+    } catch (e){
+      console.error('[shipper] pallet PDF export failed', e);
       setP('PDF export failed: ' + (e && e.message ? e.message : 'unknown error') + '. Please try again.', 'err');
     }
   }
-  window._spDownloadPdf = downloadPdf;
+
+  window._spDownloadKeylinePdf = downloadKeylinePdf;
+  window._spDownloadPalletPdf = downloadPalletPdf;
+  // Back-compat alias — the keyline sheet is the primary "Download PDF".
+  window._spDownloadPdf = downloadKeylinePdf;
 
   // ── Saved Keylines library ───────────────────────────────────────────────
   // Persists the full planner state to Supabase so a keyline can be reopened,
@@ -65655,7 +65695,8 @@ window.attendanceReject=async function(reqId,btn){
         + '</div>'
         + '<div style="display:flex;flex-direction:column;gap:6px;margin-left:8px;white-space:nowrap;">'
         +   '<button onclick="window._spLoadKeyline(\'' + idJs + '\')" style="background:var(--gold);border:none;color:var(--navy);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;">Load</button>'
-        +   '<button onclick="window._spDownloadSaved(\'' + idJs + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">&#8681; PDF</button>'
+        +   '<button onclick="window._spDownloadSaved(\'' + idJs + '\',\'keyline\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">&#8681; Keyline</button>'
+        +   '<button onclick="window._spDownloadSaved(\'' + idJs + '\',\'pallet\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">&#8681; Pallet</button>'
         +   '<button onclick="window._spDeleteKeyline(\'' + idJs + '\',\'' + nameJs + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Delete</button>'
         + '</div>'
         + '</div>';
@@ -65676,14 +65717,15 @@ window.attendanceReject=async function(reqId,btn){
     }
   };
 
-  window._spDownloadSaved = async function(id){
+  window._spDownloadSaved = async function(id, kind){
     var row = _libRows.find(function(r){ return String(r.id) === String(id); });
     try {
       if (!row){ var rows = await window.db.select(KEYLINE_TABLE, '?id=eq.' + id); row = rows && rows[0]; }
       if (!row || !row.data){ if (window.toast) window.toast('Keyline not found.', 'error'); return; }
       applyKeylineData(row.data);   // rebuild the planner from the saved state
       window._spCloseLibrary();
-      downloadPdf();                // exports keyline + divider + pallet plan pages
+      if (kind === 'pallet') downloadPalletPdf();   // pallet plan + isometric sheet
+      else downloadKeylinePdf();                    // keyline blank + divider spec sheet
     } catch(e){
       console.error('[shipper] download saved keyline failed', e);
       if (window.toast) window.toast('Error exporting keyline: ' + (e && e.message || ''), 'error');
