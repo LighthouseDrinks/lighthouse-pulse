@@ -64585,10 +64585,11 @@ window.attendanceReject=async function(reqId,btn){
     return { name: name, rects: rects, count: rects.length, spanL: spanL, spanW: spanW, overL: overL, overW: overW };
   }
 
-  // Distribute cases so the layer's outer perimeter is a full rectangle: every
-  // column is flush to the pallet's left/right edges and every case within a
-  // column is flush to the top/bottom edges, with any slack shared as even gaps
-  // between rows/columns (never a solid empty L-corner). Mutates + returns pat.
+  // Pack the layer tight and centre it on the pallet. Columns sit flush against
+  // each other (no gaps), and cases within a full-height column touch as normal.
+  // Only a column that is SHORTER than the tallest (the part that "doesn't fit")
+  // gets its slack shared as gaps between its rows, so the block still reads as a
+  // clean rectangle. The whole block is centred on the pallet. Mutates + returns.
   function justifyPattern(pat, Lp, Wp){
     var colMap = {};
     pat.rects.forEach(function(r){
@@ -64597,39 +64598,36 @@ window.attendanceReject=async function(reqId,btn){
       colMap[k].push(r);
     });
     var keys = Object.keys(colMap).map(Number).sort(function(a,b){ return a-b; });
-    var ncols = keys.length;
-    var totalW = keys.reduce(function(s,k){ return s + colMap[k][0].w; }, 0);
-    var gapX, startX;
-    if (ncols > 1 && totalW <= Lp){ gapX = (Lp - totalW) / (ncols - 1); startX = 0; }
-    else { gapX = 0; startX = (Lp - totalW) / 2; } // centre (negative => overhang)
+    var cols = keys.map(function(k){
+      var arr = colMap[k].slice().sort(function(a,b){ return a.y - b.y; });
+      var totalH = arr.reduce(function(s,r){ return s + r.h; }, 0);
+      return { w: arr[0].w, rects: arr, nrows: arr.length, totalH: totalH };
+    });
+    var blockW = cols.reduce(function(s,c){ return s + c.w; }, 0);
+    var blockH = cols.reduce(function(m,c){ return Math.max(m, c.totalH); }, 0);
+    var offsetX = (Lp - blockW) / 2;   // centre horizontally (columns touch)
+    var offsetY = (Wp - blockH) / 2;   // centre vertically
 
     var newRects = [];
-    var minLeft = 1e9, maxRight = -1e9, minTop = 1e9, maxBot = -1e9;
-    var cx = startX;
-    keys.forEach(function(k){
-      var col = colMap[k].slice().sort(function(a,b){ return a.y - b.y; });
-      var w = col[0].w;
-      var nrows = col.length;
-      var totalH = col.reduce(function(s,r){ return s + r.h; }, 0);
+    var cx = offsetX;
+    cols.forEach(function(c){
       var gapY, startY;
-      if (nrows > 1 && totalH <= Wp){ gapY = (Wp - totalH) / (nrows - 1); startY = 0; }
-      else { gapY = 0; startY = (Wp - totalH) / 2; }
+      if (c.totalH >= blockH || c.nrows <= 1 && c.totalH >= blockH){ gapY = 0; startY = offsetY; }
+      else if (c.nrows <= 1){ gapY = 0; startY = offsetY + (blockH - c.totalH) / 2; } // centre lone case
+      else { gapY = (blockH - c.totalH) / (c.nrows - 1); startY = offsetY; }           // spread the misfit
       var cy = startY;
-      col.forEach(function(r){
-        var nr = { x: cx, y: cy, w: w, h: r.h };
-        newRects.push(nr);
-        minLeft = Math.min(minLeft, nr.x); maxRight = Math.max(maxRight, nr.x + nr.w);
-        minTop  = Math.min(minTop,  nr.y); maxBot   = Math.max(maxBot,  nr.y + nr.h);
+      c.rects.forEach(function(r){
+        newRects.push({ x: cx, y: cy, w: c.w, h: r.h });
         cy += r.h + gapY;
       });
-      cx += w + gapX;
+      cx += c.w;
     });
+
     pat.rects = newRects;
-    pat.minX = minLeft; pat.minY = minTop;
-    pat.spanL = maxRight - Math.min(0, minLeft);
-    pat.spanW = maxBot - Math.min(0, minTop);
-    pat.overL = Math.max(0, -minLeft, maxRight - Lp);
-    pat.overW = Math.max(0, -minTop,  maxBot  - Wp);
+    pat.minX = offsetX; pat.minY = offsetY;
+    pat.spanL = blockW; pat.spanW = blockH;
+    pat.overL = Math.max(0, -offsetX);
+    pat.overW = Math.max(0, -offsetY);
     return pat;
   }
 
