@@ -64585,6 +64585,60 @@ window.attendanceReject=async function(reqId,btn){
     return { name: name, rects: rects, count: rects.length, spanL: spanL, spanW: spanW, overL: overL, overW: overW };
   }
 
+  // Distribute cases so the layer's outer perimeter is a full rectangle: every
+  // column is flush to the pallet's left/right edges and every case within a
+  // column is flush to the top/bottom edges, with any slack shared as even gaps
+  // between rows/columns (never a solid empty L-corner). Mutates + returns pat.
+  function justifyPattern(pat, Lp, Wp){
+    var colMap = {};
+    pat.rects.forEach(function(r){
+      var k = Math.round(r.x);
+      if (!colMap[k]) colMap[k] = [];
+      colMap[k].push(r);
+    });
+    var keys = Object.keys(colMap).map(Number).sort(function(a,b){ return a-b; });
+    var ncols = keys.length;
+    var totalW = keys.reduce(function(s,k){ return s + colMap[k][0].w; }, 0);
+    var gapX, startX;
+    if (ncols > 1 && totalW <= Lp){ gapX = (Lp - totalW) / (ncols - 1); startX = 0; }
+    else { gapX = 0; startX = (Lp - totalW) / 2; } // centre (negative => overhang)
+
+    var newRects = [];
+    var minLeft = 1e9, maxRight = -1e9, minTop = 1e9, maxBot = -1e9;
+    var cx = startX;
+    keys.forEach(function(k){
+      var col = colMap[k].slice().sort(function(a,b){ return a.y - b.y; });
+      var w = col[0].w;
+      var nrows = col.length;
+      var totalH = col.reduce(function(s,r){ return s + r.h; }, 0);
+      var gapY, startY;
+      if (nrows > 1 && totalH <= Wp){ gapY = (Wp - totalH) / (nrows - 1); startY = 0; }
+      else { gapY = 0; startY = (Wp - totalH) / 2; }
+      var cy = startY;
+      col.forEach(function(r){
+        var nr = { x: cx, y: cy, w: w, h: r.h };
+        newRects.push(nr);
+        minLeft = Math.min(minLeft, nr.x); maxRight = Math.max(maxRight, nr.x + nr.w);
+        minTop  = Math.min(minTop,  nr.y); maxBot   = Math.max(maxBot,  nr.y + nr.h);
+        cy += r.h + gapY;
+      });
+      cx += w + gapX;
+    });
+    pat.rects = newRects;
+    pat.minX = minLeft; pat.minY = minTop;
+    pat.spanL = maxRight - Math.min(0, minLeft);
+    pat.spanW = maxBot - Math.min(0, minTop);
+    pat.overL = Math.max(0, -minLeft, maxRight - Lp);
+    pat.overW = Math.max(0, -minTop,  maxBot  - Wp);
+    return pat;
+  }
+
+  // Rotate a layer 180 degrees about the pallet centre so alternate layers
+  // interlock (seams do not line up vertically).
+  function mirrorRects(rects, Lp, Wp){
+    return rects.map(function(r){ return { x: Lp - (r.x + r.w), y: Wp - (r.y + r.h), w: r.w, h: r.h }; });
+  }
+
   function generatePatterns(extL, extW, Lp, Wp){
     var out = [];
     // Aligned: case length along pallet length.
@@ -64636,7 +64690,8 @@ window.attendanceReject=async function(reqId,btn){
       if (b.count !== a.count) return b.count - a.count;
       return (a.overL + a.overW) - (b.overL + b.overW);
     });
-    return uniq.slice(0, 10);
+    // Justify the survivors so each layer reads as a clean rectangle on its perimeter.
+    return uniq.slice(0, 10).map(function(p){ return justifyPattern(p, Lp, Wp); });
   }
 
   // ── SVG helpers ──────────────────────────────────────────────────────────
@@ -64705,12 +64760,11 @@ window.attendanceReject=async function(reqId,btn){
   // Phase 7: top-down layer plan SVG.
   function topdownSVG(pat, Lp, Wp){
     var pad = 40, vbW = Lp + pad*2, vbH = Wp + pad*2;
-    var shiftX = (Lp - pat.spanL)/2, shiftY = (Wp - pat.spanW)/2;
     var s = '<svg viewBox="0 0 '+r1(vbW)+' '+r1(vbH)+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Top-down pallet layer">';
     s += '<g transform="translate('+pad+','+pad+')">';
     s += svgRect(0,0,Lp,Wp, C.pallet, C.palletEdge, 2);
     pat.rects.forEach(function(rc){
-      s += svgRect(rc.x + shiftX, rc.y + shiftY, rc.w, rc.h, C.fill, C.cut, 1.4);
+      s += svgRect(rc.x, rc.y, rc.w, rc.h, C.fill, C.cut, 1.4);
     });
     s += svgText(Lp/2, Wp + 26, 'Pallet length '+r0(Lp)+' mm', C.text, 12);
     s += '<text x="-14" y="'+r1(Wp/2)+'" fill="'+C.text+'" font-size="12" font-family="ui-monospace,Consolas,monospace" text-anchor="middle" transform="rotate(-90 -14 '+r1(Wp/2)+')">Pallet width '+r0(Wp)+' mm</text>';
@@ -64723,7 +64777,6 @@ window.attendanceReject=async function(reqId,btn){
   function isoSVG(pat, cc, Lp, Wp, layers){
     var A = 0.87, B = 0.5;
     function proj(X,Y,Z){ return { x: (X - Y)*A, y: (X + Y)*B - Z }; }
-    var shiftX = (Lp - pat.spanL)/2, shiftY = (Wp - pat.spanW)/2;
     var deck = state.pallet.palletDeckHeightMm;
     var extH = cc.extH;
     var drawLayers = Math.min(layers, 14); // cap drawn layers for sanity; table shows true count
@@ -64748,10 +64801,13 @@ window.attendanceReject=async function(reqId,btn){
     // Deck slab (pallet sits at origin 0..Lp, 0..Wp; cases are centred via shift)
     var deckSvg = boxFaces(0, 0, Lp, Wp, 0, deck, C.deckTop, C.deckSide, '#3a2f1c', '#2a2214');
 
-    // Cases: sort back-to-front, bottom-to-top
+    // Cases: sort back-to-front, bottom-to-top. Alternate layers are mirrored
+    // (rotated 180 degrees) so the stack interlocks.
+    var mirrored = mirrorRects(pat.rects, Lp, Wp);
     var cases = [];
     for (var k=0;k<drawLayers;k++){
-      pat.rects.forEach(function(rc){
+      var layerRects = (k % 2 === 0) ? pat.rects : mirrored;
+      layerRects.forEach(function(rc){
         cases.push({ rc: rc, k: k, depth: (rc.x + rc.w/2) + (rc.y + rc.h/2) });
       });
     }
@@ -64764,7 +64820,7 @@ window.attendanceReject=async function(reqId,btn){
       var s1 = even ? C.side1 : C.side1b;
       var s2 = even ? C.side2 : C.side2b;
       var zb = deck + cs.k*extH, zt = zb + extH;
-      body += boxFaces(cs.rc.x + shiftX, cs.rc.y + shiftY, cs.rc.w, cs.rc.h, zb, zt, top, s1, s2, '#5c4a1f');
+      body += boxFaces(cs.rc.x, cs.rc.y, cs.rc.w, cs.rc.h, zb, zt, top, s1, s2, '#5c4a1f');
     });
 
     // Compute bbox to build viewBox (pallet at origin; pad covers any overhang)
@@ -65201,6 +65257,64 @@ window.attendanceReject=async function(reqId,btn){
     doc.text('Blank width '+r0(bw)+' mm', ox+bw*scale/2, oy+bh*scale + 8, { align:'center' });
   }
 
+  // Top-down layer plan into a page region (rx,ry,rw,rh) in mm.
+  function drawTopdownPdf(doc, pat, Lp, Wp, rx, ry, rw, rh){
+    var baseX = Math.min(0, pat.minX || 0), baseY = Math.min(0, pat.minY || 0);
+    var fullW = Lp - 2*baseX, fullH = Wp - 2*baseY; // include any overhang symmetrically
+    var sc = Math.min(rw / fullW, rh / fullH);
+    var ox = rx + (rw - fullW*sc)/2 - baseX*sc;
+    var oy = ry + (rh - fullH*sc)/2 - baseY*sc;
+    // pallet
+    doc.setDrawColor(120,120,120); doc.setLineWidth(0.5);
+    doc.rect(ox, oy, Lp*sc, Wp*sc, 'S');
+    // cases
+    doc.setDrawColor(90,70,20); doc.setLineWidth(0.4); doc.setFillColor(230,214,150);
+    pat.rects.forEach(function(r){ doc.rect(ox + r.x*sc, oy + r.y*sc, r.w*sc, r.h*sc, 'FD'); });
+    doc.setTextColor(70,70,70); doc.setFontSize(8);
+    doc.text('Layer plan \u2014 ' + r0(Lp) + ' \u00d7 ' + r0(Wp) + ' mm', ox, oy - 3);
+  }
+
+  // Isometric packed pallet into a page region (rx,ry,rw,rh) in mm.
+  function drawIsoPdf(doc, pat, cc, Lp, Wp, layers, rx, ry, rw, rh){
+    var A = 0.87, B = 0.5;
+    function proj(X,Y,Z){ return { x: (X - Y)*A, y: (X + Y)*B - Z }; }
+    var deck = state.pallet.palletDeckHeightMm, extH = cc.extH;
+    var drawLayers = Math.min(layers, 14);
+    var topZ = deck + drawLayers*extH;
+    // bbox of projection
+    var corners = [[0,0,0],[Lp,0,0],[0,Wp,0],[Lp,Wp,0],[0,0,topZ],[Lp,0,topZ],[0,Wp,topZ],[Lp,Wp,topZ]];
+    var minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9;
+    corners.forEach(function(c){ var p=proj(c[0],c[1],c[2]); minx=Math.min(minx,p.x);miny=Math.min(miny,p.y);maxx=Math.max(maxx,p.x);maxy=Math.max(maxy,p.y); });
+    var sc = Math.min(rw/(maxx-minx), rh/(maxy-miny));
+    var ox = rx + (rw - (maxx-minx)*sc)/2 - minx*sc;
+    var oy = ry + (rh - (maxy-miny)*sc)/2 - miny*sc;
+    function poly(pts, fill){
+      doc.setFillColor(fill[0],fill[1],fill[2]); doc.setDrawColor(70,58,25); doc.setLineWidth(0.2);
+      var segs=[]; for (var i=1;i<pts.length;i++){ segs.push([pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y]); }
+      doc.lines(segs, ox + pts[0].x*sc, oy + pts[0].y*sc, [sc,sc], 'FD', true);
+    }
+    function box(bx,by,bw,bh,zb,zt,top,s1,s2){
+      var b=proj(bx+bw,by,zb), c=proj(bx+bw,by+bh,zb), Cc=proj(bx+bw,by+bh,zt), Bc=proj(bx+bw,by,zt);
+      var d=proj(bx,by+bh,zb), D=proj(bx,by+bh,zt), Aa=proj(bx,by,zt);
+      poly([b,c,Cc,Bc], s1); poly([d,c,Cc,D], s2); poly([Aa,Bc,Cc,D], top);
+    }
+    box(0,0,Lp,Wp,0,deck,[107,88,54],[74,61,36],[58,47,28]); // deck
+    var mirrored = mirrorRects(pat.rects, Lp, Wp);
+    var cases = [];
+    for (var k=0;k<drawLayers;k++){
+      var lr = (k%2===0) ? pat.rects : mirrored;
+      lr.forEach(function(rc){ cases.push({ rc:rc, k:k, depth:(rc.x+rc.w/2)+(rc.y+rc.h/2) }); });
+    }
+    cases.sort(function(a,b){ if(a.k!==b.k) return a.k-b.k; return a.depth-b.depth; });
+    cases.forEach(function(csx){
+      var even=(csx.k%2===0);
+      var top=even?[201,168,76]:[138,110,47], s1=even?[168,134,58]:[124,99,41], s2=even?[124,99,41]:[92,74,31];
+      var zb=deck+csx.k*extH, zt=zb+extH;
+      box(csx.rc.x,csx.rc.y,csx.rc.w,csx.rc.h,zb,zt,top,s1,s2);
+    });
+    return drawLayers;
+  }
+
   function buildPdf(){
     var jsPDFns = window.jspdf || window.jsPDF;
     var Ctor = jsPDFns && (jsPDFns.jsPDF || jsPDFns);
@@ -65253,6 +65367,42 @@ window.attendanceReject=async function(reqId,btn){
     var bx2 = bx + cc.intW*sc + 40;
     doc.rect(bx2, by, cc.intL*sc, cc.intH*sc);
     doc.text('Short panel  '+r0(cc.intL)+'\u00d7'+r0(cc.intH)+' mm  (\u00d7'+(cc.rows-1)+')', bx2, by - 3);
+
+    // ── Page 3: pallet plan ──
+    var pat = currentPattern();
+    if (pat){
+      var Lp = current.Lp, Wp = current.Wp;
+      var pInfo = PALLETS[state.pallet.type] || PALLETS.std;
+      var layers = Math.max(0, Math.floor((state.pallet.maxStackHeightMm - state.pallet.palletDeckHeightMm) / cc.extH));
+      var casesPallet = pat.count * layers;
+      var stackH = state.pallet.palletDeckHeightMm + layers * cc.extH;
+      var palletGross = casesPallet * cc.caseKg + state.pallet.palletWeightKg;
+
+      doc.addPage('a3','landscape');
+      doc.setTextColor(20,27,42); doc.setFontSize(15); doc.setFont(undefined,'bold');
+      doc.text('LIGHTHOUSE DRINKS \u2014 ' + (titleName ? titleName.toUpperCase() + ' \u2014 ' : '') + 'PALLET PLAN \u00b7 ' + String(pat.name).toUpperCase(), 15, 16);
+      doc.setFont(undefined,'normal'); doc.setFontSize(10); doc.setTextColor(60,60,60);
+      var pl = [
+        'Pallet: ' + pInfo.label,
+        'Pattern: ' + pat.name + (pat.overL>0||pat.overW>0 ? '  (overhang ' + r1(pat.overL) + ' / ' + r1(pat.overW) + ' mm per side)' : ''),
+        'Cases per layer: ' + pat.count,
+        'Layers: ' + layers + '  (alternate layers mirrored to interlock)',
+        'Cases per pallet: ' + casesPallet,
+        'Bottles per pallet: ' + (casesPallet * cc.n),
+        'Stack height: ' + r0(stackH) + ' mm',
+        'Footprint used: ' + r0(pat.spanL) + ' \u00d7 ' + r0(pat.spanW) + ' mm',
+        'Pallet gross weight: ' + r1(palletGross) + ' kg'
+      ];
+      var py = 28; pl.forEach(function(t){ doc.text(t, 15, py); py += 6; });
+
+      // Top-down (left) and isometric (right), below the text block.
+      var regTop = 92, regH = pageH - regTop - 20;
+      var halfW = (pageW - 45) / 2;
+      drawTopdownPdf(doc, pat, Lp, Wp, 15, regTop, halfW, regH);
+      var drew = drawIsoPdf(doc, pat, cc, Lp, Wp, layers, 30 + halfW, regTop, halfW, regH);
+      doc.setTextColor(70,70,70); doc.setFontSize(8);
+      doc.text('Packed pallet \u2014 ' + (drew < layers ? 'showing ' + drew + ' of ' + layers + ' layers' : layers + ' layers'), 30 + halfW, regTop - 3);
+    }
 
     return doc;
   }
