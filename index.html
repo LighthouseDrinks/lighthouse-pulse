@@ -9828,6 +9828,27 @@ window.runBomStockCheck = async function() {
   </div>
 </div>
 
+<!-- Saved Keylines modal (Shipper & Pallet Planner) ─────────────────────── -->
+<div id="shipper-keylines-overlay" class="modal-overlay" onclick="if(event.target===this)window._spCloseLibrary()" style="display:none;opacity:0;transition:opacity .2s;">
+  <div class="modal-box" style="max-width:720px;width:96%;" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px;">Shipper &amp; Pallet Planner</div>
+        <div class="job-id-preview">Saved Keylines</div>
+      </div>
+      <button class="modal-close" onclick="window._spCloseLibrary()">&times;</button>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:0 20px 10px;">
+      <input id="spk-search" type="text" placeholder="Search name, bottle, grid…"
+        oninput="window._spFilterLibrary && window._spFilterLibrary()"
+        style="flex:1;min-width:160px;background:var(--navy-med);border:1px solid var(--navy-border);color:var(--text);padding:6px 10px;font-size:12px;font-family:Lato,sans-serif;outline:none;border-radius:3px;">
+    </div>
+    <div id="shipper-keylines-list" style="max-height:440px;overflow-y:auto;padding:4px 0;">
+      <div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">Loading…</div>
+    </div>
+  </div>
+</div>
+
 <!-- Email Quote compose modal ─────────────────────────────────────────── -->
 <div id="email-quote-overlay" class="modal-overlay" style="display:none;opacity:0;transition:opacity .2s;z-index:10050;">
   <div class="modal-box" style="max-width:640px;width:96%;" onclick="event.stopPropagation()">
@@ -14846,6 +14867,10 @@ window.loadBoms = async function initBoms() {
           <div>
             <table class="sp-kv-table"><tbody id="sp-case-table"></tbody></table>
             <button type="button" class="sp-btn" id="sp-pdf-btn" onclick="window._spDownloadPdf && window._spDownloadPdf()">Download Keyline PDF</button>
+            <div class="sp-btn-row">
+              <button type="button" class="sp-btn" id="sp-save-btn" onclick="window._spSaveKeyline && window._spSaveKeyline()">Save Keyline</button>
+              <button type="button" class="sp-btn sp-btn-ghost" id="sp-library-btn" onclick="window._spOpenLibrary && window._spOpenLibrary()">Saved Keylines</button>
+            </div>
             <div id="sp-pdf-status" class="sp-status" style="margin-top:8px;" aria-live="polite"></div>
           </div>
           <div class="sp-svg-wrap">
@@ -65446,6 +65471,238 @@ window.attendanceReject=async function(reqId,btn){
     }
   }
   window._spDownloadPdf = downloadPdf;
+
+  // ── Saved Keylines library ───────────────────────────────────────────────
+  // Persists the full planner state to Supabase so a keyline can be reopened,
+  // re-exported or deleted later. Mirrors the Pricing tool's Saved Quotes
+  // pattern (window.db + a modal list). Storage table: shipper_keylines.
+  var KEYLINE_TABLE = 'shipper_keylines';
+  var _libRows = [];
+
+  function serializeState(){
+    return JSON.parse(JSON.stringify({
+      bottle:       state.bottle,
+      closure:      state.closure,
+      caseSetup:    state.caseSetup,
+      grid:         state.grid,
+      pallet:       state.pallet,
+      patternIndex: state.patternIndex
+    }));
+  }
+
+  // SQL the user runs once in Supabase if the table isn't there yet.
+  var KEYLINE_SQL =
+    'CREATE TABLE shipper_keylines (\n' +
+    '  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,\n' +
+    '  name text NOT NULL,\n' +
+    '  bottle_name text,\n' +
+    '  cells integer,\n' +
+    '  grid text,\n' +
+    '  ext_dims text,\n' +
+    '  case_kg numeric,\n' +
+    '  pattern text,\n' +
+    '  data jsonb NOT NULL,\n' +
+    '  created_by text,\n' +
+    '  created_at timestamptz DEFAULT now()\n' +
+    ');\n' +
+    'ALTER TABLE shipper_keylines ENABLE ROW LEVEL SECURITY;\n' +
+    'CREATE POLICY "authenticated full access" ON shipper_keylines\n' +
+    '  FOR ALL TO authenticated USING (true) WITH CHECK (true);';
+
+  function _missingTable(msg){
+    msg = String(msg || '');
+    return /shipper_keylines/.test(msg) && (/exist/.test(msg) || /PGRST205/.test(msg) || /42P01/.test(msg) || /Could not find the table/.test(msg));
+  }
+
+  function _setPdfStatus(m, cls){
+    var s = document.getElementById('sp-pdf-status');
+    if (s){ s.textContent = m || ''; s.className = 'sp-status' + (cls ? ' ' + cls : ''); }
+  }
+
+  async function saveKeyline(){
+    var cc = current.cc || calcCase(state.bottle, state.closure, state.caseSetup, state.caseSetup.flute, state.grid);
+    var pat = currentPattern();
+    var nm = (state.bottle.name || '').trim();
+    var cells = state.caseSetup.bottleCount;
+    var suggested = 'Lighthouse Drinks' + (nm ? ' - ' + nm : '') + ' - ' + cells + ' cell shipper keyline';
+    var name = await window.lpPrompt('Name this keyline so you can find it later.', suggested, { title: 'Save keyline' });
+    if (name === null) return;          // cancelled
+    name = String(name).trim() || suggested;
+
+    var payload = {
+      name:        name,
+      bottle_name: nm || null,
+      cells:       cells,
+      grid:        cc.cols + '\u00d7' + cc.rows,
+      ext_dims:    r0(cc.extL) + '\u00d7' + r0(cc.extW) + '\u00d7' + r0(cc.extH),
+      case_kg:     r2(cc.caseKg),
+      pattern:     pat ? pat.name : null,
+      data:        serializeState(),
+      created_by:  (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'Unknown'
+    };
+
+    try {
+      await window.db.insert(KEYLINE_TABLE, payload);
+      _setPdfStatus('Keyline saved: ' + name, 'ok');
+      if (window.toast) window.toast('Keyline "' + name + '" saved.', 'success');
+    } catch(e){
+      console.error('[shipper] save keyline failed', e);
+      if (_missingTable(e && e.message)){
+        await window.lpAlert(
+          'The shipper_keylines table doesn\'t exist yet in Supabase.\n\nRun this SQL in your Supabase SQL editor, then try again:\n\n' + KEYLINE_SQL,
+          { title: 'One-time setup required', variant: 'warn' }
+        );
+      } else {
+        _setPdfStatus('Save failed: ' + (e && e.message ? e.message : 'unknown error'), 'err');
+        if (window.toast) window.toast('Error saving keyline: ' + (e && e.message || ''), 'error');
+      }
+    }
+  }
+  window._spSaveKeyline = saveKeyline;
+
+  // Restore a saved state object into the live planner and redraw everything.
+  function applyKeylineData(data){
+    if (!data) return;
+    state.bottle    = Object.assign({ name:'', diaMm:74, heightMm:300, glassWeightG:540, fillMl:700, sgFixed:0.95, closureLabelG:15 }, data.bottle || {});
+    state.closure   = Object.assign({ type:'cork', corkProtrusionMm:12 }, data.closure || {});
+    state.caseSetup = Object.assign({ bottleCount:6, cellClearanceMm:2, headspaceMm:2, flute:'B' }, data.caseSetup || {});
+    state.grid      = data.grid || null;
+    state.pallet    = Object.assign({ type:'std', maxStackHeightMm:1650, palletDeckHeightMm:150, palletWeightKg:25 }, data.pallet || {});
+    state.patternIndex = data.patternIndex || 0;
+
+    syncInputsFromState();
+    // applyClosureType resets the label weight to its type default, so restore
+    // the saved value afterwards to keep the loaded keyline exact.
+    var savedLabel = state.bottle.closureLabelG;
+    applyClosureType(state.closure.type);
+    state.bottle.closureLabelG = savedLabel;
+    var le = document.getElementById('sp-closureLabelG'); if (le) le.value = savedLabel;
+
+    var pseg = document.getElementById('sp-pallet-seg');
+    if (pseg) pseg.querySelectorAll('.sp-seg-btn').forEach(function(b){
+      b.classList.toggle('active', b.getAttribute('data-pallet') === state.pallet.type);
+    });
+
+    recompute();
+  }
+
+  window._spOpenLibrary = function(){
+    var ov = document.getElementById('shipper-keylines-overlay');
+    if (!ov) return;
+    ov.style.display = 'flex';
+    setTimeout(function(){ ov.style.opacity = '1'; }, 10);
+    document.body.style.overflow = 'hidden';
+    renderLibrary();
+  };
+  window._spCloseLibrary = function(){
+    var ov = document.getElementById('shipper-keylines-overlay');
+    if (!ov) return;
+    ov.style.opacity = '0';
+    setTimeout(function(){ ov.style.display = 'none'; }, 200);
+    document.body.style.overflow = '';
+  };
+
+  window._spFilterLibrary = function(){ renderLibrary(true); };
+
+  async function renderLibrary(fromCache){
+    var box = document.getElementById('shipper-keylines-list');
+    if (!box) return;
+    if (!fromCache){
+      box.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">Loading\u2026</div>';
+      try {
+        _libRows = await window.db.select(KEYLINE_TABLE, '?order=created_at.desc') || [];
+      } catch(e){
+        console.error('[shipper] library load failed', e);
+        if (_missingTable(e && e.message)){
+          box.innerHTML = '<div style="padding:28px 24px;color:var(--muted);font-size:12px;line-height:1.6;">'
+            + 'No keyline store yet. Run this once in your Supabase SQL editor, then reopen:'
+            + '<pre style="margin-top:10px;padding:12px;background:var(--navy-med);border:1px solid var(--navy-border);border-radius:4px;color:var(--gold);font-size:11px;white-space:pre-wrap;overflow:auto;">' + esc(KEYLINE_SQL) + '</pre></div>';
+        } else {
+          box.innerHTML = '<div style="text-align:center;padding:40px;color:var(--red);font-size:13px;">Error loading keylines: ' + esc(e && e.message || '') + '</div>';
+        }
+        return;
+      }
+    }
+
+    var q = ((document.getElementById('spk-search') || {}).value || '').toLowerCase();
+    var rows = _libRows.filter(function(r){
+      if (!q) return true;
+      return [r.name, r.bottle_name, r.grid, r.created_by].join(' ').toLowerCase().indexOf(q) >= 0;
+    });
+
+    if (!rows.length){
+      box.innerHTML = '<div style="text-align:center;padding:48px 24px;color:var(--muted);font-size:13px;">'
+        + (_libRows.length ? 'No keylines match your search.' : 'No saved keylines yet.<br><span style="font-size:11px;opacity:0.7;">Build one, then click Save Keyline.</span>')
+        + '</div>';
+      return;
+    }
+
+    box.innerHTML = rows.map(function(r){
+      var date = r.created_at ? new Date(r.created_at).toLocaleDateString('en-IE', {day:'2-digit',month:'short',year:'numeric'}) : '';
+      var meta = [
+        r.grid ? 'Grid ' + r.grid : '',
+        r.ext_dims ? r.ext_dims + ' mm' : '',
+        (r.case_kg != null ? r.case_kg + ' kg/case' : ''),
+        r.pattern || ''
+      ].filter(Boolean).map(esc).join(' \u00b7 ');
+      var idJs = esc(String(r.id)).replace(/'/g, "\\'");
+      var nameJs = esc(r.name).replace(/'/g, "\\'");
+      return '<div style="padding:14px 20px;border-bottom:1px solid var(--navy-border);display:flex;align-items:center;gap:12px;">'
+        + '<div style="flex:1;min-width:0;">'
+        +   '<div style="font-weight:700;color:var(--white);font-size:14px;margin-bottom:2px;">' + esc(r.name) + '</div>'
+        +   (meta ? '<div style="font-size:11px;color:var(--muted);margin-bottom:2px;">' + meta + '</div>' : '')
+        +   '<div style="font-size:10px;color:var(--muted);opacity:0.7;">' + date + (r.created_by ? ' &nbsp;\u00b7&nbsp; ' + esc(r.created_by) : '') + '</div>'
+        + '</div>'
+        + '<div style="display:flex;flex-direction:column;gap:6px;margin-left:8px;white-space:nowrap;">'
+        +   '<button onclick="window._spLoadKeyline(\'' + idJs + '\')" style="background:var(--gold);border:none;color:var(--navy);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;">Load</button>'
+        +   '<button onclick="window._spDownloadSaved(\'' + idJs + '\')" style="background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">&#8681; PDF</button>'
+        +   '<button onclick="window._spDeleteKeyline(\'' + idJs + '\',\'' + nameJs + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Delete</button>'
+        + '</div>'
+        + '</div>';
+    }).join('');
+  }
+
+  window._spLoadKeyline = async function(id){
+    var row = _libRows.find(function(r){ return String(r.id) === String(id); });
+    try {
+      if (!row){ var rows = await window.db.select(KEYLINE_TABLE, '?id=eq.' + id); row = rows && rows[0]; }
+      if (!row || !row.data){ if (window.toast) window.toast('Keyline not found.', 'error'); return; }
+      applyKeylineData(row.data);
+      window._spCloseLibrary();
+      if (window.toast) window.toast('Keyline "' + (row.name || '') + '" loaded.', 'success');
+    } catch(e){
+      console.error('[shipper] load keyline failed', e);
+      if (window.toast) window.toast('Error loading keyline: ' + (e && e.message || ''), 'error');
+    }
+  };
+
+  window._spDownloadSaved = async function(id){
+    var row = _libRows.find(function(r){ return String(r.id) === String(id); });
+    try {
+      if (!row){ var rows = await window.db.select(KEYLINE_TABLE, '?id=eq.' + id); row = rows && rows[0]; }
+      if (!row || !row.data){ if (window.toast) window.toast('Keyline not found.', 'error'); return; }
+      applyKeylineData(row.data);   // rebuild the planner from the saved state
+      window._spCloseLibrary();
+      downloadPdf();                // exports keyline + divider + pallet plan pages
+    } catch(e){
+      console.error('[shipper] download saved keyline failed', e);
+      if (window.toast) window.toast('Error exporting keyline: ' + (e && e.message || ''), 'error');
+    }
+  };
+
+  window._spDeleteKeyline = async function(id, name){
+    var ok = await window.lpConfirm('Delete keyline "' + name + '"? This cannot be undone.', { title: 'Delete keyline', confirmLabel: 'Delete', destructive: true });
+    if (!ok) return;
+    try {
+      await window.db.delete(KEYLINE_TABLE, '?id=eq.' + id);
+      _libRows = _libRows.filter(function(r){ return String(r.id) !== String(id); });
+      if (window.toast) window.toast('Keyline deleted.', 'success');
+      renderLibrary(true);
+    } catch(e){
+      console.error('[shipper] delete keyline failed', e);
+      if (window.toast) window.toast('Error deleting keyline: ' + (e && e.message || ''), 'error');
+    }
+  };
 
   // ── Init (idempotent) ────────────────────────────────────────────────────
   var inited = false;
