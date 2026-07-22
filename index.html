@@ -64901,10 +64901,10 @@ window.attendanceReject=async function(reqId,btn){
     return s;
   }
 
-  // Isometric 3D preview of the selected grid option: bottles (cylinders)
+  // Isometric 3D preview of the selected grid option: generic bottles
   // seated in divider cells inside an open-top case. Reuses the same
   // projection and shading approach as isoSVG.
-  var GLASS = { top:'rgba(196,214,180,0.92)', side:'rgba(150,180,140,0.92)', edge:'#41562f' };
+  var GLASS = { top:'rgba(210,226,196,0.96)', body:'rgba(150,180,140,0.92)', shoulder:'rgba(136,168,128,0.92)', neck:'rgba(166,194,154,0.94)', edge:'#41562f' };
   function gridIsoSVG(cc){
     if (!cc || !cc.cols || !cc.rows) return '';
     var A = 0.87, B = 0.5, SQ2 = Math.SQRT2;
@@ -64918,18 +64918,33 @@ window.attendanceReject=async function(reqId,btn){
           Ap=proj(rx,ry,zt), Bp=proj(rx+rw,ry,zt), Cp=proj(rx+rw,ry+rh,zt), Dp=proj(rx,ry+rh,zt);
       return poly([b,c,Cp,Bp], s1, edge) + poly([d,c,Cp,Dp], s2, edge) + poly([Ap,Bp,Cp,Dp], top, edge);
     }
-    // Bottle cylinder: body + bottom/top discs via projected (transformed) circles.
-    function cylinder(cx,cy,r,z0,z1){
-      var W = A*r*SQ2;                         // half screen-width of the disc
-      var cb = proj(cx,cy,z0), ct = proj(cx,cy,z1);
-      var mat = function(p){ return 'matrix('+r1(A)+','+r1(B)+','+r1(-A)+','+r1(B)+','+r1(p.x)+','+r1(p.y)+')'; };
-      var body = '<polygon points="'
-        + r1(ct.x-W)+','+r1(ct.y)+' ' + r1(ct.x+W)+','+r1(ct.y)+' '
-        + r1(cb.x+W)+','+r1(cb.y)+' ' + r1(cb.x-W)+','+r1(cb.y)
-        + '" fill="'+GLASS.side+'" stroke="'+GLASS.edge+'" stroke-width="0.6" stroke-linejoin="round" />';
-      var bottom = '<ellipse rx="'+r1(r)+'" ry="'+r1(r)+'" transform="'+mat(cb)+'" fill="'+GLASS.side+'" stroke="'+GLASS.edge+'" stroke-width="0.4" />';
-      var topd  = '<ellipse rx="'+r1(r)+'" ry="'+r1(r)+'" transform="'+mat(ct)+'" fill="'+GLASS.top+'" stroke="'+GLASS.edge+'" stroke-width="0.6" />';
-      return bottom + body + topd;
+    // A projected disc (circle in the XY plane) at screen point p, radius r.
+    function disc(p, r, fill, sw){
+      return '<ellipse rx="'+r1(r)+'" ry="'+r1(r)+'" transform="matrix('+r1(A)+','+r1(B)+','+r1(-A)+','+r1(B)+','+r1(p.x)+','+r1(p.y)+')" fill="'+fill+'" stroke="'+GLASS.edge+'" stroke-width="'+(sw==null?0.6:sw)+'" />';
+    }
+    // Left/right screen extremes of a disc of radius r centred at (cx,cy,z).
+    function ext(cx,cy,z,r){ var p = proj(cx,cy,z); var W = A*r*SQ2; return { L:{x:p.x-W,y:p.y}, R:{x:p.x+W,y:p.y}, c:p }; }
+    // A tapered wall segment between a lower and upper ring.
+    function wall(eLow, eHigh, fill){
+      return '<polygon points="'
+        + r1(eHigh.L.x)+','+r1(eHigh.L.y)+' ' + r1(eHigh.R.x)+','+r1(eHigh.R.y)+' '
+        + r1(eLow.R.x)+','+r1(eLow.R.y)+' ' + r1(eLow.L.x)+','+r1(eLow.L.y)
+        + '" fill="'+fill+'" stroke="'+GLASS.edge+'" stroke-width="0.5" stroke-linejoin="round" />';
+    }
+    // Generic bottle: cylindrical body, tapered shoulder, narrow neck, opening.
+    function bottle(cx,cy,rBody,z0,zTop){
+      var h = zTop - z0;
+      var neckR = Math.max(1.2, rBody * 0.36);
+      var zBody = z0 + h*0.60, zNeck = z0 + h*0.74;
+      var eBot     = ext(cx,cy,z0,   rBody);
+      var eBodyTop = ext(cx,cy,zBody, rBody);
+      var eNeckBot = ext(cx,cy,zNeck, neckR);
+      var eNeckTop = ext(cx,cy,zTop,  neckR);
+      return disc(eBot.c, rBody, GLASS.body, 0.4)   // base (mostly hidden)
+        + wall(eBot, eBodyTop, GLASS.body)          // straight body
+        + wall(eBodyTop, eNeckBot, GLASS.shoulder)  // shoulder taper
+        + wall(eNeckBot, eNeckTop, GLASS.neck)      // neck
+        + disc(eNeckTop.c, neckR, GLASS.top, 0.5);  // opening rim
     }
 
     var w = cc.cal;
@@ -64954,18 +64969,36 @@ window.attendanceReject=async function(reqId,btn){
       for (var i=0;i<cols;i++){
         var cx = ox + i*pitch + cell/2;
         var cy = oy + j*pitch + cell/2;
-        items.push({ depth: cx+cy, z2: 0, svg: cylinder(cx, cy, br, floorZ, floorZ+bh) });
+        items.push({ depth: cx+cy, z2: 0, svg: bottle(cx, cy, br, floorZ, floorZ+bh) });
       }
     }
+    // Column dividers (parallel to Y), split per row cell so each piece sorts
+    // correctly against the bottle in front of / behind it.
     for (var ci=0;ci<cols-1;ci++){
       var dx = ox + (ci+1)*cell + ci*w;
-      items.push({ depth: (dx + w/2) + (oy + cc.intW/2), z2: 1,
-        svg: boxFaces(dx, oy, w, cc.intW, floorZ, floorZ+intH, C.caseTopB, C.side1b, C.side2b, '#5c4a1f') });
+      for (var cj=0;cj<rows;cj++){
+        var cry = oy + cj*pitch;
+        items.push({ depth: (dx + w/2) + (cry + cell/2), z2: 1,
+          svg: boxFaces(dx, cry, w, cell, floorZ, floorZ+intH, C.caseTopB, C.side1b, C.side2b, '#5c4a1f') });
+      }
     }
+    // Row dividers (parallel to X), split per column cell.
     for (var rj=0;rj<rows-1;rj++){
       var dy = oy + (rj+1)*cell + rj*w;
-      items.push({ depth: (ox + cc.intL/2) + (dy + w/2), z2: 1,
-        svg: boxFaces(ox, dy, cc.intL, w, floorZ, floorZ+intH, C.caseTopB, C.side1b, C.side2b, '#5c4a1f') });
+      for (var rii=0;rii<cols;rii++){
+        var rrx = ox + rii*pitch;
+        items.push({ depth: (rrx + cell/2) + (dy + w/2), z2: 1,
+          svg: boxFaces(rrx, dy, cell, w, floorZ, floorZ+intH, C.caseTopB, C.side1b, C.side2b, '#5c4a1f') });
+      }
+    }
+    // Fill the small square gaps where dividers cross.
+    for (var xi=0;xi<cols-1;xi++){
+      var xdx = ox + (xi+1)*cell + xi*w;
+      for (var yj=0;yj<rows-1;yj++){
+        var ydy = oy + (yj+1)*cell + yj*w;
+        items.push({ depth: (xdx + w/2) + (ydy + w/2), z2: 1,
+          svg: boxFaces(xdx, ydy, w, w, floorZ, floorZ+intH, C.caseTopB, C.side1b, C.side2b, '#5c4a1f') });
+      }
     }
     items.sort(function(a,b){ return (a.depth - b.depth) || (a.z2 - b.z2); });
     items.forEach(function(it){ out += it.svg; });
