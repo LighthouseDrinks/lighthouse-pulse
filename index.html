@@ -3768,7 +3768,7 @@ window._pjmCheckStock = async function() {
     { label: 'Front Label',        field: 'front_label_sku_id',  needed: bottles  },
     { label: 'Back Label',         field: 'back_label_sku_id',   needed: bottles  },
     { label: 'Neck Label',         field: 'neck_label_sku_id',   needed: bottles  },
-    { label: 'Outer Shipper Case Label', field: 'outer_case_label_sku_id', needed: bottles },
+    { label: 'Outer Shipper Case Label', field: 'outer_case_label_sku_id', needed: shippers },
     { label: 'String / Twine',     field: 'string_twine_sku_id', needed: bottles  },
     { label: 'Monocarton',         field: 'monocarton_sku_id',   needed: bottles  },
     { label: 'Gift Tube',          field: 'gift_tube_sku_id',    needed: bottles  },
@@ -11616,7 +11616,7 @@ window.toggleLhStock = function() {
     }
   }
   if (hint) hint.style.display = window._bomIncludeLhStock ? '' : 'none';
-  onBomClientChange();
+  onBomClientChange(true);
 };
 
 // Category → dropdown mapping for BOM components
@@ -11773,14 +11773,16 @@ window._weightedContainerAbv = function(linked) {
 };
 
 // Compute the per-job qty_required for one BOM SKU column.
-// Shippers and dividers are case items (ceil(bottles / bottles_per_shipper)).
+// Shippers, dividers and outer case labels are case items — one per case,
+// i.e. ceil(bottles / bottles_per_shipper). The outer case label goes on the
+// outside of the shipper case, so it is needed once per case, not per bottle.
 // Liquid SKU has no bottle-based qty (qty tracked in litres elsewhere).
 // All other items use the effective bottle count from _deriveBottleCount.
 window._bomQtyFor = function(skuCol, job, bom) {
   if (!job || !bom) return null;
   var effectiveBottles = window._deriveBottleCount(job, bom);
   if (skuCol === 'liquid_sku_id') return null;
-  var isCaseItem = (skuCol === 'shipper_sku_id' || skuCol === 'divider_sku_id');
+  var isCaseItem = (skuCol === 'shipper_sku_id' || skuCol === 'divider_sku_id' || skuCol === 'outer_case_label_sku_id');
   if (isCaseItem) {
     if (effectiveBottles && bom.bottles_per_shipper) {
       return Math.ceil(effectiveBottles / bom.bottles_per_shipper);
@@ -32397,7 +32399,7 @@ window.saveAdjModal = async function() {
     var actual = parseInt(job.actual_bottles_produced || 0);
     if (!actual) return null;
     var nm = (jc.item_name || '').toLowerCase();
-    var isCase = nm.indexOf('shipper') > -1 || nm.indexOf('divider') > -1;
+    var isCase = nm.indexOf('shipper') > -1 || nm.indexOf('divider') > -1 || nm.indexOf('case label') > -1;
     var bps = bom ? parseInt(bom.bottles_per_shipper || 0) : 0;
     if (isCase && bps > 0) return Math.ceil(actual / bps);
     var qr = jc.qty_required != null ? parseFloat(jc.qty_required) : null;
@@ -34725,7 +34727,7 @@ window.saveAdjModal = async function() {
       });
 
       function calcRow(c, waste) {
-        var isCaseItem = c.item_name && (c.item_name.toLowerCase().indexOf('shipper') > -1 || c.item_name.toLowerCase().indexOf('divider') > -1);
+        var isCaseItem = c.item_name && (c.item_name.toLowerCase().indexOf('shipper') > -1 || c.item_name.toLowerCase().indexOf('divider') > -1 || c.item_name.toLowerCase().indexOf('case label') > -1);
         var qtyPerUnit;
         if (isCaseItem && bomBPS) {
           qtyPerUnit = Math.ceil(actualBottles / bomBPS);
@@ -36401,7 +36403,7 @@ window.saveAdjModal = async function() {
     if (!jobData || !jobData.bom_id) return 0;
     var changed = 0;
     try {
-      var bomRows = await supaGet('boms?id=eq.' + jobData.bom_id + '&select=liquid_sku_id,bottle_sku_id,shipper_sku_id,divider_sku_id,volume_cl,bottles_per_shipper,bottling_abv,abv');
+      var bomRows = await supaGet('boms?id=eq.' + jobData.bom_id + '&select=liquid_sku_id,bottle_sku_id,shipper_sku_id,divider_sku_id,outer_case_label_sku_id,volume_cl,bottles_per_shipper,bottling_abv,abv');
       if (!bomRows || !bomRows.length) return 0;
       var bom = bomRows[0];
 
@@ -36416,7 +36418,7 @@ window.saveAdjModal = async function() {
         var qty;
         if (c.sku_id && c.sku_id === bom.liquid_sku_id) {
           qty = null;
-        } else if (c.sku_id && (c.sku_id === bom.shipper_sku_id || c.sku_id === bom.divider_sku_id)) {
+        } else if (c.sku_id && (c.sku_id === bom.shipper_sku_id || c.sku_id === bom.divider_sku_id || c.sku_id === bom.outer_case_label_sku_id)) {
           qty = (effectiveBottles && bom.bottles_per_shipper)
             ? Math.ceil(effectiveBottles / bom.bottles_per_shipper)
             : effectiveBottles;
@@ -50773,7 +50775,7 @@ window.saveAdjModal = async function() {
       var info   = skuInfo[sku] || {};
       var name   = (info.id ? window.skuDisplayName(info) : null) || nameMap[sku] || sku;
       var qtyReq = reqMap[sku];
-      var isCase = /shipper|divider/i.test(name || '');
+      var isCase = /shipper|divider|case label/i.test(name || '');
       var consumed  = lastQty(sku, 'job_depletion');
       var collected = lastQty(sku, 'client_collection');
       var expected;
