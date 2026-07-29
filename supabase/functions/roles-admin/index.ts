@@ -92,8 +92,14 @@ function sanitisePayload(p: RolePayload, isCreate: boolean): {
   }
   if (p.permissions && typeof p.permissions === 'object') {
     // Coerce to 0/1 ints to match the existing matrix payload shape.
+    // Validate each key against the same snake_case pattern used for role
+    // keys, so junk / injection keys from a stale or hostile UI are dropped
+    // rather than written verbatim into the permissions JSON. All real
+    // permission keys (boms_edit, jobs_create, settings_access, ...) are
+    // snake_case and pass, so this is non-breaking for legitimate payloads.
     const coerced: Record<string, number> = {};
     for (const [k, v] of Object.entries(p.permissions)) {
+      if (!KEY_RE.test(k)) continue;
       coerced[k] = v ? 1 : 0;
     }
     row.permissions = coerced;

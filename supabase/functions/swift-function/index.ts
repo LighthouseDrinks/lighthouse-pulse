@@ -12,9 +12,13 @@
 //
 // NOTE: the email path is intentionally still callable without a user JWT
 // because the public magic-link approval pages send notifications as the
-// anon role. Requiring auth there would break those flows. Once
-// RESEND_API_KEY is set in the environment, no secret is accepted from the
-// browser regardless of caller.
+// anon role. Requiring auth there would break those flows.
+//
+// The Resend key is now resolved SERVER-SIDE only: from the RESEND_API_KEY
+// function secret, or (fallback) from the app_settings key='system' row via
+// the service role — the same key staff manage under Settings -> System.
+// A browser-supplied `resendKey` is NO LONGER accepted, so the anon email
+// path can't be turned into an open relay with an attacker-chosen key.
 
 const PROJECT_URL = 'https://anhawgzgxoywophqbmji.supabase.co';
 
@@ -64,13 +68,39 @@ async function callerIsStaff(userId: string, serviceKey: string): Promise<boolea
   }
 }
 
+// Resolve the Resend API key SERVER-SIDE only: prefer the RESEND_API_KEY
+// function secret, else read app_settings key='system' value.resend_key via
+// the service role. Never trust a browser-supplied key.
+async function resolveResendKey(serviceKey: string): Promise<string> {
+  const envKey = (Deno.env.get('RESEND_API_KEY') || '').trim();
+  if (envKey) return envKey;
+  if (!serviceKey) return '';
+  try {
+    const r = await fetch(
+      `${PROJECT_URL}/rest/v1/app_settings?key=eq.system&select=value`,
+      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } }
+    );
+    if (!r.ok) return '';
+    const rows = await r.json();
+    const raw = Array.isArray(rows) && rows[0] ? rows[0].value : null;
+    let v: Record<string, unknown> = {};
+    if (typeof raw === 'string') { try { v = JSON.parse(raw); } catch (_) { v = {}; } }
+    else if (raw && typeof raw === 'object') { v = raw as Record<string, unknown>; }
+    return v.resend_key ? String(v.resend_key).trim() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS });
   }
 
   const body = await req.json();
-  const serviceKey = Deno.env.get('SERVICE_ROLE_KEY') || '';
+  // Supabase auto-injects SUPABASE_SERVICE_ROLE_KEY; keep SERVICE_ROLE_KEY as a
+  // fallback so the delete_user path can't regress if only the old secret is set.
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SERVICE_ROLE_KEY') || '';
 
   // ── Delete auth user (staff only) ─────────────────────────────────
   if (body.action === 'delete_user') {
@@ -90,10 +120,10 @@ Deno.serve(async (req) => {
   }
 
   // ── Send email ────────────────────────────────────────────────────
-  const { to, subject, html, from, resendKey, attachments, cc, bcc, reply_to } = body;
-  // Prefer the server-held key; only fall back to a client-supplied key
-  // when the environment key is not configured.
-  const effectiveKey = Deno.env.get('RESEND_API_KEY') || resendKey;
+  const { to, subject, html, from, attachments, cc, bcc, reply_to } = body;
+  // Server-resolved key only (env secret, else app_settings via service role).
+  // A browser-supplied `resendKey` is deliberately ignored.
+  const effectiveKey = await resolveResendKey(serviceKey);
   if (!effectiveKey) return json({ error: 'No Resend API key configured' }, 400);
 
   const payload: Record<string, unknown> = { to, subject, html, from };

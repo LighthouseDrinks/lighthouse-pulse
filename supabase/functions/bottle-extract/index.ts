@@ -66,16 +66,30 @@ Deno.serve(async (req: Request) => {
 
     const supabaseUrl  = Deno.env.get('SUPABASE_URL')!;
     const anonKey      = Deno.env.get('SUPABASE_ANON_KEY')!;
+    const serviceKey   = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY') || '';
 
     if (!anthropicKey) return json({ error: 'ANTHROPIC_API_KEY not configured' }, 500);
 
-    // Require an authenticated Pulse user (staff tool).
+    // Require an authenticated Pulse user.
     const userClient = createClient(supabaseUrl, anonKey, {
       global: { headers: { Authorization: authHeader } },
     });
     const { data: { user }, error: authErr } = await userClient.auth.getUser();
     if (authErr || !user) return json({ error: 'Unauthorized' }, 401);
+
+    // Staff-only tool: block client-portal users and inactive accounts so a
+    // logged-in client can't burn Anthropic credits via this endpoint.
+    // Role is resolved server-side via the service role (mirrors peat-ingest).
+    const adminClient = createClient(supabaseUrl, serviceKey);
+    const { data: appUser } = await adminClient
+      .from('app_users')
+      .select('role, status')
+      .eq('auth_user_id', user.id)
+      .single();
+    if (!appUser || appUser.role === 'client' || appUser.status !== 'active') {
+      return json({ error: 'Forbidden — staff only' }, 403);
+    }
 
     const body = await req.json().catch(() => ({})) as {
       fileBase64?: string; mimeType?: string; fileName?: string;

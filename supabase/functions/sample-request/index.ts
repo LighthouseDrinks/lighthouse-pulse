@@ -169,6 +169,35 @@ Deno.serve(async (req: Request) => {
       if (total > 100.5) return err(`Blend percentages total ${Math.round(total * 10) / 10}% — they can't exceed 100%.`, 400);
     }
 
+    // Tenant binding: the public prospect form omits client_id and stays
+    // anonymous (recipient_company is a free-text name). But when a client_id
+    // is supplied, the caller MUST prove they own it — otherwise a holder of
+    // the publishable key could attribute samples/tasks to any brand. Staff
+    // (any non-client role) may attribute to any client; a portal client may
+    // only use their own client_id. Verified from the caller's JWT, not the
+    // request body.
+    if (clientId) {
+      const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+      let callerOk = false;
+      if (token && token.split('.').length === 3) {
+        const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
+        const userClient = createClient(supabaseUrl, anonKey, {
+          global: { headers: { Authorization: `Bearer ${token}` } },
+        });
+        const { data: { user } } = await userClient.auth.getUser();
+        if (user) {
+          const { data: au } = await admin.from('app_users')
+            .select('role, client_id, status')
+            .eq('auth_user_id', user.id).maybeSingle();
+          if (au && au.status === 'active') {
+            if (au.role && au.role !== 'client') callerOk = true;         // staff
+            else if (String(au.client_id) === String(clientId)) callerOk = true; // own tenant
+          }
+        }
+      }
+      if (!callerOk) return err('Not authorised to submit for this account.', 403);
+    }
+
     const sampleId = await nextSampleId(admin);
     const finishedLogNo = await nextFinishedLogNo(admin);
     const nowIso = new Date().toISOString();
@@ -199,7 +228,10 @@ Deno.serve(async (req: Request) => {
     };
 
     const { error: insErr } = await admin.from('samples').insert(payload);
-    if (insErr) return err('Could not save the request: ' + insErr.message, 500);
+    if (insErr) {
+      console.error('[sample-request] insert samples failed:', insErr.message);
+      return err('Could not save the request. Please try again or contact Lighthouse.', 500);
+    }
 
     if (comps.length) {
       const rows = comps.map((c) => ({ ...c, sample_id: sampleId }));
