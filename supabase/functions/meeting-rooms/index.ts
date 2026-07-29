@@ -198,7 +198,11 @@ async function syncFeed(admin: ReturnType<typeof createClient>, timeMin: string,
     listRoom(token, room1, 'CBW Main Office Meeting Room', timeMin, timeMax),
     listRoom(token, room2, 'CBW Warehouse 4 Meeting Room', timeMin, timeMax),
   ]);
-  const events = [...a, ...b];
+  // Dedupe by google_event_id: a meeting booked into both rooms appears in both
+  // feeds with the same id, which would break the ON CONFLICT upsert below.
+  const byEventId = new Map<string, NormEvent>();
+  for (const ev of [...a, ...b]) byEventId.set(ev.google_event_id, ev);
+  const events = [...byEventId.values()];
 
   // Upsert meetings, capture DB ids, then refresh attendees.
   const idByEvent: Record<string, string> = {};
