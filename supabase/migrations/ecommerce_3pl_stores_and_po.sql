@@ -73,8 +73,11 @@ create or replace view public.ecommerce_stores_public as
     three_pl_client_id
   from public.ecommerce_stores
   where is_active = true;
-alter view public.ecommerce_stores_public set (security_invoker = on);
-revoke all on public.ecommerce_stores_public from anon, authenticated;
+-- Definer behaviour (security_invoker OFF): the view is credential-free and
+-- SELECT on the base ecommerce_stores table is revoked from authenticated, so
+-- the view must run with its owner's privileges (matches the original design).
+alter view public.ecommerce_stores_public set (security_invoker = off);
+revoke all on public.ecommerce_stores_public from anon;
 grant select on public.ecommerce_stores_public to authenticated;
 
 -- ── ex-VAT sales capture on order items ────────────────────
