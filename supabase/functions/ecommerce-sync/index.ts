@@ -134,6 +134,32 @@ function shopifyHost(storeUrl: string) {
   return storeUrl.replace(/^https?:\/\//, '').replace(/\/+$/, '');
 }
 
+// Resolves an Admin API access token for a store.
+//  • Legacy custom apps: api_key holds a permanent `shpat_...` token (no secret).
+//  • Dev Dashboard apps (2026+): api_key = Client ID, api_secret = Client secret.
+//    Shopify no longer exposes a static token, so we mint a short-lived one via
+//    the client-credentials grant (valid ~24h; we fetch fresh per operation).
+async function resolveShopifyToken(store: Record<string, unknown>): Promise<string> {
+  const key    = (store.api_key    as string) || '';
+  const secret = (store.api_secret as string) || '';
+  if (key.startsWith('shpat_') && !secret) return key;
+  if (key && secret) {
+    const host = shopifyHost(store.store_url as string);
+    const res = await fetch(`https://${host}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ grant_type: 'client_credentials', client_id: key, client_secret: secret }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.access_token) {
+      throw new Error('Shopify token exchange failed: ' + (data.error_description || data.error || ('HTTP ' + res.status)));
+    }
+    return data.access_token as string;
+  }
+  // Fallback: treat whatever is in api_key as the token.
+  return key;
+}
+
 async function shopifyTestConnection(storeUrl: string, token: string) {
   const url = `https://${shopifyHost(storeUrl)}/admin/api/${SHOPIFY_API_VER}/shop.json`;
   console.log('[ecommerce-sync] shopify test:', url);
@@ -590,7 +616,14 @@ Deno.serve(async (req: Request) => {
 
       let result: { ok: boolean; error?: string; shop_name?: string };
       if (store.platform === 'shopify') {
-        result = await shopifyTestConnection(store.store_url as string, store.api_key as string);
+        try {
+          var shopToken = await resolveShopifyToken(store);
+        } catch (te) {
+          result = { ok: false, error: te instanceof Error ? te.message : String(te) };
+          await updateStoreStatus(adminClient, id, { connection_status: 'error', error_message: result.error, updated_at: new Date().toISOString() });
+          return err(result.error || 'Token error', 400);
+        }
+        result = await shopifyTestConnection(store.store_url as string, shopToken);
       } else if (store.platform === 'woocommerce') {
         result = await wooTestConnection(store.store_url as string, store.api_key as string, store.api_secret as string);
       } else {
@@ -624,7 +657,8 @@ Deno.serve(async (req: Request) => {
         let rawOrders: Array<Record<string, unknown>>;
         let normalised: Array<{ order: Record<string, unknown>; items: Array<Record<string, unknown>> }>;
         if (store.platform === 'shopify') {
-          rawOrders  = await shopifyFetchOrders(store.store_url as string, store.api_key as string, since);
+          var shopToken = await resolveShopifyToken(store);
+          rawOrders  = await shopifyFetchOrders(store.store_url as string, shopToken, since);
           normalised = rawOrders.map((o) => ({
             order: shopifyNormaliseOrder(id, o),
             items: shopifyItemsForOrder(o),
@@ -691,7 +725,8 @@ Deno.serve(async (req: Request) => {
       try {
         let products: Array<{ sku: string | null; product_name: string; external_id: string }>;
         if (store.platform === 'shopify') {
-          products = await shopifyFetchProducts(store.store_url as string, store.api_key as string);
+          var shopToken = await resolveShopifyToken(store);
+          products = await shopifyFetchProducts(store.store_url as string, shopToken);
         } else if (store.platform === 'woocommerce') {
           products = await wooFetchProducts(store.store_url as string, store.api_key as string, store.api_secret as string);
         } else {
