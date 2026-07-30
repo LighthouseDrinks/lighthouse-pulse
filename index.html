@@ -62263,7 +62263,8 @@ if (typeof _origOpenDD === 'function') {
     body.innerHTML = '<div style="color:var(--muted);font-size:13px;">Loading stores…</div>';
     try {
       var [stores, mappings] = await Promise.all([
-        window.db.select('ecommerce_stores_public', '?order=created_at.asc&select=*'),
+        // Exclude 3PL client stores — those are managed under Ecommerce, not Finance.
+        window.db.select('ecommerce_stores_public', '?three_pl_client_id=is.null&order=created_at.asc&select=*'),
         window.db.select('xero_mappings', '?select=mapping_key,xero_account_code,xero_account_name,xero_tax_type,mapping_type,description')
       ]);
       window._finStores   = stores || [];
@@ -62972,12 +62973,13 @@ if (typeof _origOpenDD === 'function') {
     <!-- Sub-nav -->
     <div id="ecom-tabs" style="display:flex;gap:0;margin-bottom:24px;border-bottom:2px solid var(--navy-border);">
       <button class="inv-tab active" id="ecom-tab-3pl" onclick="window.showEcomTab('3pl',this)">3PL Clients</button>
+      <button class="inv-tab" id="ecom-tab-po" onclick="window.showEcomTab('po',this)">Purchase Orders</button>
     </div>
 
     <!-- Panels -->
     <div class="ecom-panel" id="ecom-panel-3pl">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:12px;flex-wrap:wrap;">
-        <div style="color:var(--muted);font-size:12px;">Third-party logistics clients Lighthouse fulfils for.</div>
+        <div style="color:var(--muted);font-size:12px;">Third-party logistics clients Lighthouse fulfils for. Open a client to connect their store and generate purchase orders.</div>
         <button class="btn btn-gold" id="ecom-3pl-add-btn" onclick="window.open3plModal()">+ Add 3PL Client</button>
       </div>
       <div class="card" style="padding:0;overflow-x:auto;">
@@ -62997,6 +62999,32 @@ if (typeof _origOpenDD === 'function') {
         </table>
       </div>
     </div>
+
+    <!-- Purchase Orders history (all clients) -->
+    <div class="ecom-panel" id="ecom-panel-po" style="display:none;">
+      <div style="color:var(--muted);font-size:12px;margin-bottom:18px;">Purchase orders generated for 3PL clients. Click a row to reprint.</div>
+      <div class="card" style="padding:0;overflow-x:auto;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>PO #</th>
+              <th>Client</th>
+              <th>Period</th>
+              <th>Method</th>
+              <th style="text-align:right;">Total</th>
+              <th>Created</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="ecom-po-tbody">
+            <tr><td colspan="7" style="color:var(--muted);font-size:13px;">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Client drill-down (populated by JS) -->
+    <div id="ecom-client-detail" style="display:none;"></div>
   </div>
 </div>
 
@@ -63051,6 +63079,12 @@ if (typeof _origOpenDD === 'function') {
 
   // ── Tab switcher ───────────────────────────────────────────
   window.showEcomTab = function(key, btn) {
+    // Leaving any open client drill-down when switching top-level tabs.
+    var detail = document.getElementById('ecom-client-detail');
+    if (detail) { detail.style.display = 'none'; detail.innerHTML = ''; }
+    var tabsBar = document.getElementById('ecom-tabs');
+    if (tabsBar) tabsBar.style.display = 'flex';
+
     document.querySelectorAll('.ecom-panel').forEach(function(p) { p.style.display = 'none'; });
     document.querySelectorAll('#ecom-tabs .inv-tab').forEach(function(b) { b.classList.remove('active'); });
     var panel = document.getElementById('ecom-panel-' + key);
@@ -63058,12 +63092,54 @@ if (typeof _origOpenDD === 'function') {
     if (btn) btn.classList.add('active');
     _ecomTab = key;
     if (key === '3pl') window.load3plClients && window.load3plClients();
+    if (key === 'po')  window.loadEcomPOs && window.loadEcomPOs();
   };
 
   // ── Page loader (called from showPage hook) ────────────────
   window.loadEcommercePage = function() {
     if (_ecomTab === '3pl') window.load3plClients();
+    else if (_ecomTab === 'po') window.loadEcomPOs();
   };
+
+  // Finance-access or Pulse-admin may connect/sync sensitive store creds.
+  function _ecomCanManageStores() {
+    var role = window.CURRENT_USER && window.CURRENT_USER.role;
+    return (window.FINANCE_NAV_ROLES && window.FINANCE_NAV_ROLES.indexOf(role) >= 0)
+        || (window.isPulseAdmin && window.isPulseAdmin(role));
+  }
+
+  function _esc(s) { return window.escapeHtml ? window.escapeHtml(s) : (s == null ? '' : String(s)); }
+  function _eur(v) {
+    var n = Number(v || 0);
+    return '€' + n.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  var ECOMMERCE_EF = 'https://anhawgzgxoywophqbmji.supabase.co/functions/v1/ecommerce-sync';
+  async function callEcomEF(body, timeoutMs) {
+    var sess  = await window._sb.auth.getSession();
+    var token = sess.data && sess.data.session ? sess.data.session.access_token : null;
+    var controller = new AbortController();
+    var timer = timeoutMs ? setTimeout(function() { controller.abort(); }, timeoutMs) : null;
+    var res;
+    try {
+      res = await fetch(ECOMMERCE_EF, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      if (e.name === 'AbortError') throw new Error('Request timed out');
+      throw e;
+    }
+    if (timer) clearTimeout(timer);
+    var txt = await res.text();
+    var data;
+    try { data = JSON.parse(txt); } catch (e) { throw new Error('Edge function returned non-JSON: ' + txt.slice(0, 120)); }
+    if (!res.ok) throw new Error(data.error || 'Edge function error (HTTP ' + res.status + ')');
+    return data;
+  }
 
   // ── 3PL Clients: load + render ─────────────────────────────
   window.load3plClients = async function() {
@@ -63099,6 +63175,7 @@ if (typeof _origOpenDD === 'function') {
         + '<td>' + fmtRetainer(r.monthly_retainer) + '</td>'
         + '<td>' + margin + '</td>'
         + '<td style="text-align:right;white-space:nowrap;">'
+        +   '<button class="btn btn-gold" style="padding:5px 12px;" onclick="window.openEcomClient(this.dataset.id)" data-id="' + window.escapeHtml(r.id) + '">Open</button> '
         +   '<button class="btn btn-outline" style="padding:5px 12px;" onclick=\'window.open3plModal(JSON.parse(this.dataset.row))\' data-row="' + payload + '">Edit</button> '
         +   '<button class="btn btn-outline" style="padding:5px 12px;" onclick="window.delete3plClient(this.dataset.id, this.dataset.name)" data-id="' + window.escapeHtml(r.id) + '" data-name="' + window.escapeHtml(r.company_name || '') + '">Delete</button>'
         + '</td>'
@@ -63187,6 +63264,559 @@ if (typeof _origOpenDD === 'function') {
   document.addEventListener('click', function(e) {
     if (e.target && e.target.id === 'ecom-3pl-modal-overlay') window.close3plModal();
   });
+
+  // ═══════════════════════════════════════════════════════════
+  // ── CLIENT DRILL-DOWN: stores, catalogue, report, POs ──────
+  // ═══════════════════════════════════════════════════════════
+  var _ecomClient   = null;   // currently open client row
+  var _ecomStores   = [];     // linked stores
+  var _ecomProducts = [];     // catalogue rows (three_pl_client_products)
+  var _ecomReport   = null;   // last report: { start, end, rows, totalNet, totalUnits }
+
+  function _ymd(d) {
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+  function _addDayYmd(ymd) {
+    var p = ymd.split('-'); var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+  }
+  function _prevMonthRange() {
+    var now = new Date();
+    var start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    var end   = new Date(now.getFullYear(), now.getMonth(), 0);
+    return { start: _ymd(start), end: _ymd(end) };
+  }
+  function _statusPill(s) {
+    if (s === 'connected') return '<span class="pill green">Connected</span>';
+    if (s === 'error')     return '<span class="pill red">Error</span>';
+    return '<span class="pill muted">' + _esc(s || 'disconnected') + '</span>';
+  }
+  // Our purchase price for a report row, matched by SKU then name.
+  function _purchasePriceFor(row) {
+    var p = null;
+    if (row.sku) p = _ecomProducts.find(function(x) { return x.sku && String(x.sku) === String(row.sku); });
+    if (!p) p = _ecomProducts.find(function(x) { return (x.product_name || '').toLowerCase() === (row.product_name || '').toLowerCase(); });
+    return (p && p.purchase_price != null) ? Number(p.purchase_price) : null;
+  }
+
+  window.openEcomClient = async function(id) {
+    var host = document.getElementById('ecom-client-detail');
+    if (!host) return;
+    document.querySelectorAll('.ecom-panel').forEach(function(p) { p.style.display = 'none'; });
+    var tabsBar = document.getElementById('ecom-tabs'); if (tabsBar) tabsBar.style.display = 'none';
+    host.style.display = '';
+    host.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">Loading client…</div>';
+    try {
+      var client = (await window.db.select('three_pl_clients', '?id=eq.' + encodeURIComponent(id) + '&limit=1'))[0];
+      if (!client) { host.innerHTML = '<div style="color:var(--red);font-size:13px;">Client not found.</div>'; return; }
+      _ecomClient = client;
+      _ecomReport = null;
+      _ecomStores = (await window.db.select('ecommerce_stores_public',
+        '?three_pl_client_id=eq.' + encodeURIComponent(id) + '&order=created_at.asc&select=*')) || [];
+      _ecomProducts = (await window.db.select('three_pl_client_products',
+        '?three_pl_client_id=eq.' + encodeURIComponent(id) + '&order=product_name.asc')) || [];
+      _renderClientDetail();
+    } catch (e) {
+      host.innerHTML = '<div style="color:var(--red);font-size:13px;">Failed to load client: ' + _esc(e.message || String(e)) + '</div>';
+    }
+  };
+
+  window.closeEcomClient = function() {
+    _ecomClient = null; _ecomReport = null;
+    var host = document.getElementById('ecom-client-detail');
+    if (host) { host.style.display = 'none'; host.innerHTML = ''; }
+    var tabsBar = document.getElementById('ecom-tabs'); if (tabsBar) tabsBar.style.display = 'flex';
+    window.showEcomTab('3pl', document.getElementById('ecom-tab-3pl'));
+  };
+
+  function _renderClientDetail() {
+    var host = document.getElementById('ecom-client-detail');
+    if (!host || !_ecomClient) return;
+    var c = _ecomClient;
+    var canManage = _ecomCanManageStores();
+    var cardStyle = 'background:var(--navy-card,#0a1628);border:1px solid var(--navy-border);border-radius:6px;padding:20px;margin-bottom:18px;';
+    var titleStyle = 'font-size:15px;font-weight:700;color:var(--white);margin-bottom:14px;';
+    var h = [];
+
+    // Header
+    h.push('<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px;">');
+    h.push('<div style="display:flex;align-items:center;gap:12px;">');
+    h.push('<button class="btn btn-outline" style="padding:6px 12px;" onclick="window.closeEcomClient()">← Back</button>');
+    h.push('<div style="font-size:20px;font-weight:700;color:var(--white);">' + _esc(c.company_name || '') + '</div>');
+    h.push((c.contract_signed ? '<span class="pill green">Contract signed</span>' : '<span class="pill muted">No contract</span>'));
+    h.push('</div></div>');
+
+    // ── Stores ──
+    h.push('<div style="' + cardStyle + '">');
+    h.push('<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px;">');
+    h.push('<div style="' + titleStyle + 'margin:0;">Connected Store</div>');
+    if (canManage) h.push('<button class="btn btn-gold" style="padding:6px 12px;" onclick="window.ecomOpenStoreModal()">' + (_ecomStores.length ? '+ Connect Another' : '+ Connect Store') + '</button>');
+    h.push('</div>');
+    if (!_ecomStores.length) {
+      h.push('<div style="color:var(--muted);font-size:13px;">' + (canManage
+        ? 'No store connected yet. Connect this client\'s Shopify or WooCommerce store to sync orders and products.'
+        : 'No store connected. A finance or admin user must connect the store.') + '</div>');
+    } else {
+      _ecomStores.forEach(function(s) {
+        h.push('<div style="border:1px solid var(--navy-border);border-radius:5px;padding:14px;margin-bottom:10px;">');
+        h.push('<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">');
+        h.push('<div><span style="font-weight:600;color:var(--white);">' + _esc(s.name || '') + '</span> '
+          + '<span style="color:var(--muted);font-size:12px;">' + _esc(s.platform || '') + '</span> ' + _statusPill(s.connection_status) + '</div>');
+        h.push('<div style="color:var(--muted);font-size:11px;">'
+          + (s.last_synced_at ? 'Last synced ' + new Date(s.last_synced_at).toLocaleString('en-IE') : 'Never synced')
+          + ' · ' + (s.orders_synced_count || 0) + ' orders</div>');
+        h.push('</div>');
+        if (s.error_message) h.push('<div style="color:var(--red);font-size:11px;margin-top:6px;">' + _esc(s.error_message) + '</div>');
+        if (canManage) {
+          h.push('<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">');
+          h.push('<button class="btn btn-outline" style="padding:5px 10px;font-size:12px;" onclick="window.ecomTestStore(\'' + _esc(s.id) + '\')">Test</button>');
+          h.push('<button class="btn btn-outline" style="padding:5px 10px;font-size:12px;" onclick="window.ecomSyncStore(\'' + _esc(s.id) + '\')">Sync Orders</button>');
+          h.push('<button class="btn btn-outline" style="padding:5px 10px;font-size:12px;" onclick="window.ecomSyncProducts(\'' + _esc(s.id) + '\')">Sync Products</button>');
+          h.push('<button class="btn btn-outline" style="padding:5px 10px;font-size:12px;" onclick="window.ecomOpenStoreModal(\'' + _esc(s.id) + '\')">Configure</button>');
+          h.push('</div>');
+        }
+        h.push('</div>');
+      });
+    }
+    h.push('</div>');
+
+    // ── PO configuration + purchase prices ──
+    var method = c.po_method || 'purchase_price';
+    h.push('<div style="' + cardStyle + '">');
+    h.push('<div style="' + titleStyle + '">Purchase Order Settings</div>');
+    h.push('<div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px;">');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">PO method</label>'
+      + '<select id="ecom-po-method" onchange="window.ecomPoMethodChanged()" style="' + _inp() + 'min-width:280px;">'
+      + '<option value="purchase_price"' + (method === 'purchase_price' ? ' selected' : '') + '>Preset purchase price per SKU</option>'
+      + '<option value="discount"' + (method === 'discount' ? ' selected' : '') + '>Percentage discount off net sales</option>'
+      + '</select></div>');
+    h.push('<div id="ecom-po-discount-wrap" style="display:' + (method === 'discount' ? 'block' : 'none') + ';">'
+      + '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Discount off net (%)</label>'
+      + '<input id="ecom-po-discount" type="number" step="0.01" min="0" max="100" value="'
+      + (c.po_discount_pct != null ? _esc(c.po_discount_pct) : '') + '" style="' + _inp() + 'width:160px;"></div>');
+    h.push('<button class="btn btn-gold" style="padding:8px 16px;" onclick="window.ecomSaveClientConfig()">Save Settings</button>');
+    h.push('</div>');
+    h.push('<div style="color:var(--muted);font-size:11px;margin-bottom:14px;">'
+      + 'Method A builds the PO from units sold × your purchase price per SKU (set below). '
+      + 'Method B applies a single discount to the period\'s total ex-VAT net sales.</div>');
+
+    // Purchase price list
+    h.push('<div style="' + titleStyle + 'font-size:13px;margin-top:6px;">Our Purchase Prices (per SKU)</div>');
+    if (!_ecomProducts.length) {
+      h.push('<div style="color:var(--muted);font-size:12px;">No products yet. Use "Sync Products" on the store to pull the catalogue.</div>');
+    } else {
+      h.push('<div style="overflow-x:auto;"><table class="data-table"><thead><tr>'
+        + '<th>SKU</th><th>Product</th><th style="text-align:right;">Our Purchase Price (€)</th></tr></thead><tbody>');
+      _ecomProducts.forEach(function(p) {
+        h.push('<tr>'
+          + '<td>' + (p.sku ? _esc(p.sku) : '<span style="color:var(--muted);">—</span>') + '</td>'
+          + '<td>' + _esc(p.product_name || '') + '</td>'
+          + '<td style="text-align:right;"><input type="number" step="0.01" min="0" data-pid="' + _esc(p.id) + '" '
+          + 'value="' + (p.purchase_price != null ? _esc(p.purchase_price) : '') + '" '
+          + 'style="' + _inp() + 'width:130px;text-align:right;"></td>'
+          + '</tr>');
+      });
+      h.push('</tbody></table></div>');
+      h.push('<div style="margin-top:12px;text-align:right;"><button class="btn btn-gold" style="padding:8px 16px;" onclick="window.ecomSavePrices()">Save Prices</button></div>');
+    }
+    h.push('</div>');
+
+    // ── Report + generate PO ──
+    var rng = _prevMonthRange();
+    h.push('<div style="' + cardStyle + '">');
+    h.push('<div style="' + titleStyle + '">Sales Report &amp; Purchase Order</div>');
+    h.push('<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;">');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">From</label>'
+      + '<input id="ecom-rep-start" type="date" value="' + rng.start + '" style="' + _inp() + 'width:170px;"></div>');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">To</label>'
+      + '<input id="ecom-rep-end" type="date" value="' + rng.end + '" style="' + _inp() + 'width:170px;"></div>');
+    h.push('<button class="btn btn-gold" style="padding:8px 16px;" onclick="window.ecomRunReport()">Run Report</button>');
+    h.push('</div>');
+    h.push('<div id="ecom-report-results"><div style="color:var(--muted);font-size:12px;">Pick a date range and run the report to see SKUs sold (ex-VAT).</div></div>');
+    h.push('</div>');
+
+    host.innerHTML = h.join('');
+  }
+
+  function _inp() {
+    return 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);'
+      + 'padding:8px 10px;font-size:13px;border-radius:3px;box-sizing:border-box;font-family:Lato,sans-serif;';
+  }
+
+  // ── Store connect modal (no Xero fields) ───────────────────
+  window.ecomOpenStoreModal = function(editId) {
+    if (!_ecomClient) return;
+    var existing = (_ecomStores || []).find(function(s) { return s.id === editId; });
+    var platform = existing ? existing.platform : 'shopify';
+
+    var bg = document.createElement('div');
+    bg.id = 'ecom-store-modal-bg';
+    bg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+    var modal = document.createElement('div');
+    modal.style.cssText = 'background:#0a1628;border:1px solid var(--navy-border);border-radius:6px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;padding:24px;';
+    var s = _inp();
+    modal.innerHTML =
+        '<div style="font-size:18px;font-weight:700;color:var(--white);margin-bottom:6px;">' + (existing ? 'Configure store' : 'Connect store') + '</div>'
+      + '<div style="font-size:12px;color:var(--muted);margin-bottom:18px;">' + _esc(_ecomClient.company_name || '') + '</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">'
+      +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Platform</label>'
+      +   '<select id="ecom-store-platform" onchange="window.ecomStorePlatformChanged()" style="' + s + '"' + (existing ? ' disabled' : '') + '>'
+      +   '<option value="shopify"' + (platform === 'shopify' ? ' selected' : '') + '>Shopify</option>'
+      +   '<option value="woocommerce"' + (platform === 'woocommerce' ? ' selected' : '') + '>WooCommerce</option></select></div>'
+      +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Store name</label>'
+      +   '<input id="ecom-store-name" type="text" value="' + _esc(existing ? existing.name : '') + '" style="' + s + '"></div>'
+      + '</div>'
+      + '<div style="margin-bottom:12px;"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Store URL</label>'
+      +   '<input id="ecom-store-url" type="text" placeholder="e.g. mystore.myshopify.com" value="' + _esc(existing ? (existing.store_url || '') : '') + '" style="' + s + '"></div>'
+      + '<div id="ecom-store-creds-shopify" style="display:' + (platform === 'shopify' ? 'block' : 'none') + ';margin-bottom:12px;">'
+      +   '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Admin API Access Token' + (existing ? ' <span style="color:var(--muted);">(leave blank to keep)</span>' : '') + '</label>'
+      +   '<input id="ecom-store-shop-token" type="password" placeholder="shpat_..." style="' + s + '"></div>'
+      + '<div id="ecom-store-creds-woo" style="display:' + (platform === 'woocommerce' ? 'block' : 'none') + ';margin-bottom:12px;">'
+      +   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
+      +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Consumer Key' + (existing ? ' <span style="color:var(--muted);">(blank=keep)</span>' : '') + '</label>'
+      +   '<input id="ecom-store-woo-key" type="password" placeholder="ck_..." style="' + s + '"></div>'
+      +   '<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Consumer Secret' + (existing ? ' <span style="color:var(--muted);">(blank=keep)</span>' : '') + '</label>'
+      +   '<input id="ecom-store-woo-secret" type="password" placeholder="cs_..." style="' + s + '"></div></div></div>'
+      + '<div style="margin-bottom:14px;"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Sync from date</label>'
+      +   '<input id="ecom-store-from-date" type="date" value="' + _esc(existing && existing.sync_from_date ? existing.sync_from_date : '') + '" style="' + s + 'width:200px;"></div>'
+      + '<div id="ecom-store-test-result" style="font-size:12px;margin-bottom:14px;"></div>'
+      + '<div style="display:flex;justify-content:space-between;gap:8px;">'
+      +   '<button class="btn btn-outline" onclick="window.ecomCloseStoreModal()">Cancel</button>'
+      +   '<div style="display:flex;gap:8px;">'
+      +   '<button class="btn btn-outline" id="ecom-store-test-btn" onclick="window.ecomTestStoreModal(' + (existing ? '\'' + _esc(existing.id) + '\'' : 'null') + ')">Test Connection</button>'
+      +   '<button class="btn btn-gold" id="ecom-store-save-btn" onclick="window.ecomSaveStore(' + (existing ? '\'' + _esc(existing.id) + '\'' : 'null') + ')">' + (existing ? 'Save' : 'Connect') + '</button>'
+      +   '</div></div>';
+    bg.appendChild(modal);
+    bg.addEventListener('click', function(e) { if (e.target === bg) window.ecomCloseStoreModal(); });
+    document.body.appendChild(bg);
+  };
+  window.ecomCloseStoreModal = function() { var el = document.getElementById('ecom-store-modal-bg'); if (el) el.remove(); };
+  window.ecomStorePlatformChanged = function() {
+    var p = (document.getElementById('ecom-store-platform') || {}).value;
+    var sh = document.getElementById('ecom-store-creds-shopify');
+    var wo = document.getElementById('ecom-store-creds-woo');
+    if (sh) sh.style.display = p === 'shopify' ? 'block' : 'none';
+    if (wo) wo.style.display = p === 'woocommerce' ? 'block' : 'none';
+  };
+  function _ecomCollectStorePayload(existingId) {
+    var p = (document.getElementById('ecom-store-platform') || {}).value;
+    var payload = {
+      name:      (document.getElementById('ecom-store-name') || {}).value || '',
+      platform:  p,
+      store_url: (document.getElementById('ecom-store-url') || {}).value || '',
+      sync_from_date: (document.getElementById('ecom-store-from-date') || {}).value || null,
+      three_pl_client_id: _ecomClient.id
+    };
+    if (p === 'shopify') { payload.api_key = (document.getElementById('ecom-store-shop-token') || {}).value || ''; payload.api_secret = ''; }
+    else { payload.api_key = (document.getElementById('ecom-store-woo-key') || {}).value || ''; payload.api_secret = (document.getElementById('ecom-store-woo-secret') || {}).value || ''; }
+    if (existingId) payload.id = existingId;
+    return payload;
+  }
+  window.ecomTestStoreModal = async function(existingId) {
+    var resEl = document.getElementById('ecom-store-test-result');
+    var btn   = document.getElementById('ecom-store-test-btn');
+    if (resEl) resEl.innerHTML = '<span style="color:var(--muted);">Testing…</span>';
+    if (btn) btn.disabled = true;
+    try {
+      var payload = _ecomCollectStorePayload(existingId);
+      var id = existingId;
+      if (!id) {
+        if (!payload.name || !payload.platform || !payload.store_url || !payload.api_key) {
+          if (resEl) resEl.innerHTML = '<span style="color:var(--amber,#e89c3a);">Fill in name, URL and credentials first.</span>';
+          if (btn) btn.disabled = false; return;
+        }
+        var r = await callEcomEF(Object.assign({ action: 'add_store' }, payload), 15000);
+        id = r.id;
+        document.getElementById('ecom-store-save-btn').setAttribute('data-new-id', id);
+      } else if (payload.api_key || payload.api_secret) {
+        await callEcomEF(Object.assign({ action: 'update_store' }, payload), 15000);
+      }
+      var t = await callEcomEF({ action: 'store_test_connection', id: id }, 20000);
+      if (resEl) resEl.innerHTML = '<span style="color:var(--green);">✓ Connected — ' + _esc(t.shop_name || 'OK') + '</span>';
+    } catch (e) {
+      if (resEl) resEl.innerHTML = '<span style="color:var(--red);">✗ ' + _esc(e.message || 'failed') + '</span>';
+    } finally { if (btn) btn.disabled = false; }
+  };
+  window.ecomSaveStore = async function(existingId) {
+    var btn = document.getElementById('ecom-store-save-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      var payload = _ecomCollectStorePayload(existingId);
+      var newId = btn ? btn.getAttribute('data-new-id') : null;
+      if (existingId) { await callEcomEF(Object.assign({ action: 'update_store' }, payload), 15000); }
+      else if (newId) { payload.id = newId; await callEcomEF(Object.assign({ action: 'update_store' }, payload), 15000); }
+      else { await callEcomEF(Object.assign({ action: 'add_store' }, payload), 15000); }
+      window.toast && window.toast('Store saved.', 'success');
+      window.ecomCloseStoreModal();
+      await window.openEcomClient(_ecomClient.id);
+    } catch (e) {
+      window.toast && window.toast('Failed: ' + (e.message || 'unknown'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = existingId ? 'Save' : 'Connect'; }
+    }
+  };
+
+  // ── Store actions from the card ────────────────────────────
+  window.ecomTestStore = async function(storeId) {
+    window.toast && window.toast('Testing connection…');
+    try { var t = await callEcomEF({ action: 'store_test_connection', id: storeId }, 20000);
+      window.toast && window.toast('Connected — ' + (t.shop_name || 'OK'), 'success');
+      await window.openEcomClient(_ecomClient.id);
+    } catch (e) { window.toast && window.toast('Test failed: ' + (e.message || 'unknown'), 'error'); await window.openEcomClient(_ecomClient.id); }
+  };
+  window.ecomSyncStore = async function(storeId) {
+    window.toast && window.toast('Syncing orders… this can take a moment.');
+    try { var r = await callEcomEF({ action: 'store_sync_orders', id: storeId }, 120000);
+      window.toast && window.toast('Synced ' + (r.fetched || 0) + ' new orders (' + (r.total_orders || 0) + ' total).', 'success');
+      await window.openEcomClient(_ecomClient.id);
+    } catch (e) { window.toast && window.toast('Sync failed: ' + (e.message || 'unknown'), 'error'); await window.openEcomClient(_ecomClient.id); }
+  };
+  window.ecomSyncProducts = async function(storeId) {
+    window.toast && window.toast('Syncing product catalogue…');
+    try { var r = await callEcomEF({ action: 'store_sync_products', id: storeId }, 120000);
+      window.toast && window.toast('Catalogue synced — ' + (r.inserted || 0) + ' new, ' + (r.updated || 0) + ' updated.', 'success');
+      await window.openEcomClient(_ecomClient.id);
+    } catch (e) { window.toast && window.toast('Product sync failed: ' + (e.message || 'unknown'), 'error'); }
+  };
+
+  // ── PO settings + prices ───────────────────────────────────
+  window.ecomPoMethodChanged = function() {
+    var m = (document.getElementById('ecom-po-method') || {}).value;
+    var w = document.getElementById('ecom-po-discount-wrap');
+    if (w) w.style.display = m === 'discount' ? 'block' : 'none';
+  };
+  window.ecomSaveClientConfig = async function() {
+    if (!_ecomClient) return;
+    var method = (document.getElementById('ecom-po-method') || {}).value || 'purchase_price';
+    var disc = (document.getElementById('ecom-po-discount') || {}).value.trim();
+    var payload = { po_method: method, po_discount_pct: (method === 'discount' && disc !== '') ? Number(disc) : (method === 'discount' ? null : _ecomClient.po_discount_pct), updated_at: new Date().toISOString() };
+    try {
+      await window.db.update('three_pl_clients', '?id=eq.' + encodeURIComponent(_ecomClient.id), payload);
+      _ecomClient.po_method = method; _ecomClient.po_discount_pct = payload.po_discount_pct;
+      window.toast && window.toast('Settings saved.', 'success');
+      if (_ecomReport) _renderReport();
+    } catch (e) { window.toast && window.toast('Save failed: ' + (e.message || 'unknown'), 'error'); }
+  };
+  window.ecomSavePrices = async function() {
+    var inputs = document.querySelectorAll('#ecom-client-detail input[data-pid]');
+    var updates = [];
+    inputs.forEach(function(inp) {
+      var pid = inp.getAttribute('data-pid');
+      var val = inp.value.trim();
+      var prod = _ecomProducts.find(function(p) { return p.id === pid; });
+      var newVal = val === '' ? null : Number(val);
+      var oldVal = prod && prod.purchase_price != null ? Number(prod.purchase_price) : null;
+      if (newVal !== oldVal) updates.push({ id: pid, purchase_price: newVal });
+    });
+    if (!updates.length) { window.toast && window.toast('No changes to save.'); return; }
+    try {
+      await Promise.all(updates.map(function(u) {
+        return window.db.update('three_pl_client_products', '?id=eq.' + encodeURIComponent(u.id),
+          { purchase_price: u.purchase_price, updated_at: new Date().toISOString() });
+      }));
+      updates.forEach(function(u) { var p = _ecomProducts.find(function(x) { return x.id === u.id; }); if (p) p.purchase_price = u.purchase_price; });
+      window.toast && window.toast('Saved ' + updates.length + ' price' + (updates.length === 1 ? '' : 's') + '.', 'success');
+    } catch (e) { window.toast && window.toast('Save failed: ' + (e.message || 'unknown'), 'error'); }
+  };
+
+  // ── Report ─────────────────────────────────────────────────
+  window.ecomRunReport = async function() {
+    var start = (document.getElementById('ecom-rep-start') || {}).value;
+    var end   = (document.getElementById('ecom-rep-end') || {}).value;
+    var out   = document.getElementById('ecom-report-results');
+    if (!start || !end) { window.toast && window.toast('Pick a date range.', 'error'); return; }
+    if (!_ecomStores.length) { if (out) out.innerHTML = '<div style="color:var(--amber,#e89c3a);font-size:12px;">Connect a store first.</div>'; return; }
+    if (out) out.innerHTML = '<div style="color:var(--muted);font-size:12px;">Running report…</div>';
+    try {
+      var ids = _ecomStores.map(function(s) { return s.id; });
+      var endNext = _addDayYmd(end);
+      var items = await window.db.select('ecommerce_order_items',
+        '?select=sku,product_name,quantity,net_sales,line_total,ord:ecommerce_orders!inner(store_id,ordered_at)'
+        + '&item_type=eq.product'
+        + '&ord.store_id=in.(' + ids.join(',') + ')'
+        + '&ord.ordered_at=gte.' + encodeURIComponent(start + 'T00:00:00Z')
+        + '&ord.ordered_at=lt.'  + encodeURIComponent(endNext + 'T00:00:00Z')
+        + '&limit=100000') || [];
+      var map = {};
+      items.forEach(function(it) {
+        var key = it.sku ? ('sku:' + it.sku) : ('name:' + (it.product_name || '').toLowerCase());
+        if (!map[key]) map[key] = { sku: it.sku || null, product_name: it.product_name || 'Unknown', units: 0, net: 0 };
+        map[key].units += Number(it.quantity || 0);
+        map[key].net   += (it.net_sales != null ? Number(it.net_sales) : Number(it.line_total || 0));
+      });
+      var rows = Object.keys(map).map(function(k) { return map[k]; }).sort(function(a, b) { return b.net - a.net; });
+      var totalNet = rows.reduce(function(s, r) { return s + r.net; }, 0);
+      var totalUnits = rows.reduce(function(s, r) { return s + r.units; }, 0);
+      _ecomReport = { start: start, end: end, rows: rows, totalNet: totalNet, totalUnits: totalUnits };
+      _renderReport();
+    } catch (e) {
+      if (out) out.innerHTML = '<div style="color:var(--red);font-size:12px;">Report failed: ' + _esc(e.message || String(e)) + '</div>';
+    }
+  };
+
+  function _renderReport() {
+    var out = document.getElementById('ecom-report-results');
+    if (!out || !_ecomReport) return;
+    var rep = _ecomReport;
+    var method = (_ecomClient && _ecomClient.po_method) || 'purchase_price';
+    if (!rep.rows.length) { out.innerHTML = '<div style="color:var(--muted);font-size:12px;">No products sold in this period.</div>'; return; }
+    var h = [];
+    h.push('<div style="color:var(--muted);font-size:11px;margin-bottom:10px;">' + _esc(rep.start) + ' → ' + _esc(rep.end)
+      + ' · ' + rep.rows.length + ' SKUs · ' + rep.totalUnits + ' units · Total net ex-VAT ' + _eur(rep.totalNet) + '</div>');
+    h.push('<div style="overflow-x:auto;"><table class="data-table"><thead><tr>'
+      + '<th>SKU</th><th>Product</th><th style="text-align:right;">Units</th>'
+      + '<th style="text-align:right;">Ex-VAT unit price</th><th style="text-align:right;">Net (ex-VAT)</th>');
+    if (method === 'purchase_price') h.push('<th style="text-align:right;">Our price</th><th style="text-align:right;">PO line</th>');
+    h.push('</tr></thead><tbody>');
+    var poTotal = 0;
+    var pct = Number((_ecomClient && _ecomClient.po_discount_pct) || 0);
+    rep.rows.forEach(function(r) {
+      var unit = r.units > 0 ? r.net / r.units : 0;
+      h.push('<tr><td>' + (r.sku ? _esc(r.sku) : '<span style="color:var(--muted);">—</span>') + '</td>'
+        + '<td>' + _esc(r.product_name) + '</td>'
+        + '<td style="text-align:right;">' + r.units + '</td>'
+        + '<td style="text-align:right;">' + _eur(unit) + '</td>'
+        + '<td style="text-align:right;">' + _eur(r.net) + '</td>');
+      if (method === 'purchase_price') {
+        var pp = _purchasePriceFor(r);
+        var line = pp != null ? pp * r.units : 0;
+        if (pp != null) poTotal += line;
+        h.push('<td style="text-align:right;">' + (pp != null ? _eur(pp) : '<span style="color:var(--amber,#e89c3a);">unset</span>') + '</td>'
+          + '<td style="text-align:right;">' + (pp != null ? _eur(line) : '—') + '</td>');
+      }
+      h.push('</tr>');
+    });
+    if (method === 'discount') poTotal = rep.totalNet * (1 - pct / 100);
+    var colspan = method === 'purchase_price' ? 6 : 4;
+    h.push('<tr style="border-top:2px solid var(--navy-border);font-weight:700;">'
+      + '<td colspan="' + colspan + '" style="text-align:right;">PO total'
+      + (method === 'discount' ? ' (net − ' + pct + '%)' : '') + '</td>'
+      + '<td style="text-align:right;">' + _eur(poTotal) + '</td></tr>');
+    h.push('</tbody></table></div>');
+
+    // Generate PO
+    h.push('<div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">');
+    h.push('<div style="color:var(--muted);font-size:11px;">Method: ' + (method === 'purchase_price' ? 'Purchase price per SKU' : 'Discount ' + pct + '% off net') + '</div>');
+    h.push('<button class="btn btn-gold" style="padding:9px 18px;" onclick="window.ecomGeneratePO()">Generate &amp; Print PO</button>');
+    h.push('</div>');
+    if (method === 'purchase_price') {
+      var missing = rep.rows.filter(function(r) { return _purchasePriceFor(r) == null; }).length;
+      if (missing) h.push('<div style="color:var(--amber,#e89c3a);font-size:11px;margin-top:6px;">' + missing + ' SKU(s) have no purchase price set — they will be €0 on the PO until you set a price above.</div>');
+    }
+    out.innerHTML = h.join('');
+  }
+
+  // ── Generate PO ────────────────────────────────────────────
+  window.ecomGeneratePO = async function() {
+    if (!_ecomClient || !_ecomReport) return;
+    var rep = _ecomReport;
+    var method = _ecomClient.po_method || 'purchase_price';
+    var pct = Number(_ecomClient.po_discount_pct || 0);
+    var lines = [];
+    var poTotal = 0;
+    rep.rows.forEach(function(r) {
+      var unit = r.units > 0 ? r.net / r.units : 0;
+      var line, poUnit, pp = null;
+      if (method === 'purchase_price') {
+        pp = _purchasePriceFor(r);
+        poUnit = pp != null ? pp : 0;
+        line = poUnit * r.units;
+      } else {
+        line = r.net * (1 - pct / 100);
+        poUnit = r.units > 0 ? line / r.units : null;
+      }
+      poTotal += line;
+      lines.push({ sku: r.sku, product_name: r.product_name, quantity: r.units, net_sales: r.net, purchase_price: pp, po_unit_price: poUnit, po_line_total: line });
+    });
+    var poNumber = 'PO-' + _ecomClient.company_name.replace(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase() + '-' + rep.start.replace(/-/g, '').slice(0, 6) + '-' + Date.now().toString().slice(-4);
+    try {
+      var poRow = (await window.db.insert('three_pl_purchase_orders', {
+        three_pl_client_id: _ecomClient.id,
+        po_number: poNumber,
+        period_start: rep.start, period_end: rep.end,
+        method: method, discount_pct: method === 'discount' ? pct : null,
+        currency: 'EUR', subtotal_net: rep.totalNet, total: poTotal,
+        status: 'generated',
+        created_by: (window.CURRENT_USER && window.CURRENT_USER.id) || null
+      }))[0];
+      var poId = poRow.id;
+      await window.db.insert('three_pl_purchase_order_lines', lines.map(function(l) { return Object.assign({ po_id: poId }, l); }));
+      window.toast && window.toast('PO ' + poNumber + ' generated.', 'success');
+      _printPO(poRow, lines);
+    } catch (e) {
+      window.toast && window.toast('Could not save PO: ' + (e.message || 'unknown'), 'error');
+    }
+  };
+
+  function _printPO(po, lines) {
+    var w = window.open('', '_blank');
+    if (!w) { window.toast && window.toast('Allow pop-ups to print the PO.', 'error'); return; }
+    var rowsHtml = lines.map(function(l) {
+      return '<tr><td>' + _esc(l.sku || '—') + '</td><td>' + _esc(l.product_name || '') + '</td>'
+        + '<td class="r">' + (l.quantity || 0) + '</td>'
+        + '<td class="r">' + (l.po_unit_price != null ? _eur(l.po_unit_price) : '—') + '</td>'
+        + '<td class="r">' + _eur(l.po_line_total || 0) + '</td></tr>';
+    }).join('');
+    var methodLabel = po.method === 'discount' ? ('Discount ' + (po.discount_pct || 0) + '% off net sales') : 'Purchase price per SKU';
+    var html = '<!doctype html><html><head><meta charset="utf-8"><title>' + _esc(po.po_number) + '</title>'
+      + '<style>body{font-family:Arial,Helvetica,sans-serif;color:#111;padding:32px;max-width:860px;margin:0 auto;}'
+      + 'h1{font-size:22px;margin:0 0 4px;} .muted{color:#666;font-size:12px;} .hdr{display:flex;justify-content:space-between;margin-bottom:24px;}'
+      + 'table{width:100%;border-collapse:collapse;margin-top:16px;} th,td{border-bottom:1px solid #ddd;padding:8px 10px;font-size:13px;text-align:left;}'
+      + 'th.r,td.r{text-align:right;} tfoot td{font-weight:bold;border-top:2px solid #333;} .tot{font-size:16px;}'
+      + '@media print{button{display:none;}}</style></head><body>'
+      + '<div class="hdr"><div><h1>Purchase Order</h1><div class="muted">' + _esc(po.po_number) + '</div></div>'
+      + '<div style="text-align:right;"><div style="font-weight:bold;">Lighthouse</div>'
+      + '<div class="muted">To: ' + _esc(_ecomClient.company_name || '') + '</div>'
+      + '<div class="muted">Period: ' + _esc(po.period_start) + ' → ' + _esc(po.period_end) + '</div>'
+      + '<div class="muted">Method: ' + _esc(methodLabel) + '</div></div></div>'
+      + '<table><thead><tr><th>SKU</th><th>Product</th><th class="r">Qty sold</th><th class="r">Unit price</th><th class="r">Line total</th></tr></thead>'
+      + '<tbody>' + rowsHtml + '</tbody>'
+      + '<tfoot><tr><td colspan="4" class="r">Total net sold (ex-VAT)</td><td class="r">' + _eur(po.subtotal_net || 0) + '</td></tr>'
+      + '<tr><td colspan="4" class="r tot">PO Total</td><td class="r tot">' + _eur(po.total || 0) + '</td></tr></tfoot></table>'
+      + '<div style="margin-top:24px;"><button onclick="window.print()">Print</button></div>'
+      + '</body></html>';
+    w.document.write(html);
+    w.document.close();
+  }
+
+  // ── Purchase Orders history tab ────────────────────────────
+  window.loadEcomPOs = async function() {
+    var tbody = document.getElementById('ecom-po-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);font-size:13px;">Loading…</td></tr>';
+    try {
+      var pos = await window.db.select('three_pl_purchase_orders',
+        '?select=*,client:three_pl_clients(company_name)&order=created_at.desc&limit=500') || [];
+      if (!pos.length) { tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);font-size:13px;">No purchase orders generated yet.</td></tr>'; return; }
+      tbody.innerHTML = pos.map(function(p) {
+        var client = (p.client && p.client.company_name) || '—';
+        var methodLabel = p.method === 'discount' ? ('Discount ' + (p.discount_pct || 0) + '%') : 'Purchase price';
+        return '<tr>'
+          + '<td class="strong">' + _esc(p.po_number || p.id.slice(0, 8)) + '</td>'
+          + '<td>' + _esc(client) + '</td>'
+          + '<td>' + _esc(p.period_start || '') + ' → ' + _esc(p.period_end || '') + '</td>'
+          + '<td>' + _esc(methodLabel) + '</td>'
+          + '<td style="text-align:right;">' + _eur(p.total || 0) + '</td>'
+          + '<td>' + (p.created_at ? new Date(p.created_at).toLocaleDateString('en-IE') : '') + '</td>'
+          + '<td style="text-align:right;"><button class="btn btn-outline" style="padding:5px 12px;" onclick="window.ecomReprintPO(this.dataset.id)" data-id="' + _esc(p.id) + '">Reprint</button></td>'
+          + '</tr>';
+      }).join('');
+    } catch (e) {
+      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--red);font-size:13px;">Failed to load POs: ' + _esc(e.message || String(e)) + '</td></tr>';
+    }
+  };
+  window.ecomReprintPO = async function(poId) {
+    try {
+      var po = (await window.db.select('three_pl_purchase_orders', '?id=eq.' + encodeURIComponent(poId) + '&select=*,client:three_pl_clients(company_name)&limit=1'))[0];
+      if (!po) { window.toast && window.toast('PO not found.', 'error'); return; }
+      var lines = await window.db.select('three_pl_purchase_order_lines', '?po_id=eq.' + encodeURIComponent(poId) + '&order=po_line_total.desc') || [];
+      // _printPO reads _ecomClient.company_name — use the joined client name here.
+      var savedClient = _ecomClient;
+      _ecomClient = { company_name: (po.client && po.client.company_name) || '' };
+      _printPO(po, lines);
+      _ecomClient = savedClient;
+    } catch (e) { window.toast && window.toast('Reprint failed: ' + (e.message || 'unknown'), 'error'); }
+  };
 
   // ── Hook into showPage — lazy load on nav ──────────────────
   var _origShowPage = window.showPage;
