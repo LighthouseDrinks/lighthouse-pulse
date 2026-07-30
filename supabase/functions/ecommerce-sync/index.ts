@@ -179,6 +179,9 @@ async function shopifyFetchOrders(storeUrl: string, token: string, since: string
 // Builds normalised item rows from a Shopify order
 function shopifyItemsForOrder(o: Record<string, unknown>) {
   const items: Array<Record<string, unknown>> = [];
+  // When shop prices are tax-inclusive, line_total includes VAT and must be
+  // stripped to get ex-VAT net_sales; otherwise line_total is already ex-VAT.
+  const taxesIncluded = o.taxes_included === true;
 
   // Products — net of line-level discount_allocations (actual allocated discount)
   for (const li of ((o.line_items ?? []) as Array<Record<string, unknown>>)) {
@@ -189,6 +192,11 @@ function shopifyItemsForOrder(o: Record<string, unknown>) {
       discount += Number(d.amount ?? 0);
     }
     const lineTotal = (qty * price) - discount;
+    let taxAmount = 0;
+    for (const t of ((li.tax_lines ?? []) as Array<Record<string, unknown>>)) {
+      taxAmount += Number(t.price ?? 0);
+    }
+    const netSales = taxesIncluded ? (lineTotal - taxAmount) : lineTotal;
     const isGiftCard = (li.product_type as string)?.toLowerCase() === 'gift cards' || li.gift_card === true;
     items.push({
       sku:          li.sku ?? null,
@@ -196,6 +204,8 @@ function shopifyItemsForOrder(o: Record<string, unknown>) {
       quantity:     qty,
       unit_price:   price,
       line_total:   lineTotal,
+      tax_amount:   taxAmount,
+      net_sales:    isGiftCard ? null : netSales,
       item_type:    isGiftCard ? 'gift_card_issued' : 'product',
       xero_account_key: isGiftCard ? 'gift_cards' : 'ecommerce_sales',
     });
@@ -239,6 +249,35 @@ function shopifyItemsForOrder(o: Record<string, unknown>) {
     });
   }
   return items;
+}
+
+// Fetches the full Shopify product catalogue, flattened to one row per variant.
+async function shopifyFetchProducts(storeUrl: string, token: string) {
+  const host = shopifyHost(storeUrl);
+  let url: string | null = `https://${host}/admin/api/${SHOPIFY_API_VER}/products.json?limit=250`;
+  const out: Array<{ sku: string | null; product_name: string; external_id: string }> = [];
+  while (url) {
+    const res = await fetch(url, { headers: shopifyHeaders(token) });
+    if (res.status !== 200) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Shopify products ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    for (const p of ((data?.products ?? []) as Array<Record<string, unknown>>)) {
+      const title    = (p.title as string) ?? 'Unknown';
+      const variants = (p.variants ?? []) as Array<Record<string, unknown>>;
+      if (variants.length) {
+        for (const v of variants) {
+          const vTitle = (v.title && v.title !== 'Default Title') ? ` — ${v.title}` : '';
+          out.push({ sku: (v.sku as string) || null, product_name: `${title}${vTitle}`, external_id: String(v.id ?? p.id) });
+        }
+      } else {
+        out.push({ sku: null, product_name: title, external_id: String(p.id) });
+      }
+    }
+    url = shopifyNextLink(res.headers.get('Link'));
+  }
+  return out;
 }
 
 // ── WooCommerce ───────────────────────────────────────────────────────────────
@@ -286,13 +325,18 @@ function wooItemsForOrder(o: Record<string, unknown>) {
   const items: Array<Record<string, unknown>> = [];
   for (const li of ((o.line_items ?? []) as Array<Record<string, unknown>>)) {
     const qty   = Number(li.quantity ?? 1);
+    // Woo line `total` is already net of discount and EXCLUSIVE of tax;
+    // `total_tax` is the VAT portion. So net_sales = total.
     const total = Number(li.total ?? 0);
+    const taxAmount = Number(li.total_tax ?? 0);
     items.push({
       sku:          li.sku ?? null,
       product_name: (li.name as string) ?? 'Unknown',
       quantity:     qty,
       unit_price:   qty > 0 ? total / qty : total,
       line_total:   total,
+      tax_amount:   taxAmount,
+      net_sales:    total,
       item_type:    'product',
       xero_account_key: 'ecommerce_sales',
     });
@@ -325,6 +369,28 @@ function wooItemsForOrder(o: Record<string, unknown>) {
   return items;
 }
 
+// Fetches the full WooCommerce product catalogue.
+async function wooFetchProducts(storeUrl: string, key: string, secret: string) {
+  const out: Array<{ sku: string | null; product_name: string; external_id: string }> = [];
+  let page = 1;
+  while (true) {
+    const url = `${wooHost(storeUrl)}/wp-json/wc/v3/products?per_page=100&page=${page}&status=publish`;
+    const res = await fetch(url, { headers: wooHeaders(key, secret) });
+    if (res.status !== 200) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`WooCommerce products ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const batch = await res.json() as Array<Record<string, unknown>>;
+    for (const p of batch) {
+      out.push({ sku: (p.sku as string) || null, product_name: (p.name as string) ?? 'Unknown', external_id: String(p.id) });
+    }
+    const totalPages = parseInt(res.headers.get('X-WP-TotalPages') || '1', 10);
+    if (page >= totalPages || batch.length === 0) break;
+    page++;
+  }
+  return out;
+}
+
 // ── Common: upsert orders + items into Pulse DB ───────────────────────────────
 function shopifyNormaliseOrder(storeId: string, o: Record<string, unknown>) {
   const customer = (o.customer ?? {}) as Record<string, unknown>;
@@ -342,6 +408,7 @@ function shopifyNormaliseOrder(storeId: string, o: Record<string, unknown>) {
     ordered_at:     (o.created_at as string) ?? new Date().toISOString(),
     payment_gateway: gateways[0] ?? null,
     payment_status:  (o.financial_status as string) ?? null,
+    taxes_included:  o.taxes_included === true,
     raw_data:       { source: 'shopify', has_gift_card_payment: hasGiftCard, order_id: o.id },
   };
 }
@@ -360,6 +427,7 @@ function wooNormaliseOrder(storeId: string, o: Record<string, unknown>) {
     ordered_at:      (o.date_created_gmt as string) ? `${o.date_created_gmt}Z` : new Date().toISOString(),
     payment_gateway: (o.payment_method as string) ?? null,
     payment_status:  (o.status as string) ?? null,
+    taxes_included:  o.prices_include_tax === true,
     raw_data:        { source: 'woocommerce', has_gift_card_payment: false, order_id: o.id },
   };
 }
@@ -432,11 +500,13 @@ Deno.serve(async (req: Request) => {
 
     const { data: roleRow } = await adminClient
       .from('roles')
-      .select('has_finance_access')
+      .select('has_finance_access, is_pulse_admin')
       .eq('key', appUser.role)
       .maybeSingle();
-    if (!roleRow?.has_finance_access) {
-      return err('Forbidden — finance roles only', 403);
+    // Finance features (Xero push) and 3PL store connect/sync are both allowed
+    // for finance roles or Pulse admins.
+    if (!roleRow?.has_finance_access && !roleRow?.is_pulse_admin) {
+      return err('Forbidden — finance or admin roles only', 403);
     }
 
     const userId = appUser.id as string;
@@ -454,6 +524,7 @@ Deno.serve(async (req: Request) => {
         sync_from_date:       (body.sync_from_date as string) || null,
         xero_sales_account:   (body.xero_sales_account as string) || null,
         xero_shipping_account: (body.xero_shipping_account as string) || null,
+        three_pl_client_id:   (body.three_pl_client_id as string) || null,
         created_by:           userId,
         is_active:            true,
         connection_status:    'disconnected',
@@ -486,6 +557,7 @@ Deno.serve(async (req: Request) => {
       setIf('sync_from_date', 'sync_from_date');
       setIf('xero_sales_account', 'xero_sales_account');
       setIf('xero_shipping_account', 'xero_shipping_account');
+      setIf('three_pl_client_id', 'three_pl_client_id');
       // Only overwrite credentials if explicitly provided non-empty (Configure
       // panel can omit them to keep the existing token in place).
       if (typeof body.api_key === 'string' && body.api_key.trim()) updates.api_key = body.api_key.trim();
@@ -601,6 +673,82 @@ Deno.serve(async (req: Request) => {
           error_message:     msg,
           updated_at:        new Date().toISOString(),
         });
+        return err(msg, 500);
+      }
+    }
+
+    // ── store_sync_products ─────────────────────────────────────────────────
+    // Pulls the full product catalogue for a 3PL client's store into
+    // three_pl_client_products. Never overwrites purchase_price (our price).
+    if (action === 'store_sync_products') {
+      const id = (body.id as string) || '';
+      if (!id) return err('Missing store id', 400);
+      const store = await loadStore(adminClient, id);
+      if (!store) return err('Store not found', 404);
+      const clientId = (store.three_pl_client_id as string | null) || null;
+      if (!clientId) return err('Store is not linked to a 3PL client', 400);
+
+      try {
+        let products: Array<{ sku: string | null; product_name: string; external_id: string }>;
+        if (store.platform === 'shopify') {
+          products = await shopifyFetchProducts(store.store_url as string, store.api_key as string);
+        } else if (store.platform === 'woocommerce') {
+          products = await wooFetchProducts(store.store_url as string, store.api_key as string, store.api_secret as string);
+        } else {
+          return err(`Unsupported platform: ${store.platform}`, 400);
+        }
+
+        // Existing catalogue for this client — preserve purchase_price + match rows.
+        const { data: existing } = await adminClient
+          .from('three_pl_client_products')
+          .select('id, sku, product_name')
+          .eq('three_pl_client_id', clientId);
+        const bySku  = new Map<string, string>();
+        const byName = new Map<string, string>();
+        for (const r of (existing ?? [])) {
+          if (r.sku) bySku.set(String(r.sku), r.id as string);
+          byName.set(String(r.product_name).toLowerCase(), r.id as string);
+        }
+
+        const now = new Date().toISOString();
+        const seen = new Set<string>();
+        const toInsert: Array<Record<string, unknown>> = [];
+        let updated = 0;
+        for (const p of products) {
+          const key = p.sku ? `sku:${p.sku}` : `name:${(p.product_name || '').toLowerCase()}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const existingId = p.sku
+            ? bySku.get(String(p.sku))
+            : byName.get(String(p.product_name || '').toLowerCase());
+          if (existingId) {
+            await adminClient.from('three_pl_client_products').update({
+              product_name: p.product_name,
+              external_id:  p.external_id,
+              active:       true,
+              last_seen_at: now,
+              updated_at:   now,
+            }).eq('id', existingId);
+            updated++;
+          } else {
+            toInsert.push({
+              three_pl_client_id: clientId,
+              sku:                p.sku,
+              product_name:       p.product_name,
+              external_id:        p.external_id,
+              active:             true,
+              last_seen_at:       now,
+            });
+          }
+        }
+        if (toInsert.length) {
+          const { error: insErr } = await adminClient.from('three_pl_client_products').insert(toInsert);
+          if (insErr) throw new Error(`product insert: ${insErr.message}`);
+        }
+        return json({ ok: true, fetched: products.length, inserted: toInsert.length, updated });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error('[ecommerce-sync] product sync error:', msg);
         return err(msg, 500);
       }
     }
