@@ -1452,6 +1452,84 @@ function _kv(label, val) {
   return '<div class="kv"><span class="kv-label">' + label + '</span><span class="kv-val">' + val + '</span></div>';
 }
 
+// ── Task-assignment email ─────────────────────────────────────────────────────
+// Central helper so every place that assigns a task can email the assignee with
+// the task details. Fire-and-forget: it resolves the recipient's address itself
+// and never throws, so a missing email/Resend key can never block task saving.
+//
+// Pass ONE of:
+//   assigneeId     — app_users.id      (CRM tasks, sample tasks, meeting tasks)
+//   assigneeAuthId — auth.users.id     (operational job tasks, HR onboarding)
+// Optionally: title, description, priority, dueAt, context, byName, email, name.
+window.notifyTaskAssigned = async function(opts) {
+  try {
+    opts = opts || {};
+    if (!window.sendEmail) return;
+
+    var email = opts.email || null;
+    var name  = opts.name  || null;
+
+    // Resolve the recipient's email if not supplied directly.
+    if (!email) {
+      try {
+        if (opts.assigneeId) {
+          var cached = (window.APP_USERS || []).find(function(u){ return u && u.id === opts.assigneeId; });
+          if (cached) { email = email || cached.email; name = name || cached.display_name; }
+          if (!email && window.db) {
+            var r = await window.db.select('app_users', '?id=eq.' + encodeURIComponent(opts.assigneeId) + '&select=email,display_name&limit=1');
+            if (r && r[0]) { email = r[0].email; name = name || r[0].display_name; }
+          }
+        } else if (opts.assigneeAuthId && window.db) {
+          var r2 = await window.db.select('app_users', '?auth_user_id=eq.' + encodeURIComponent(opts.assigneeAuthId) + '&select=email,display_name&limit=1');
+          if (r2 && r2[0]) { email = r2[0].email; name = name || r2[0].display_name; }
+        }
+      } catch(_lookupErr) { /* fall through — no address means no email */ }
+    }
+
+    if (!email) return; // no address on file — skip silently
+
+    var esc = (typeof _esc === 'function') ? _esc : function(s){ return String(s == null ? '' : s); };
+    var kv  = (typeof _kv  === 'function') ? _kv  : function(l,v){ return (v || v === 0) ? ('<div class="kv"><span class="kv-label">' + l + '</span><span class="kv-val">' + v + '</span></div>') : ''; };
+
+    var title    = opts.title || 'a task';
+    var byName   = opts.byName || 'Someone';
+    var priority = opts.priority || 'normal';
+    var prBadge  = priority === 'high' ? '<span class="badge badge-red">High</span>'
+                 : priority === 'low'  ? '<span class="badge badge-amber">Low</span>'
+                 : '<span class="badge badge-green">Normal</span>';
+
+    var dueTxt = null;
+    if (opts.dueAt) {
+      var d = new Date(opts.dueAt);
+      if (!isNaN(d)) dueTxt = d.toLocaleDateString('en-IE', { weekday:'short', day:'2-digit', month:'short', year:'numeric' });
+    }
+
+    var descHtml = opts.description ? esc(opts.description).replace(/\n/g, '<br>') : '';
+    var appUrl   = 'https://pulse.lighthousedrinks.com';
+
+    var html = window._emailWrap(
+      '<div class="header">'
+        + '<div class="header-logo">Lighthouse Pulse · Tasks</div>'
+        + '<div class="header-title">You\u2019ve been assigned a task</div>'
+      + '</div>'
+      + '<div class="body">'
+        + '<p style="color:#8fa6c0;font-size:14px;margin:0 0 20px;">' + esc(byName) + ' assigned you a task on Pulse' + (name ? (', ' + esc((name || '').split(' ')[0])) : '') + '.</p>'
+        + '<div class="section-head">Task</div>'
+        + kv('Title', esc(title))
+        + kv('Priority', prBadge)
+        + kv('Due', dueTxt ? esc(dueTxt) : null)
+        + (opts.context ? kv('Context', esc(opts.context)) : '')
+        + (descHtml ? ('<div class="section-head">Details</div><div class="action-box" style="color:#d6dee7;">' + descHtml + '</div>') : '')
+        + '<div class="action-box">Open <strong><a href="' + appUrl + '">Lighthouse Pulse</a></strong> to view the full task and get started.</div>'
+      + '</div>'
+    );
+
+    await window.sendEmail({ to: email, subject: 'New task assigned: ' + title, html: html });
+  } catch(_e) {
+    console.warn('[task-email] send failed (non-blocking):', _e && _e.message);
+  }
+};
+
 window._emailTpl = {
 
   // Client submits a BOM — confirmation to client
@@ -8076,6 +8154,13 @@ window.copyInviteLink = function() {
               target_user_id: newUserId
             });
             if (window.DEBUG) console.log('[TASK] created:', taskResult);
+            window.notifyTaskAssigned && window.notifyTaskAssigned({
+              assigneeAuthId: mgrAuthId,
+              title: 'Complete HR profile for ' + fullName,
+              description: 'New employee ' + fullName + ' has registered and needs their HR profile completed in Pulse.',
+              priority: 'normal',
+              byName: 'Lighthouse Pulse'
+            });
           } else {
             console.error('[TASK] no mgrAuthId found for reportsToId:', reportsToId);
           }
@@ -18736,6 +18821,14 @@ window.loadBoms = async function initBoms() {
           deal_id: deal_id,
           client_id: client_id,
           body: meDisplay() + ' assigned you a task: ' + title
+        });
+        window.notifyTaskAssigned && window.notifyTaskAssigned({
+          assigneeId: assignee_id,
+          title: title,
+          description: description,
+          priority: priority,
+          dueAt: due_at,
+          byName: meDisplay()
         });
       }
 
@@ -34129,6 +34222,7 @@ window.saveAdjModal = async function() {
           if (!sel) continue;
           var assignee = sel.value || null;
           var r = rows[i];
+          var _rtaBy = (window.CURRENT_USER && window.CURRENT_USER.display_name) || 'A manager';
           if (r.virtual) {
             if (!assignee) continue; // leave unfired tasks alone when no one is picked
             try {
@@ -34136,18 +34230,26 @@ window.saveAdjModal = async function() {
               // the live state before deciding between PATCH and POST.
               var live = await supaGet('job_tasks?job_id=eq.' + jobId + '&task_type=eq.' + r.def.task_type + '&limit=1');
               if (live && live.length) {
+                var _rtaPrev = live[0].assigned_to || null;
                 await supaMut('PATCH','job_tasks','?id=eq.'+live[0].id,{ assigned_to: assignee });
                 reassigned++;
+                if (assignee !== _rtaPrev) window.notifyTaskAssigned && window.notifyTaskAssigned({
+                  assigneeAuthId: assignee, title: taskTitle(r.def), context: 'Job ' + jobId, byName: _rtaBy });
               } else {
                 var payload = Object.assign({ job_id:jobId, status:'pending', assigned_to:assignee }, r.def);
                 await supaMut('POST','job_tasks','', payload);
                 fired++;
+                window.notifyTaskAssigned && window.notifyTaskAssigned({
+                  assigneeAuthId: assignee, title: taskTitle(r.def), context: 'Job ' + jobId, byName: _rtaBy });
               }
             } catch(e) { console.warn('Fire task failed:', e && e.message); window.logError && window.logError('fire job task', e); }
           } else {
+            var _rtaPrevAssignee = r.task.assigned_to || null;
             try {
               await supaMut('PATCH','job_tasks','?id=eq.'+r.task.id,{ assigned_to: assignee });
               reassigned++;
+              if (assignee && assignee !== _rtaPrevAssignee) window.notifyTaskAssigned && window.notifyTaskAssigned({
+                assigneeAuthId: assignee, title: taskTitle(r.task), context: 'Job ' + jobId, byName: _rtaBy });
             } catch(e) { console.warn('Reassign failed:', e && e.message); }
           }
         }
@@ -58521,6 +58623,15 @@ window._smpAssignTask = async function() {
   try {
     await _smpDB().insert('job_tasks', task);
 
+    window.notifyTaskAssigned && window.notifyTaskAssigned({
+      assigneeId: assigneeId,
+      title: task.title,
+      description: task.description,
+      priority: 'normal',
+      dueAt: task.due_date,
+      byName: (window.CURRENT_USER && window.CURRENT_USER.display_name) || 'A colleague'
+    });
+
     // Link task to sample
     await _smpDB().update('samples','?id=eq.'+encodeURIComponent(sampleId),{ mixing_task_id: newTaskId });
 
@@ -64100,6 +64211,14 @@ window.attendanceReject=async function(reqId,btn){
         task_type:'crm', assigned_role:'crm', status:'pending',
         assignee_id: assignee, priority:'normal', due_at: due,
         created_by: meId(), created_at: new Date().toISOString()
+      });
+      window.notifyTaskAssigned && window.notifyTaskAssigned({
+        assigneeId: assignee,
+        title: a.text,
+        description: 'From meeting: '+(m.title||'')+' ('+fmtDayLong(m.starts_at)+')',
+        priority: 'normal',
+        dueAt: due,
+        byName: (window.CURRENT_USER && window.CURRENT_USER.display_name) || 'A colleague'
       });
       var row = await patchRow('meeting_actions', id, a.updated_at, { task_id: taskId });
       if (row) Object.assign(a,row); else a.task_id=taskId;
