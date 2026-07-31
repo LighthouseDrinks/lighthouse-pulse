@@ -23390,10 +23390,6 @@ window.approveJobSubmission = async function(id, opts) {
 
     await window.db.insert('jobs', jobPayload);
 
-    // Auto-queue at tail of bay waitlist
-    try { window._bayAutoQueuePlanning && await window._bayAutoQueuePlanning(); }
-    catch(qErr) { window.logError && window.logError('bayAutoQueuePlanning', qErr); }
-
     // Mark submission approved
     await db.update('client_job_submissions', '?id=eq.' + id, {
       status: 'approved',
@@ -33938,9 +33934,6 @@ window.saveAdjModal = async function() {
           // Auto-send BOM confirmation to client
           try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(saved.id); }
           catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate', bErr); }
-          // Auto-queue the new planning job at the tail of the bay queue
-          try { window._bayAutoQueuePlanning && await window._bayAutoQueuePlanning(); }
-          catch(qErr) { window.logError && window.logError('bayAutoQueuePlanning', qErr); }
         }
         await loadJobs();
       }
@@ -34785,9 +34778,7 @@ window.saveAdjModal = async function() {
       // Must be holding a bay. Released bays don't count — the job's dry-goods
       // staging slot has already been torn down.
       if (!j.job_bay || j.bay_released_at) {
-        var nextHint = j.bay_waitlist_priority != null
-          ? 'Job is at queue position #' + j.bay_waitlist_priority + '. Wait for a bay to be assigned from the Bay Board, or re-prioritise on the Jobs page.'
-          : 'This job has no bay queue priority. Open the Jobs page to set one, or the Bay Board will auto-queue it on next refresh.';
+        var nextHint = 'Waiting for a bay. Assign one from the Bay Board (higher-priority jobs are offered first), or raise this job\'s priority on the Jobs page.';
         blockers1.push({ label: 'Job Bay', hint: nextHint });
       }
       if (blockers1.length) {
@@ -42478,12 +42469,7 @@ window.saveAdjModal = async function() {
         } else if (st === 'queued') {
           bayBanner = '<div style="background:rgba(232,156,58,0.08);border:1px solid rgba(232,156,58,0.3);border-left:4px solid var(--amber);padding:12px 16px;border-radius:4px;margin-bottom:16px;">'
             + '<div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--amber);">Do not kit yet — waiting for a bay</div>'
-            + '<div style="font-size:11px;color:var(--muted);margin-top:3px;">Queued at position #' + j.bay_waitlist_priority + '. Planning will confirm the bay when one frees up.</div>'
-            + '</div>';
-        } else if (st === 'none' && j.stage === 'new') {
-          bayBanner = '<div style="background:rgba(224,93,93,0.08);border:1px solid rgba(224,93,93,0.3);border-left:4px solid var(--red);padding:12px 16px;border-radius:4px;margin-bottom:16px;">'
-            + '<div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--red);">No bay assigned</div>'
-            + '<div style="font-size:11px;color:var(--muted);margin-top:3px;">This job isn\'t in the queue yet. Refresh the Bay Board or set a priority from the Jobs page.</div>'
+            + '<div style="font-size:11px;color:var(--muted);margin-top:3px;">Awaiting a bay. Planning will confirm the bay when one frees up.</div>'
             + '</div>';
         }
       }
@@ -44381,10 +44367,6 @@ window.saveAdjModal = async function() {
 
   // ── Hook into showPage for jobs tab ──────────────────────────────────────────
   async function _loadJobsWithQueue() {
-    // Auto-assign priorities first so arrows are visible on the very first render.
-    if (typeof window._bayAutoQueuePlanning === 'function') {
-      try { await window._bayAutoQueuePlanning(); } catch(e) {}
-    }
     loadJobs();
   }
   document.addEventListener('DOMContentLoaded', function() {
@@ -45259,8 +45241,8 @@ window.saveAdjModal = async function() {
     try {
       await loadWorkingOverrides();
       var jobs = await sbGet('jobs?stage=in.(new,active)&actual_start=is.null'
-        + '&select=id,bottle_target,bom_id,bay_waitlist_priority,changeover_start'
-        + '&order=bay_waitlist_priority.asc.nullslast,created_at.asc');
+        + '&select=id,bottle_target,bom_id,priority_band,schedule_slot,changeover_start'
+        + '&order=schedule_slot.asc.nullslast,created_at.asc');
       var bomIds = [];
       jobs.forEach(function(j) { if (j.bom_id && bomIds.indexOf(j.bom_id) < 0) bomIds.push(j.bom_id); });
       var lbm = {};
@@ -45943,23 +45925,6 @@ window.saveAdjModal = async function() {
 
   // ── Job actions ──────────────────────────────────────────────────────────────
 
-  // Close the gap left when a job leaves the priority queue (Start Changeover or Start Production).
-  // Mirrors the original logic inside schedStartJob — shifts everything at or above `oldPriority`
-  // down by 1 so the visible queue stays dense.
-  async function _schedCloseQueueGap(jobId, oldPriority) {
-    if (oldPriority == null) return;
-    try {
-      var above = await sbGet('jobs?bay_waitlist_priority=gte.' + oldPriority
-        + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
-      for (var i = 0; i < (above || []).length; i++) {
-        if (above[i].id === jobId) continue;
-        await sbPatch('jobs', '?id=eq.' + above[i].id, {
-          bay_waitlist_priority: (above[i].bay_waitlist_priority || 0) - 1
-        });
-      }
-    } catch(e) {}
-  }
-
   function _schedLineOccupied(excludeJobId) {
     return _schedJobs.some(function(j) {
       return j.id !== excludeJobId && (
@@ -45981,8 +45946,6 @@ window.saveAdjModal = async function() {
     }
     try {
       var nowIso = new Date().toISOString();
-      var existing = _schedJobs.find(function(x) { return x.id === jobId; });
-      var oldPriority = existing && existing.bay_waitlist_priority;
       await sbPatch('jobs', '?id=eq.' + jobId, {
         changeover_start: nowIso,
         date_commenced:   nowIso,
@@ -45991,9 +45954,8 @@ window.saveAdjModal = async function() {
         date_completed:   null,
         paused_at:        null,
         total_paused_secs: 0,
-        bay_waitlist_priority: null
+        schedule_slot:    null   // free its Next-Jobs slot once it leaves the queue
       });
-      await _schedCloseQueueGap(jobId, oldPriority);
       window.toast && window.toast('Changeover started.', 'success');
       await loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
@@ -46013,7 +45975,6 @@ window.saveAdjModal = async function() {
     try {
       var startIso = new Date().toISOString();
       var existing = _schedJobs.find(function(x) { return x.id === jobId; });
-      var oldPriority = existing && existing.bay_waitlist_priority;
       var hadChangeover = !!(existing && existing.changeover_start);
       var patch = {
         actual_start: startIso,
@@ -46021,12 +45982,11 @@ window.saveAdjModal = async function() {
         date_completed: null,
         paused_at: null,
         total_paused_secs: 0,
-        bay_waitlist_priority: null
+        schedule_slot: null   // free its Next-Jobs slot once it leaves the queue
       };
       // Preserve date_commenced when changeover already anchored it; otherwise anchor to run start.
       if (!hadChangeover) patch.date_commenced = startIso;
       await sbPatch('jobs', '?id=eq.' + jobId, patch);
-      await _schedCloseQueueGap(jobId, oldPriority);
       window.toast && window.toast(hadChangeover ? 'Production started.' : 'Job started (no changeover).', 'success');
       await loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
@@ -46095,10 +46055,11 @@ window.saveAdjModal = async function() {
     if (!q.length) {
       html += '<div style="color:var(--muted);font-size:12px;padding:18px 4px;">No queued jobs are available.</div>';
     } else {
+      var _bandLbl = { high: 'High', medium: 'Medium', low: 'Low' };
       q.forEach(function(j, i) {
         var btls = j.bottle_target ? Number(j.bottle_target).toLocaleString() + ' btls' : '—';
-        html += '<button data-next-job="' + esc(j.id) + '" style="width:100%;text-align:left;background:rgba(255,255,255,0.025);border:1px solid var(--navy-border);border-radius:5px;padding:11px 13px;margin-bottom:8px;cursor:pointer;font-family:Lato,sans-serif;color:var(--white);display:grid;grid-template-columns:44px 1fr 120px;gap:10px;align-items:center;">'
-          + '<span style="font-size:12px;font-weight:700;color:var(--amber);">#' + (j.bay_waitlist_priority != null ? j.bay_waitlist_priority : (i + 1)) + '</span>'
+        html += '<button data-next-job="' + esc(j.id) + '" style="width:100%;text-align:left;background:rgba(255,255,255,0.025);border:1px solid var(--navy-border);border-radius:5px;padding:11px 13px;margin-bottom:8px;cursor:pointer;font-family:Lato,sans-serif;color:var(--white);display:grid;grid-template-columns:64px 1fr 120px;gap:10px;align-items:center;">'
+          + '<span style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--amber);">' + (_bandLbl[j.priority_band || 'medium']) + '</span>'
           + '<span style="min-width:0;"><span style="display:block;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(window.jobLabel(j, _schedBomMap) || j.id) + '</span><span style="display:block;font-size:10px;color:var(--muted);margin-top:2px;">' + esc(j.clientName || '—') + ' · ' + esc(j.id) + '</span></span>'
           + '<span style="font-size:11px;color:var(--gold);text-align:right;">' + btls + '</span>'
           + '</button>';
@@ -46160,7 +46121,7 @@ window.saveAdjModal = async function() {
       +   '</div>'
       +   '<button id="_sso_close" style="background:none;border:none;color:rgba(255,255,255,0.4);cursor:pointer;font-size:22px;line-height:1;padding:0;flex-shrink:0;">&times;</button>'
       + '</div>'
-      + '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5;">The job will go back to position #1 in the queue. The stop window will be logged' + (elapsedMs < 60000 ? ' as a <strong style="color:var(--gold);">misclick</strong> (excluded from downtime stats)' : ' as <strong style="color:var(--red);">downtime</strong>') + '.</div>'
+      + '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5;">The job will be moved to <strong style="color:var(--red);">High priority</strong>. The stop window will be logged' + (elapsedMs < 60000 ? ' as a <strong style="color:var(--gold);">misclick</strong> (excluded from downtime stats)' : ' as <strong style="color:var(--red);">downtime</strong>') + '.</div>'
       + '<div style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Reason</div>'
       + '<div id="_sso_chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">'
       +   REASONS.map(function(r, i) {
@@ -46258,18 +46219,10 @@ window.saveAdjModal = async function() {
     }
     await sbPatch('jobs', '?id=eq.' + j.id, patch);
 
-    // 2. Re-queue at the top via integer shift: bump every queued priority by +1, set this to 1.
+    // 2. Bump the stopped job to High priority so it resurfaces first for a bay/run.
     try {
-      var queued = await sbGet('jobs?bay_waitlist_priority=not.is.null&stage=not.in.(complete,cancelled)'
-        + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
-      for (var i = 0; i < (queued || []).length; i++) {
-        if (queued[i].id === j.id) continue;
-        await sbPatch('jobs', '?id=eq.' + queued[i].id, {
-          bay_waitlist_priority: (queued[i].bay_waitlist_priority || 0) + 1
-        });
-      }
-      await sbPatch('jobs', '?id=eq.' + j.id, { bay_waitlist_priority: 1 });
-    } catch(qe) { console.warn('Stop re-queue error:', qe && qe.message); }
+      await sbPatch('jobs', '?id=eq.' + j.id, { priority_band: 'high' });
+    } catch(qe) { console.warn('Stop re-prioritise error:', qe && qe.message); }
 
     // 3. Log the abandoned window. Classify misclicks (<60s) separately so they don't poison KPIs.
     var isMisclick = elapsedMs < 60000;
@@ -46658,17 +46611,6 @@ window.saveAdjModal = async function() {
     }
     document.getElementById('_ssd_co').onclick   = function() { guarded(window.schedStartChangeover); };
     document.getElementById('_ssd_prod').onclick = function() { guarded(window.schedStartProduction); };
-  };
-
-  // Optimistic priority swap for Next Jobs — mirrors _jobsSwapPriorities on the Jobs page.
-  // Called by _bayWaitlistMove so the Schedule card updates instantly without waiting for a DB round-trip.
-  window._schedSwapPriorities = function(idA, newPA, idB, newPB) {
-    var a = _schedJobs.find(function(j){ return j.id === idA; });
-    var b = _schedJobs.find(function(j){ return j.id === idB; });
-    if (a) a.bay_waitlist_priority = newPA;
-    if (b) b.bay_waitlist_priority = newPB;
-    renderNextJobs();
-    renderScheduleEvents();
   };
 
 })();
@@ -56057,9 +55999,9 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 </script>
 
 <!-- ══ JOB BAY ASSIGNMENT MODULE ═════════════════════════════════════════════ -->
-<!-- Bays are 5 scarce dry-goods staging slots. Every Planning job auto-gets a
-     priority number (the queue). From there a job moves Queued → Held → Released.
-     All state lives on the jobs table; bay_waitlist_priority IS the queue order. -->
+<!-- Bays are 5 scarce dry-goods staging slots. In-flight (new/active) jobs await a
+     bay, then move Queued → Held → Released. Queue order for bay assignment is the
+     H/M/L priority band (jobs.priority_band); state lives on the jobs table. -->
 <script>
 (function() {
   'use strict';
@@ -56132,7 +56074,11 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     try {
       var to = await getBayRecipients();
       if (!to.length) return;
-      var topRows = await apiGet('jobs?bay_waitlist_priority=not.is.null&stage=in.(new,active)&order=bay_waitlist_priority.asc&limit=1&select=id,product_name,client_id,clients(name)');
+      // Top of the waitlist = highest-priority in-flight job without an active bay.
+      var _waitRows = await apiGet('jobs?stage=in.(new,active)&or=(job_bay.is.null,bay_released_at.not.is.null)&order=created_at.asc&limit=50&select=id,product_name,client_id,priority_band,clients(name)');
+      var _wRank = { high: 0, medium: 1, low: 2 };
+      (_waitRows || []).sort(function(a, b) { return (_wRank[a.priority_band||'medium']) - (_wRank[b.priority_band||'medium']); });
+      var topRows = (_waitRows || []).slice(0, 1);
       var top = (topRows && topRows[0]) || null;
       var topLabel = top
         ? (top.id + ' &middot; ' + esc(top.product_name||'—') + (top.clients && top.clients.name ? ' &middot; ' + esc(top.clients.name) : ''))
@@ -56179,171 +56125,10 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   // be cleared (the inner try/catch swallows the ReferenceError silently).
   window._clearExtraBays = _clearExtraBays;
 
-  // ── Auto-queue: give every Planning job without a priority a slot at the tail ─
-  // Called on job create + every Bay Board render. Idempotent.
-  window._bayAutoQueuePlanning = async function() {
-    try {
-      var missing = await apiGet('jobs?stage=eq.new&bay_waitlist_priority=is.null&select=id&order=created_at.asc');
-      if (!missing || !missing.length) return 0;
-      var tail = await apiGet('jobs?stage=in.(new,active)&bay_waitlist_priority=not.is.null&order=bay_waitlist_priority.desc&limit=1&select=bay_waitlist_priority');
-      var maxP = (tail && tail[0] && tail[0].bay_waitlist_priority) || 0;
-      for (var i = 0; i < missing.length; i++) {
-        await apiPatch('jobs', '?id=eq.' + encodeURIComponent(missing[i].id), { bay_waitlist_priority: maxP + i + 1 });
-      }
-      return missing.length;
-    } catch(e) { console.warn('Auto-queue planning jobs failed:', e && e.message); return 0; }
-  };
-
-  // Compact priorities > gapAtOrAbove by −1 (used whenever a job leaves the queue)
-  async function compactQueueAbove(gapAtOrAbove) {
-    if (gapAtOrAbove == null) return;
-    var above = await apiGet('jobs?bay_waitlist_priority=gte.' + gapAtOrAbove + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
-    for (var i = 0; i < (above||[]).length; i++) {
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(above[i].id), { bay_waitlist_priority: (above[i].bay_waitlist_priority || 0) - 1 });
-    }
-  }
-
-  // Shift existing priorities in [fromP, toP) down by +1, used when inserting at a specific slot
-  async function shiftQueueDown(fromP) {
-    var rows = await apiGet('jobs?bay_waitlist_priority=gte.' + fromP + '&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
-    for (var i = 0; i < (rows||[]).length; i++) {
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(rows[i].id), { bay_waitlist_priority: (rows[i].bay_waitlist_priority || 0) + 1 });
-    }
-  }
-
-  // ── Normalise queue: renumber all planning/scheduled jobs to dense 1..n ─
-  // Eliminates gaps and duplicate priority values so every arrow click moves
-  // exactly one visual row. Called after every swap.
-  async function _normalizeQueuePriorities() {
-    try {
-      var rows = await apiGet('jobs?stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc.nullslast,created_at.asc');
-      if (!rows || !rows.length) return;
-      for (var i = 0; i < rows.length; i++) {
-        var expected = i + 1;
-        if (rows[i].bay_waitlist_priority !== expected) {
-          await apiPatch('jobs', '?id=eq.' + encodeURIComponent(rows[i].id), { bay_waitlist_priority: expected });
-        }
-      }
-    } catch(e) { console.warn('Queue normalize failed:', e && e.message); }
-  }
-
-  // ── Reorder: swap priority with adjacent neighbour ──────────────────────
-  var _baySwappingJobs = {};   // per-job lock — prevents double-click corruption
-  window._bayWaitlistMove = async function(jobId, direction) {
-    var _canMove = window.isExec() || (window.canDo && window.canDo('bay_assign'));
-    if (!_canMove) return;
-    if (_baySwappingJobs[jobId]) return;   // already in-flight for this job
-    _baySwappingJobs[jobId] = true;
-
-    // Visually disable both arrow buttons for this job immediately
-    document.querySelectorAll('[data-arrow-job-id="' + jobId + '"]').forEach(function(b){
-      b.disabled = true; b.style.opacity = '0.35'; b.style.cursor = 'not-allowed';
-    });
-
-    try {
-      var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,bay_waitlist_priority');
-      if (!me || !me.length) return;
-      var myP = me[0].bay_waitlist_priority;
-      // Auto-assign to end of queue if this job has no priority yet
-      if (myP == null) {
-        var allP = await apiGet('jobs?stage=in.(new,active)&bay_waitlist_priority=not.is.null&select=bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1');
-        myP = (allP && allP.length) ? allP[0].bay_waitlist_priority + 1 : 1;
-        await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: myP });
-        // Sync local caches immediately so the optimistic swap below works
-        if (typeof window._jobsSwapPriorities === 'function') {
-          window._jobsSwapPriorities(jobId, myP, null, null);
-        }
-      }
-      var nbQuery = direction === 'up'
-        ? 'jobs?bay_waitlist_priority=lt.' + myP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1'
-        : 'jobs?bay_waitlist_priority=gt.' + myP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc&limit=1';
-      var nb = await apiGet(nbQuery);
-      if (!nb || !nb.length) return;   // already at top / bottom
-      var nbP  = nb[0].bay_waitlist_priority;
-      var nbId = nb[0].id;
-
-      // Optimistic local update — both Jobs table and Next Jobs card re-render instantly
-      if (typeof window._jobsSwapPriorities === 'function') {
-        window._jobsSwapPriorities(jobId, nbP, nbId, myP);
-      }
-      if (typeof window._schedSwapPriorities === 'function') {
-        window._schedSwapPriorities(jobId, nbP, nbId, myP);
-      }
-
-      // DB swap — use 99999 as sentinel (never a real priority; avoids the -1 corruption bug)
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: 99999 });
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(nbId),  { bay_waitlist_priority: myP });
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: nbP });
-
-      // Compact: renumber all active jobs to dense 1..n so gaps/duplicates can't
-      // cause the next click to skip a visual row. Must finish before we reload UI.
-      await _normalizeQueuePriorities();
-
-      // Reload both pages from the now-clean DB state
-      // loadSchedule() calls _renderBayBoard() on completion — no need to call it separately here
-      if (typeof window.loadJobs === 'function')         { try { window.loadJobs();         } catch(e){} }
-      if (typeof window.loadSchedule === 'function')     { try { window.loadSchedule();     } catch(e){} }
-    } catch(e) {
-      window.toast && window.toast('Error moving job: ' + (e && e.message), 'error');
-      // Full reload to restore correct state after a failed patch
-      if (typeof window.loadJobs === 'function') window.loadJobs();
-    } finally {
-      delete _baySwappingJobs[jobId];
-    }
-  };
-
-  // ── Set an explicit priority (click-to-edit from Jobs table). Shifts others as needed. ─
-  window._bayEditPriority = async function(jobId) {
-    var _canEdit = window.isExec() || (window.canDo && window.canDo('bay_assign'));
-    if (!_canEdit) { window.toast && window.toast('You don\'t have permission to reorder the planning queue.', 'error'); return; }
-    try {
-      var me = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,stage,bay_waitlist_priority');
-      if (!me || !me.length) return;
-      var curP = me[0].bay_waitlist_priority;
-      // If no priority yet, default the prompt to end of queue
-      if (curP == null) {
-        var allP = await apiGet('jobs?stage=in.(new,active)&bay_waitlist_priority=not.is.null&select=bay_waitlist_priority&order=bay_waitlist_priority.desc&limit=1');
-        curP = (allP && allP.length) ? allP[0].bay_waitlist_priority + 1 : 1;
-      }
-      var ans = await window.lpPrompt('Enter new priority position for this job (1 = top of queue).', String(curP), { title: 'Set queue priority' });
-      if (ans == null) return;
-      var newP = parseInt(ans, 10);
-      if (!newP || newP < 1) { window.toast && window.toast('Enter a positive number.', 'error'); return; }
-      var origP = me[0].bay_waitlist_priority; // may be null
-      if (newP === origP) return;
-      if (origP == null) {
-        // No existing position — just insert at newP, shifting others down
-        var ins = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
-        for (var ii = 0; ii < (ins||[]).length; ii++) {
-          await apiPatch('jobs', '?id=eq.' + encodeURIComponent(ins[ii].id), { bay_waitlist_priority: ins[ii].bay_waitlist_priority + 1 });
-        }
-        await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: newP });
-        await auditBay(jobId, me[0].stage, 'Queue priority set to #' + newP + ' (was unassigned)');
-        window.toast && window.toast('Priority set to #' + newP + '.', 'success');
-        window._bayRefreshAll(jobId);
-        return;
-      }
-      // Park the row at a sentinel to free up origP
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: -1 });
-      if (newP < origP) {
-        // Moving up: shift rows in [newP, origP) down by +1 — only new/active
-        var up = await apiGet('jobs?bay_waitlist_priority=gte.' + newP + '&bay_waitlist_priority=lt.' + origP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.desc');
-        for (var i = 0; i < (up||[]).length; i++) {
-          await apiPatch('jobs', '?id=eq.' + encodeURIComponent(up[i].id), { bay_waitlist_priority: (up[i].bay_waitlist_priority || 0) + 1 });
-        }
-      } else {
-        // Moving down: shift rows in (origP, newP] up by -1 — only new/active
-        var dn = await apiGet('jobs?bay_waitlist_priority=gt.' + origP + '&bay_waitlist_priority=lte.' + newP + '&stage=in.(new,active)&select=id,bay_waitlist_priority&order=bay_waitlist_priority.asc');
-        for (var k = 0; k < (dn||[]).length; k++) {
-          await apiPatch('jobs', '?id=eq.' + encodeURIComponent(dn[k].id), { bay_waitlist_priority: (dn[k].bay_waitlist_priority || 0) - 1 });
-        }
-      }
-      await apiPatch('jobs', '?id=eq.' + encodeURIComponent(jobId), { bay_waitlist_priority: newP });
-      await auditBay(jobId, me[0].stage, 'Queue priority set to #' + newP + ' (was #' + origP + ')');
-      window.toast && window.toast('Priority set to #' + newP + '.', 'success');
-      window._bayRefreshAll(jobId);
-    } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
-  };
+  // Priority is now the H/M/L band on the Jobs page (jobs.priority_band); the old
+  // integer waitlist queue and its arrows/normalise/auto-queue helpers were retired.
+  // Kept as a safe no-op so any legacy callers don't throw.
+  window._bayAutoQueuePlanning = async function() { return 0; };
 
   // ── Assign a bay from the queue ──────────────────────────────────────────
   window._bayAssignFromWaitlist = async function(bayNo) {
@@ -56365,9 +56150,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         }
       } catch(e) {}
 
-      // All new/active jobs without an active bay (never assigned, or previously released)
-      var top = await apiGet('jobs?stage=in.(new,active)&or=(job_bay.is.null,bay_released_at.not.is.null)&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=10&select=id,product_name,bom_id,client_id,bay_waitlist_priority,clients(name)');
+      // All new/active jobs without an active bay (never assigned, or previously released),
+      // ordered by priority band (High → Medium → Low) then oldest first.
+      var top = await apiGet('jobs?stage=in.(new,active)&or=(job_bay.is.null,bay_released_at.not.is.null)&order=created_at.asc&limit=50&select=id,product_name,bom_id,client_id,priority_band,clients(name)');
       if (!top || !top.length) { await window.lpAlert('No unassigned new jobs found.', { title: 'No jobs available' }); return; }
+      var _bandRank = { high: 0, medium: 1, low: 2 };
+      top.sort(function(a, b) { return (_bandRank[a.priority_band||'medium']) - (_bandRank[b.priority_band||'medium']); });
+      top = top.slice(0, 10);
       try {
         var _bayBomIds = (top || []).map(function(c){ return c.bom_id; }).filter(Boolean);
         if (_bayBomIds.length) await window._fetchBomMapFor(_bayBomIds);
@@ -56551,13 +56340,14 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       card.style.cssText = 'background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:6px;padding:22px 26px;width:540px;max-width:94vw;max-height:88vh;overflow-y:auto;';
       var header = '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">Assign Bay ' + bayNo + '</div>'
         + '<div style="font-size:15px;font-weight:700;color:var(--white);margin-bottom:4px;">Pick a job to assign</div>'
-        + '<div style="font-size:11px;color:var(--muted);margin-bottom:16px;">Ordered by priority where set. Bay assignment is independent of job priority.</div>';
+        + '<div style="font-size:11px;color:var(--muted);margin-bottom:16px;">Ordered by priority band (High first). Bay assignment is independent of job priority.</div>';
       var list = '<div style="display:flex;flex-direction:column;gap:8px;">';
+      var _pqBand = { high: 'High', medium: 'Medium', low: 'Low' };
       candidates.forEach(function(c) {
         var clientName = c.clients && c.clients.name ? c.clients.name : '';
         list += '<button type="button" data-pick="' + esc(c.id) + '" style="text-align:left;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:10px 14px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;">'
           + '<div style="display:flex;align-items:center;gap:10px;">'
-          +   (c.bay_waitlist_priority != null ? '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;color:var(--amber);background:rgba(232,156,58,0.12);border:1px solid rgba(232,156,58,0.25);padding:2px 7px;border-radius:3px;">#' + c.bay_waitlist_priority + '</span>' : '<span style="font-size:10px;color:var(--muted);padding:2px 7px;">—</span>')
+          +   '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;color:var(--amber);background:rgba(232,156,58,0.12);border:1px solid rgba(232,156,58,0.25);padding:2px 7px;border-radius:3px;">' + (_pqBand[c.priority_band || 'medium']) + '</span>'
           +   '<span style="font-size:12px;font-weight:700;color:var(--gold);">' + esc(c.id) + '</span>'
           +   '<span style="font-size:12px;color:var(--white);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(c.product_name||'—') + '</span>'
           +   (clientName ? '<span style="font-size:11px;color:var(--muted);">' + esc(clientName) + '</span>' : '')
@@ -56773,9 +56563,6 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     // Don't replace existing content with a loading stub — that collapses the container
     // height and causes the rest of the page to jump. Fetch first, paint once.
     try {
-      // Auto-queue any planning jobs without a priority before we paint
-      try { await window._bayAutoQueuePlanning(); } catch(e) {}
-
       var held = await apiGet('jobs?job_bay=not.is.null&bay_released_at=is.null&stage=not.in.(complete,cancelled)&select=id,product_name,bom_id,job_bay,bay_assigned_at,bay_assigned_by,stage,clients(name)&order=job_bay.asc');
       // heldByBay[n] = array of jobs — supports multiple jobs per bay
       var heldByBay = {};
@@ -56858,11 +56645,11 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     }
   };
 
-  // ── Print the Next Jobs list ─────────────────────────────────────────────
+  // ── Print the Next Jobs list (the 5 schedule slots, in order) ─────────────
   window._printNextJobs = async function() {
     try {
-      var jobs = await apiGet('jobs?stage=in.(new,active)&order=bay_waitlist_priority.asc.nullslast,created_at.asc&limit=20&select=id,product_name,bom_id,bottle_target,bay_waitlist_priority,job_bay,bay_released_at,clients(name)');
-      if (!jobs || !jobs.length) { window.toast && window.toast('No jobs in the priority list.', 'error'); return; }
+      var jobs = await apiGet('jobs?schedule_slot=not.is.null&stage=in.(new,active)&order=schedule_slot.asc&select=id,product_name,bom_id,bottle_target,schedule_slot,job_bay,bay_released_at,clients(name)');
+      if (!jobs || !jobs.length) { window.toast && window.toast('No jobs assigned to slots yet.', 'error'); return; }
       // Fetch BOM extras for the extended product label (e.g. "Lucky Penny — 70cl · 46% · EU/ROW")
       var bomMap = {};
       var bomIds = [];
@@ -56878,7 +56665,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         var cn = w.clients && w.clients.name ? w.clients.name : '—';
         var bt = w.bottle_target ? w.bottle_target.toLocaleString() + ' btls' : '—';
         var bay = (w.job_bay && !w.bay_released_at) ? 'Bay ' + w.job_bay : '—';
-        return '<tr><td style="padding:10px 12px;font-size:16px;font-weight:700;color:#e89c3a;">#' + w.bay_waitlist_priority + '</td>'
+        return '<tr><td style="padding:10px 12px;font-size:16px;font-weight:700;color:#e89c3a;">#' + w.schedule_slot + '</td>'
           + '<td style="padding:10px 12px;font-family:monospace;font-size:12px;">' + w.id + '</td>'
           + '<td style="padding:10px 12px;font-size:13px;font-weight:600;">' + window.jobDisplayName(w, bomMap) + '</td>'
           + '<td style="padding:10px 12px;font-size:12px;color:#555;">' + cn + '</td>'
@@ -56896,9 +56683,9 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         + 'tr:nth-child(even){background:#f9f9f9;}'
         + '.footer{margin-top:24px;font-size:10px;color:#aaa;display:flex;justify-content:space-between;border-top:1px solid #ddd;padding-top:10px;}'
         + '@media print{body{margin:16px 20px;}}</style></head><body>'
-        + '<h1>Lighthouse Drinks</h1><h2>Next Jobs — Priority Order</h2>'
+        + '<h1>Lighthouse Drinks</h1><h2>Next Jobs — Schedule Slots</h2>'
         + '<table><thead><tr>'
-        +   '<th style="width:44px;">#</th><th style="width:100px;">Job</th><th>Product</th><th>Client</th><th style="text-align:right;width:90px;">Target</th><th style="text-align:center;width:80px;">Bay</th>'
+        +   '<th style="width:44px;">Slot</th><th style="width:100px;">Job</th><th>Product</th><th>Client</th><th style="text-align:right;width:90px;">Target</th><th style="text-align:center;width:80px;">Bay</th>'
         + '</tr></thead><tbody>' + rows + '</tbody></table>'
         + '<div class="footer"><span>Lighthouse Pulse</span><span>Printed ' + dateStr + '</span></div>'
         + '</body></html>';
@@ -56919,7 +56706,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     if (!jobId) return;
     container.setAttribute('data-job', jobId);
     try {
-      var rows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,bay_assigned_at,bay_assigned_by,bay_released_at,bay_released_by,bay_release_reason,bay_waitlist_priority,stage');
+      var rows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=id,job_bay,bay_assigned_at,bay_assigned_by,bay_released_at,bay_released_by,bay_release_reason,priority_band,stage');
       // Attempt to load extra_bays separately — only works after SQL migration
       try {
         var ebRows = await apiGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=extra_bays');
@@ -56937,17 +56724,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       if (st === 'none') {
         if (j.stage === 'complete' || j.stage === 'cancelled') {
           body = '<div style="font-size:12px;color:var(--muted);">No bay was assigned for this job.</div>';
-        } else if (j.stage === 'new') {
-          // New job without a priority shouldn't normally happen (auto-queue catches it).
-          // Kick auto-queue + refresh so the card picks up the new priority shortly.
-          try { window._bayAutoQueuePlanning && window._bayAutoQueuePlanning().then(function(){ window.refreshJobBayCard && window.refreshJobBayCard(jobId); }); } catch(e){}
-          body = '<div style="font-size:12px;color:var(--muted);">Queuing this planning job…</div>';
         } else {
           body = '<div style="font-size:12px;color:var(--muted);">This job isn\'t in Planning, so no bay queue applies.</div>';
         }
       } else if (st === 'queued') {
-        body = '<div style="font-size:12px;color:var(--white);margin-bottom:8px;line-height:1.5;">Priority position <strong style="color:var(--amber);">#' + j.bay_waitlist_priority + '</strong> — no bay assigned yet.<br>'
-          + '<span style="color:var(--muted);font-size:11px;">Reorder using ▲▼ on the Jobs page. Bay assignment is independent of priority.</span></div>';
+        var _bcBand = { high: 'High', medium: 'Medium', low: 'Low' }[j.priority_band || 'medium'];
+        body = '<div style="font-size:12px;color:var(--white);margin-bottom:8px;line-height:1.5;"><strong style="color:var(--amber);">' + _bcBand + ' priority</strong> — awaiting a bay.<br>'
+          + '<span style="color:var(--muted);font-size:11px;">Set the priority band on the Jobs page. Bay assignment is independent of priority.</span></div>';
       } else if (st === 'held') {
         var extraBays = j.extra_bays || [];
         // Primary bay row
