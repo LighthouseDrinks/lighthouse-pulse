@@ -24702,12 +24702,14 @@ window.ccxPrintRecord = function() {
   var _pMonthMoves = [];  // current-month movements for KPIs
   var _pBilling = [];     // last billing calculation
   var _pBillingPeriod = null;
+  var _pClientsCache = {};  // id -> display name, prefetched in loadPallets()
 
   function _pClients() {
     return (window.CLIENTS && window.CLIENTS.length) ? window.CLIENTS
          : ((window.APP && window.APP.clients) || []);
   }
   function _pClientName(id) {
+    if (id && _pClientsCache[id]) return _pClientsCache[id];
     var c = _pClients().find(function(x){ return x.id === id; });
     return c ? (c.company || c.name || id) : id;
   }
@@ -24763,10 +24765,15 @@ window.ccxPrintRecord = function() {
       var monthStart = _pMonthStart();
       var results = await Promise.all([
         window.db.select('pallet_balances', '?order=current_pallets.desc'),
-        window.db.select('pallet_movements', '?movement_date=gte.' + monthStart + '&select=movement_type,quantity')
+        window.db.select('pallet_movements', '?movement_date=gte.' + monthStart + '&select=movement_type,quantity'),
+        // Prefetch client names BEFORE rendering. The clients table's id IS the
+        // client code (e.g. "CLI-007") and the display name lives in `name`, so
+        // without this a cold load shows raw CLI-xxx codes in the Client column.
+        window.db.select('clients', '?select=id,name&limit=500').catch(function(){ return []; })
       ]);
       _pBalances   = results[0] || [];
       _pMonthMoves = results[1] || [];
+      (results[2] || []).forEach(function(c){ if (c && c.id) _pClientsCache[c.id] = c.name || c.id; });
       window.renderPallets();
     } catch (e) {
       if (wrap) wrap.innerHTML = '<div style="color:var(--red);padding:30px;text-align:center;">Could not load pallet data: ' + _pEsc(e.message) + '</div>';
