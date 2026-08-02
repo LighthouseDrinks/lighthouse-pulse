@@ -63822,7 +63822,6 @@ if (typeof _origOpenDD === 'function') {
       return '<tr>'
         + '<td class="strong">' + window.escapeHtml(r.company_name || '') + '</td>'
         + '<td>' + signed + '</td>'
-        + '<td>' + fmtRetainer(r.monthly_retainer) + '</td>'
         + '<td style="text-align:center;"><input type="checkbox"' + (r.fulfild_setup ? ' checked' : '')
         +   ' style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;"'
         +   ' onchange="window.toggle3plFulfild(this.dataset.id, \'fulfild_setup\', this.checked)" data-id="' + window.escapeHtml(r.id) + '"></td>'
@@ -64719,6 +64718,365 @@ if (typeof _origOpenDD === 'function') {
       window.toast && window.toast('Purchase order ' + label + ' deleted.', 'success');
       window.loadEcomPOs();
     } catch (e) { window.toast && window.toast('Delete failed: ' + (e.message || 'unknown'), 'error'); }
+  };
+
+  // ═══════════════════════════════════════════════════════════
+  // ── SHIPPING TAB: settings (DPD flat / UPS) + cost report ──
+  // ═══════════════════════════════════════════════════════════
+  var _shipConfig  = null;   // parsed app_settings.shipping_config
+  var _shipClients = [];     // three_pl_clients
+  var _shipReport  = null;   // last report payload from the edge function
+
+  function _shipDefaultConfig() {
+    return {
+      dpd_ie_flat_rate: null,
+      carrier_rules: [{ keyword: 'dpd', carrier: 'dpd' }, { keyword: 'ups', carrier: 'ups' }],
+      ups: { account_number: '', service_code: '11', default_weight_kg: 1, origin: { city: '', postal: '', country: 'IE', state: '' } }
+    };
+  }
+
+  window.loadEcomShipping = async function() {
+    var host = document.getElementById('ecom-shipping-body');
+    if (!host) return;
+    host.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0;">Loading…</div>';
+    try {
+      var cfgRows = await window.db.select('app_settings', '?key=eq.shipping_config&limit=1&select=value');
+      var cfg = _shipDefaultConfig();
+      if (cfgRows && cfgRows.length && cfgRows[0].value) {
+        // app_settings.value is jsonb — PostgREST returns it already parsed. Tolerate
+        // the legacy double-encoded (string) form too.
+        try {
+          var raw = cfgRows[0].value;
+          var parsed = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+          cfg = Object.assign(_shipDefaultConfig(), parsed || {});
+        } catch (e) { /* keep default */ }
+      }
+      if (!cfg.ups) cfg.ups = _shipDefaultConfig().ups;
+      if (!cfg.ups.origin) cfg.ups.origin = { city: '', postal: '', country: 'IE', state: '' };
+      if (!Array.isArray(cfg.carrier_rules)) cfg.carrier_rules = _shipDefaultConfig().carrier_rules;
+      _shipConfig = cfg;
+      _shipClients = (await window.db.select('three_pl_clients', '?order=company_name.asc&select=id,company_name')) || [];
+      _renderShipping();
+    } catch (e) {
+      host.innerHTML = '<div style="color:var(--red);font-size:13px;">Failed to load: ' + _esc(e.message || String(e)) + '</div>';
+    }
+  };
+
+  function _shipRuleRow(kw, carrier) {
+    var opt = function(v, label) { return '<option value="' + v + '"' + (carrier === v ? ' selected' : '') + '>' + label + '</option>'; };
+    return '<div class="ecomsh-rule" style="display:flex;gap:8px;margin-bottom:6px;align-items:center;">'
+      + '<input type="text" class="ecomsh-rule-kw" placeholder="shipping title contains… e.g. ups" value="' + _esc(kw || '') + '" style="' + _inp() + 'flex:1;">'
+      + '<select class="ecomsh-rule-carrier" style="' + _inp() + 'width:130px;">' + opt('dpd', 'DPD') + opt('ups', 'UPS') + '</select>'
+      + '<button class="btn btn-outline" style="padding:6px 10px;" onclick="this.parentNode.remove()">Remove</button>'
+      + '</div>';
+  }
+
+  function _renderShipping() {
+    var host = document.getElementById('ecom-shipping-body');
+    if (!host) return;
+    var canManage = _ecomCanManageStores();
+    var cfg = _shipConfig || _shipDefaultConfig();
+    var ups = cfg.ups || {}; var origin = ups.origin || {};
+    var cardStyle = 'background:var(--navy-card,#0a1628);border:1px solid var(--navy-border);border-radius:6px;padding:20px;margin-bottom:18px;';
+    var titleStyle = 'font-size:15px;font-weight:700;color:var(--white);margin-bottom:14px;';
+    var dis = canManage ? '' : ' disabled';
+    var h = [];
+
+    // ── Settings card ──
+    h.push('<div style="' + cardStyle + '">');
+    h.push('<div style="' + titleStyle + '">Shipping Cost Settings</div>');
+    if (!canManage) h.push('<div style="color:var(--muted);font-size:11px;margin-bottom:12px;">Read-only — a finance or admin user can edit these settings.</div>');
+
+    // DPD flat rate
+    h.push('<div style="' + titleStyle + 'font-size:13px;">DPD (Ireland)</div>');
+    h.push('<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px;">');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Flat cost per DPD order (€)</label>'
+      + '<input id="ecomsh-dpd" type="number" step="0.01" min="0" value="' + (cfg.dpd_ie_flat_rate != null ? _esc(cfg.dpd_ie_flat_rate) : '') + '" style="' + _inp() + 'width:200px;"' + dis + '></div>');
+    h.push('<div style="color:var(--muted);font-size:11px;max-width:360px;">Applied to every order detected as DPD. DPD does not expose live prices, so this single Ireland rate is used for all services.</div>');
+    h.push('</div>');
+
+    // UPS
+    h.push('<div style="' + titleStyle + 'font-size:13px;">UPS (live negotiated rates)</div>');
+    h.push('<div style="color:var(--muted);font-size:11px;margin-bottom:10px;">UPS API credentials are held securely on the server. Set the account, origin and service below; costs are pulled live per order at report time.</div>');
+    h.push('<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;">');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Account (shipper) number</label>'
+      + '<input id="ecomsh-ups-account" type="text" value="' + _esc(ups.account_number || '') + '" style="' + _inp() + 'width:180px;"' + dis + '></div>');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Service code</label>'
+      + '<input id="ecomsh-ups-service" type="text" value="' + _esc(ups.service_code || '11') + '" style="' + _inp() + 'width:110px;"' + dis + '></div>');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Default weight (kg)</label>'
+      + '<input id="ecomsh-ups-weight" type="number" step="0.1" min="0.1" value="' + _esc(ups.default_weight_kg != null ? ups.default_weight_kg : 1) + '" style="' + _inp() + 'width:130px;"' + dis + '></div>');
+    h.push('</div>');
+    h.push('<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;">');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Origin city</label>'
+      + '<input id="ecomsh-ups-city" type="text" value="' + _esc(origin.city || '') + '" style="' + _inp() + 'width:160px;"' + dis + '></div>');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Origin postcode</label>'
+      + '<input id="ecomsh-ups-postal" type="text" value="' + _esc(origin.postal || '') + '" style="' + _inp() + 'width:150px;"' + dis + '></div>');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Origin country (2-letter)</label>'
+      + '<input id="ecomsh-ups-country" type="text" maxlength="2" value="' + _esc(origin.country || 'IE') + '" style="' + _inp() + 'width:110px;"' + dis + '></div>');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Origin state/province</label>'
+      + '<input id="ecomsh-ups-state" type="text" value="' + _esc(origin.state || '') + '" style="' + _inp() + 'width:150px;"' + dis + '></div>');
+    h.push('</div>');
+
+    // Carrier rules
+    h.push('<div style="' + titleStyle + 'font-size:13px;">Carrier detection rules</div>');
+    h.push('<div style="color:var(--muted);font-size:11px;margin-bottom:10px;">Each order is matched by its shipping-method title. The first rule whose keyword appears in the title wins.</div>');
+    h.push('<div id="ecomsh-rules">');
+    (cfg.carrier_rules || []).forEach(function(r) { h.push(_shipRuleRow(r.keyword, (r.carrier || '').toLowerCase())); });
+    h.push('</div>');
+    if (canManage) {
+      h.push('<button class="btn btn-outline" style="padding:6px 12px;margin-top:4px;" onclick="window.ecomShipAddRule()">+ Add rule</button>');
+      h.push('<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:16px;flex-wrap:wrap;">');
+      h.push('<div style="display:flex;gap:8px;align-items:center;"><button class="btn btn-outline" style="padding:8px 14px;" onclick="window.ecomShipTestUps()">Test UPS Connection</button><span id="ecomsh-ups-status" style="font-size:12px;"></span></div>');
+      h.push('<button class="btn btn-gold" style="padding:8px 16px;" onclick="window.ecomShipSaveSettings()">Save Settings</button>');
+      h.push('</div>');
+    }
+    h.push('</div>');
+
+    // ── Report card ──
+    var rng = _prevMonthRange();
+    var defMonth = rng.start.slice(0, 7);
+    h.push('<div style="' + cardStyle + '">');
+    h.push('<div style="' + titleStyle + '">Shipping Cost Report</div>');
+    h.push('<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px;">');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Client</label>'
+      + '<select id="ecomsh-client" style="' + _inp() + 'min-width:240px;">'
+      + '<option value="">Select a client…</option>'
+      + _shipClients.map(function(c) { return '<option value="' + _esc(c.id) + '">' + _esc(c.company_name || '') + '</option>'; }).join('')
+      + '</select></div>');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Month</label>'
+      + '<div style="display:flex;gap:6px;align-items:center;">'
+      + '<button class="btn btn-outline" style="padding:8px 11px;" title="Previous month" onclick="window.ecomShipShiftMonth(-1)">&lsaquo;</button>'
+      + '<input id="ecomsh-month" type="month" value="' + defMonth + '" onchange="window.ecomShipSetMonth()" style="' + _inp() + 'width:170px;">'
+      + '<button class="btn btn-outline" style="padding:8px 11px;" title="Next month" onclick="window.ecomShipShiftMonth(1)">&rsaquo;</button>'
+      + '</div></div>');
+    h.push('<button class="btn btn-gold" style="padding:8px 16px;" onclick="window.ecomShipRunReport()">Run Report</button>');
+    h.push('</div>');
+    h.push('<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;">');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">From (custom)</label>'
+      + '<input id="ecomsh-start" type="date" value="' + rng.start + '" onchange="window.ecomShipClearMonth()" style="' + _inp() + 'width:160px;"></div>');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">To (custom)</label>'
+      + '<input id="ecomsh-end" type="date" value="' + rng.end + '" onchange="window.ecomShipClearMonth()" style="' + _inp() + 'width:160px;"></div>');
+    h.push('<div style="padding-bottom:8px;"><label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer;">'
+      + '<input id="ecomsh-refresh" type="checkbox" style="width:15px;height:15px;cursor:pointer;"> Refresh UPS rates (ignore cache)</label></div>');
+    h.push('</div>');
+    h.push('<div id="ecomsh-results"><div style="color:var(--muted);font-size:12px;">Select a client and date range, then run the report.</div></div>');
+    h.push('</div>');
+
+    host.innerHTML = h.join('');
+  }
+
+  window.ecomShipAddRule = function() {
+    var box = document.getElementById('ecomsh-rules');
+    if (box) box.insertAdjacentHTML('beforeend', _shipRuleRow('', 'ups'));
+  };
+
+  function _collectShipSettings() {
+    var rules = [];
+    document.querySelectorAll('#ecomsh-rules .ecomsh-rule').forEach(function(row) {
+      var kw = (row.querySelector('.ecomsh-rule-kw') || {}).value || '';
+      var carrier = (row.querySelector('.ecomsh-rule-carrier') || {}).value || '';
+      kw = kw.trim();
+      if (kw) rules.push({ keyword: kw, carrier: carrier });
+    });
+    var dpdRaw = ((document.getElementById('ecomsh-dpd') || {}).value || '').trim();
+    var wRaw   = ((document.getElementById('ecomsh-ups-weight') || {}).value || '').trim();
+    return {
+      dpd_ie_flat_rate: dpdRaw === '' ? null : Number(dpdRaw),
+      carrier_rules: rules,
+      ups: {
+        account_number: ((document.getElementById('ecomsh-ups-account') || {}).value || '').trim(),
+        service_code:   ((document.getElementById('ecomsh-ups-service') || {}).value || '11').trim(),
+        default_weight_kg: wRaw === '' ? 1 : Number(wRaw),
+        origin: {
+          city:    ((document.getElementById('ecomsh-ups-city') || {}).value || '').trim(),
+          postal:  ((document.getElementById('ecomsh-ups-postal') || {}).value || '').trim(),
+          country: (((document.getElementById('ecomsh-ups-country') || {}).value || 'IE').trim()).toUpperCase(),
+          state:   ((document.getElementById('ecomsh-ups-state') || {}).value || '').trim()
+        }
+      }
+    };
+  }
+
+  window.ecomShipSaveSettings = async function() {
+    if (!_ecomCanManageStores()) return;
+    var cfg = _collectShipSettings();
+    try {
+      // app_settings.value is jsonb — store the object directly (no stringify).
+      var rows = await window.db.select('app_settings', '?key=eq.shipping_config&limit=1&select=id');
+      if (rows && rows.length) await window.db.update('app_settings', '?key=eq.shipping_config', { value: cfg });
+      else await window.db.insert('app_settings', { key: 'shipping_config', value: cfg });
+      _shipConfig = cfg;
+      window.toast && window.toast('Shipping settings saved.', 'success');
+    } catch (e) {
+      window.toast && window.toast('Save failed: ' + (e.message || 'unknown'), 'error');
+    }
+  };
+
+  window.ecomShipTestUps = async function() {
+    var el = document.getElementById('ecomsh-ups-status');
+    if (el) el.innerHTML = '<span style="color:var(--muted);">Testing…</span>';
+    try {
+      await callEcomEF({ action: 'ups_test' }, 20000);
+      if (el) el.innerHTML = '<span style="color:var(--green);">✓ UPS connected</span>';
+    } catch (e) {
+      if (el) el.innerHTML = '<span style="color:var(--red);">✗ ' + _esc(e.message || 'failed') + '</span>';
+    }
+  };
+
+  // Month <-> custom range sync (shipping-specific ids)
+  window.ecomShipSetMonth = function() {
+    var m = (document.getElementById('ecomsh-month') || {}).value;
+    if (!m) return;
+    var parts = m.split('-'); var y = +parts[0], mo = +parts[1];
+    if (!y || !mo) return;
+    var s = document.getElementById('ecomsh-start');
+    var e = document.getElementById('ecomsh-end');
+    if (s) s.value = _ymd(new Date(y, mo - 1, 1));
+    if (e) e.value = _ymd(new Date(y, mo, 0));
+  };
+  window.ecomShipShiftMonth = function(delta) {
+    var el = document.getElementById('ecomsh-month');
+    if (!el) return;
+    var parts = (el.value || '').split('-'); var y = +parts[0], mo = +parts[1];
+    if (!y || !mo) { var n = new Date(); y = n.getFullYear(); mo = n.getMonth() + 1; }
+    var d = new Date(y, mo - 1 + delta, 1);
+    el.value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    window.ecomShipSetMonth();
+  };
+  window.ecomShipClearMonth = function() {
+    var el = document.getElementById('ecomsh-month');
+    if (el) el.value = '';
+  };
+
+  var _shipCarrierLabel = { dpd: 'DPD', ups: 'UPS', unmatched: 'Unmatched' };
+
+  window.ecomShipRunReport = async function() {
+    var clientId = (document.getElementById('ecomsh-client') || {}).value;
+    var start = (document.getElementById('ecomsh-start') || {}).value;
+    var end   = (document.getElementById('ecomsh-end') || {}).value;
+    var refresh = !!(document.getElementById('ecomsh-refresh') || {}).checked;
+    var out = document.getElementById('ecomsh-results');
+    if (!clientId) { window.toast && window.toast('Select a client.', 'error'); return; }
+    if (!start || !end) { window.toast && window.toast('Pick a date range.', 'error'); return; }
+    if (out) out.innerHTML = '<div style="color:var(--muted);font-size:12px;">Running report… UPS orders are rated live, this can take a moment.</div>';
+    try {
+      var res = await callEcomEF({ action: 'shipping_cost_report', three_pl_client_id: clientId, start: start, end: end, refresh: refresh }, 180000);
+      _shipReport = Object.assign({ start: start, end: end }, res);
+      _renderShipReport();
+    } catch (e) {
+      if (out) out.innerHTML = '<div style="color:var(--red);font-size:12px;">Report failed: ' + _esc(e.message || String(e)) + '</div>';
+    }
+  };
+
+  function _renderShipReport() {
+    var out = document.getElementById('ecomsh-results');
+    if (!out || !_shipReport) return;
+    var rep = _shipReport;
+    var rows = rep.rows || [];
+    var cur = rep.currency || 'EUR';
+    if (rep.note && !rows.length) { out.innerHTML = '<div style="color:var(--amber,#e89c3a);font-size:12px;">' + _esc(rep.note) + '</div>'; return; }
+    if (!rows.length) { out.innerHTML = '<div style="color:var(--muted);font-size:12px;">No orders with shipping in this period.</div>'; return; }
+    var h = [];
+    h.push('<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">');
+    h.push('<div style="color:var(--muted);font-size:11px;">' + _esc(rep.start) + ' → ' + _esc(rep.end) + ' · ' + rows.length + ' orders</div>');
+    h.push('<div style="display:flex;gap:8px;"><button class="btn btn-outline" style="padding:6px 12px;" onclick="window.ecomShipExportCsv()">Export CSV</button>'
+      + '<button class="btn btn-outline" style="padding:6px 12px;" onclick="window.ecomShipPrint()">Print</button></div>');
+    h.push('</div>');
+
+    h.push('<div style="overflow-x:auto;"><table class="data-table"><thead><tr>'
+      + '<th>Order #</th><th>Date</th><th>Customer</th><th>Carrier</th><th>Method</th>'
+      + '<th style="text-align:right;">Customer paid</th><th style="text-align:right;">Shipping cost</th></tr></thead><tbody>');
+    rows.forEach(function(r) {
+      var carrier = _shipCarrierLabel[r.carrier] || (r.carrier || '—');
+      var costCell = (r.cost != null)
+        ? _eur(r.cost)
+        : '<span style="color:var(--amber,#e89c3a);" title="' + _esc(r.note || 'No cost') + '">n/a</span>';
+      h.push('<tr>'
+        + '<td class="strong">' + _esc(r.order_number || '') + '</td>'
+        + '<td>' + (r.ordered_at ? new Date(r.ordered_at).toLocaleDateString('en-IE') : '') + '</td>'
+        + '<td>' + _esc(r.customer_name || '—') + '</td>'
+        + '<td>' + _esc(carrier) + '</td>'
+        + '<td>' + _esc(r.shipping_method || '') + '</td>'
+        + '<td style="text-align:right;">' + _eur(r.customer_paid || 0) + '</td>'
+        + '<td style="text-align:right;">' + costCell + '</td>'
+        + '</tr>');
+    });
+    h.push('</tbody></table></div>');
+
+    // Totals
+    var totals = rep.totals || {};
+    h.push('<div style="margin-top:14px;display:flex;gap:20px;flex-wrap:wrap;align-items:center;">');
+    Object.keys(totals).forEach(function(k) {
+      var t = totals[k];
+      h.push('<div style="font-size:12px;color:var(--muted);">' + _esc(_shipCarrierLabel[k] || k) + ': '
+        + '<span style="color:var(--white);font-weight:700;">' + _eur(t.cost || 0) + '</span> (' + (t.count || 0) + ')</div>');
+    });
+    h.push('<div style="font-size:14px;margin-left:auto;">Total shipping cost: <span style="color:var(--white);font-weight:700;">' + _eur(rep.grand_total || 0) + ' ' + _esc(cur) + '</span></div>');
+    h.push('</div>');
+
+    var missing = rows.filter(function(r) { return r.cost == null; }).length;
+    if (missing) h.push('<div style="color:var(--amber,#e89c3a);font-size:11px;margin-top:8px;">' + missing + ' order(s) have no cost — hover the "n/a" cell for the reason (e.g. DPD rate unset, missing address, or UPS not configured).</div>');
+
+    out.innerHTML = h.join('');
+  }
+
+  window.ecomShipExportCsv = function() {
+    if (!_shipReport || !(_shipReport.rows || []).length) { window.toast && window.toast('Nothing to export.'); return; }
+    var cols = ['Order #', 'Date', 'Customer', 'Carrier', 'Method', 'Customer paid', 'Shipping cost', 'Note'];
+    var esc = function(v) { v = (v == null ? '' : String(v)); return '"' + v.replace(/"/g, '""') + '"'; };
+    var lines = [cols.map(esc).join(',')];
+    _shipReport.rows.forEach(function(r) {
+      lines.push([
+        r.order_number, (r.ordered_at ? new Date(r.ordered_at).toISOString().slice(0, 10) : ''),
+        r.customer_name, (_shipCarrierLabel[r.carrier] || r.carrier), r.shipping_method,
+        (r.customer_paid != null ? Number(r.customer_paid).toFixed(2) : ''),
+        (r.cost != null ? Number(r.cost).toFixed(2) : ''), (r.note || '')
+      ].map(esc).join(','));
+    });
+    var blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'shipping-costs-' + (_shipReport.start || '') + '_' + (_shipReport.end || '') + '.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
+  };
+
+  window.ecomShipPrint = function() {
+    if (!_shipReport) return;
+    var rep = _shipReport;
+    var w = window.open('', '_blank');
+    if (!w) { window.toast && window.toast('Allow pop-ups to print.', 'error'); return; }
+    var clientSel = document.getElementById('ecomsh-client');
+    var clientName = clientSel && clientSel.selectedIndex >= 0 ? clientSel.options[clientSel.selectedIndex].text : '';
+    var rowsHtml = (rep.rows || []).map(function(r) {
+      return '<tr><td>' + _esc(r.order_number || '') + '</td>'
+        + '<td>' + (r.ordered_at ? new Date(r.ordered_at).toLocaleDateString('en-IE') : '') + '</td>'
+        + '<td>' + _esc(r.customer_name || '') + '</td>'
+        + '<td>' + _esc(_shipCarrierLabel[r.carrier] || r.carrier || '') + '</td>'
+        + '<td>' + _esc(r.shipping_method || '') + '</td>'
+        + '<td class="r">' + (r.cost != null ? _eur(r.cost) : 'n/a') + '</td></tr>';
+    }).join('');
+    var totals = rep.totals || {};
+    var totalsHtml = Object.keys(totals).map(function(k) {
+      return '<tr><td colspan="5" class="r">' + _esc(_shipCarrierLabel[k] || k) + ' (' + (totals[k].count || 0) + ' orders)</td><td class="r">' + _eur(totals[k].cost || 0) + '</td></tr>';
+    }).join('');
+    var html = '<!doctype html><html><head><meta charset="utf-8"><title>Shipping Costs</title>'
+      + '<style>body{font-family:Arial,Helvetica,sans-serif;color:#111;padding:32px;max-width:900px;margin:0 auto;}'
+      + 'h1{font-size:22px;margin:0 0 4px;} .muted{color:#666;font-size:12px;} .hdr{display:flex;justify-content:space-between;margin-bottom:24px;}'
+      + 'table{width:100%;border-collapse:collapse;margin-top:16px;} th,td{border-bottom:1px solid #ddd;padding:8px 10px;font-size:13px;text-align:left;}'
+      + 'th.r,td.r{text-align:right;} tfoot td{font-weight:bold;border-top:2px solid #333;} .tot{font-size:16px;}'
+      + '@media print{button{display:none;}}</style></head><body>'
+      + '<div class="hdr"><div><h1>Shipping Cost Report</h1><div class="muted">' + _esc(clientName) + '</div></div>'
+      + '<div style="text-align:right;"><div style="font-weight:bold;">Lighthouse</div>'
+      + '<div class="muted">Period: ' + _esc(rep.start) + ' → ' + _esc(rep.end) + '</div></div></div>'
+      + '<table><thead><tr><th>Order #</th><th>Date</th><th>Customer</th><th>Carrier</th><th>Method</th><th class="r">Cost</th></tr></thead>'
+      + '<tbody>' + rowsHtml + '</tbody>'
+      + '<tfoot>' + totalsHtml
+      + '<tr><td colspan="5" class="r tot">Total shipping cost</td><td class="r tot">' + _eur(rep.grand_total || 0) + ' ' + _esc(rep.currency || 'EUR') + '</td></tr></tfoot></table>'
+      + '<div style="margin-top:24px;"><button onclick="window.print()">Print</button></div>'
+      + '</body></html>';
+    w.document.write(html);
+    w.document.close();
   };
 
   // ── Hook into showPage — lazy load on nav ──────────────────
