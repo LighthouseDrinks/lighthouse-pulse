@@ -22,6 +22,12 @@ const XERO_TOKEN_URL     = 'https://identity.xero.com/connect/token';
 const SHOPIFY_API_VER    = '2026-01';
 const PUSH_BATCH_LIMIT   = 50;
 const SYNC_DEFAULT_DAYS  = 90;
+const IE_VAT_RATE        = 0.23;   // Irish standard VAT — stripped from store RRP
+
+// Store RRP is treated as VAT-inclusive; return it ex-VAT (2 dp), or null.
+function rrpExVat(inclPrice: number): number | null {
+  return inclPrice > 0 ? Math.round((inclPrice / (1 + IE_VAT_RATE)) * 100) / 100 : null;
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -281,7 +287,7 @@ function shopifyItemsForOrder(o: Record<string, unknown>) {
 async function shopifyFetchProducts(storeUrl: string, token: string) {
   const host = shopifyHost(storeUrl);
   let url: string | null = `https://${host}/admin/api/${SHOPIFY_API_VER}/products.json?limit=250`;
-  const out: Array<{ sku: string | null; product_name: string; external_id: string }> = [];
+  const out: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null }> = [];
   while (url) {
     const res = await fetch(url, { headers: shopifyHeaders(token) });
     if (res.status !== 200) {
@@ -295,10 +301,14 @@ async function shopifyFetchProducts(storeUrl: string, token: string) {
       if (variants.length) {
         for (const v of variants) {
           const vTitle = (v.title && v.title !== 'Default Title') ? ` — ${v.title}` : '';
-          out.push({ sku: (v.sku as string) || null, product_name: `${title}${vTitle}`, external_id: String(v.id ?? p.id) });
+          // Regular price = struck-through compare_at_price when the item is on sale, else price.
+          const priceNum = Number(v.price ?? 0);
+          const compare  = v.compare_at_price != null ? Number(v.compare_at_price) : null;
+          const regular  = (compare != null && compare > priceNum) ? compare : priceNum;
+          out.push({ sku: (v.sku as string) || null, product_name: `${title}${vTitle}`, external_id: String(v.id ?? p.id), rrp_ex_vat: rrpExVat(regular) });
         }
       } else {
-        out.push({ sku: null, product_name: title, external_id: String(p.id) });
+        out.push({ sku: null, product_name: title, external_id: String(p.id), rrp_ex_vat: null });
       }
     }
     url = shopifyNextLink(res.headers.get('Link'));
@@ -397,7 +407,7 @@ function wooItemsForOrder(o: Record<string, unknown>) {
 
 // Fetches the full WooCommerce product catalogue.
 async function wooFetchProducts(storeUrl: string, key: string, secret: string) {
-  const out: Array<{ sku: string | null; product_name: string; external_id: string }> = [];
+  const out: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null }> = [];
   let page = 1;
   while (true) {
     const url = `${wooHost(storeUrl)}/wp-json/wc/v3/products?per_page=100&page=${page}&status=publish`;
@@ -408,7 +418,8 @@ async function wooFetchProducts(storeUrl: string, key: string, secret: string) {
     }
     const batch = await res.json() as Array<Record<string, unknown>>;
     for (const p of batch) {
-      out.push({ sku: (p.sku as string) || null, product_name: (p.name as string) ?? 'Unknown', external_id: String(p.id) });
+      const regular = Number((p.regular_price as string) || (p.price as string) || 0);
+      out.push({ sku: (p.sku as string) || null, product_name: (p.name as string) ?? 'Unknown', external_id: String(p.id), rrp_ex_vat: rrpExVat(regular) });
     }
     const totalPages = parseInt(res.headers.get('X-WP-TotalPages') || '1', 10);
     if (page >= totalPages || batch.length === 0) break;
@@ -723,7 +734,7 @@ Deno.serve(async (req: Request) => {
       if (!clientId) return err('Store is not linked to a 3PL client', 400);
 
       try {
-        let products: Array<{ sku: string | null; product_name: string; external_id: string }>;
+        let products: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null }>;
         if (store.platform === 'shopify') {
           var shopToken = await resolveShopifyToken(store);
           products = await shopifyFetchProducts(store.store_url as string, shopToken);
@@ -760,6 +771,7 @@ Deno.serve(async (req: Request) => {
             await adminClient.from('three_pl_client_products').update({
               product_name: p.product_name,
               external_id:  p.external_id,
+              rrp_ex_vat:   p.rrp_ex_vat,
               active:       true,
               last_seen_at: now,
               updated_at:   now,
@@ -771,6 +783,7 @@ Deno.serve(async (req: Request) => {
               sku:                p.sku,
               product_name:       p.product_name,
               external_id:        p.external_id,
+              rrp_ex_vat:         p.rrp_ex_vat,
               active:             true,
               last_seen_at:       now,
             });
