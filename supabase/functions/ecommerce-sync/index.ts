@@ -111,6 +111,120 @@ async function refreshXeroIfNeeded(
   return { ok: true, accessToken: tokenData.access_token, tenantId: conn.tenant_id };
 }
 
+// ── UPS helpers (Rating API with negotiated rates) ────────────────────────────
+// Credentials are edge-function env secrets (UPS_CLIENT_ID / UPS_CLIENT_SECRET).
+// Non-secret config (account number, origin address, service code) is read from
+// app_settings.shipping_config. UPS_BASE defaults to production; point it at the
+// UPS CIE test host to dry-run.
+const UPS_BASE = Deno.env.get('UPS_BASE') || 'https://onlinetools.ups.com';
+const UPS_RATE_VERSION = Deno.env.get('UPS_RATE_VERSION') || 'v2409';
+
+async function getUpsToken(): Promise<{ ok: boolean; token?: string; error?: string }> {
+  const id     = Deno.env.get('UPS_CLIENT_ID');
+  const secret = Deno.env.get('UPS_CLIENT_SECRET');
+  if (!id || !secret) return { ok: false, error: 'UPS credentials not configured (UPS_CLIENT_ID / UPS_CLIENT_SECRET).' };
+  const res = await fetch(`${UPS_BASE}/security/v1/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: basicAuth(id, secret) },
+    body: new URLSearchParams({ grant_type: 'client_credentials' }).toString(),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) {
+    return { ok: false, error: 'UPS token: ' + (data.error_description || data.error || ('HTTP ' + res.status)) };
+  }
+  return { ok: true, token: data.access_token as string };
+}
+
+interface UpsAddress { city?: string | null; postal?: string | null; country?: string | null; state?: string | null }
+interface UpsConfig { account_number?: string; service_code?: string; origin?: UpsAddress }
+
+// Rates a single shipment. Returns the account-negotiated total where available,
+// otherwise the published total.
+async function upsRate(
+  token: string,
+  cfg: UpsConfig,
+  dest: UpsAddress,
+  weightKg: number,
+): Promise<{ ok: boolean; cost?: number; currency?: string; error?: string }> {
+  const origin   = cfg.origin || {};
+  const service  = String(cfg.service_code || '11');
+  const account  = String(cfg.account_number || '');
+  const addr = (a: UpsAddress) => ({
+    City:               a.city    || '',
+    PostalCode:         a.postal  || '',
+    CountryCode:        (a.country || '').toUpperCase(),
+    StateProvinceCode:  a.state   || '',
+  });
+  const payload = {
+    RateRequest: {
+      Request: { TransactionReference: { CustomerContext: 'lighthouse-pulse shipping report' } },
+      Shipment: {
+        Shipper:  { Name: 'Lighthouse', ShipperNumber: account, Address: addr(origin) },
+        ShipFrom: { Name: 'Lighthouse', Address: addr(origin) },
+        ShipTo:   { Name: 'Customer',   Address: addr(dest) },
+        Service:  { Code: service },
+        Package: {
+          PackagingType: { Code: '02' },
+          PackageWeight: { UnitOfMeasurement: { Code: 'KGS' }, Weight: String(weightKg) },
+        },
+        ShipmentRatingOptions: { NegotiatedRatesIndicator: 'Y' },
+      },
+    },
+  };
+  const res = await fetch(`${UPS_BASE}/api/rating/${UPS_RATE_VERSION}/Rate`, {
+    method: 'POST',
+    headers: {
+      Authorization:  `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept':       'application/json',
+      transId:        crypto.randomUUID(),
+      transactionSrc: 'lighthouse-pulse',
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.response?.errors?.[0]?.message || ('HTTP ' + res.status);
+    return { ok: false, error: 'UPS rate: ' + msg };
+  }
+  const rs = data?.RateResponse?.RatedShipment;
+  const shipment = Array.isArray(rs) ? rs[0] : rs;
+  if (!shipment) return { ok: false, error: 'UPS rate: no shipment in response' };
+  const charge = shipment?.NegotiatedRateCharges?.TotalCharge || shipment?.TotalCharges;
+  if (!charge || charge.MonetaryValue == null) return { ok: false, error: 'UPS rate: no charge in response' };
+  return { ok: true, cost: Number(charge.MonetaryValue), currency: (charge.CurrencyCode as string) || 'EUR' };
+}
+
+// Exclusive end date helper for range queries (YYYY-MM-DD -> next day).
+function nextDayYmd(ymd: string): string {
+  const p = ymd.split('-');
+  const d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// ── Shipping destination + weight extraction (for UPS rating) ─────────────────
+function shopifyShippingFields(o: Record<string, unknown>) {
+  const sa = (o.shipping_address ?? {}) as Record<string, unknown>;
+  return {
+    ship_country:       (sa.country_code as string) ?? null,
+    ship_postal:        (sa.zip as string) ?? null,
+    ship_city:          (sa.city as string) ?? null,
+    ship_state:         (sa.province_code as string) ?? null,
+    total_weight_grams: o.total_weight != null ? Number(o.total_weight) : null,
+  };
+}
+function wooShippingFields(o: Record<string, unknown>) {
+  const sh = (o.shipping ?? {}) as Record<string, unknown>;
+  return {
+    ship_country:       (sh.country as string) ?? null,
+    ship_postal:        (sh.postcode as string) ?? null,
+    ship_city:          (sh.city as string) ?? null,
+    ship_state:         (sh.state as string) ?? null,
+    total_weight_grams: null, // Woo orders don't expose an aggregate weight
+  };
+}
+
 // ── Store helpers ─────────────────────────────────────────────────────────────
 async function loadStore(adminClient: AdminClient, storeId: string) {
   const { data, error } = await adminClient
@@ -452,6 +566,7 @@ function shopifyNormaliseOrder(storeId: string, o: Record<string, unknown>) {
     payment_gateway: gateways[0] ?? null,
     payment_status:  (o.financial_status as string) ?? null,
     taxes_included:  o.taxes_included === true,
+    ...shopifyShippingFields(o),
     raw_data:       { source: 'shopify', has_gift_card_payment: hasGiftCard, order_id: o.id },
   };
 }
@@ -471,6 +586,7 @@ function wooNormaliseOrder(storeId: string, o: Record<string, unknown>) {
     payment_gateway: (o.payment_method as string) ?? null,
     payment_status:  (o.status as string) ?? null,
     taxes_included:  o.prices_include_tax === true,
+    ...wooShippingFields(o),
     raw_data:        { source: 'woocommerce', has_gift_card_payment: false, order_id: o.id },
   };
 }
@@ -546,15 +662,19 @@ Deno.serve(async (req: Request) => {
       .select('has_finance_access, is_pulse_admin')
       .eq('key', appUser.role)
       .maybeSingle();
-    // Finance features (Xero push) and 3PL store connect/sync are both allowed
-    // for finance roles or Pulse admins.
-    if (!roleRow?.has_finance_access && !roleRow?.is_pulse_admin) {
-      return err('Forbidden — finance or admin roles only', 403);
-    }
 
     const userId = appUser.id as string;
     const body   = await req.json() as Record<string, unknown>;
     const action = body.action as string;
+
+    // Finance features (Xero push) and 3PL store connect/sync are both allowed
+    // for finance roles or Pulse admins. The read-only shipping cost report is
+    // available to any active staff member (already verified above).
+    const READ_ONLY_ACTIONS = ['shipping_cost_report'];
+    if (!READ_ONLY_ACTIONS.includes(action)
+        && !roleRow?.has_finance_access && !roleRow?.is_pulse_admin) {
+      return err('Forbidden — finance or admin roles only', 403);
+    }
 
     // ── add_store ───────────────────────────────────────────────────────────
     if (action === 'add_store') {
@@ -1085,6 +1205,152 @@ Deno.serve(async (req: Request) => {
       }
 
       return json({ pushed, failed, skipped: skipped.length, total_processed: pushable.length });
+    }
+
+    // ── ups_test ────────────────────────────────────────────────────────────
+    // Verifies UPS OAuth credentials by fetching a client-credentials token.
+    if (action === 'ups_test') {
+      const t = await getUpsToken();
+      return t.ok ? json({ ok: true }) : err(t.error || 'UPS token failed', 400);
+    }
+
+    // ── shipping_cost_report ────────────────────────────────────────────────
+    // For a 3PL client + date range, lists every order that has a shipping line,
+    // detects the carrier from the shipping-method title (configurable keyword
+    // rules), and works out the cost: DPD = flat Ireland rate from settings;
+    // UPS = live negotiated rate from the UPS Rating API (cached on the order).
+    if (action === 'shipping_cost_report') {
+      const clientId = (body.three_pl_client_id as string) || '';
+      const start    = (body.start as string) || '';
+      const end      = (body.end as string) || '';
+      const refresh  = body.refresh === true;
+      if (!clientId || !start || !end) return err('Missing client or date range', 400);
+
+      // Config
+      const { data: cfgRow } = await adminClient
+        .from('app_settings').select('value').eq('key', 'shipping_config').maybeSingle();
+      let cfg: Record<string, unknown> = {};
+      try { cfg = cfgRow?.value ? JSON.parse(cfgRow.value as string) : {}; } catch { cfg = {}; }
+      const dpdRate = cfg.dpd_ie_flat_rate != null ? Number(cfg.dpd_ie_flat_rate) : null;
+      const rules   = Array.isArray(cfg.carrier_rules) ? cfg.carrier_rules as Array<{ keyword?: string; carrier?: string }> : [];
+      const ups     = (cfg.ups || {}) as UpsConfig & { default_weight_kg?: number };
+      const defaultWeightKg = Number(ups.default_weight_kg || 1) || 1;
+
+      // Stores for this client
+      const { data: stores } = await adminClient
+        .from('ecommerce_stores').select('id').eq('three_pl_client_id', clientId);
+      const storeIds = (stores ?? []).map((s: { id: string }) => s.id);
+      if (!storeIds.length) {
+        return json({ rows: [], totals: {}, grand_total: 0, currency: 'EUR', dpd_rate: dpdRate, note: 'No stores linked to this client.' });
+      }
+
+      // Orders in range
+      const { data: ordersData } = await adminClient
+        .from('ecommerce_orders')
+        .select('id, order_number, customer_name, ordered_at, currency, ship_country, ship_postal, ship_city, ship_state, total_weight_grams, ups_cost')
+        .in('store_id', storeIds)
+        .gte('ordered_at', `${start}T00:00:00Z`)
+        .lt('ordered_at',  `${nextDayYmd(end)}T00:00:00Z`)
+        .order('ordered_at', { ascending: true })
+        .limit(100000);
+      const orders = (ordersData ?? []) as Array<Record<string, unknown>>;
+
+      // Shipping line items for those orders
+      const orderIds = orders.map((o) => o.id as string);
+      const shipByOrder = new Map<string, Array<Record<string, unknown>>>();
+      if (orderIds.length) {
+        const { data: shipItems } = await adminClient
+          .from('ecommerce_order_items')
+          .select('order_id, product_name, line_total')
+          .eq('item_type', 'shipping')
+          .in('order_id', orderIds);
+        for (const it of (shipItems ?? [])) {
+          const arr = shipByOrder.get(it.order_id as string) ?? [];
+          arr.push(it);
+          shipByOrder.set(it.order_id as string, arr);
+        }
+      }
+
+      const detect = (title: string): string => {
+        const t = (title || '').toLowerCase();
+        for (const r of rules) {
+          const kw = (r.keyword || '').toLowerCase();
+          if (kw && t.includes(kw)) return (r.carrier || '').toLowerCase() || 'unmatched';
+        }
+        return 'unmatched';
+      };
+
+      let upsToken: string | null = null;
+      let upsTokenErr: string | null = null;
+      const rows: Array<Record<string, unknown>> = [];
+      const totals: Record<string, { count: number; cost: number }> = {};
+      let grand = 0;
+      let currency = 'EUR';
+
+      for (const o of orders) {
+        const ships = shipByOrder.get(o.id as string) ?? [];
+        if (!ships.length) continue; // no shipping line -> cannot classify
+        const title = ships.map((s) => s.product_name).filter(Boolean).join(' / ');
+        const customerPaid = ships.reduce((s, x) => s + Number(x.line_total ?? 0), 0);
+        const carrier = detect(title);
+        let cost: number | null = null;
+        let note: string | null = null;
+
+        if (carrier === 'dpd') {
+          cost = dpdRate;
+          if (dpdRate == null) note = 'DPD flat rate not set in settings';
+        } else if (carrier === 'ups') {
+          if (o.ups_cost != null && !refresh) {
+            cost = Number(o.ups_cost);
+          } else if (upsTokenErr) {
+            note = upsTokenErr;
+          } else {
+            if (!upsToken) {
+              const t = await getUpsToken();
+              if (t.ok) upsToken = t.token!;
+              else { upsTokenErr = t.error || 'UPS token failed'; }
+            }
+            if (upsTokenErr) {
+              note = upsTokenErr;
+            } else if (!o.ship_country) {
+              note = 'No destination address on order (re-sync store to backfill)';
+            } else {
+              const grams = o.total_weight_grams != null ? Number(o.total_weight_grams) : 0;
+              const wKg = grams > 0 ? Math.round((grams / 1000) * 100) / 100 : defaultWeightKg;
+              const r = await upsRate(
+                upsToken!, ups,
+                { country: o.ship_country as string, postal: o.ship_postal as string, city: o.ship_city as string, state: o.ship_state as string },
+                Math.max(0.1, wKg),
+              );
+              if (r.ok) {
+                cost = r.cost!;
+                currency = r.currency || currency;
+                await adminClient.from('ecommerce_orders')
+                  .update({ ups_cost: cost, detected_carrier: 'ups' }).eq('id', o.id as string);
+              } else {
+                note = r.error || 'UPS rate failed';
+              }
+            }
+          }
+        }
+
+        if (!totals[carrier]) totals[carrier] = { count: 0, cost: 0 };
+        totals[carrier].count++;
+        if (cost != null) { totals[carrier].cost += cost; grand += cost; }
+
+        rows.push({
+          order_number:   o.order_number,
+          ordered_at:     o.ordered_at,
+          customer_name:  o.customer_name,
+          carrier,
+          shipping_method: title,
+          customer_paid:  customerPaid,
+          cost,
+          note,
+        });
+      }
+
+      return json({ rows, totals, grand_total: grand, currency, dpd_rate: dpdRate });
     }
 
     return err('Unknown action: ' + action, 400);
