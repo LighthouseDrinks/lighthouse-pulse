@@ -63616,6 +63616,7 @@ if (typeof _origOpenDD === 'function') {
     <div id="ecom-tabs" style="display:flex;gap:0;margin-bottom:20px;border-bottom:2px solid var(--navy-border);">
       <button class="inv-tab active" id="ecom-tab-3pl" onclick="window.showEcomTab('3pl',this)">3PL Clients</button>
       <button class="inv-tab" id="ecom-tab-po" onclick="window.showEcomTab('po',this)">Purchase Orders</button>
+      <button class="inv-tab" id="ecom-tab-shipping" onclick="window.showEcomTab('shipping',this)">Shipping</button>
     </div>
 
     <!-- Panels -->
@@ -63630,7 +63631,6 @@ if (typeof _origOpenDD === 'function') {
             <tr>
               <th>Company</th>
               <th>Contract Signed</th>
-              <th>Monthly Retainer</th>
               <th style="text-align:center;">Setup on Fulfild</th>
               <th style="text-align:center;">CS Setup on Fulfild</th>
               <th style="text-align:center;">Under Bond PO</th>
@@ -63639,7 +63639,7 @@ if (typeof _origOpenDD === 'function') {
             </tr>
           </thead>
           <tbody id="ecom-3pl-tbody">
-            <tr><td colspan="8" style="color:var(--muted);font-size:13px;">Loading…</td></tr>
+            <tr><td colspan="7" style="color:var(--muted);font-size:13px;">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -63665,6 +63665,13 @@ if (typeof _origOpenDD === 'function') {
             <tr><td colspan="7" style="color:var(--muted);font-size:13px;">Loading…</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Shipping costs (settings + per-client report) -->
+    <div class="ecom-panel" id="ecom-panel-shipping" style="display:none;">
+      <div id="ecom-shipping-body">
+        <div style="color:var(--muted);font-size:13px;">Loading…</div>
       </div>
     </div>
 
@@ -63734,12 +63741,14 @@ if (typeof _origOpenDD === 'function') {
     _ecomTab = key;
     if (key === '3pl') window.load3plClients && window.load3plClients();
     if (key === 'po')  window.loadEcomPOs && window.loadEcomPOs();
+    if (key === 'shipping') window.loadEcomShipping && window.loadEcomShipping();
   };
 
   // ── Page loader (called from showPage hook) ────────────────
   window.loadEcommercePage = function() {
     if (_ecomTab === '3pl') window.load3plClients();
     else if (_ecomTab === 'po') window.loadEcomPOs();
+    else if (_ecomTab === 'shipping') window.loadEcomShipping();
   };
 
   // Finance-access or Pulse-admin may connect/sync sensitive store creds.
@@ -63802,7 +63811,7 @@ if (typeof _origOpenDD === 'function') {
     var tbody = document.getElementById('ecom-3pl-tbody');
     if (!tbody) return;
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);font-size:13px;">No 3PL clients yet. Click "Add 3PL Client" to create one.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);font-size:13px;">No 3PL clients yet. Click "Add 3PL Client" to create one.</td></tr>';
       return;
     }
     tbody.innerHTML = rows.map(function(r) {
@@ -64028,6 +64037,20 @@ if (typeof _origOpenDD === 'function') {
     h.push('<div style="font-size:20px;font-weight:700;color:var(--white);">' + _esc(c.company_name || '') + '</div>');
     h.push((c.contract_signed ? '<span class="pill green">Contract signed</span>' : '<span class="pill muted">No contract</span>'));
     h.push('</div></div>');
+
+    // ── Monthly retainer (independent of PO package) ──
+    h.push('<div style="' + cardStyle + '">');
+    h.push('<div style="' + titleStyle + '">Monthly Retainer</div>');
+    h.push('<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">');
+    h.push('<div><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Monthly retainer (€)</label>'
+      + '<input id="ecom-client-retainer" type="number" step="0.01" min="0" placeholder="e.g. 2500" '
+      + 'value="' + (c.monthly_retainer != null ? _esc(c.monthly_retainer) : '') + '" '
+      + (canManage ? '' : 'disabled ') + 'style="' + _inp() + 'width:180px;"></div>');
+    if (canManage) h.push('<button class="btn btn-gold" style="padding:8px 16px;" onclick="window.ecomSaveRetainer()">Save Retainer</button>');
+    h.push('</div>');
+    h.push('<div style="color:var(--muted);font-size:11px;margin-top:8px;">'
+      + 'A flat monthly fee charged to this client, separate from and in addition to whichever purchase order method is used below.</div>');
+    h.push('</div>');
 
     // ── Stores ──
     h.push('<div style="' + cardStyle + '">');
@@ -64326,6 +64349,20 @@ if (typeof _origOpenDD === 'function') {
       _ecomClient.po_method = method; _ecomClient.po_discount_pct = payload.po_discount_pct;
       window.toast && window.toast('Settings saved.', 'success');
       if (_ecomReport) _renderReport();
+    } catch (e) { window.toast && window.toast('Save failed: ' + (e.message || 'unknown'), 'error'); }
+  };
+  // Saves the client's monthly retainer (independent of the PO method).
+  window.ecomSaveRetainer = async function() {
+    if (!_ecomClient) return;
+    var raw = (document.getElementById('ecom-client-retainer') || {}).value;
+    raw = (raw || '').trim();
+    var val = raw === '' ? null : Number(raw);
+    if (val != null && (isNaN(val) || val < 0)) { window.toast && window.toast('Enter a valid retainer amount.', 'error'); return; }
+    try {
+      await window.db.update('three_pl_clients', '?id=eq.' + encodeURIComponent(_ecomClient.id),
+        { monthly_retainer: val, updated_at: new Date().toISOString() });
+      _ecomClient.monthly_retainer = val;
+      window.toast && window.toast('Retainer saved.', 'success');
     } catch (e) { window.toast && window.toast('Save failed: ' + (e.message || 'unknown'), 'error'); }
   };
   // Live-refresh the read-only excise cell for one product row as Volume/ABV change.
