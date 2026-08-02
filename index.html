@@ -63968,10 +63968,12 @@ if (typeof _origOpenDD === 'function') {
     return (p && p.purchase_price != null) ? Number(p.purchase_price) : null;
   }
   // Catalogue product for a report row, matched by SKU then name.
+  // Products the user has unticked (included === false) are treated as not in
+  // the catalogue, so they carry no purchase price and stay out of POs.
   function _productFor(row) {
     var p = null;
-    if (row.sku) p = _ecomProducts.find(function(x) { return x.sku && String(x.sku) === String(row.sku); });
-    if (!p) p = _ecomProducts.find(function(x) { return (x.product_name || '').toLowerCase() === (row.product_name || '').toLowerCase(); });
+    if (row.sku) p = _ecomProducts.find(function(x) { return x.included !== false && x.sku && String(x.sku) === String(row.sku); });
+    if (!p) p = _ecomProducts.find(function(x) { return x.included !== false && (x.product_name || '').toLowerCase() === (row.product_name || '').toLowerCase(); });
     return p || null;
   }
   // Per-unit excise for a report row (null if unmatched or volume/ABV unset).
@@ -64087,6 +64089,7 @@ if (typeof _origOpenDD === 'function') {
       h.push('<div style="color:var(--muted);font-size:12px;">No products yet. Use "Sync Products" on the store to pull the catalogue.</div>');
     } else {
       h.push('<div style="overflow-x:auto;"><table class="data-table"><thead><tr>'
+        + '<th style="text-align:center;width:56px;" title="Untick to grey out and exclude from purchase orders">Active</th>'
         + '<th>SKU</th><th>Product</th>'
         + '<th style="text-align:right;">Volume (ml)</th>'
         + '<th style="text-align:right;">ABV (%)</th>'
@@ -64102,7 +64105,13 @@ if (typeof _origOpenDD === 'function') {
         var cost = p.purchase_price != null ? Number(p.purchase_price) : null;
         var diff = (rrp != null && cost != null) ? (rrp - cost) : null;
         var marg = (rrp != null && cost != null && rrp > 0) ? (diff / rrp * 100) : null;
-        h.push('<tr>'
+        var inc  = p.included !== false;
+        var statusNote = (p.store_status && p.store_status !== 'active' && p.store_status !== 'publish')
+          ? ' title="Store status: ' + _esc(p.store_status) + '"' : '';
+        h.push('<tr id="ecom-row-' + pid + '" style="' + (inc ? '' : 'opacity:0.45;') + '"' + statusNote + '>'
+          + '<td style="text-align:center;"><input type="checkbox" data-pid="' + pid + '" data-field="included" '
+          + (inc ? 'checked ' : '') + 'onchange="window.ecomToggleIncluded(\'' + pid + '\', this)" '
+          + 'style="width:16px;height:16px;cursor:pointer;"></td>'
           + '<td>' + (p.sku ? _esc(p.sku) : '<span style="color:var(--muted);">—</span>') + '</td>'
           + '<td>' + _esc(p.product_name || '') + '</td>'
           + '<td style="text-align:right;"><input type="number" step="1" min="0" data-pid="' + pid + '" data-field="volume_ml" '
@@ -64335,8 +64344,26 @@ if (typeof _origOpenDD === 'function') {
     if (diffCell) diffCell.textContent = diff != null ? _eur(diff) : '—';
     if (margCell) margCell.textContent = marg != null ? (marg.toFixed(1) + '%') : '—';
   };
+  // Toggle whether a product is listed/included. Greys the row and saves immediately.
+  window.ecomToggleIncluded = async function(pid, el) {
+    var prod = _ecomProducts.find(function(p) { return p.id === pid; });
+    if (!prod) return;
+    var inc = !!el.checked;
+    var row = document.getElementById('ecom-row-' + pid);
+    if (row) row.style.opacity = inc ? '' : '0.45';
+    try {
+      await window.db.update('three_pl_client_products', '?id=eq.' + encodeURIComponent(pid),
+        { included: inc, updated_at: new Date().toISOString() });
+      prod.included = inc;
+      if (_ecomReport) _renderReport();
+    } catch (e) {
+      el.checked = !inc;
+      if (row) row.style.opacity = !inc ? '' : '0.45';
+      window.toast && window.toast('Update failed: ' + (e.message || 'unknown'), 'error');
+    }
+  };
   window.ecomSavePrices = async function() {
-    var inputs = document.querySelectorAll('#ecom-client-detail input[data-pid][data-field]');
+    var inputs = document.querySelectorAll('#ecom-client-detail input[data-pid][data-field]:not([type="checkbox"])');
     var byId = {};
     inputs.forEach(function(inp) {
       var pid = inp.getAttribute('data-pid');
