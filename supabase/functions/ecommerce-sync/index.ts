@@ -287,7 +287,7 @@ function shopifyItemsForOrder(o: Record<string, unknown>) {
 async function shopifyFetchProducts(storeUrl: string, token: string) {
   const host = shopifyHost(storeUrl);
   let url: string | null = `https://${host}/admin/api/${SHOPIFY_API_VER}/products.json?limit=250`;
-  const out: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null }> = [];
+  const out: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null; store_status: string | null }> = [];
   while (url) {
     const res = await fetch(url, { headers: shopifyHeaders(token) });
     if (res.status !== 200) {
@@ -297,6 +297,10 @@ async function shopifyFetchProducts(storeUrl: string, token: string) {
     const data = await res.json();
     for (const p of ((data?.products ?? []) as Array<Record<string, unknown>>)) {
       const title    = (p.title as string) ?? 'Unknown';
+      // Shopify product status: 'active' | 'draft' | 'archived'. Treat anything
+      // other than active (or unpublished to a sales channel) as not-for-sale.
+      const status   = (p.status as string) || null;
+      const storeStatus = (status && status !== 'active') ? status : (p.published_at == null ? 'draft' : status);
       const variants = (p.variants ?? []) as Array<Record<string, unknown>>;
       if (variants.length) {
         for (const v of variants) {
@@ -305,10 +309,10 @@ async function shopifyFetchProducts(storeUrl: string, token: string) {
           const priceNum = Number(v.price ?? 0);
           const compare  = v.compare_at_price != null ? Number(v.compare_at_price) : null;
           const regular  = (compare != null && compare > priceNum) ? compare : priceNum;
-          out.push({ sku: (v.sku as string) || null, product_name: `${title}${vTitle}`, external_id: String(v.id ?? p.id), rrp_ex_vat: rrpExVat(regular) });
+          out.push({ sku: (v.sku as string) || null, product_name: `${title}${vTitle}`, external_id: String(v.id ?? p.id), rrp_ex_vat: rrpExVat(regular), store_status: storeStatus });
         }
       } else {
-        out.push({ sku: null, product_name: title, external_id: String(p.id), rrp_ex_vat: null });
+        out.push({ sku: null, product_name: title, external_id: String(p.id), rrp_ex_vat: null, store_status: storeStatus });
       }
     }
     url = shopifyNextLink(res.headers.get('Link'));
@@ -407,7 +411,7 @@ function wooItemsForOrder(o: Record<string, unknown>) {
 
 // Fetches the full WooCommerce product catalogue.
 async function wooFetchProducts(storeUrl: string, key: string, secret: string) {
-  const out: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null }> = [];
+  const out: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null; store_status: string | null }> = [];
   let page = 1;
   while (true) {
     const url = `${wooHost(storeUrl)}/wp-json/wc/v3/products?per_page=100&page=${page}&status=publish`;
@@ -419,7 +423,9 @@ async function wooFetchProducts(storeUrl: string, key: string, secret: string) {
     const batch = await res.json() as Array<Record<string, unknown>>;
     for (const p of batch) {
       const regular = Number((p.regular_price as string) || (p.price as string) || 0);
-      out.push({ sku: (p.sku as string) || null, product_name: (p.name as string) ?? 'Unknown', external_id: String(p.id), rrp_ex_vat: rrpExVat(regular) });
+      // Only published products are fetched; catalog_visibility 'hidden' means not shown for sale.
+      const storeStatus = (p.catalog_visibility === 'hidden') ? 'hidden' : ((p.status as string) || 'publish');
+      out.push({ sku: (p.sku as string) || null, product_name: (p.name as string) ?? 'Unknown', external_id: String(p.id), rrp_ex_vat: rrpExVat(regular), store_status: storeStatus });
     }
     const totalPages = parseInt(res.headers.get('X-WP-TotalPages') || '1', 10);
     if (page >= totalPages || batch.length === 0) break;
@@ -734,7 +740,7 @@ Deno.serve(async (req: Request) => {
       if (!clientId) return err('Store is not linked to a 3PL client', 400);
 
       try {
-        let products: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null }>;
+        let products: Array<{ sku: string | null; product_name: string; external_id: string; rrp_ex_vat: number | null; store_status: string | null }>;
         if (store.platform === 'shopify') {
           var shopToken = await resolveShopifyToken(store);
           products = await shopifyFetchProducts(store.store_url as string, shopToken);
@@ -767,23 +773,30 @@ Deno.serve(async (req: Request) => {
           const existingId = p.sku
             ? bySku.get(String(p.sku))
             : byName.get(String(p.product_name || '').toLowerCase());
+          // A product is "for sale" (listed) when its store status is active/publish/null.
+          const listed = p.store_status == null || p.store_status === 'active' || p.store_status === 'publish';
           if (existingId) {
+            // Refresh the store status, but preserve the user's manual `included` choice.
             await adminClient.from('three_pl_client_products').update({
               product_name: p.product_name,
               external_id:  p.external_id,
               rrp_ex_vat:   p.rrp_ex_vat,
+              store_status: p.store_status,
               active:       true,
               last_seen_at: now,
               updated_at:   now,
             }).eq('id', existingId);
             updated++;
           } else {
+            // First time we've seen it: default `included` from the store status.
             toInsert.push({
               three_pl_client_id: clientId,
               sku:                p.sku,
               product_name:       p.product_name,
               external_id:        p.external_id,
               rrp_ex_vat:         p.rrp_ex_vat,
+              store_status:       p.store_status,
+              included:           listed,
               active:             true,
               last_seen_at:       now,
             });
