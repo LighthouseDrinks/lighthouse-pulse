@@ -1229,8 +1229,13 @@ Deno.serve(async (req: Request) => {
       // Config
       const { data: cfgRow } = await adminClient
         .from('app_settings').select('value').eq('key', 'shipping_config').maybeSingle();
+      // app_settings.value is jsonb: supabase-js returns it already parsed. Tolerate
+      // the legacy double-encoded (string) form too.
       let cfg: Record<string, unknown> = {};
-      try { cfg = cfgRow?.value ? JSON.parse(cfgRow.value as string) : {}; } catch { cfg = {}; }
+      try {
+        const rawCfg = cfgRow?.value;
+        cfg = (typeof rawCfg === 'string' ? JSON.parse(rawCfg) : (rawCfg || {})) as Record<string, unknown>;
+      } catch { cfg = {}; }
       const dpdRate = cfg.dpd_ie_flat_rate != null ? Number(cfg.dpd_ie_flat_rate) : null;
       const rules   = Array.isArray(cfg.carrier_rules) ? cfg.carrier_rules as Array<{ keyword?: string; carrier?: string }> : [];
       const ups     = (cfg.ups || {}) as UpsConfig & { default_weight_kg?: number };
