@@ -63964,10 +63964,20 @@ if (typeof _origOpenDD === 'function') {
   }
   // Our purchase price for a report row, matched by SKU then name.
   function _purchasePriceFor(row) {
+    var p = _productFor(row);
+    return (p && p.purchase_price != null) ? Number(p.purchase_price) : null;
+  }
+  // Catalogue product for a report row, matched by SKU then name.
+  function _productFor(row) {
     var p = null;
     if (row.sku) p = _ecomProducts.find(function(x) { return x.sku && String(x.sku) === String(row.sku); });
     if (!p) p = _ecomProducts.find(function(x) { return (x.product_name || '').toLowerCase() === (row.product_name || '').toLowerCase(); });
-    return (p && p.purchase_price != null) ? Number(p.purchase_price) : null;
+    return p || null;
+  }
+  // Per-unit excise for a report row (null if unmatched or volume/ABV unset).
+  function _exciseForRow(row) {
+    var p = _productFor(row);
+    return p ? _exciseFor(p.volume_ml, p.abv) : null;
   }
 
   window.openEcomClient = async function(id) {
@@ -64369,6 +64379,7 @@ if (typeof _origOpenDD === 'function') {
     if (!out || !_ecomReport) return;
     var rep = _ecomReport;
     var method = (_ecomClient && _ecomClient.po_method) || 'purchase_price';
+    var underBond = !!(_ecomClient && _ecomClient.under_bond_po) && method === 'purchase_price';
     if (!rep.rows.length) { out.innerHTML = '<div style="color:var(--muted);font-size:12px;">No products sold in this period.</div>'; return; }
     var h = [];
     h.push('<div style="color:var(--muted);font-size:11px;margin-bottom:10px;">' + _esc(rep.start) + ' → ' + _esc(rep.end)
@@ -64376,7 +64387,11 @@ if (typeof _origOpenDD === 'function') {
     h.push('<div style="overflow-x:auto;"><table class="data-table"><thead><tr>'
       + '<th>SKU</th><th>Product</th><th style="text-align:right;">Units</th>'
       + '<th style="text-align:right;">Ex-VAT unit price</th><th style="text-align:right;">Net (ex-VAT)</th>');
-    if (method === 'purchase_price') h.push('<th style="text-align:right;">Our price</th><th style="text-align:right;">PO line</th>');
+    if (method === 'purchase_price') {
+      h.push('<th style="text-align:right;">Our DP price</th>');
+      if (underBond) h.push('<th style="text-align:right;">Excise/unit</th><th style="text-align:right;">PO unit (ex-duty)</th>');
+      h.push('<th style="text-align:right;">PO line</th>');
+    }
     h.push('</tr></thead><tbody>');
     var poTotal = 0;
     var pct = Number((_ecomClient && _ecomClient.po_discount_pct) || 0);
@@ -64389,26 +64404,38 @@ if (typeof _origOpenDD === 'function') {
         + '<td style="text-align:right;">' + _eur(r.net) + '</td>');
       if (method === 'purchase_price') {
         var pp = _purchasePriceFor(r);
-        var line = pp != null ? pp * r.units : 0;
+        var exc = underBond ? _exciseForRow(r) : null;
+        var poUnit = pp != null ? Math.max(0, pp - (underBond ? (exc || 0) : 0)) : 0;
+        var line = pp != null ? poUnit * r.units : 0;
         if (pp != null) poTotal += line;
-        h.push('<td style="text-align:right;">' + (pp != null ? _eur(pp) : '<span style="color:var(--amber,#e89c3a);">unset</span>') + '</td>'
-          + '<td style="text-align:right;">' + (pp != null ? _eur(line) : '—') + '</td>');
+        h.push('<td style="text-align:right;">' + (pp != null ? _eur(pp) : '<span style="color:var(--amber,#e89c3a);">unset</span>') + '</td>');
+        if (underBond) {
+          h.push('<td style="text-align:right;">' + (exc != null ? _eur(exc) : '<span style="color:var(--amber,#e89c3a);">unset</span>') + '</td>'
+            + '<td style="text-align:right;">' + (pp != null && exc != null ? _eur(poUnit) : '—') + '</td>');
+        }
+        h.push('<td style="text-align:right;">' + (pp != null ? _eur(line) : '—') + '</td>');
       }
       h.push('</tr>');
     });
     if (method === 'discount') poTotal = rep.totalNet * (1 - pct / 100);
-    var colspan = method === 'purchase_price' ? 6 : 4;
+    var colspan = underBond ? 8 : (method === 'purchase_price' ? 6 : 4);
     h.push('<tr style="border-top:2px solid var(--navy-border);font-weight:700;">'
       + '<td colspan="' + colspan + '" style="text-align:right;">PO total'
-      + (method === 'discount' ? ' (net − ' + pct + '%)' : '') + '</td>'
+      + (method === 'discount' ? ' (net − ' + pct + '%)' : (underBond ? ' (under bond, ex-duty)' : '')) + '</td>'
       + '<td style="text-align:right;">' + _eur(poTotal) + '</td></tr>');
     h.push('</tbody></table></div>');
 
+    // Guard: under bond needs excise (volume & ABV) for every sold SKU
+    var missingExcise = underBond ? rep.rows.filter(function(r) { return _exciseForRow(r) == null; }).length : 0;
+
     // Generate PO
     h.push('<div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">');
-    h.push('<div style="color:var(--muted);font-size:11px;">Method: ' + (method === 'purchase_price' ? 'Purchase price per SKU' : 'Discount ' + pct + '% off net') + '</div>');
-    h.push('<button class="btn btn-gold" style="padding:9px 18px;" onclick="window.ecomGeneratePO()">Generate &amp; Print PO</button>');
+    h.push('<div style="color:var(--muted);font-size:11px;">Method: ' + (method === 'purchase_price' ? 'Purchase price per SKU' : 'Discount ' + pct + '% off net') + (underBond ? ' · Under bond (excise excluded)' : '') + '</div>');
+    h.push('<button class="btn btn-gold" style="padding:9px 18px;"' + (missingExcise ? ' disabled title="Set volume &amp; ABV for all sold SKUs first"' : '') + ' onclick="window.ecomGeneratePO()">Generate &amp; Print PO</button>');
     h.push('</div>');
+    if (missingExcise) {
+      h.push('<div style="color:var(--red);font-size:12px;margin-top:6px;font-weight:700;">Cannot create PO — excise not set (volume &amp; ABV) for ' + missingExcise + ' SKU(s). Set them under Our DP Purchase Prices above.</div>');
+    }
     if (method === 'purchase_price') {
       var missing = rep.rows.filter(function(r) { return _purchasePriceFor(r) == null; }).length;
       if (missing) h.push('<div style="color:var(--amber,#e89c3a);font-size:11px;margin-top:6px;">' + missing + ' SKU(s) have no purchase price set — they will be €0 on the PO until you set a price above.</div>');
@@ -64421,22 +64448,31 @@ if (typeof _origOpenDD === 'function') {
     if (!_ecomClient || !_ecomReport) return;
     var rep = _ecomReport;
     var method = _ecomClient.po_method || 'purchase_price';
+    var underBond = !!_ecomClient.under_bond_po && method === 'purchase_price';
     var pct = Number(_ecomClient.po_discount_pct || 0);
+    if (underBond) {
+      var missingExcise = rep.rows.filter(function(r) { return _exciseForRow(r) == null; }).length;
+      if (missingExcise) {
+        window.toast && window.toast('Cannot create PO — excise/volume & ABV not set for ' + missingExcise + ' SKU(s).', 'error');
+        return;
+      }
+    }
     var lines = [];
     var poTotal = 0;
     rep.rows.forEach(function(r) {
       var unit = r.units > 0 ? r.net / r.units : 0;
-      var line, poUnit, pp = null;
+      var line, poUnit, pp = null, excPer = null;
       if (method === 'purchase_price') {
         pp = _purchasePriceFor(r);
-        poUnit = pp != null ? pp : 0;
+        excPer = underBond ? (_exciseForRow(r) || 0) : null;
+        poUnit = pp != null ? Math.max(0, pp - (underBond ? excPer : 0)) : 0;
         line = poUnit * r.units;
       } else {
         line = r.net * (1 - pct / 100);
         poUnit = r.units > 0 ? line / r.units : null;
       }
       poTotal += line;
-      lines.push({ sku: r.sku, product_name: r.product_name, quantity: r.units, net_sales: r.net, purchase_price: pp, po_unit_price: poUnit, po_line_total: line });
+      lines.push({ sku: r.sku, product_name: r.product_name, quantity: r.units, net_sales: r.net, purchase_price: pp, excise_per_unit: excPer, po_unit_price: poUnit, po_line_total: line });
     });
     var poNumber = 'PO-' + _ecomClient.company_name.replace(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase() + '-' + rep.start.replace(/-/g, '').slice(0, 6) + '-' + Date.now().toString().slice(-4);
     try {
@@ -64445,6 +64481,7 @@ if (typeof _origOpenDD === 'function') {
         po_number: poNumber,
         period_start: rep.start, period_end: rep.end,
         method: method, discount_pct: method === 'discount' ? pct : null,
+        under_bond: underBond,
         currency: 'EUR', subtotal_net: rep.totalNet, total: poTotal,
         status: 'generated',
         created_by: (window.CURRENT_USER && window.CURRENT_USER.id) || null
@@ -64461,13 +64498,27 @@ if (typeof _origOpenDD === 'function') {
   function _printPO(po, lines) {
     var w = window.open('', '_blank');
     if (!w) { window.toast && window.toast('Allow pop-ups to print the PO.', 'error'); return; }
+    var underBond = !!po.under_bond;
     var rowsHtml = lines.map(function(l) {
+      if (underBond) {
+        return '<tr><td>' + _esc(l.sku || '—') + '</td><td>' + _esc(l.product_name || '') + '</td>'
+          + '<td class="r">' + (l.quantity || 0) + '</td>'
+          + '<td class="r">' + (l.purchase_price != null ? _eur(l.purchase_price) : '—') + '</td>'
+          + '<td class="r">' + (l.excise_per_unit != null ? _eur(l.excise_per_unit) : '—') + '</td>'
+          + '<td class="r">' + (l.po_unit_price != null ? _eur(l.po_unit_price) : '—') + '</td>'
+          + '<td class="r">' + _eur(l.po_line_total || 0) + '</td></tr>';
+      }
       return '<tr><td>' + _esc(l.sku || '—') + '</td><td>' + _esc(l.product_name || '') + '</td>'
         + '<td class="r">' + (l.quantity || 0) + '</td>'
         + '<td class="r">' + (l.po_unit_price != null ? _eur(l.po_unit_price) : '—') + '</td>'
         + '<td class="r">' + _eur(l.po_line_total || 0) + '</td></tr>';
     }).join('');
-    var methodLabel = po.method === 'discount' ? ('Discount ' + (po.discount_pct || 0) + '% off net sales') : 'Purchase price per SKU';
+    var methodLabel = (po.method === 'discount' ? ('Discount ' + (po.discount_pct || 0) + '% off net sales') : 'Purchase price per SKU')
+      + (underBond ? ' · Under bond (excise excluded)' : '');
+    var headHtml = underBond
+      ? '<tr><th>SKU</th><th>Product</th><th class="r">Qty sold</th><th class="r">DP unit price</th><th class="r">Excise/unit</th><th class="r">PO unit (ex-duty)</th><th class="r">Line total</th></tr>'
+      : '<tr><th>SKU</th><th>Product</th><th class="r">Qty sold</th><th class="r">Unit price</th><th class="r">Line total</th></tr>';
+    var footColspan = underBond ? 6 : 4;
     var html = '<!doctype html><html><head><meta charset="utf-8"><title>' + _esc(po.po_number) + '</title>'
       + '<style>body{font-family:Arial,Helvetica,sans-serif;color:#111;padding:32px;max-width:860px;margin:0 auto;}'
       + 'h1{font-size:22px;margin:0 0 4px;} .muted{color:#666;font-size:12px;} .hdr{display:flex;justify-content:space-between;margin-bottom:24px;}'
@@ -64479,10 +64530,10 @@ if (typeof _origOpenDD === 'function') {
       + '<div class="muted">To: ' + _esc(_ecomClient.company_name || '') + '</div>'
       + '<div class="muted">Period: ' + _esc(po.period_start) + ' → ' + _esc(po.period_end) + '</div>'
       + '<div class="muted">Method: ' + _esc(methodLabel) + '</div></div></div>'
-      + '<table><thead><tr><th>SKU</th><th>Product</th><th class="r">Qty sold</th><th class="r">Unit price</th><th class="r">Line total</th></tr></thead>'
+      + '<table><thead>' + headHtml + '</thead>'
       + '<tbody>' + rowsHtml + '</tbody>'
-      + '<tfoot><tr><td colspan="4" class="r">Total net sold (ex-VAT)</td><td class="r">' + _eur(po.subtotal_net || 0) + '</td></tr>'
-      + '<tr><td colspan="4" class="r tot">PO Total</td><td class="r tot">' + _eur(po.total || 0) + '</td></tr></tfoot></table>'
+      + '<tfoot><tr><td colspan="' + footColspan + '" class="r">Total net sold (ex-VAT)</td><td class="r">' + _eur(po.subtotal_net || 0) + '</td></tr>'
+      + '<tr><td colspan="' + footColspan + '" class="r tot">PO Total</td><td class="r tot">' + _eur(po.total || 0) + '</td></tr></tfoot></table>'
       + '<div style="margin-top:24px;"><button onclick="window.print()">Print</button></div>'
       + '</body></html>';
     w.document.write(html);
@@ -64500,7 +64551,7 @@ if (typeof _origOpenDD === 'function') {
       if (!pos.length) { tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);font-size:13px;">No purchase orders generated yet.</td></tr>'; return; }
       tbody.innerHTML = pos.map(function(p) {
         var client = (p.client && p.client.company_name) || '—';
-        var methodLabel = p.method === 'discount' ? ('Discount ' + (p.discount_pct || 0) + '%') : 'Purchase price';
+        var methodLabel = (p.method === 'discount' ? ('Discount ' + (p.discount_pct || 0) + '%') : 'Purchase price') + (p.under_bond ? ' · Under bond' : '');
         return '<tr>'
           + '<td class="strong">' + _esc(p.po_number || p.id.slice(0, 8)) + '</td>'
           + '<td>' + _esc(client) + '</td>'
