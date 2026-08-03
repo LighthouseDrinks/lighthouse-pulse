@@ -281,7 +281,8 @@ async function fetchFulfildCosts(externalIds: string[]): Promise<Map<string, Ful
   let sql: any = null;
   try {
     const postgres = (await import('https://esm.sh/postgres@3.4.5')).default;
-    sql = postgres(dbUrl, { prepare: false, max: 1, idle_timeout: 5, connect_timeout: 10 });
+    // Supabase pooler: transaction mode (no prepared statements) over TLS.
+    sql = postgres(dbUrl, { prepare: false, ssl: 'require', max: 1, idle_timeout: 5, connect_timeout: 10 });
     const rows = await sql`
       select external_order_id, platform, carrier, service, weight_kg, cost, currency
       from pulse_order_shipping
@@ -1448,6 +1449,30 @@ Deno.serve(async (req: Request) => {
     if (action === 'ups_test') {
       const t = await getUpsToken();
       return t.ok ? json({ ok: true }) : err(t.error || 'UPS token failed', 400);
+    }
+
+    // ── fulfild_test ────────────────────────────────────────────────────────
+    // Verifies the read-only pulse_order_shipping feed is reachable. Optionally
+    // pass { external_ids: string[] } to fetch specific orders.
+    if (action === 'fulfild_test') {
+      const dbUrl = Deno.env.get('FULFILD_DB_URL');
+      if (!dbUrl) return err('FULFILD_DB_URL not set', 400);
+      const wanted = Array.isArray(body.external_ids) ? (body.external_ids as unknown[]).map(String) : [];
+      // deno-lint-ignore no-explicit-any
+      let sql: any = null;
+      try {
+        const postgres = (await import('https://esm.sh/postgres@3.4.5')).default;
+        sql = postgres(dbUrl, { prepare: false, ssl: 'require', max: 1, idle_timeout: 5, connect_timeout: 10 });
+        const countRows = await sql`select count(*)::int as n from pulse_order_shipping`;
+        const sample = wanted.length
+          ? await sql`select external_order_id, platform, carrier, service, weight_kg, cost, currency from pulse_order_shipping where external_order_id = any(${wanted})`
+          : await sql`select external_order_id, platform, carrier, service, weight_kg, cost, currency from pulse_order_shipping order by created_at desc nulls last limit 5`;
+        return json({ ok: true, total_rows: countRows[0]?.n ?? 0, sample });
+      } catch (e) {
+        return err(`Fulfild connection failed: ${e instanceof Error ? e.message : String(e)}`, 400);
+      } finally {
+        if (sql) { try { await sql.end({ timeout: 5 }); } catch { /* ignore */ } }
+      }
     }
 
     // ── shipping_cost_report ────────────────────────────────────────────────
