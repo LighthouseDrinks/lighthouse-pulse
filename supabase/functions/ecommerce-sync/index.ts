@@ -1579,6 +1579,10 @@ Deno.serve(async (req: Request) => {
         // the default ('default'). null = not a fresh UPS quote.
         let upsWeightKg: number | null = null;
         let upsWeightSource: string | null = null;
+        // For UPS quotes: where the service code came from — Fulfild's booked
+        // service ('fulfild'), the store shipping-method mapping ('store'), or
+        // the default service ('default'). null = not a fresh UPS quote.
+        let upsServiceSource: string | null = null;
 
         // Fulfild is authoritative for *which* carrier/service was actually
         // used to book the label — trust it over title-keyword matching.
@@ -1638,7 +1642,21 @@ Deno.serve(async (req: Request) => {
                 postal: o.ship_postal as string, country: o.ship_country as string,
                 residential: o.ship_residential as boolean,
               };
-              const svcCode = (o.ship_service_code as string) || UPS_DEFAULT_SERVICE;
+              // Prefer the actual UPS service booked in Fulfild; fall back to the
+              // service resolved from the store shipping-method title, then default.
+              // "UPS Zone 4"-style store labels are merchant zones, not real UPS
+              // services, so Fulfild's booked service is far more reliable.
+              let svcCode: string;
+              if (fRow && fRow.service && normalizeCarrier(fRow.carrier) === 'ups') {
+                svcCode = resolveUpsServiceCode(fRow.service);
+                upsServiceSource = 'fulfild';
+              } else if (o.ship_service_code) {
+                svcCode = o.ship_service_code as string;
+                upsServiceSource = 'store';
+              } else {
+                svcCode = UPS_DEFAULT_SERVICE;
+                upsServiceSource = 'default';
+              }
               const r = await upsRate(upsToken!, dest, Math.max(0.1, wKg), svcCode);
               if (r.ok) {
                 cost = r.cost!;
@@ -1671,6 +1689,7 @@ Deno.serve(async (req: Request) => {
           ups_negotiated: source === 'ups_quote' ? upsNegotiated : null,
           weight_kg:      source === 'ups_quote' ? upsWeightKg : null,
           weight_source:  source === 'ups_quote' ? upsWeightSource : null,
+          service_source: source === 'ups_quote' ? upsServiceSource : null,
           note,
         });
       }
