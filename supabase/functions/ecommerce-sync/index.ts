@@ -249,6 +249,65 @@ async function upsRate(
   return { ok: true, cost: Number(charge.MonetaryValue), currency: (charge.CurrencyCode as string) || 'EUR' };
 }
 
+// ── Fulfild (fulfilment platform) actual booked shipping cost ─────────────────
+// Fulfild is Supabase Postgres and the source of truth for the booked carrier
+// cost (shipments.cost). We read its least-privilege view `pulse_order_shipping`
+// via a read-only connection string (FULFILD_DB_URL). When the secret is absent
+// the integration is simply disabled and the report falls back to DPD flat rate
+// / UPS quote. Matching key is platform + external_order_id.
+interface FulfildRow {
+  carrier: string | null;
+  service: string | null;
+  weight_kg: number | null;
+  cost: number | null;
+  currency: string | null;
+}
+
+// Normalises Fulfild's carrier_code / service text to Pulse's carrier keys.
+function normalizeCarrier(raw: string | null | undefined): string {
+  const t = (raw || '').toLowerCase();
+  if (t.includes('ups')) return 'ups';
+  if (t.includes('dpd')) return 'dpd';
+  if (t.includes('post')) return 'anpost';
+  return t.trim() || 'unmatched';
+}
+
+async function fetchFulfildCosts(externalIds: string[]): Promise<Map<string, FulfildRow>> {
+  const map = new Map<string, FulfildRow>();
+  const dbUrl = Deno.env.get('FULFILD_DB_URL');
+  const ids = Array.from(new Set(externalIds.filter(Boolean).map(String)));
+  if (!dbUrl || !ids.length) return map;
+  // deno-lint-ignore no-explicit-any
+  let sql: any = null;
+  try {
+    const postgres = (await import('https://esm.sh/postgres@3.4.5')).default;
+    sql = postgres(dbUrl, { prepare: false, max: 1, idle_timeout: 5, connect_timeout: 10 });
+    const rows = await sql`
+      select external_order_id, platform, carrier, service, weight_kg, cost, currency
+      from pulse_order_shipping
+      where external_order_id = any(${ids})
+    `;
+    for (const r of rows) {
+      const row: FulfildRow = {
+        carrier:   r.carrier ?? null,
+        service:   r.service ?? null,
+        weight_kg: r.weight_kg != null ? Number(r.weight_kg) : null,
+        cost:      r.cost != null ? Number(r.cost) : null,
+        currency:  r.currency ?? null,
+      };
+      const platform = String(r.platform || '').toLowerCase();
+      map.set(`${platform}:${r.external_order_id}`, row);
+      // Platform-agnostic fallback key (first writer wins).
+      if (!map.has(String(r.external_order_id))) map.set(String(r.external_order_id), row);
+    }
+  } catch (e) {
+    console.error('[ecommerce-sync] fulfild read error:', e instanceof Error ? e.message : String(e));
+  } finally {
+    if (sql) { try { await sql.end({ timeout: 5 }); } catch { /* ignore */ } }
+  }
+  return map;
+}
+
 // Exclusive end date helper for range queries (YYYY-MM-DD -> next day).
 function nextDayYmd(ymd: string): string {
   const p = ymd.split('-');
@@ -551,6 +610,87 @@ async function wooFetchOrders(storeUrl: string, key: string, secret: string, sin
   return orders;
 }
 
+// Woo stores weight on the product/variation (not the order line), in the store's
+// configured unit. We fetch weights during sync and sum qty*weight per order so
+// UPS rates on the real parcel weight instead of a fallback.
+function toGrams(value: number, unit: string): number {
+  switch ((unit || 'kg').toLowerCase()) {
+    case 'g':   return value;
+    case 'kg':  return value * 1000;
+    case 'lbs':
+    case 'lb':  return value * 453.59237;
+    case 'oz':  return value * 28.349523;
+    default:    return value * 1000;
+  }
+}
+
+async function wooWeightUnit(storeUrl: string, key: string, secret: string): Promise<string> {
+  try {
+    const res = await fetch(`${wooHost(storeUrl)}/wp-json/wc/v3/settings/products/woocommerce_weight_unit`, { headers: wooHeaders(key, secret) });
+    if (!res.ok) return 'kg';
+    const d = await res.json().catch(() => ({}));
+    return (d?.value as string) || 'kg';
+  } catch { return 'kg'; }
+}
+
+// Weights for a set of simple/parent product ids (batched via include=).
+async function wooProductWeights(storeUrl: string, key: string, secret: string, ids: number[]): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  const uniq = Array.from(new Set(ids.filter((n) => n > 0)));
+  const CHUNK = 50;
+  for (let i = 0; i < uniq.length; i += CHUNK) {
+    const chunk = uniq.slice(i, i + CHUNK);
+    const url = `${wooHost(storeUrl)}/wp-json/wc/v3/products?include=${chunk.join(',')}&per_page=${chunk.length}&_fields=id,weight`;
+    const res = await fetch(url, { headers: wooHeaders(key, secret) });
+    if (!res.ok) continue;
+    const batch = await res.json().catch(() => []) as Array<Record<string, unknown>>;
+    for (const p of batch) {
+      const w = parseFloat(String(p.weight ?? ''));
+      if (!isNaN(w) && w > 0) map.set(Number(p.id), w);
+    }
+  }
+  return map;
+}
+
+// Weights for specific (product_id, variation_id) pairs. Variation weight can be
+// set on the variation or inherited from the parent (empty here).
+async function wooVariationWeights(storeUrl: string, key: string, secret: string, pairs: Array<[number, number]>): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const seen = new Set<string>();
+  for (const [pid, vid] of pairs) {
+    if (!(pid > 0 && vid > 0)) continue;
+    const k = `${pid}:${vid}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const url = `${wooHost(storeUrl)}/wp-json/wc/v3/products/${pid}/variations/${vid}?_fields=id,weight`;
+    const res = await fetch(url, { headers: wooHeaders(key, secret) });
+    if (!res.ok) continue;
+    const v = await res.json().catch(() => ({})) as Record<string, unknown>;
+    const w = parseFloat(String(v.weight ?? ''));
+    if (!isNaN(w) && w > 0) map.set(k, w);
+  }
+  return map;
+}
+
+interface WooWeightCtx { unit: string; prodW: Map<number, number>; varW: Map<string, number> }
+
+// Sums qty * (variation|product) weight for an order, converted to grams. Returns
+// null when no line item has a usable weight (so the fallback weight applies).
+function wooOrderWeightGrams(o: Record<string, unknown>, ctx: WooWeightCtx): number | null {
+  let total = 0;
+  let any = false;
+  for (const li of ((o.line_items ?? []) as Array<Record<string, unknown>>)) {
+    const qty = Number(li.quantity ?? 0);
+    const pid = Number(li.product_id ?? 0);
+    const vid = Number(li.variation_id ?? 0);
+    let w = 0;
+    if (vid > 0 && ctx.varW.has(`${pid}:${vid}`)) w = ctx.varW.get(`${pid}:${vid}`)!;
+    else if (ctx.prodW.has(pid)) w = ctx.prodW.get(pid)!;
+    if (w > 0 && qty > 0) { total += toGrams(w, ctx.unit) * qty; any = true; }
+  }
+  return any ? Math.round(total) : null;
+}
+
 function wooItemsForOrder(o: Record<string, unknown>) {
   const items: Array<Record<string, unknown>> = [];
   for (const li of ((o.line_items ?? []) as Array<Record<string, unknown>>)) {
@@ -647,8 +787,11 @@ function shopifyNormaliseOrder(storeId: string, o: Record<string, unknown>) {
   };
 }
 
-function wooNormaliseOrder(storeId: string, o: Record<string, unknown>) {
+function wooNormaliseOrder(storeId: string, o: Record<string, unknown>, weightCtx?: WooWeightCtx) {
   const billing = (o.billing ?? {}) as Record<string, unknown>;
+  const shipFields = wooShippingFields(o);
+  // Woo carries no aggregate order weight; derive it from product weights.
+  if (weightCtx) shipFields.total_weight_grams = wooOrderWeightGrams(o, weightCtx);
   return {
     store_id:        storeId,
     external_id:     String(o.id),
@@ -662,7 +805,7 @@ function wooNormaliseOrder(storeId: string, o: Record<string, unknown>) {
     payment_gateway: (o.payment_method as string) ?? null,
     payment_status:  (o.status as string) ?? null,
     taxes_included:  o.prices_include_tax === true,
-    ...wooShippingFields(o),
+    ...shipFields,
     raw_data:        { source: 'woocommerce', has_gift_card_payment: false, order_id: o.id },
   };
 }
@@ -877,9 +1020,26 @@ Deno.serve(async (req: Request) => {
             items: shopifyItemsForOrder(o),
           }));
         } else if (store.platform === 'woocommerce') {
-          rawOrders  = await wooFetchOrders(store.store_url as string, store.api_key as string, store.api_secret as string, since);
+          const url = store.store_url as string, k = store.api_key as string, sec = store.api_secret as string;
+          rawOrders  = await wooFetchOrders(url, k, sec, since);
+          // Resolve real parcel weights: gather product/variation ids across all
+          // orders, fetch their weights once, then sum per order.
+          const prodIds: number[] = [];
+          const varPairs: Array<[number, number]> = [];
+          for (const o of rawOrders) {
+            for (const li of ((o.line_items ?? []) as Array<Record<string, unknown>>)) {
+              const pid = Number(li.product_id ?? 0);
+              const vid = Number(li.variation_id ?? 0);
+              if (pid > 0) prodIds.push(pid);
+              if (pid > 0 && vid > 0) varPairs.push([pid, vid]);
+            }
+          }
+          const unit  = await wooWeightUnit(url, k, sec);
+          const prodW = await wooProductWeights(url, k, sec, prodIds);
+          const varW  = await wooVariationWeights(url, k, sec, varPairs);
+          const weightCtx: WooWeightCtx = { unit, prodW, varW };
           normalised = rawOrders.map((o) => ({
-            order: wooNormaliseOrder(id, o),
+            order: wooNormaliseOrder(id, o, weightCtx),
             items: wooItemsForOrder(o),
           }));
         } else {
@@ -1317,8 +1477,10 @@ Deno.serve(async (req: Request) => {
 
       // Stores for this client
       const { data: stores } = await adminClient
-        .from('ecommerce_stores').select('id').eq('three_pl_client_id', clientId);
+        .from('ecommerce_stores').select('id, platform').eq('three_pl_client_id', clientId);
       const storeIds = (stores ?? []).map((s: { id: string }) => s.id);
+      const storePlatform = new Map<string, string>();
+      for (const s of (stores ?? [])) storePlatform.set(s.id as string, ((s.platform as string) || '').toLowerCase());
       if (!storeIds.length) {
         return json({ rows: [], totals: {}, grand_total: 0, currency: 'EUR', dpd_rate: dpdRate, note: 'No stores linked to this client.' });
       }
@@ -1326,7 +1488,7 @@ Deno.serve(async (req: Request) => {
       // Orders in range
       const { data: ordersData } = await adminClient
         .from('ecommerce_orders')
-        .select('id, order_number, customer_name, ordered_at, currency, ship_name, ship_company, ship_address1, ship_address2, ship_country, ship_postal, ship_city, ship_state, ship_residential, ship_service_code, ship_service_name, total_weight_grams, ups_cost')
+        .select('id, store_id, external_id, order_number, customer_name, ordered_at, currency, ship_name, ship_company, ship_address1, ship_address2, ship_country, ship_postal, ship_city, ship_state, ship_residential, ship_service_code, ship_service_name, total_weight_grams, ups_cost')
         .in('store_id', storeIds)
         .gte('ordered_at', `${start}T00:00:00Z`)
         .lt('ordered_at',  `${nextDayYmd(end)}T00:00:00Z`)
@@ -1359,6 +1521,10 @@ Deno.serve(async (req: Request) => {
         return 'unmatched';
       };
 
+      // Fulfild is the primary cost source: pull actual booked cost for these
+      // orders in one batch (no-op when FULFILD_DB_URL is unset).
+      const fulfild = await fetchFulfildCosts(orders.map((o) => String(o.external_id)));
+
       let upsToken: string | null = null;
       let upsTokenErr: string | null = null;
       const rows: Array<Record<string, unknown>> = [];
@@ -1371,14 +1537,30 @@ Deno.serve(async (req: Request) => {
         if (!ships.length) continue; // no shipping line -> cannot classify
         const title = ships.map((s) => s.product_name).filter(Boolean).join(' / ');
         const customerPaid = ships.reduce((s, x) => s + Number(x.line_total ?? 0), 0);
-        const carrier = detect(title);
+        const platform = storePlatform.get(o.store_id as string) || '';
+        const fRow = fulfild.get(`${platform}:${o.external_id}`) || fulfild.get(String(o.external_id));
+
+        let carrier = detect(title);
         let cost: number | null = null;
         let note: string | null = null;
+        let source: string | null = null;
+        let service: string | null = (o.ship_service_name as string) || null;
 
-        if (carrier === 'dpd') {
+        if (fRow && fRow.cost != null) {
+          // Actual booked cost from Fulfild — authoritative for any carrier.
+          carrier = normalizeCarrier(fRow.carrier) !== 'unmatched' ? normalizeCarrier(fRow.carrier) : carrier;
+          cost = fRow.cost;
+          currency = fRow.currency || currency;
+          if (fRow.service) service = fRow.service;
+          source = 'fulfild';
+          await adminClient.from('ecommerce_orders')
+            .update({ carrier_cost: cost, carrier_cost_source: 'fulfild', detected_carrier: carrier }).eq('id', o.id as string);
+        } else if (carrier === 'dpd') {
           cost = dpdRate;
+          source = 'dpd_flat';
           if (dpdRate == null) note = 'DPD flat rate not set in settings';
         } else if (carrier === 'ups') {
+          source = 'ups_quote';
           if (o.ups_cost != null && !refresh) {
             cost = Number(o.ups_cost);
           } else if (upsTokenErr) {
@@ -1409,7 +1591,7 @@ Deno.serve(async (req: Request) => {
                 cost = r.cost!;
                 currency = r.currency || currency;
                 await adminClient.from('ecommerce_orders')
-                  .update({ ups_cost: cost, detected_carrier: 'ups' }).eq('id', o.id as string);
+                  .update({ ups_cost: cost, carrier_cost: cost, carrier_cost_source: 'ups_quote', detected_carrier: 'ups' }).eq('id', o.id as string);
               } else {
                 note = r.error || 'UPS rate failed';
               }
@@ -1427,10 +1609,11 @@ Deno.serve(async (req: Request) => {
           customer_name:  o.customer_name,
           carrier,
           shipping_method: title,
-          service:        (o.ship_service_name as string) || null,
+          service,
           destination:    [o.ship_city, o.ship_country].filter(Boolean).join(', ') || null,
           customer_paid:  customerPaid,
           cost,
+          cost_source:    source,
           note,
         });
       }
