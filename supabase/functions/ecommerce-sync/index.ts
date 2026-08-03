@@ -188,7 +188,7 @@ async function upsRate(
   dest: UpsAddress,
   weightKg: number,
   serviceCode: string,
-): Promise<{ ok: boolean; cost?: number; currency?: string; error?: string }> {
+): Promise<{ ok: boolean; cost?: number; currency?: string; negotiated?: boolean; error?: string }> {
   const destAddr = () => {
     const lines = [dest.address1, dest.address2].filter(Boolean) as string[];
     const out: Record<string, unknown> = {
@@ -244,9 +244,10 @@ async function upsRate(
   const rs = data?.RateResponse?.RatedShipment;
   const shipment = Array.isArray(rs) ? rs[0] : rs;
   if (!shipment) return { ok: false, error: 'UPS rate: no shipment in response' };
-  const charge = shipment?.NegotiatedRateCharges?.TotalCharge || shipment?.TotalCharges;
+  const negCharge = shipment?.NegotiatedRateCharges?.TotalCharge;
+  const charge = negCharge || shipment?.TotalCharges;
   if (!charge || charge.MonetaryValue == null) return { ok: false, error: 'UPS rate: no charge in response' };
-  return { ok: true, cost: Number(charge.MonetaryValue), currency: (charge.CurrencyCode as string) || 'EUR' };
+  return { ok: true, cost: Number(charge.MonetaryValue), currency: (charge.CurrencyCode as string) || 'EUR', negotiated: !!negCharge };
 }
 
 // ── Fulfild (fulfilment platform) actual booked shipping cost ─────────────────
@@ -1513,7 +1514,7 @@ Deno.serve(async (req: Request) => {
       // Orders in range
       const { data: ordersData } = await adminClient
         .from('ecommerce_orders')
-        .select('id, store_id, external_id, order_number, customer_name, ordered_at, currency, ship_name, ship_company, ship_address1, ship_address2, ship_country, ship_postal, ship_city, ship_state, ship_residential, ship_service_code, ship_service_name, total_weight_grams, ups_cost')
+        .select('id, store_id, external_id, order_number, customer_name, ordered_at, currency, ship_name, ship_company, ship_address1, ship_address2, ship_country, ship_postal, ship_city, ship_state, ship_residential, ship_service_code, ship_service_name, total_weight_grams, ups_cost, ups_negotiated')
         .in('store_id', storeIds)
         .gte('ordered_at', `${start}T00:00:00Z`)
         .lt('ordered_at',  `${nextDayYmd(end)}T00:00:00Z`)
@@ -1570,6 +1571,9 @@ Deno.serve(async (req: Request) => {
         let note: string | null = null;
         let source: string | null = null;
         let service: string | null = (o.ship_service_name as string) || null;
+        // For UPS quotes: whether the rate returned was account-negotiated
+        // (discount applied) or UPS published/list. null = not a UPS quote / unknown.
+        let upsNegotiated: boolean | null = null;
 
         // Fulfild is authoritative for *which* carrier/service was actually
         // used to book the label — trust it over title-keyword matching.
@@ -1599,6 +1603,7 @@ Deno.serve(async (req: Request) => {
           source = 'ups_quote';
           if (o.ups_cost != null && !refresh) {
             cost = Number(o.ups_cost);
+            upsNegotiated = o.ups_negotiated == null ? null : Boolean(o.ups_negotiated);
           } else if (upsTokenErr) {
             note = upsTokenErr;
           } else {
@@ -1626,8 +1631,9 @@ Deno.serve(async (req: Request) => {
               if (r.ok) {
                 cost = r.cost!;
                 currency = r.currency || currency;
+                upsNegotiated = r.negotiated == null ? null : Boolean(r.negotiated);
                 await adminClient.from('ecommerce_orders')
-                  .update({ ups_cost: cost, carrier_cost: cost, carrier_cost_source: 'ups_quote', detected_carrier: 'ups' }).eq('id', o.id as string);
+                  .update({ ups_cost: cost, carrier_cost: cost, carrier_cost_source: 'ups_quote', detected_carrier: 'ups', ups_negotiated: upsNegotiated }).eq('id', o.id as string);
               } else {
                 note = r.error || 'UPS rate failed';
               }
@@ -1650,6 +1656,7 @@ Deno.serve(async (req: Request) => {
           customer_paid:  customerPaid,
           cost,
           cost_source:    source,
+          ups_negotiated: source === 'ups_quote' ? upsNegotiated : null,
           note,
         });
       }
