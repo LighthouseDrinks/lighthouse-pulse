@@ -64916,6 +64916,13 @@ if (typeof _origOpenDD === 'function') {
 
   var _shipCarrierLabel = { dpd: 'DPD', ups: 'UPS', anpost: 'An Post', unmatched: 'Unmatched' };
   var _shipSourceLabel = { fulfild: 'Fulfild', ups_quote: 'UPS quote', dpd_flat: 'DPD flat' };
+  // Plain-text source label with the UPS negotiated/list qualifier (for CSV / print).
+  function _shipSourceText(r) {
+    var base = _shipSourceLabel[r.cost_source] || '';
+    if (r.cost_source === 'ups_quote' && r.ups_negotiated === true) return base + ' - negotiated';
+    if (r.cost_source === 'ups_quote' && r.ups_negotiated === false) return base + ' - list';
+    return base;
+  }
 
   window.ecomShipRunReport = async function() {
     var clientId = (document.getElementById('ecomsh-client') || {}).value;
@@ -64961,9 +64968,16 @@ if (typeof _origOpenDD === 'function') {
       var method = r.shipping_method || '';
       if (r.service && r.service !== method) method = method ? (method + ' · ' + r.service) : r.service;
       var srcLabel = _shipSourceLabel[r.cost_source] || '';
-      var srcCell = srcLabel
-        ? '<span style="font-size:11px;color:var(--muted);border:1px solid var(--navy-border);border-radius:4px;padding:2px 6px;">' + _esc(srcLabel) + '</span>'
-        : '<span style="color:var(--muted);">—</span>';
+      var srcCell;
+      if (!srcLabel) {
+        srcCell = '<span style="color:var(--muted);">—</span>';
+      } else if (r.cost_source === 'ups_quote' && r.ups_negotiated === false) {
+        srcCell = '<span style="font-size:11px;color:var(--amber,#e89c3a);border:1px solid var(--amber,#e89c3a);border-radius:4px;padding:2px 6px;" title="UPS returned published/list rates for this lane — your negotiated discount was not applied.">' + _esc(srcLabel) + ' · list</span>';
+      } else if (r.cost_source === 'ups_quote' && r.ups_negotiated === true) {
+        srcCell = '<span style="font-size:11px;color:var(--muted);border:1px solid var(--navy-border);border-radius:4px;padding:2px 6px;" title="Account-negotiated UPS rate (discount applied).">' + _esc(srcLabel) + ' · negotiated</span>';
+      } else {
+        srcCell = '<span style="font-size:11px;color:var(--muted);border:1px solid var(--navy-border);border-radius:4px;padding:2px 6px;">' + _esc(srcLabel) + '</span>';
+      }
       h.push('<tr>'
         + '<td class="strong">' + _esc(r.order_number || '') + '</td>'
         + '<td>' + (r.ordered_at ? new Date(r.ordered_at).toLocaleDateString('en-IE') : '') + '</td>'
@@ -64992,6 +65006,7 @@ if (typeof _origOpenDD === 'function') {
     var missing = rows.filter(function(r) { return r.cost == null; }).length;
     if (missing) h.push('<div style="color:var(--amber,#e89c3a);font-size:11px;margin-top:8px;">' + missing + ' order(s) have no cost — hover the "n/a" cell for the reason (e.g. DPD rate unset, missing destination on the order, or a UPS rating error).</div>');
     if (rows.some(function(r) { return r.cost_source === 'fulfild'; })) h.push('<div style="color:var(--muted);font-size:11px;margin-top:6px;">Fulfild figures are the actual cost at label booking (not a reconciled carrier invoice).</div>');
+    if (rows.some(function(r) { return r.cost_source === 'ups_quote' && r.ups_negotiated === false; })) h.push('<div style="color:var(--amber,#e89c3a);font-size:11px;margin-top:6px;">"UPS quote · list" means UPS returned published rates for that lane (no negotiated discount applied). Re-run with "Refresh UPS rates" after the UPS account is fixed.</div>');
 
     out.innerHTML = h.join('');
   }
@@ -65006,7 +65021,7 @@ if (typeof _origOpenDD === 'function') {
         r.order_number, (r.ordered_at ? new Date(r.ordered_at).toISOString().slice(0, 10) : ''),
         r.customer_name, (r.destination || ''), (_shipCarrierLabel[r.carrier] || r.carrier), r.shipping_method, (r.service || ''),
         (r.customer_paid != null ? Number(r.customer_paid).toFixed(2) : ''),
-        (r.cost != null ? Number(r.cost).toFixed(2) : ''), (_shipSourceLabel[r.cost_source] || ''), (r.note || '')
+        (r.cost != null ? Number(r.cost).toFixed(2) : ''), _shipSourceText(r), (r.note || '')
       ].map(esc).join(','));
     });
     var blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
@@ -65034,7 +65049,7 @@ if (typeof _origOpenDD === 'function') {
         + '<td>' + _esc(_shipCarrierLabel[r.carrier] || r.carrier || '') + '</td>'
         + '<td>' + _esc(method) + '</td>'
         + '<td class="r">' + (r.cost != null ? _eur(r.cost) : 'n/a') + '</td>'
-        + '<td>' + _esc(_shipSourceLabel[r.cost_source] || '') + '</td></tr>';
+        + '<td>' + _esc(_shipSourceText(r)) + '</td></tr>';
     }).join('');
     var totals = rep.totals || {};
     var totalsHtml = Object.keys(totals).map(function(k) {
