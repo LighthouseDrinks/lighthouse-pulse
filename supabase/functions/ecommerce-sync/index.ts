@@ -112,12 +112,50 @@ async function refreshXeroIfNeeded(
 }
 
 // ── UPS helpers (Rating API with negotiated rates) ────────────────────────────
-// Credentials are edge-function env secrets (UPS_CLIENT_ID / UPS_CLIENT_SECRET).
-// Non-secret config (account number, origin address, service code) is read from
-// app_settings.shipping_config. UPS_BASE defaults to production; point it at the
-// UPS CIE test host to dry-run.
+// Fully automatic: nothing UPS-related is configured in the UI. Client ID/Secret
+// are edge-function env secrets (UPS_CLIENT_ID / UPS_CLIENT_SECRET); the account
+// number and warehouse origin are hard-coded below. UPS_BASE defaults to
+// production; point it at the UPS CIE test host to dry-run.
 const UPS_BASE = Deno.env.get('UPS_BASE') || 'https://onlinetools.ups.com';
 const UPS_RATE_VERSION = Deno.env.get('UPS_RATE_VERSION') || 'v2409';
+
+// Lighthouse warehouse ship-from (origin). Same for every order, so it's baked in
+// rather than entered by a user. Account can be overridden via env if it changes.
+const UPS_ACCOUNT = Deno.env.get('UPS_ACCOUNT') || '7X933W';
+const UPS_DEFAULT_SERVICE = '11';   // UPS Standard — fallback when the order's service is unknown
+const UPS_DEFAULT_WEIGHT_KG = 1;    // fallback when the order carries no weight
+const UPS_ORIGIN = {
+  name:     'Lighthouse Drinks',
+  address1: 'Unit 3/4 Cork Bonded Warehouses',
+  address2: 'Little Island',
+  city:     'Cork',
+  postal:   'T45YF43',
+  country:  'IE',
+  state:    '',
+};
+
+// Maps a store shipping-method title/code to a UPS service code (mirrors what the
+// real label uses). First match wins; falls back to Standard.
+const UPS_SERVICE_MAP: Array<{ re: RegExp; code: string }> = [
+  { re: /worldwide\s*express\s*plus/i,                 code: '54' },
+  { re: /(worldwide\s*express\s*saver|express\s*saver)/i, code: '65' },
+  { re: /worldwide\s*express/i,                        code: '07' },
+  { re: /(worldwide\s*expedited|expedited)/i,          code: '08' },
+  { re: /access\s*point/i,                             code: '70' },
+  { re: /next\s*day\s*air\s*saver/i,                   code: '13' },
+  { re: /next\s*day\s*air\s*early/i,                   code: '14' },
+  { re: /next\s*day\s*air/i,                           code: '01' },
+  { re: /(2nd\s*day\s*air|second\s*day)/i,             code: '02' },
+  { re: /3\s*day\s*select/i,                           code: '12' },
+  { re: /standard/i,                                   code: '11' },
+  { re: /ground/i,                                     code: '03' },
+  { re: /\bups\b/i,                                    code: '11' }, // generic "UPS" -> Standard
+];
+function resolveUpsServiceCode(title: string): string {
+  const t = title || '';
+  for (const m of UPS_SERVICE_MAP) if (m.re.test(t)) return m.code;
+  return UPS_DEFAULT_SERVICE;
+}
 
 async function getUpsToken(): Promise<{ ok: boolean; token?: string; error?: string }> {
   const id     = Deno.env.get('UPS_CLIENT_ID');
@@ -135,34 +173,50 @@ async function getUpsToken(): Promise<{ ok: boolean; token?: string; error?: str
   return { ok: true, token: data.access_token as string };
 }
 
-interface UpsAddress { city?: string | null; postal?: string | null; country?: string | null; state?: string | null }
-interface UpsConfig { account_number?: string; service_code?: string; origin?: UpsAddress }
+interface UpsAddress {
+  name?: string | null; company?: string | null;
+  address1?: string | null; address2?: string | null;
+  city?: string | null; postal?: string | null; country?: string | null; state?: string | null;
+  residential?: boolean | null;
+}
 
-// Rates a single shipment. Returns the account-negotiated total where available,
-// otherwise the published total.
+// Rates a single shipment using the hard-coded Lighthouse origin, the order's full
+// destination, weight and (per-order) service — mirroring the real label inputs.
+// Returns the account-negotiated total where available, otherwise the published total.
 async function upsRate(
   token: string,
-  cfg: UpsConfig,
   dest: UpsAddress,
   weightKg: number,
+  serviceCode: string,
 ): Promise<{ ok: boolean; cost?: number; currency?: string; error?: string }> {
-  const origin   = cfg.origin || {};
-  const service  = String(cfg.service_code || '11');
-  const account  = String(cfg.account_number || '');
-  const addr = (a: UpsAddress) => ({
-    City:               a.city    || '',
-    PostalCode:         a.postal  || '',
-    CountryCode:        (a.country || '').toUpperCase(),
-    StateProvinceCode:  a.state   || '',
-  });
+  const destAddr = () => {
+    const lines = [dest.address1, dest.address2].filter(Boolean) as string[];
+    const out: Record<string, unknown> = {
+      City:              dest.city  || '',
+      PostalCode:        (dest.postal || '').replace(/\s+/g, ''),
+      CountryCode:       (dest.country || '').toUpperCase(),
+      StateProvinceCode: dest.state || '',
+    };
+    if (lines.length) out.AddressLine = lines;
+    // UPS treats presence of this (empty) node as "residential", which affects price.
+    if (dest.residential) out.ResidentialAddressIndicator = '';
+    return out;
+  };
+  const shipperAddr = {
+    AddressLine:       [UPS_ORIGIN.address1, UPS_ORIGIN.address2],
+    City:              UPS_ORIGIN.city,
+    PostalCode:        UPS_ORIGIN.postal.replace(/\s+/g, ''),
+    CountryCode:       UPS_ORIGIN.country,
+    StateProvinceCode: UPS_ORIGIN.state,
+  };
   const payload = {
     RateRequest: {
       Request: { TransactionReference: { CustomerContext: 'lighthouse-pulse shipping report' } },
       Shipment: {
-        Shipper:  { Name: 'Lighthouse', ShipperNumber: account, Address: addr(origin) },
-        ShipFrom: { Name: 'Lighthouse', Address: addr(origin) },
-        ShipTo:   { Name: 'Customer',   Address: addr(dest) },
-        Service:  { Code: service },
+        Shipper:  { Name: UPS_ORIGIN.name, ShipperNumber: UPS_ACCOUNT, Address: shipperAddr },
+        ShipFrom: { Name: UPS_ORIGIN.name, Address: shipperAddr },
+        ShipTo:   { Name: dest.name || 'Customer', Address: destAddr() },
+        Service:  { Code: serviceCode || UPS_DEFAULT_SERVICE },
         Package: {
           PackagingType: { Code: '02' },
           PackageWeight: { UnitOfMeasurement: { Code: 'KGS' }, Weight: String(weightKg) },
@@ -203,24 +257,46 @@ function nextDayYmd(ymd: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-// ── Shipping destination + weight extraction (for UPS rating) ─────────────────
+// ── Shipping destination + weight + service extraction (for UPS rating) ───────
+// Captures the same inputs UPS uses to price a label so the quote is accurate.
 function shopifyShippingFields(o: Record<string, unknown>) {
-  const sa = (o.shipping_address ?? {}) as Record<string, unknown>;
+  const sa    = (o.shipping_address ?? {}) as Record<string, unknown>;
+  const lines = (o.shipping_lines ?? []) as Array<Record<string, unknown>>;
+  const svcTitle = (lines[0]?.title as string) || (lines[0]?.code as string) || '';
+  const company  = (sa.company as string) || null;
   return {
-    ship_country:       (sa.country_code as string) ?? null,
-    ship_postal:        (sa.zip as string) ?? null,
+    ship_name:          (sa.name as string) ?? null,
+    ship_company:       company,
+    ship_address1:      (sa.address1 as string) ?? null,
+    ship_address2:      (sa.address2 as string) ?? null,
     ship_city:          (sa.city as string) ?? null,
     ship_state:         (sa.province_code as string) ?? null,
+    ship_postal:        (sa.zip as string) ?? null,
+    ship_country:       (sa.country_code as string) ?? null,
+    ship_residential:   !company,
+    ship_service_name:  svcTitle || null,
+    ship_service_code:  svcTitle ? resolveUpsServiceCode(svcTitle) : null,
     total_weight_grams: o.total_weight != null ? Number(o.total_weight) : null,
   };
 }
 function wooShippingFields(o: Record<string, unknown>) {
-  const sh = (o.shipping ?? {}) as Record<string, unknown>;
+  const sh    = (o.shipping ?? {}) as Record<string, unknown>;
+  const lines = (o.shipping_lines ?? []) as Array<Record<string, unknown>>;
+  const svcTitle = (lines[0]?.method_title as string) || '';
+  const company  = (sh.company as string) || null;
+  const name     = [sh.first_name, sh.last_name].filter(Boolean).join(' ') || null;
   return {
-    ship_country:       (sh.country as string) ?? null,
-    ship_postal:        (sh.postcode as string) ?? null,
+    ship_name:          name,
+    ship_company:       company,
+    ship_address1:      (sh.address_1 as string) ?? null,
+    ship_address2:      (sh.address_2 as string) ?? null,
     ship_city:          (sh.city as string) ?? null,
     ship_state:         (sh.state as string) ?? null,
+    ship_postal:        (sh.postcode as string) ?? null,
+    ship_country:       (sh.country as string) ?? null,
+    ship_residential:   !company,
+    ship_service_name:  svcTitle || null,
+    ship_service_code:  svcTitle ? resolveUpsServiceCode(svcTitle) : null,
     total_weight_grams: null, // Woo orders don't expose an aggregate weight
   };
 }
@@ -1238,8 +1314,6 @@ Deno.serve(async (req: Request) => {
       } catch { cfg = {}; }
       const dpdRate = cfg.dpd_ie_flat_rate != null ? Number(cfg.dpd_ie_flat_rate) : null;
       const rules   = Array.isArray(cfg.carrier_rules) ? cfg.carrier_rules as Array<{ keyword?: string; carrier?: string }> : [];
-      const ups     = (cfg.ups || {}) as UpsConfig & { default_weight_kg?: number };
-      const defaultWeightKg = Number(ups.default_weight_kg || 1) || 1;
 
       // Stores for this client
       const { data: stores } = await adminClient
@@ -1252,7 +1326,7 @@ Deno.serve(async (req: Request) => {
       // Orders in range
       const { data: ordersData } = await adminClient
         .from('ecommerce_orders')
-        .select('id, order_number, customer_name, ordered_at, currency, ship_country, ship_postal, ship_city, ship_state, total_weight_grams, ups_cost')
+        .select('id, order_number, customer_name, ordered_at, currency, ship_name, ship_company, ship_address1, ship_address2, ship_country, ship_postal, ship_city, ship_state, ship_residential, ship_service_code, ship_service_name, total_weight_grams, ups_cost')
         .in('store_id', storeIds)
         .gte('ordered_at', `${start}T00:00:00Z`)
         .lt('ordered_at',  `${nextDayYmd(end)}T00:00:00Z`)
@@ -1321,12 +1395,16 @@ Deno.serve(async (req: Request) => {
               note = 'No destination address on order (re-sync store to backfill)';
             } else {
               const grams = o.total_weight_grams != null ? Number(o.total_weight_grams) : 0;
-              const wKg = grams > 0 ? Math.round((grams / 1000) * 100) / 100 : defaultWeightKg;
-              const r = await upsRate(
-                upsToken!, ups,
-                { country: o.ship_country as string, postal: o.ship_postal as string, city: o.ship_city as string, state: o.ship_state as string },
-                Math.max(0.1, wKg),
-              );
+              const wKg = grams > 0 ? Math.round((grams / 1000) * 100) / 100 : UPS_DEFAULT_WEIGHT_KG;
+              const dest: UpsAddress = {
+                name: o.ship_name as string, company: o.ship_company as string,
+                address1: o.ship_address1 as string, address2: o.ship_address2 as string,
+                city: o.ship_city as string, state: o.ship_state as string,
+                postal: o.ship_postal as string, country: o.ship_country as string,
+                residential: o.ship_residential as boolean,
+              };
+              const svcCode = (o.ship_service_code as string) || UPS_DEFAULT_SERVICE;
+              const r = await upsRate(upsToken!, dest, Math.max(0.1, wKg), svcCode);
               if (r.ok) {
                 cost = r.cost!;
                 currency = r.currency || currency;
@@ -1349,6 +1427,8 @@ Deno.serve(async (req: Request) => {
           customer_name:  o.customer_name,
           carrier,
           shipping_method: title,
+          service:        (o.ship_service_name as string) || null,
+          destination:    [o.ship_city, o.ship_country].filter(Boolean).join(', ') || null,
           customer_paid:  customerPaid,
           cost,
           note,
