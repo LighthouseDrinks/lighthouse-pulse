@@ -1574,6 +1574,11 @@ Deno.serve(async (req: Request) => {
         // For UPS quotes: whether the rate returned was account-negotiated
         // (discount applied) or UPS published/list. null = not a UPS quote / unknown.
         let upsNegotiated: boolean | null = null;
+        // For UPS quotes: the weight used and where it came from — Fulfild's real
+        // booked label weight ('fulfild'), the WooCommerce snapshot ('store'), or
+        // the default ('default'). null = not a fresh UPS quote.
+        let upsWeightKg: number | null = null;
+        let upsWeightSource: string | null = null;
 
         // Fulfild is authoritative for *which* carrier/service was actually
         // used to book the label — trust it over title-keyword matching.
@@ -1617,8 +1622,15 @@ Deno.serve(async (req: Request) => {
             } else if (!o.ship_country) {
               note = 'No destination address on order (re-sync store to backfill)';
             } else {
+              // Prefer the real booked parcel weight from Fulfild; fall back to the
+              // WooCommerce snapshot, then the default. Woo product-weight edits no
+              // longer need to propagate to already-shipped orders.
+              const fKg   = fRow && fRow.weight_kg != null && Number(fRow.weight_kg) > 0 ? Number(fRow.weight_kg) : null;
               const grams = o.total_weight_grams != null ? Number(o.total_weight_grams) : 0;
-              const wKg = grams > 0 ? Math.round((grams / 1000) * 100) / 100 : UPS_DEFAULT_WEIGHT_KG;
+              const wKg   = fKg != null ? fKg
+                          : (grams > 0 ? Math.round((grams / 1000) * 100) / 100 : UPS_DEFAULT_WEIGHT_KG);
+              upsWeightKg     = Math.round(Math.max(0.1, wKg) * 100) / 100;
+              upsWeightSource = fKg != null ? 'fulfild' : (grams > 0 ? 'store' : 'default');
               const dest: UpsAddress = {
                 name: o.ship_name as string, company: o.ship_company as string,
                 address1: o.ship_address1 as string, address2: o.ship_address2 as string,
@@ -1657,6 +1669,8 @@ Deno.serve(async (req: Request) => {
           cost,
           cost_source:    source,
           ups_negotiated: source === 'ups_quote' ? upsNegotiated : null,
+          weight_kg:      source === 'ups_quote' ? upsWeightKg : null,
+          weight_source:  source === 'ups_quote' ? upsWeightSource : null,
           note,
         });
       }
