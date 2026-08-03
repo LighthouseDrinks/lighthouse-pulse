@@ -1571,12 +1571,23 @@ Deno.serve(async (req: Request) => {
         let source: string | null = null;
         let service: string | null = (o.ship_service_name as string) || null;
 
-        if (fRow && fRow.cost != null) {
-          // Actual booked cost from Fulfild — authoritative for any carrier.
-          carrier = normalizeCarrier(fRow.carrier) !== 'unmatched' ? normalizeCarrier(fRow.carrier) : carrier;
+        // Fulfild is authoritative for *which* carrier/service was actually
+        // used to book the label — trust it over title-keyword matching.
+        if (fRow) {
+          const fc = normalizeCarrier(fRow.carrier);
+          if (fc && fc !== 'unmatched') carrier = fc;
+          if (fRow.service) service = fRow.service;
+        }
+
+        // Fulfild's persisted cost (Shiptheory booking rate) is only meaningful
+        // when it's a priced (> 0) booked rate. In the current setup it resolves
+        // from the unpriced service catalogue (0.00) and does NOT reflect our
+        // negotiated UPS discount, so treat 0/null as "not priced" and fall back
+        // to the DPD flat rate / live negotiated UPS quote instead.
+        if (fRow && fRow.cost != null && fRow.cost > 0) {
+          // Actual priced booked cost from Fulfild — authoritative for any carrier.
           cost = fRow.cost;
           currency = fRow.currency || currency;
-          if (fRow.service) service = fRow.service;
           source = 'fulfild';
           await adminClient.from('ecommerce_orders')
             .update({ carrier_cost: cost, carrier_cost_source: 'fulfild', detected_carrier: carrier }).eq('id', o.id as string);
