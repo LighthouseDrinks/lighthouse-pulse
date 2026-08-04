@@ -64500,7 +64500,7 @@ if (typeof _origOpenDD === 'function') {
       var ids = _ecomStores.map(function(s) { return s.id; });
       var endNext = _addDayYmd(end);
       var items = await window.db.select('ecommerce_order_items',
-        '?select=sku,product_name,quantity,net_sales,line_total,ord:ecommerce_orders!inner(store_id,ordered_at)'
+        '?select=sku,product_name,quantity,net_sales,line_total,gross_ex_vat,discount_ex_vat,ord:ecommerce_orders!inner(store_id,ordered_at)'
         + '&item_type=eq.product'
         + '&ord.store_id=in.(' + ids.join(',') + ')'
         + '&ord.ordered_at=gte.' + encodeURIComponent(start + 'T00:00:00Z')
@@ -64509,14 +64509,42 @@ if (typeof _origOpenDD === 'function') {
       var map = {};
       items.forEach(function(it) {
         var key = it.sku ? ('sku:' + it.sku) : ('name:' + (it.product_name || '').toLowerCase());
-        if (!map[key]) map[key] = { sku: it.sku || null, product_name: it.product_name || 'Unknown', units: 0, net: 0 };
-        map[key].units += Number(it.quantity || 0);
-        map[key].net   += (it.net_sales != null ? Number(it.net_sales) : Number(it.line_total || 0));
+        if (!map[key]) map[key] = { sku: it.sku || null, product_name: it.product_name || 'Unknown', units: 0, net: 0, gross: 0, discount: 0 };
+        var net = (it.net_sales != null ? Number(it.net_sales) : Number(it.line_total || 0));
+        var disc = it.discount_ex_vat != null ? Number(it.discount_ex_vat) : 0;
+        var gross = it.gross_ex_vat != null ? Number(it.gross_ex_vat) : (net + disc);
+        map[key].units    += Number(it.quantity || 0);
+        map[key].net      += net;
+        map[key].gross    += gross;
+        map[key].discount += disc;
       });
       var rows = Object.keys(map).map(function(k) { return map[k]; }).sort(function(a, b) { return b.net - a.net; });
       var totalNet = rows.reduce(function(s, r) { return s + r.net; }, 0);
+      var totalGross = rows.reduce(function(s, r) { return s + r.gross; }, 0);
+      var totalDiscount = rows.reduce(function(s, r) { return s + r.discount; }, 0);
       var totalUnits = rows.reduce(function(s, r) { return s + r.units; }, 0);
-      _ecomReport = { start: start, end: end, rows: rows, totalNet: totalNet, totalUnits: totalUnits };
+
+      // Coupon/promo breakdown from the order-level discounts jsonb.
+      var coupons = {};
+      try {
+        var ordRows = await window.db.select('ecommerce_orders',
+          '?select=id,discounts'
+          + '&store_id=in.(' + ids.join(',') + ')'
+          + '&ordered_at=gte.' + encodeURIComponent(start + 'T00:00:00Z')
+          + '&ordered_at=lt.'  + encodeURIComponent(endNext + 'T00:00:00Z')
+          + '&discounts=not.is.null&limit=100000') || [];
+        ordRows.forEach(function(o) {
+          (o.discounts || []).forEach(function(d) {
+            var code = (d.code || 'discount');
+            if (!coupons[code]) coupons[code] = { code: code, type: d.type || '', uses: 0, amount: 0 };
+            coupons[code].uses   += 1;
+            coupons[code].amount += Number(d.amount_ex_vat || 0);
+          });
+        });
+      } catch (ce) { /* coupon detail is best-effort; ignore if unavailable */ }
+      var couponRows = Object.keys(coupons).map(function(k) { return coupons[k]; }).sort(function(a, b) { return b.amount - a.amount; });
+
+      _ecomReport = { start: start, end: end, rows: rows, totalNet: totalNet, totalGross: totalGross, totalDiscount: totalDiscount, totalUnits: totalUnits, coupons: couponRows };
       _renderReport();
     } catch (e) {
       if (out) out.innerHTML = '<div style="color:var(--red);font-size:12px;">Report failed: ' + _esc(e.message || String(e)) + '</div>';
@@ -64533,9 +64561,12 @@ if (typeof _origOpenDD === 'function') {
     var h = [];
     h.push('<div style="color:var(--muted);font-size:11px;margin-bottom:10px;">' + _esc(rep.start) + ' → ' + _esc(rep.end)
       + ' · ' + rep.rows.length + ' SKUs · ' + rep.totalUnits + ' units · Total net ex-VAT ' + _eur(rep.totalNet) + '</div>');
+    var hasDiscount = rep.totalDiscount > 0.005;
     h.push('<div style="overflow-x:auto;"><table class="data-table"><thead><tr>'
       + '<th>SKU</th><th>Product</th><th style="text-align:right;">Units</th>'
-      + '<th style="text-align:right;">Ex-VAT unit price</th><th style="text-align:right;">Net (ex-VAT)</th>');
+      + '<th style="text-align:right;">Ex-VAT unit price</th>'
+      + (hasDiscount ? '<th style="text-align:right;">Gross (ex-VAT)</th><th style="text-align:right;">Discount</th>' : '')
+      + '<th style="text-align:right;">Net (ex-VAT)</th>');
     if (method === 'purchase_price') {
       h.push('<th style="text-align:right;">Our DP price</th>');
       if (underBond) h.push('<th style="text-align:right;">Excise/unit</th><th style="text-align:right;">PO unit (ex-duty)</th>');
@@ -64551,6 +64582,8 @@ if (typeof _origOpenDD === 'function') {
         + '<td>' + _esc(r.product_name) + '</td>'
         + '<td style="text-align:right;">' + r.units + '</td>'
         + '<td style="text-align:right;">' + _eur(unit) + '</td>'
+        + (hasDiscount ? '<td style="text-align:right;">' + _eur(r.gross) + '</td>'
+            + '<td style="text-align:right;color:' + (r.discount > 0.005 ? 'var(--amber,#e89c3a)' : 'var(--muted)') + ';">' + (r.discount > 0.005 ? '−' + _eur(r.discount) : '—') + '</td>' : '')
         + '<td style="text-align:right;">' + _eur(r.net) + '</td>');
       if (method === 'purchase_price') {
         var pp = _purchasePriceFor(r);
@@ -64569,7 +64602,7 @@ if (typeof _origOpenDD === 'function') {
       h.push('</tr>');
     });
     if (method === 'discount') poTotal = rep.totalNet * (1 - pct / 100);
-    var colspan = underBond ? 8 : (method === 'purchase_price' ? 6 : 4);
+    var colspan = (underBond ? 8 : (method === 'purchase_price' ? 6 : 4)) + (hasDiscount ? 2 : 0);
     h.push('<tr style="border-top:2px solid var(--navy-border);font-weight:700;">'
       + '<td colspan="' + colspan + '" style="text-align:right;">PO total'
       + (method === 'discount' ? ' (net − ' + pct + '%)' : (underBond ? ' (under bond, ex-duty)' : '')) + '</td>'
@@ -64584,7 +64617,12 @@ if (typeof _origOpenDD === 'function') {
       return '<div><div style="font-size:11px;color:var(--muted);margin-bottom:3px;">' + label + '</div>'
         + '<div style="font-size:18px;font-weight:700;color:' + (colour || 'var(--white)') + ';">' + value + '</div></div>';
     };
-    var statsHtml = _stat('Sales (ex-VAT, ex-shipping)', _eur(rep.totalNet))
+    var statsHtml = '';
+    if (hasDiscount) {
+      statsHtml += _stat('Gross (ex-VAT, ex-shipping)', _eur(rep.totalGross))
+        + _stat('Discount', '−' + _eur(rep.totalDiscount), 'var(--amber,#e89c3a)');
+    }
+    statsHtml += _stat('Sales (net, ex-VAT, ex-shipping)', _eur(rep.totalNet))
       + _stat('PO total' + (underBond ? ' (ex-duty)' : ''), _eur(poTotal));
     if (underBond) statsHtml += _stat('Excise duty', _eur(totalExcise), 'var(--amber,#e89c3a)');
     statsHtml += _stat(grossProfit >= 0 ? 'Gross profit' + (underBond ? ' (after excise)' : '') : 'Gross loss',
@@ -64593,6 +64631,25 @@ if (typeof _origOpenDD === 'function') {
     h.push('<div style="margin-top:14px;display:flex;gap:32px;flex-wrap:wrap;'
       + 'background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;padding:14px 18px;">'
       + statsHtml + '</div>');
+
+    // Discounts / coupons breakdown (order-level codes), when any exist.
+    if (rep.coupons && rep.coupons.length) {
+      var ch = ['<div style="margin-top:12px;background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:6px;padding:12px 16px;">'
+        + '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Discounts / coupons</div>'
+        + '<table class="data-table" style="margin:0;"><thead><tr><th>Code</th><th>Type</th>'
+        + '<th style="text-align:right;">Uses</th><th style="text-align:right;">Amount (ex-VAT)</th></tr></thead><tbody>'];
+      var couponTotal = 0;
+      rep.coupons.forEach(function(c) {
+        couponTotal += c.amount;
+        ch.push('<tr><td>' + _esc(c.code) + '</td><td style="color:var(--muted);">' + _esc(c.type || '—') + '</td>'
+          + '<td style="text-align:right;">' + c.uses + '</td>'
+          + '<td style="text-align:right;color:var(--amber,#e89c3a);">−' + _eur(c.amount) + '</td></tr>');
+      });
+      ch.push('<tr style="border-top:2px solid var(--navy-border);font-weight:700;"><td colspan="3" style="text-align:right;">Total coupon discount</td>'
+        + '<td style="text-align:right;color:var(--amber,#e89c3a);">−' + _eur(couponTotal) + '</td></tr>');
+      ch.push('</tbody></table></div>');
+      h.push(ch.join(''));
+    }
 
     // Guard: under bond needs excise (volume & ABV) for every sold SKU
     var missingExcise = underBond ? rep.rows.filter(function(r) { return _exciseForRow(r) == null; }).length : 0;
