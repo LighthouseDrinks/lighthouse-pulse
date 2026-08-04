@@ -474,12 +474,18 @@ function shopifyItemsForOrder(o: Record<string, unknown>) {
     for (const d of ((li.discount_allocations ?? []) as Array<Record<string, unknown>>)) {
       discount += Number(d.amount ?? 0);
     }
-    const lineTotal = (qty * price) - discount;
+    const grossRaw = qty * price;             // pre-discount, store's tax mode
+    const lineTotal = grossRaw - discount;
     let taxAmount = 0;
     for (const t of ((li.tax_lines ?? []) as Array<Record<string, unknown>>)) {
       taxAmount += Number(t.price ?? 0);
     }
     const netSales = taxesIncluded ? (lineTotal - taxAmount) : lineTotal;
+    // Strip VAT from gross/discount using the same ex-VAT factor as net_sales so
+    // gross_ex_vat - discount_ex_vat === net_sales for tax-inclusive stores too.
+    const factor = taxesIncluded ? (lineTotal > 0 ? netSales / lineTotal : 1) : 1;
+    const grossExVat = grossRaw * factor;
+    const discountExVat = discount * factor;
     const isGiftCard = (li.product_type as string)?.toLowerCase() === 'gift cards' || li.gift_card === true;
     items.push({
       sku:          li.sku ?? null,
@@ -489,6 +495,8 @@ function shopifyItemsForOrder(o: Record<string, unknown>) {
       line_total:   lineTotal,
       tax_amount:   taxAmount,
       net_sales:    isGiftCard ? null : netSales,
+      gross_ex_vat: isGiftCard ? null : grossExVat,
+      discount_ex_vat: isGiftCard ? null : Math.max(0, discountExVat),
       item_type:    isGiftCard ? 'gift_card_issued' : 'product',
       xero_account_key: isGiftCard ? 'gift_cards' : 'ecommerce_sales',
     });
@@ -698,8 +706,10 @@ function wooItemsForOrder(o: Record<string, unknown>) {
   for (const li of ((o.line_items ?? []) as Array<Record<string, unknown>>)) {
     const qty   = Number(li.quantity ?? 1);
     // Woo line `total` is already net of discount and EXCLUSIVE of tax;
-    // `total_tax` is the VAT portion. So net_sales = total.
+    // `subtotal` is the pre-discount value (also ex-tax). So the ex-VAT discount
+    // is subtotal - total, and net_sales = total.
     const total = Number(li.total ?? 0);
+    const subtotal = li.subtotal != null ? Number(li.subtotal) : total;
     const taxAmount = Number(li.total_tax ?? 0);
     items.push({
       sku:          li.sku ?? null,
@@ -709,6 +719,8 @@ function wooItemsForOrder(o: Record<string, unknown>) {
       line_total:   total,
       tax_amount:   taxAmount,
       net_sales:    total,
+      gross_ex_vat: subtotal,
+      discount_ex_vat: Math.max(0, subtotal - total),
       item_type:    'product',
       xero_account_key: 'ecommerce_sales',
     });
@@ -767,6 +779,56 @@ async function wooFetchProducts(storeUrl: string, key: string, secret: string) {
 }
 
 // ── Common: upsert orders + items into Pulse DB ───────────────────────────────
+// Itemised coupon/promo detail for an order: [{ code, type, amount_ex_vat }].
+// Shopify: discount_applications carry the code/title + type; the actual money is
+// in each line's discount_allocations (indexed back to the application). We sum
+// allocations per application and VAT-strip when the store prices tax-inclusive.
+function shopifyDiscounts(o: Record<string, unknown>): Array<Record<string, unknown>> {
+  const apps = (o.discount_applications ?? []) as Array<Record<string, unknown>>;
+  if (!apps.length) return [];
+  const taxesIncluded = o.taxes_included === true;
+  const amounts = new Array(apps.length).fill(0);
+  for (const li of ((o.line_items ?? []) as Array<Record<string, unknown>>)) {
+    for (const d of ((li.discount_allocations ?? []) as Array<Record<string, unknown>>)) {
+      const idx = Number(d.discount_application_index ?? -1);
+      if (idx >= 0 && idx < amounts.length) amounts[idx] += Number(d.amount ?? 0);
+    }
+  }
+  // Approximate ex-VAT stripping using the order's overall net ratio.
+  const subtotal = Number(o.subtotal_price ?? o.total_line_items_price ?? 0);
+  const totalTax = Number(o.total_tax ?? 0);
+  const factor = taxesIncluded && subtotal > 0 ? Math.max(0, (subtotal - totalTax) / subtotal) : 1;
+  const out: Array<Record<string, unknown>> = [];
+  apps.forEach(function (a, i) {
+    const amt = amounts[i] * factor;
+    if (amt > 0.005) {
+      out.push({
+        code: (a.code as string) || (a.title as string) || 'discount',
+        type: (a.value_type as string) || (a.type as string) || 'discount',
+        amount_ex_vat: Math.round(amt * 100) / 100,
+      });
+    }
+  });
+  return out;
+}
+
+// Woo: coupon_lines carry code + discount (ex-tax).
+function wooDiscounts(o: Record<string, unknown>): Array<Record<string, unknown>> {
+  const lines = (o.coupon_lines ?? []) as Array<Record<string, unknown>>;
+  const out: Array<Record<string, unknown>> = [];
+  for (const c of lines) {
+    const amt = Number(c.discount ?? 0);
+    if (amt > 0.005) {
+      out.push({
+        code: (c.code as string) || 'coupon',
+        type: 'coupon',
+        amount_ex_vat: Math.round(amt * 100) / 100,
+      });
+    }
+  }
+  return out;
+}
+
 function shopifyNormaliseOrder(storeId: string, o: Record<string, unknown>) {
   const customer = (o.customer ?? {}) as Record<string, unknown>;
   const gateways = (o.payment_gateway_names ?? []) as string[];
@@ -784,6 +846,7 @@ function shopifyNormaliseOrder(storeId: string, o: Record<string, unknown>) {
     payment_gateway: gateways[0] ?? null,
     payment_status:  (o.financial_status as string) ?? null,
     taxes_included:  o.taxes_included === true,
+    discounts:       shopifyDiscounts(o),
     ...shopifyShippingFields(o),
     raw_data:       { source: 'shopify', has_gift_card_payment: hasGiftCard, order_id: o.id },
   };
@@ -807,6 +870,7 @@ function wooNormaliseOrder(storeId: string, o: Record<string, unknown>, weightCt
     payment_gateway: (o.payment_method as string) ?? null,
     payment_status:  (o.status as string) ?? null,
     taxes_included:  o.prices_include_tax === true,
+    discounts:       wooDiscounts(o),
     ...shipFields,
     raw_data:        { source: 'woocommerce', has_gift_card_payment: false, order_id: o.id },
   };
