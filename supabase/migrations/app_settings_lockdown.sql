@@ -16,9 +16,9 @@
 -- Current keys at time of writing: credit_from_email, credit_from_name,
 -- ecom_stock_value, system (contains resend_key), xero_client_id,
 -- xero_client_secret. None are needed by client portal users; the portal
--- only ever attempts to read 'working_day_overrides' (absent today,
--- allow-listed for forward-compat). Adjust the allow-list if a genuinely
--- non-secret, client-needed key is added later.
+-- only ever attempts to read 'working_day_overrides' (and later
+-- 'production_windows' — see production_windows_setting.sql). Adjust the
+-- allow-list if a genuinely non-secret, client-needed key is added later.
 --
 -- Idempotent / safe to re-run.
 -- ============================================================

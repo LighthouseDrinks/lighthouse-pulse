@@ -349,7 +349,7 @@ Each role row has:
 
 The Settings → Roles & Permissions tab shows the role list (Role · Tier flags · Permissions N/25 · Users · Edit / Delete) and a read-only Permissions matrix audit grid. A role with users assigned cannot be deleted; system roles require typing the key as confirmation.
 
-Other Settings tabs: Users (with per-user Reset Password and Delete) · Geofence (lat/lng/radius for remote clock-in) · System · Roles & Permissions.
+Other Settings tabs: Users (with per-user Reset Password and Delete) · Geofence (lat/lng/radius for remote clock-in) · Production (editable line opening hours / production windows) · System · Roles & Permissions.
 
 The "{{STAFF_ROLES_BLOCK}}" list above is generated live from this table at every chat call, so it always reflects the current set of roles.
 

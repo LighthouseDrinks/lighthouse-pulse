@@ -584,12 +584,51 @@ const SUPA_KEY    = 'sb_publishable_i2EJHAkWd3CBNgM8kieVSA_erAhqBXs';
 const KIOSK_EMAIL = 'warehouse@lighthousedrinks.com';
 const KIOSK_PASS  = 'Lhouse2018*';
 
-const PROD_WINDOWS = [
+let PROD_WINDOWS = [
   [7*60,       10*60+30],
   [10*60+45,   13*60+30],
   [14*60,      15*60+45],
   [17*60,      21*60]
 ];
+const DEFAULT_PROD_WINDOWS = PROD_WINDOWS.map(w => w.slice());
+
+function applyProdWindows(windows) {
+  const list = (windows && windows.length) ? windows : DEFAULT_PROD_WINDOWS;
+  PROD_WINDOWS = list.map(w => [w[0], w[1]]);
+  PROD_WINDOWS.sort((a, b) => a[0] - b[0]);
+}
+
+function parseProdWindowsValue(raw) {
+  if (!raw) return null;
+  try {
+    const val = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const list = Array.isArray(val) ? val : (val && val.windows);
+    if (!Array.isArray(list) || !list.length) return null;
+    const out = [];
+    for (let i = 0; i < list.length; i++) {
+      const w = list[i];
+      if (!w || w.length < 2) return null;
+      const s = parseInt(w[0], 10), e = parseInt(w[1], 10);
+      if (isNaN(s) || isNaN(e) || s >= e || s < 0 || e > 24 * 60) return null;
+      out.push([s, e]);
+    }
+    out.sort((a, b) => a[0] - b[0]);
+    for (let j = 1; j < out.length; j++) {
+      if (out[j][0] < out[j - 1][1]) return null;
+    }
+    return out;
+  } catch (e) { return null; }
+}
+
+async function loadProdWindows() {
+  try {
+    const rows = await dbGet('app_settings?key=eq.production_windows&limit=1&select=value');
+    const parsed = rows && rows.length ? parseProdWindowsValue(rows[0].value) : null;
+    applyProdWindows(parsed || DEFAULT_PROD_WINDOWS);
+  } catch (e) {
+    applyProdWindows(DEFAULT_PROD_WINDOWS);
+  }
+}
 
 // ── Module state ──────────────────────────────────────────────
 let _sb           = null;
@@ -1058,6 +1097,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   document.documentElement.requestFullscreen().catch(() => {});
 
   await loadWorkOvr();
+  await loadProdWindows();
 
   // Load jobs
   const jobs = await dbGet(
@@ -1119,6 +1159,8 @@ document.addEventListener('DOMContentLoaded', async function () {
   _tick30s  = setInterval(pollLive, 30000);
   // Polling fallback — catches job state changes even if realtime drops
   setInterval(reloadJobs, 10000);
+  // Refresh production windows periodically so Settings changes reach the kiosk
+  setInterval(loadProdWindows, 5 * 60 * 1000);
 
   // Realtime — bottle counter (line 1)
   _rtLine = _sb.channel('pd_line_events_1')

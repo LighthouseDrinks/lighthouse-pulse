@@ -2387,6 +2387,7 @@ async function showDashboard(user) {
   if (window.loadRoles) { try { await window.loadRoles(); } catch(_) {} }
   // Reload system settings with authenticated token so Resend key is available
   if (window.loadSystemSettingsGlobal) window.loadSystemSettingsGlobal();
+  if (window.loadProductionWindows) window.loadProductionWindows();
   var screen  = document.getElementById('auth-screen');
   var portal  = document.getElementById('client-portal');
   var hdr     = document.querySelector('header');
@@ -6181,6 +6182,7 @@ window.copyInviteLink = function() {
     <div style="display:flex;border-bottom:1px solid var(--navy-border);padding:0 28px;">
       <button class="settings-tab active" data-stab="users" onclick="window.showSettingsTab('users',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid var(--gold);color:var(--gold);cursor:pointer;">Users</button>
       <button class="settings-tab" data-stab="geofence" onclick="window.showSettingsTab('geofence',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Geofence</button>
+      <button class="settings-tab" data-stab="production" onclick="window.showSettingsTab('production',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Production</button>
       <button class="settings-tab" data-stab="system" onclick="window.showSettingsTab('system',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">System</button>
       <button class="settings-tab" data-stab="roles" onclick="window.showSettingsTab('roles',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:12px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Roles &amp; Permissions</button>
     </div>
@@ -6234,6 +6236,22 @@ window.copyInviteLink = function() {
           </div>
           <div>
             <button onclick="window.saveGeofenceSettings()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save Geofence Settings</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Production tab — opening hours / line production windows -->
+      <div id="stab-production" class="settings-tab-panel" style="display:none;">
+        <div style="max-width:520px;">
+          <div style="font-size:13px;font-weight:700;color:var(--white);margin-bottom:6px;">Production hours</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.55;margin-bottom:16px;">
+            These windows drive the Schedule timer, pause gating, projected end times, Results job hours, and the plant display. Gaps between consecutive windows are treated as breaks. Weekends and bank holidays remain non-working unless overridden on the Schedule.
+          </div>
+          <div id="prod-windows-list" style="display:grid;gap:10px;margin-bottom:14px;"></div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <button type="button" onclick="window.addProductionWindowRow()" class="btn" style="font-size:11px;padding:8px 14px;background:transparent;border:1px solid var(--navy-border);color:var(--text);">+ Add window</button>
+            <button type="button" onclick="window.saveProductionWindowsSettings()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save Production Hours</button>
+            <span id="prod-save-status" style="font-size:12px;"></span>
           </div>
         </div>
       </div>
@@ -37914,13 +37932,12 @@ window.saveAdjModal = async function() {
     //   270 btls @ 6/case  -> 45     (no leftovers)
     var autoCase = window._calcCasesDecimal(j.actual_bottles_produced, bottlesPerCase);
     var actualCases = j.actual_cases || autoCase;
-    // Production schedule: Mon–Fri only, breaks excluded
-    // Periods as [startMin, endMin] from midnight
-    var _PROD_PERIODS = [
-      [7*60,       10*60+30],  // 07:00–10:30
-      [10*60+45,   13*60+30],  // 10:45–13:30
-      [14*60,      15*60+45],  // 14:00–15:45
-      [17*60,      21*60]      // 17:00–21:00
+    // Production schedule: Mon–Fri only, breaks excluded (from Settings → Production)
+    var _PROD_PERIODS = (window.getProductionWindows && window.getProductionWindows()) || [
+      [7*60,       10*60+30],
+      [10*60+45,   13*60+30],
+      [14*60,      15*60+45],
+      [17*60,      21*60]
     ];
     function calcProductionHours(startDt, endDt) {
       if (!startDt || !endDt || endDt <= startDt) return 0;
@@ -45608,20 +45625,75 @@ window.saveAdjModal = async function() {
   'use strict';
 
   // Production windows per day [start_minutes_from_midnight, end_minutes]
-  var PROD_WINDOWS = [
+  // Loaded from app_settings.production_windows; defaults match the legacy hardcoded schedule.
+  var DEFAULT_PROD_WINDOWS = [
     [7*60,       10*60+30],   // 07:00 – 10:30
     [10*60+45,   13*60+30],   // 10:45 – 13:30
     [14*60,      15*60+45],   // 14:00 – 15:45
     [17*60,      21*60]       // 17:00 – 21:00
   ];
-  var BREAK_BANDS = [
-    [10*60+30, 10*60+45],
-    [13*60+30, 14*60],
-    [15*60+45, 17*60]
-  ];
+  var PROD_WINDOWS = DEFAULT_PROD_WINDOWS.map(function(w) { return w.slice(); });
+  var BREAK_BANDS = [];
+  var DAY_START_MIN = 7 * 60;
+  var DAY_END_MIN   = 21 * 60;
 
-  var DAY_START_MIN      = 7 * 60;
-  var DAY_END_MIN        = 21 * 60;
+  function _deriveBreakBands(windows) {
+    var bands = [];
+    for (var i = 0; i < windows.length - 1; i++) {
+      if (windows[i][1] < windows[i + 1][0]) bands.push([windows[i][1], windows[i + 1][0]]);
+    }
+    return bands;
+  }
+  function applyProductionWindows(windows) {
+    var list = (windows && windows.length) ? windows : DEFAULT_PROD_WINDOWS;
+    PROD_WINDOWS = list.map(function(w) { return [w[0], w[1]]; });
+    PROD_WINDOWS.sort(function(a, b) { return a[0] - b[0]; });
+    BREAK_BANDS = _deriveBreakBands(PROD_WINDOWS);
+    DAY_START_MIN = PROD_WINDOWS[0][0];
+    DAY_END_MIN   = PROD_WINDOWS[PROD_WINDOWS.length - 1][1];
+  }
+  applyProductionWindows(DEFAULT_PROD_WINDOWS);
+
+  function _parseProductionWindowsValue(raw) {
+    if (!raw) return null;
+    var val = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    var list = Array.isArray(val) ? val : (val && val.windows);
+    if (!Array.isArray(list) || !list.length) return null;
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var w = list[i];
+      if (!w || w.length < 2) return null;
+      var s = parseInt(w[0], 10), e = parseInt(w[1], 10);
+      if (isNaN(s) || isNaN(e) || s >= e || s < 0 || e > 24 * 60) return null;
+      out.push([s, e]);
+    }
+    out.sort(function(a, b) { return a[0] - b[0]; });
+    for (var j = 1; j < out.length; j++) {
+      if (out[j][0] < out[j - 1][1]) return null;
+    }
+    return out;
+  }
+  async function loadProductionWindows() {
+    try {
+      var rows = await sbGet('app_settings?key=eq.production_windows&limit=1&select=value');
+      var parsed = rows && rows.length ? _parseProductionWindowsValue(rows[0].value) : null;
+      applyProductionWindows(parsed || DEFAULT_PROD_WINDOWS);
+    } catch (e) {
+      applyProductionWindows(DEFAULT_PROD_WINDOWS);
+    }
+  }
+  window.applyProductionWindows = applyProductionWindows;
+  window.loadProductionWindows = loadProductionWindows;
+  window.getProductionWindows = function() {
+    return PROD_WINDOWS.map(function(w) { return w.slice(); });
+  };
+  window.getDefaultProductionWindows = function() {
+    return DEFAULT_PROD_WINDOWS.map(function(w) { return w.slice(); });
+  };
+  window.getProductionDayBounds = function() {
+    return { start: DAY_START_MIN, end: DAY_END_MIN };
+  };
+
   var SETUP_MINS         = 0;
   var TEARDOWN_MINS      = 0;
   var DEFAULT_BPH        = 400;
@@ -45826,9 +45898,10 @@ window.saveAdjModal = async function() {
     var cur = new Date(startDt), remaining = durationMins;
     for (var safety = 0; safety < 500 && remaining > 0; safety++) {
       var dayStart = new Date(cur); dayStart.setHours(0, 0, 0, 0);
-      // If this day is a non-working day, jump straight to next working day at 07:00
+      // If this day is a non-working day, jump straight to next working day at day start
       if (_isNonWorkingDay(dayStart)) {
-        cur = new Date(dayStart); cur.setDate(dayStart.getDate() + 1); cur.setHours(7, 0, 0, 0);
+        cur = new Date(dayStart); cur.setDate(dayStart.getDate() + 1);
+        cur.setHours(Math.floor(DAY_START_MIN / 60), DAY_START_MIN % 60, 0, 0);
         while (_isNonWorkingDay(cur)) cur.setDate(cur.getDate() + 1);
         continue;
       }
@@ -45845,7 +45918,8 @@ window.saveAdjModal = async function() {
         }
       }
       if (!advanced) {
-        cur = new Date(dayStart); cur.setDate(dayStart.getDate() + 1); cur.setHours(7, 0, 0, 0);
+        cur = new Date(dayStart); cur.setDate(dayStart.getDate() + 1);
+        cur.setHours(Math.floor(DAY_START_MIN / 60), DAY_START_MIN % 60, 0, 0);
         while (_isNonWorkingDay(cur)) cur.setDate(cur.getDate() + 1);
       }
     }
@@ -45880,8 +45954,8 @@ window.saveAdjModal = async function() {
     clearInterval(_schedTimerInterval);
     _schedTimerInterval = null;
     try {
-      // Load working-day overrides and jobs in parallel
-      await loadWorkingOverrides();
+      // Load working-day overrides, production windows, and jobs
+      await Promise.all([loadWorkingOverrides(), loadProductionWindows()]);
       var jobs = await sbGet('jobs?stage=in.(new,active,complete)&select=id,product_name,client_id,bottle_target,job_target_type,liquid_litres,bom_id,scheduled_start,scheduled_end,schedule_notes,stage,job_bay,bay_assigned_at,bay_released_at,priority_band,schedule_slot,actual_start,actual_end,paused_at,total_paused_secs,changeover_start,date_commenced,date_completed,actual_bottles_produced,actual_job_hours,created_at,clients(name)&order=priority_band.asc,created_at.asc');
       var bomIds = [];
       jobs.forEach(function(j) { if (j.bom_id && bomIds.indexOf(j.bom_id) < 0) bomIds.push(j.bom_id); });
@@ -46007,7 +46081,7 @@ window.saveAdjModal = async function() {
   // scheduled_start values stay current without requiring the Schedule page to be open.
   window._refreshProjectedStarts = async function() {
     try {
-      await loadWorkingOverrides();
+      await Promise.all([loadWorkingOverrides(), loadProductionWindows()]);
       var jobs = await sbGet('jobs?stage=in.(new,active)&actual_start=is.null'
         + '&select=id,bottle_target,bom_id,priority_band,schedule_slot,changeover_start'
         + '&order=schedule_slot.asc.nullslast,created_at.asc');
@@ -47127,11 +47201,17 @@ window.saveAdjModal = async function() {
     function outsideShift(dt) {
       if (!dt) return false;
       var mins = dt.getHours() * 60 + dt.getMinutes();
-      return mins < 7 * 60 || mins > 21 * 60;
+      var bounds = (window.getProductionDayBounds && window.getProductionDayBounds()) || { start: 7 * 60, end: 21 * 60 };
+      return mins < bounds.start || mins > bounds.end;
     }
     if (outsideShift(startDt)) warnParts.push('start');
     if (outsideShift(endDt))   warnParts.push('end');
-    if (warnParts.length && !confirm('Warning: the ' + warnParts.join(' and ') + ' time(s) fall outside production hours (07:00–21:00). Save anyway?')) return;
+    var bounds = (window.getProductionDayBounds && window.getProductionDayBounds()) || { start: 7 * 60, end: 21 * 60 };
+    function _fmtBound(m) {
+      var h = Math.floor(m / 60), mm = m % 60;
+      return (h < 10 ? '0' : '') + h + ':' + (mm < 10 ? '0' : '') + mm;
+    }
+    if (warnParts.length && !confirm('Warning: the ' + warnParts.join(' and ') + ' time(s) fall outside production hours (' + _fmtBound(bounds.start) + '–' + _fmtBound(bounds.end) + '). Save anyway?')) return;
 
     var saveBtn = document.getElementById('_et_save');
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving\u2026'; }
@@ -52578,8 +52658,147 @@ window.saveAdjModal = async function() {
     if (btn) { btn.style.borderBottomColor='var(--gold)'; btn.style.color='var(--gold)'; }
     if (tab==='users') renderUsersList();
     if (tab==='geofence') loadGeofenceIntoSettings();
+    if (tab==='production') loadProductionIntoSettings();
     if (tab==='system') loadSystemSettings();
     if (tab==='roles') window.renderRolesList && window.renderRolesList();
+  };
+
+  // ── Settings → Production (opening hours) ────────────────────────────────────
+  function _minsToTimeInput(mins) {
+    var h = Math.floor(mins / 60), m = mins % 60;
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  }
+  function _timeInputToMins(val) {
+    if (!val || val.indexOf(':') < 0) return NaN;
+    var parts = val.split(':');
+    var h = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+    if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return NaN;
+    return h * 60 + m;
+  }
+  function _defaultProdWindows() {
+    return (window.getDefaultProductionWindows && window.getDefaultProductionWindows()) || [
+      [7*60, 10*60+30], [10*60+45, 13*60+30], [14*60, 15*60+45], [17*60, 21*60]
+    ];
+  }
+  function _renderProductionWindowRows(windows) {
+    var box = document.getElementById('prod-windows-list');
+    if (!box) return;
+    var rows = (windows && windows.length) ? windows : _defaultProdWindows();
+    var html = '';
+    rows.forEach(function(w, i) {
+      html += '<div class="prod-window-row" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
+        + '<span style="font-size:11px;color:var(--muted);width:70px;">Window ' + (i + 1) + '</span>'
+        + '<input type="time" class="prod-win-start" value="' + _minsToTimeInput(w[0]) + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;border-radius:4px;font-family:Lato,sans-serif;">'
+        + '<span style="font-size:12px;color:var(--muted);">to</span>'
+        + '<input type="time" class="prod-win-end" value="' + _minsToTimeInput(w[1]) + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;border-radius:4px;font-family:Lato,sans-serif;">'
+        + '<button type="button" onclick="window.removeProductionWindowRow(this)" title="Remove" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);width:32px;height:32px;border-radius:4px;cursor:pointer;font-size:14px;">&times;</button>'
+        + '</div>';
+    });
+    box.innerHTML = html;
+  }
+  async function loadProductionIntoSettings() {
+    var windows = _defaultProdWindows();
+    try {
+      if (window.loadProductionWindows) await window.loadProductionWindows();
+      if (window.getProductionWindows) windows = window.getProductionWindows() || windows;
+    } catch (e) { window.logError && window.logError('load production settings', e); }
+    _renderProductionWindowRows(windows);
+    var status = document.getElementById('prod-save-status');
+    if (status) status.textContent = '';
+  }
+  window.addProductionWindowRow = function() {
+    var box = document.getElementById('prod-windows-list');
+    if (!box) return;
+    var lastEnd = 17 * 60;
+    var ends = box.querySelectorAll('.prod-win-end');
+    if (ends.length) {
+      var m = _timeInputToMins(ends[ends.length - 1].value);
+      if (!isNaN(m)) lastEnd = m;
+    }
+    var start = Math.min(lastEnd + 15, 23 * 60);
+    var end = Math.min(start + 60, 24 * 60 - 1);
+    var row = document.createElement('div');
+    row.className = 'prod-window-row';
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;';
+    row.innerHTML = '<span style="font-size:11px;color:var(--muted);width:70px;">Window</span>'
+      + '<input type="time" class="prod-win-start" value="' + _minsToTimeInput(start) + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;border-radius:4px;font-family:Lato,sans-serif;">'
+      + '<span style="font-size:12px;color:var(--muted);">to</span>'
+      + '<input type="time" class="prod-win-end" value="' + _minsToTimeInput(end) + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;border-radius:4px;font-family:Lato,sans-serif;">'
+      + '<button type="button" onclick="window.removeProductionWindowRow(this)" title="Remove" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);width:32px;height:32px;border-radius:4px;cursor:pointer;font-size:14px;">&times;</button>';
+    box.appendChild(row);
+    box.querySelectorAll('.prod-window-row').forEach(function(r, i) {
+      var lab = r.querySelector('span');
+      if (lab) lab.textContent = 'Window ' + (i + 1);
+    });
+  };
+  window.removeProductionWindowRow = function(btn) {
+    var box = document.getElementById('prod-windows-list');
+    if (!box) return;
+    var rows = box.querySelectorAll('.prod-window-row');
+    if (rows.length <= 1) {
+      window.toast && window.toast('At least one production window is required.', 'error');
+      return;
+    }
+    var row = btn && btn.closest ? btn.closest('.prod-window-row') : null;
+    if (row) row.remove();
+    box.querySelectorAll('.prod-window-row').forEach(function(r, i) {
+      var lab = r.querySelector('span');
+      if (lab) lab.textContent = 'Window ' + (i + 1);
+    });
+  };
+  window.saveProductionWindowsSettings = async function() {
+    var box = document.getElementById('prod-windows-list');
+    var statusEl = document.getElementById('prod-save-status');
+    if (!box) return;
+    var windows = [];
+    var rows = box.querySelectorAll('.prod-window-row');
+    for (var i = 0; i < rows.length; i++) {
+      var start = _timeInputToMins(rows[i].querySelector('.prod-win-start').value);
+      var end = _timeInputToMins(rows[i].querySelector('.prod-win-end').value);
+      if (isNaN(start) || isNaN(end)) {
+        window.toast && window.toast('Each window needs a valid start and end time.', 'error');
+        return;
+      }
+      if (start >= end) {
+        window.toast && window.toast('Window ' + (i + 1) + ': start must be before end.', 'error');
+        return;
+      }
+      windows.push([start, end]);
+    }
+    if (!windows.length) {
+      window.toast && window.toast('At least one production window is required.', 'error');
+      return;
+    }
+    windows.sort(function(a, b) { return a[0] - b[0]; });
+    for (var j = 1; j < windows.length; j++) {
+      if (windows[j][0] < windows[j - 1][1]) {
+        window.toast && window.toast('Production windows cannot overlap.', 'error');
+        return;
+      }
+    }
+    try {
+      var val = { windows: windows };
+      var existing = await sbGet('app_settings?key=eq.production_windows&limit=1');
+      if (existing.length) {
+        await sbPatch('app_settings', '?key=eq.production_windows', { value: val, updated_at: new Date().toISOString() });
+      } else {
+        await sbPost('app_settings', { key: 'production_windows', value: val });
+      }
+      if (window.applyProductionWindows) window.applyProductionWindows(windows);
+      _renderProductionWindowRows(windows);
+      if (statusEl) {
+        statusEl.textContent = '✓ Saved';
+        statusEl.style.color = 'var(--green)';
+        setTimeout(function() { statusEl.textContent = ''; }, 3000);
+      }
+      window.toast && window.toast('Production hours saved.', 'success');
+      if (typeof window.loadSchedule === 'function') {
+        try { window.loadSchedule(); } catch (e) {}
+      }
+    } catch (e) {
+      if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = 'var(--red)'; }
+      window.toast && window.toast('Error: ' + e.message, 'error');
+    }
   };
 
   // ── Geofence in settings ─────────────────────────────────────────────────────
