@@ -23601,6 +23601,7 @@ window._approvalsBadgePoll = async function() {
   <!-- Stage filter tabs -->
   <div style="display:flex;gap:0;margin-bottom:24px;border-bottom:1px solid var(--navy-border);">
     <button class="jobs-stage-tab active" data-stage="live" onclick="window.filterJobsByStage('live',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 20px;background:transparent;border:none;border-bottom:2px solid var(--gold);color:var(--gold);cursor:pointer;">Live Queue</button>
+    <button class="jobs-stage-tab" data-stage="liquid_plan" onclick="window.filterJobsByStage('liquid_plan',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 20px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Liquid Plan</button>
     <button class="jobs-stage-tab" data-stage="new" onclick="window.filterJobsByStage('new',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 20px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">New</button>
     <button class="jobs-stage-tab" data-stage="active" onclick="window.filterJobsByStage('active',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 20px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Active</button>
     <button class="jobs-stage-tab" data-stage="complete" onclick="window.filterJobsByStage('complete',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 20px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Complete</button>
@@ -23613,6 +23614,12 @@ window._approvalsBadgePoll = async function() {
   <div id="jobs-live-hint" style="margin-bottom:12px;padding:8px 14px;background:rgba(74,158,221,0.07);border:1px solid rgba(74,158,221,0.2);border-radius:4px;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:8px;">
     <span style="color:var(--blue);font-weight:700;letter-spacing:0.06em;text-transform:uppercase;font-size:9px;">Auto-flow</span>
     Jobs move from <strong style="color:var(--amber);">New</strong> to <strong style="color:var(--blue);">Active</strong> automatically once the client signs off the BOM and a bay is assigned.
+  </div>
+
+  <!-- Liquid Plan FYI hint — informational only; no writes -->
+  <div id="jobs-liquid-plan-hint" style="display:none;margin-bottom:12px;padding:8px 14px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.22);border-radius:4px;font-size:11px;color:var(--muted);align-items:center;gap:8px;">
+    <span style="color:var(--gold);font-weight:700;letter-spacing:0.06em;text-transform:uppercase;font-size:9px;">FYI</span>
+    Informational queue — ordered by Job Ready. Planned Prep is Ready minus 5 working days. Does not change Schedule or Supply Chain.
   </div>
 
   <!-- Search + Sort -->
@@ -33852,7 +33859,7 @@ window.saveAdjModal = async function() {
   var _jobsBomMap = {}; // bom_id -> { product_name, volume_cl, abv, additional_info } for extended job labels (Jobs tab)
   var _currentJobId = null;
   var _jobStageFilter = 'live'; // 'live' = new + active combined (the default queue view)
-  var _JOB_STAGE_TABS = ['live','new','active','complete','on_hold','cancelled','all'];
+  var _JOB_STAGE_TABS = ['live','liquid_plan','new','active','complete','on_hold','cancelled','all'];
   try {
     var _savedJobStage = localStorage.getItem('lp.jobs.stage');
     if (_savedJobStage && _JOB_STAGE_TABS.indexOf(_savedJobStage) >= 0) _jobStageFilter = _savedJobStage;
@@ -34040,9 +34047,108 @@ window.saveAdjModal = async function() {
     if (subEl) subEl.textContent = p + ' new · ' + s + ' active' + (active - p - s > 0 ? ' · ' + (active - p - s) + ' other' : '');
   }
 
+  // Restore default Jobs table headers after Liquid Plan (or any alternate) view.
+  function _restoreJobsTableHeaders() {
+    var thead = document.querySelector('#jobs-main-table thead tr');
+    if (!thead) return;
+    thead.innerHTML =
+      '<th>Job No.</th>'
+      + '<th>Product</th>'
+      + '<th class="mob-hide">Client</th>'
+      + '<th class="mob-hide">Target</th>'
+      + '<th id="jobs-th-ready" class="mob-hide">Job Ready</th>'
+      + '<th class="mob-hide">Sign-offs</th>'
+      + '<th>Stage</th>'
+      + '<th id="jobs-th-invoiced" class="mob-hide" style="display:none;">Invoiced</th>'
+      + '<th></th>';
+  }
+
+  // FYI-only: projects Job Ready into a prep/bottling queue. Read-only — no DB writes,
+  // no schedule_slot sync, no Job Ready recompute.
+  function renderLiquidPlanTable() {
+    var tbody = document.getElementById('jobs-tbody-new');
+    var thead = document.querySelector('#jobs-main-table thead tr');
+    var tfoot = document.getElementById('jobs-tfoot');
+    if (!tbody || !thead) return;
+    if (tfoot) tfoot.innerHTML = '';
+
+    thead.innerHTML =
+      '<th style="width:48px;">#</th>'
+      + '<th>Job</th>'
+      + '<th>Product</th>'
+      + '<th class="mob-hide">Spirit / Blend</th>'
+      + '<th class="mob-hide">Planned Prep</th>'
+      + '<th class="mob-hide">Planned Bottling</th>';
+
+    function _fmtPlanDate(iso) {
+      if (!iso) return '<span style="color:var(--muted);">—</span>';
+      try {
+        var p = String(iso).slice(0, 10).split('-');
+        if (p.length === 3) {
+          return new Date(+p[0], +p[1] - 1, +p[2]).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
+        }
+      } catch (_e) {}
+      return String(iso).slice(0, 10);
+    }
+
+    var search = ((document.getElementById('jobs-search') || {}).value || '').toLowerCase();
+    var list = (_jobs || []).filter(function(j) {
+      var ns = _normStage(j.stage);
+      if (ns !== 'new' && ns !== 'active') return false;
+      if (j.actual_start || j.changeover_start) return false;
+      if (!j.job_ready_date) return false;
+      if (search) {
+        var label = (window.jobDisplayName(j, _jobsBomMap) || '').toLowerCase();
+        var spirit = ((_jobsBomMap[j.bom_id] && _jobsBomMap[j.bom_id].liquid_spec) || '').toLowerCase();
+        return label.indexOf(search) >= 0
+          || (j.id || '').toLowerCase().indexOf(search) >= 0
+          || spirit.indexOf(search) >= 0
+          || ((j.clients && j.clients.name) || '').toLowerCase().indexOf(search) >= 0;
+      }
+      return true;
+    }).sort(function(a, b) {
+      var ar = String(a.job_ready_date).slice(0, 10);
+      var br = String(b.job_ready_date).slice(0, 10);
+      if (ar !== br) return ar < br ? -1 : 1;
+      return (new Date(a.created_at) - new Date(b.created_at));
+    });
+
+    if (!list.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:48px;color:var(--muted);font-size:12px;">No liquids planned — jobs appear here once a Job Ready date is set.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = list.map(function(j, idx) {
+      var jid = String(j.id).replace(/'/g, "\\'");
+      var esc = window.escapeHtml || function(s) { return String(s == null ? '' : s); };
+      var product = esc(window.jobDisplayName(j, _jobsBomMap) || j.product_name || j.id);
+      var spirit = esc((_jobsBomMap[j.bom_id] && _jobsBomMap[j.bom_id].liquid_spec) || '—');
+      var readyIso = String(j.job_ready_date).slice(0, 10);
+      var prepIso = (typeof window._minusWorkingDays === 'function')
+        ? window._minusWorkingDays(readyIso, 5)
+        : null;
+      return '<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openJobDetail&&window.openJobDetail(\'' + jid + '\')">'
+        + '<td style="font-size:13px;font-weight:700;color:var(--amber);">#' + (idx + 1) + '</td>'
+        + '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + esc(j.id) + '</td>'
+        + '<td style="font-weight:600;color:var(--white);">' + product + '</td>'
+        + '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + spirit + '</td>'
+        + '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">' + _fmtPlanDate(prepIso) + '</td>'
+        + '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">' + _fmtPlanDate(readyIso) + '</td>'
+        + '</tr>';
+    }).join('');
+  }
+
   window.renderJobsTable = function() {
     var tbody = document.getElementById('jobs-tbody-new');
     if (!tbody) return;
+
+    // FYI-only Liquid Plan view — early branch; no writes / slot sync / ready recompute.
+    if (_jobStageFilter === 'liquid_plan') {
+      renderLiquidPlanTable();
+      return;
+    }
+
+    _restoreJobsTableHeaders();
     var _showCompleted = (_jobStageFilter === 'complete');
     var _thReady = document.getElementById('jobs-th-ready');
     if (_thReady) _thReady.textContent = _showCompleted ? 'Job Completed' : 'Job Ready';
@@ -34393,6 +34499,12 @@ window.saveAdjModal = async function() {
     });
     var hint = document.getElementById('jobs-live-hint');
     if (hint) hint.style.display = (stage === 'live') ? '' : 'none';
+    var lpHint = document.getElementById('jobs-liquid-plan-hint');
+    if (lpHint) lpHint.style.display = (stage === 'liquid_plan') ? 'flex' : 'none';
+    var sortEl = document.getElementById('jobs-sort');
+    var groupEl = document.getElementById('jobs-groupby');
+    if (sortEl) sortEl.style.display = (stage === 'liquid_plan') ? 'none' : '';
+    if (groupEl) groupEl.style.display = (stage === 'liquid_plan') ? 'none' : '';
   }
 
   window.filterJobsByStage = function(stage, btn) {
