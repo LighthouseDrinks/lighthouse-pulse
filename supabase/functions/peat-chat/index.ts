@@ -85,16 +85,16 @@ Action buttons gated by the production_control permission:
   • From Paused:     ▶ Resume · ■ Finish · ■ Stop · ✎ Times
 The button to end a production run is "■ Finish" — there is no "End Job" button.
 
-Next Jobs strip — 5 manually-assigned schedule slots (jobs.schedule_slot 1–5). Each slot has a Select/Change/Clear control to pick which job sits there; columns: Slot · Job · Product · Client · Bottles · Liquid · Last BPH · Gates · ▶ Start. Starting or finishing a job auto-clears its slot.
+Next Jobs strip — auto-filled from Job Ready date (earliest first) into schedule slots 1–5 (jobs.schedule_slot). Manual Select/Change pins a slot (schedule_slot_pinned) so autofill will not displace it; Clear unpins and re-autofills. Columns: Slot · Job · Product · Client · Bottles · Liquid · Last BPH · Gates · ▶ Start. Starting a job (changeover or production) auto-clears its slot and pin.
 Gate pills: BOM, S.Chain, Liquid (✓ green / ✗ red / ⚠ amber).
 Clicking ▶ Start… opens the "Start Job" dialog with two options:
   • ▶ Start Changeover (records changeover_start, date_commenced)
   • ▶ Start Production (skip changeover) (records actual_start)
 If gates are not all green a red warning appears, but the user can still proceed.
 
-Bay Board — 5 numbered bays (jobs.job_bay 1–5). Warehouse can Mark Clear; Client Coordinator / managers can assign or release. Bay states: empty, staged (assigned, not started), changeover, running, paused. When a bay frees, jobs are offered by priority band (High → Medium → Low). DB: jobs.job_bay, bay_assigned_at, bay_released_at, priority_band, bay_release_reason.
+Bay Board — 5 numbered bays (jobs.job_bay 1–5). Warehouse can Mark Clear; Client Coordinator / managers can assign or release. Bay states: empty, staged (assigned, not started), changeover, running, paused. When a bay frees, jobs are offered by Job Ready date (earliest first; awaiting dates last). Bay assignment is manual — not auto-linked to ready date. DB: jobs.job_bay, bay_assigned_at, bay_released_at, job_ready_date, bay_release_reason.
 
-Job priority — each job has an H/M/L priority band (jobs.priority_band, default medium), set from the Jobs page. The Jobs list groups jobs under High/Medium/Low headings (or by sign-off readiness tiers via a Group-by toggle).
+Job Ready — jobs.job_ready_date is the furthest outstanding supply-chain ETA (max of non-on-site component expected_delivery dates plus liquid_ready_date). Auto-fills only when every required dry-goods line is on-site or has an ETA, and Liquid Ready is set. All dry-goods on-site + liquid dated → ready date driven by liquid (or today if all inputs are immediate). Manual override + Reset on the Supply Chain tab. Jobs list sorts by Job Ready (nulls/awaiting dates last). H/M/L priority bands are retired.
 
 Changeover timer: amber from 0; turns red at 2 hours (7200 s productive). Default scheduling assumption is 400 BPH and a 2-hour changeover.
 
