@@ -34008,6 +34008,12 @@ window.saveAdjModal = async function() {
     if (typeof window._refreshBomSignedOffJobIds === 'function') window._refreshBomSignedOffJobIds(_jobs, _bomDone);
     renderJobsTable();
     updateJobKPIs();
+    // Fill Job Ready from component ETAs without requiring each SC tab to be opened.
+    if (typeof window.recomputeAllJobReadyDates === 'function') {
+      window.recomputeAllJobReadyDates({ skipSlotSync: true }).catch(function(e) {
+        console.warn('recomputeAllJobReadyDates', e);
+      });
+    }
     loadMyTasks();
     if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
     // If the Results tab is currently open and the date fields are still empty
@@ -37944,7 +37950,9 @@ window.saveAdjModal = async function() {
         });
 
         if (!incomplete) {
-          if (!dates.length) computed = _todayISODateLocal();
+          // No dry-goods lines yet (BOM not seeded) → leave null; don't invent "today".
+          if (!comps.length) computed = null;
+          else if (!dates.length) computed = _todayISODateLocal();
           else {
             dates.sort();
             computed = dates[dates.length - 1];
@@ -37953,9 +37961,15 @@ window.saveAdjModal = async function() {
       }
 
       // Liquid Ready always mirrors Job Ready (including null / manual ready).
-      var patch = { job_ready_date: computed, liquid_ready_date: computed };
-      if (opts.clearManual) patch.job_ready_manual = false;
-      await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
+      var prevReady = job.job_ready_date ? String(job.job_ready_date).slice(0, 10) : null;
+      var prevLiq = job.liquid_ready_date ? String(job.liquid_ready_date).slice(0, 10) : null;
+      var nextReady = computed ? String(computed).slice(0, 10) : null;
+      var changed = (prevReady !== nextReady) || (prevLiq !== nextReady) || !!opts.clearManual;
+      if (changed) {
+        var patch = { job_ready_date: computed, liquid_ready_date: computed };
+        if (opts.clearManual) patch.job_ready_manual = false;
+        await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
+      }
 
       function _bumpCache(arr) {
         if (!arr) return;
@@ -37969,7 +37983,7 @@ window.saveAdjModal = async function() {
       _bumpCache(typeof _jobs !== 'undefined' ? _jobs : null);
       try { _bumpCache(typeof _schedJobs !== 'undefined' ? _schedJobs : null); } catch (_c) {}
 
-      if (typeof window.renderJobsTable === 'function') {
+      if (!opts.skipRender && typeof window.renderJobsTable === 'function') {
         try { window.renderJobsTable(); } catch (_r) {}
       }
       if (!opts.skipSlotSync && typeof window.syncScheduleSlotsFromReady === 'function') {
@@ -37979,6 +37993,40 @@ window.saveAdjModal = async function() {
     } catch (e) {
       console.warn('recomputeJobReady failed:', e);
       return null;
+    }
+  };
+
+  // Batch-recompute Job Ready for live (not-started) jobs so dates appear without
+  // opening each Supply Chain tab. FYI/read paths stay unchanged — this only writes
+  // when the calculated date differs from what's stored.
+  var _jobReadyBatchInFlight = false;
+  window.recomputeAllJobReadyDates = async function(opts) {
+    opts = opts || {};
+    if (_jobReadyBatchInFlight) return;
+    _jobReadyBatchInFlight = true;
+    try {
+      var pool = opts.jobs || _jobs || [];
+      pool = pool.filter(function(j) {
+        if (!j || !j.id) return false;
+        if (j.job_ready_manual) return false;
+        var ns = (typeof _normStage === 'function') ? _normStage(j.stage) : String(j.stage || '').toLowerCase();
+        if (ns !== 'new' && ns !== 'active') return false;
+        if (j.actual_start || j.changeover_start) return false;
+        return true;
+      });
+      for (var i = 0; i < pool.length; i++) {
+        try {
+          await window.recomputeJobReady(pool[i].id, { skipSlotSync: true, skipRender: true });
+        } catch (_e) { /* continue */ }
+      }
+      if (!opts.skipRender && typeof window.renderJobsTable === 'function') {
+        try { window.renderJobsTable(); } catch (_r) {}
+      }
+      if (!opts.skipSlotSync && typeof window.syncScheduleSlotsFromReady === 'function') {
+        try { await window.syncScheduleSlotsFromReady({ silent: true, jobs: opts.jobs }); } catch (_s) {}
+      }
+    } finally {
+      _jobReadyBatchInFlight = false;
     }
   };
 
@@ -46623,9 +46671,13 @@ window.saveAdjModal = async function() {
         _schedDowntime = await sbGet('downtime_logs?start_time=gte.' + sixtyDaysAgo + '&order=start_time.asc');
       } catch(e2) { _schedDowntime = []; }
       _schedBannerLoaded = true;
-      // Auto-fill Next Jobs slots from Job Ready order (respects pinned overrides).
-      // Suppress realtime so slot PATCHes don't re-enter loadSchedule mid-sync.
+      // Backfill Job Ready from component ETAs before autofilling Next Jobs slots.
       _schedSuppressRt = true;
+      try {
+        if (typeof window.recomputeAllJobReadyDates === 'function') {
+          await window.recomputeAllJobReadyDates({ jobs: _schedJobs, skipRender: true, skipSlotSync: true });
+        }
+      } catch (_ra) { console.warn('schedule ready backfill', _ra); }
       try { await window.syncScheduleSlotsFromReady({ silent: true, jobs: _schedJobs }); } catch (_ss) {}
       _schedSuppressRt = false;
       _renderLineStatusBanner();
