@@ -23651,6 +23651,7 @@ window._approvalsBadgePoll = async function() {
             <th class="mob-hide">Sign-offs</th>
             <th>Stage</th>
             <th id="jobs-th-completed" class="mob-hide" style="display:none;">Completed</th>
+            <th id="jobs-th-invoiced" class="mob-hide" style="display:none;">Invoiced</th>
             <th></th>
           </tr>
         </thead>
@@ -34011,7 +34012,9 @@ window.saveAdjModal = async function() {
     var _showCompleted = (_jobStageFilter === 'complete');
     var _thCompleted = document.getElementById('jobs-th-completed');
     if (_thCompleted) _thCompleted.style.display = _showCompleted ? '' : 'none';
-    var _colCount = _showCompleted ? 8 : 7;
+    var _thInvoiced = document.getElementById('jobs-th-invoiced');
+    if (_thInvoiced) _thInvoiced.style.display = _showCompleted ? '' : 'none';
+    var _colCount = _showCompleted ? 9 : 7;
     var search = (document.getElementById('jobs-search')||{}).value||'';
     var list = _jobs.filter(function(j) {
       var ns = _normStage(j.stage);
@@ -34088,7 +34091,7 @@ window.saveAdjModal = async function() {
       _tfoot.innerHTML = '<tr style="border-top:2px solid var(--navy-border);background:rgba(255,255,255,0.02);">'
         + '<td colspan="3" class="mob-hide" style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);padding:10px 12px;text-align:right;">Total Bottles</td>'
         + '<td class="mob-hide" style="font-size:14px;font-weight:700;color:var(--gold);padding:10px 12px;">' + _totalBottles.toLocaleString() + ' btls</td>'
-        + '<td colspan="' + (_showCompleted ? 4 : 3) + '"></td>'
+        + '<td colspan="' + (_showCompleted ? 5 : 3) + '"></td>'
         + '</tr>';
     }
 
@@ -34151,6 +34154,24 @@ window.saveAdjModal = async function() {
         row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);white-space:nowrap;">'
           + (j.date_completed ? new Date(j.date_completed).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) : '—')
           + '</td>';
+        var _invBy = j.invoiced_by || '';
+        var _invParts = _invBy.trim().split(/\s+/).filter(Boolean);
+        var _invInit = _invParts.length
+          ? ((_invParts[0].charAt(0) + (_invParts.length > 1 ? _invParts[_invParts.length - 1].charAt(0) : '')).toUpperCase())
+          : '';
+        var _invTitle = _invBy
+          ? ('Invoiced by ' + _invBy + (j.invoiced_at ? ' · ' + new Date(j.invoiced_at).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}) : ''))
+          : 'Mark as invoiced';
+        row += '<td class="mob-hide job-invoiced-cell" data-id="' + j.id + '" style="text-align:center;white-space:nowrap;" onclick="event.stopPropagation();" title="' + String(_invTitle).replace(/"/g, '&quot;') + '">';
+        if (j.invoiced) {
+          row += '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--green);font-weight:700;">'
+            + '<input type="checkbox" checked disabled style="accent-color:var(--green);pointer-events:none;">'
+            + (_invInit ? '<span>' + _invInit + '</span>' : '')
+            + '</span>';
+        } else {
+          row += '<input type="checkbox" class="job-invoiced-cb" style="accent-color:var(--green);cursor:pointer;">';
+        }
+        row += '</td>';
       }
       row += '<td class="job-row-actions" data-id="' + j.id + '" style="white-space:nowrap;">'
         + (_stageActive ? bandCtl(j, jid, bandEditable) : '')
@@ -34221,9 +34242,59 @@ window.saveAdjModal = async function() {
       cell.appendChild(delBtn);
     });
 
+    // Wire Invoiced checkboxes (Complete tab only)
+    tbody.querySelectorAll('.job-invoiced-cb').forEach(function(cb) {
+      var cell = cb.closest('.job-invoiced-cell');
+      if (!cell) return;
+      var jid = cell.dataset.id;
+      cb.onclick = function(e){ e.stopPropagation(); };
+      cb.onchange = function(e) {
+        e.stopPropagation();
+        if (!cb.checked) { cb.checked = false; return; }
+        cb.disabled = true;
+        window.markJobInvoiced(jid);
+      };
+    });
+
     // Wire tap-to-expand on mobile
     var tbl = document.getElementById('jobs-main-table');
     if (tbl && window.mobExpandInit) window.mobExpandInit(tbl);
+  };
+
+  // Hard-tick invoiced stamp on Complete tab — once set, cannot be cleared in the UI.
+  var _invoicedInFlight = {};
+  window.markJobInvoiced = async function(jobId) {
+    if (!jobId || _invoicedInFlight[jobId]) return;
+    var job = _jobs.find(function(x){ return x.id === jobId; });
+    if (!job) return;
+    if (job.invoiced) {
+      window.renderJobsTable();
+      return;
+    }
+    var u = window.CURRENT_USER || {};
+    var byName = u.display_name || (u.email || '').split('@')[0] || 'Someone';
+    var at = new Date().toISOString();
+    _invoicedInFlight[jobId] = true;
+    job.invoiced = true;
+    job.invoiced_by = byName;
+    job.invoiced_at = at;
+    window.renderJobsTable();
+    try {
+      await window.db.update('jobs', '?id=eq.' + encodeURIComponent(jobId), {
+        invoiced: true,
+        invoiced_by: byName,
+        invoiced_at: at
+      });
+      window.toast && window.toast('Marked invoiced.', 'success');
+    } catch (e) {
+      job.invoiced = false;
+      job.invoiced_by = null;
+      job.invoiced_at = null;
+      window.renderJobsTable();
+      window.toast && window.toast('Error: ' + (e && e.message), 'error');
+    } finally {
+      delete _invoicedInFlight[jobId];
+    }
   };
 
   // Set a job's priority band (High/Medium/Low). Quick confirm on any change; no-op if unchanged.
@@ -45697,7 +45768,7 @@ window.saveAdjModal = async function() {
   var SETUP_MINS         = 0;
   var TEARDOWN_MINS      = 0;
   var DEFAULT_BPH        = 400;
-  var CHANGEOVER_PROJ_MINS = 3 * 60; // 3h default changeover block in calendar
+  var CHANGEOVER_PROJ_MINS = 2 * 60; // 2h default changeover block in calendar
 
   var JOB_COLOURS = [
     '#c9a84c','#4a9edd','#3dba78','#e89c3a',
@@ -46059,7 +46130,7 @@ window.saveAdjModal = async function() {
   }
 
   // Look up the most recent actual changeover duration (changeover_start → actual_start)
-  // for jobs sharing this BOM, so projections lean on real history rather than the 3h default.
+  // for jobs sharing this BOM, so projections lean on real history rather than the 2h default.
   async function getLastChangeoverMinsForBom(bomId) {
     if (!bomId) return null;
     try {
@@ -46569,7 +46640,7 @@ window.saveAdjModal = async function() {
     // rows at 10 by default and exposes a "Show all" expander.
     _schedQueuedJobs().forEach(function(j) {
       var coMins = _lastChangeoverMins(j);
-      var coSource = coMins ? 'Last changeover' : 'Default 3h changeover';
+      var coSource = coMins ? 'Last changeover' : 'Default 2h changeover';
       var coDur = coMins || CHANGEOVER_PROJ_MINS;
       var coStart = new Date(seed);
       var coEnd = calcEndTime(coStart, coDur);
@@ -46713,7 +46784,7 @@ window.saveAdjModal = async function() {
     el.innerHTML =
       section('Now', 'current line state', rows.now, 'Line is idle — see banner above.') +
       actualSection('Recent actual events', 'last 4 weeks — newest first', rows.actual, rows.actualTotals || {}, 'No actual run/changeover events recorded in the last 4 weeks.') +
-      section('Projected next jobs', 'projections use last actual BPH and changeover when available; falls back to 400 BPH / 3h', projVisible, 'No queued jobs to project.', projHeader);
+      section('Projected next jobs', 'projections use last actual BPH and changeover when available; falls back to 400 BPH / 2h', projVisible, 'No queued jobs to project.', projHeader);
   }
 
   window._schedToggleAllProjections = function() {

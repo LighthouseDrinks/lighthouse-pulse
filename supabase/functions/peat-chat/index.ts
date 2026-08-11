@@ -96,7 +96,7 @@ Bay Board — 5 numbered bays (jobs.job_bay 1–5). Warehouse can Mark Clear; Cl
 
 Job priority — each job has an H/M/L priority band (jobs.priority_band, default medium), set from the Jobs page. The Jobs list groups jobs under High/Medium/Low headings (or by sign-off readiness tiers via a Group-by toggle).
 
-Changeover timer: amber from 0; turns red at 3 hours (10800 s). Default scheduling assumption is 400 BPH and a 3-hour changeover.
+Changeover timer: amber from 0; turns red at 2 hours (7200 s productive). Default scheduling assumption is 400 BPH and a 2-hour changeover.
 
 ════════════════════════════════════════════════════
 PLANT DISPLAY (TV kiosk)
@@ -104,7 +104,7 @@ PLANT DISPLAY (TV kiosk)
 Standalone page at /plant-display.html (opens in a new tab from the sidebar). It is read-only — designed for a 50" TV on the production floor.
 
 Shows: header (date, In Production / Out of Hours, live clock, ⛶ Fullscreen), the active job panel with a status badge (Idle / Changeover / Running / Paused) and an elapsed timer, the Next Up queue (top 2 queued jobs), a 5-bay row, and a Bottles/Hour strip (last 4 hours plus a LIVE tile).
-Active-job states use data-state="idle" | "changeover" | "running"; changeover badge turns red at ≥3h. Bay cards show staged · changeover · running · paused with a progress bar (% and "{N} bottles to go") computed from bottle_target vs live counts in line_events / line_hourly_totals.
+Active-job states use data-state="idle" | "changeover" | "running". During changeover the progress bar is a fixed 2-hour time fill (red at ≥2h). During running it is bottle progress (counted since actual_start vs bottle_target); bottle events during changeover/idle do not count toward the bar. Bay cards show staged · changeover · running · paused status chips.
 
 ════════════════════════════════════════════════════
 BOM (Bill of Materials) WORKFLOW

@@ -170,9 +170,8 @@ body { display: flex; flex-direction: column; }
 #active-content[data-state="idle"]       #run-block,
 #active-content[data-state="idle"]       #co-block     { display: none; }
 
-/* Progress bar hidden when idle or during changeover; visible only while running */
-#active:has(#active-content[data-state="idle"]) #progress-wrap,
-#active:has(#active-content[data-state="changeover"]) #progress-wrap { display: none; }
+/* Progress bar hidden when idle; visible for running (bottles) and changeover (2h time) */
+#active:has(#active-content[data-state="idle"]) #progress-wrap { display: none; }
 
 /* Running block */
 #run-block {
@@ -240,8 +239,10 @@ body { display: flex; flex-direction: column; }
   width: 0%;
   background: #3dba78;
   border-radius: 5px;
-  transition: width 1s linear;
+  transition: width 1s linear, background-color 0.4s ease;
 }
+#bar-fill.overdue { background: #e84040; }
+#bar-fill.amber { background: #e8a838; }
 #bar-meta {
   display: flex;
   justify-content: space-between;
@@ -532,7 +533,7 @@ body { display: flex; flex-direction: column; }
 
       </div><!-- /active-content -->
 
-      <!-- Progress bar — shown only while running; hidden during changeover and idle -->
+      <!-- Progress bar — bottles while running; 2h time bar during changeover; hidden when idle -->
       <div id="progress-wrap">
         <div id="bar-bg"><div id="bar-fill"></div></div>
         <div id="bar-meta">
@@ -635,6 +636,7 @@ let _sb           = null;
 let _jobs         = [];
 let _activeJob    = null;
 let _runningCount = 0;
+let _countJobKey  = null;   // job id + actual_start — reseeds when this changes
 let _lastEventAt  = null;
 let _liveBph      = 0;
 let _hourlyBars   = [];
@@ -646,6 +648,9 @@ let _rtLine       = null;
 let _rtJobs       = null;
 let _rtDebounce   = null;
 let _lastHour     = -1;
+
+// Changeover progress / overdue target: fixed 2 productive hours
+const CO_TARGET_SECS = 2 * 60 * 60;
 
 // ── Tiny helpers ──────────────────────────────────────────────
 function p2(n) { return (n < 10 ? '0' : '') + n; }
@@ -798,6 +803,72 @@ async function dbGet(path) {
     }
     return await r.json();
   } catch(e) { console.warn('[PD] dbGet:', e); return []; }
+}
+
+function countJobKey(j) {
+  if (!j || !j.actual_start || j.actual_end) return null;
+  return j.id + '|' + j.actual_start;
+}
+
+function isRunCounting() {
+  return !!(!_activeJob?.actual_end && _activeJob?.actual_start && !_activeJob?.paused_at);
+}
+
+function resetProgressBar() {
+  const bf  = document.getElementById('bar-fill');
+  const bp  = document.getElementById('bar-pct');
+  const btg = document.getElementById('btg');
+  if (bf) { bf.style.width = '0%'; bf.classList.remove('overdue', 'amber'); }
+  if (bp) bp.textContent = '0%';
+  if (btg) btg.textContent = '—';
+}
+
+/** Sum line_events for line 1 since actual_start (ignore job_id — often null). */
+async function reseedRunningCount() {
+  const j = _activeJob;
+  const key = countJobKey(j);
+  if (!key) {
+    _runningCount = 0;
+    _countJobKey = null;
+    return;
+  }
+  if (key === _countJobKey) return; // already seeded for this run
+  _countJobKey = key;
+  _runningCount = 0;
+  try {
+    const startIso = new Date(j.actual_start).toISOString();
+    const rows = await dbGet(
+      'line_events?line_id=eq.1&created_at=gte.' + encodeURIComponent(startIso) +
+      '&select=count&order=created_at.asc&limit=10000'
+    );
+    let sum = 0;
+    (rows || []).forEach(r => { sum += Number(r.count) || 0; });
+    _runningCount = sum;
+  } catch (e) {
+    console.warn('[PD] reseedRunningCount:', e);
+    _runningCount = 0;
+  }
+}
+
+async function syncActiveJob(jobs) {
+  _jobs = jobs || [];
+  const active = _jobs.filter(j => !j.actual_end && (j.actual_start || j.changeover_start));
+  active.sort((a, b) =>
+    new Date(b.actual_start || b.changeover_start) - new Date(a.actual_start || a.changeover_start)
+  );
+  const next = active.length ? active[0] : null;
+  const prevKey = _countJobKey;
+  const nextKey = countJobKey(next);
+  _activeJob = next;
+  if (nextKey !== prevKey) {
+    if (!nextKey) {
+      _runningCount = 0;
+      _countJobKey = null;
+      resetProgressBar();
+    } else {
+      await reseedRunningCount();
+    }
+  }
 }
 
 // ── Render: status + active job left panel ────────────────────
@@ -959,7 +1030,7 @@ function tick() {
   if (_lastHour >= 0 && curH !== _lastHour) reloadHourly();
   _lastHour = curH;
 
-  // Active job timers
+  // Active job timers + progress
   if (_activeJob) {
     if (_activeJob.actual_start && !_activeJob.actual_end) {
       const endDt  = _activeJob.paused_at ? new Date(_activeJob.paused_at) : now;
@@ -968,26 +1039,55 @@ function tick() {
       );
       const et = document.getElementById('run-elapsed');
       if (et) et.textContent = fmtSecs(elapsed);
+
+      // Bottle progress — only while production is running (paused freezes the count)
+      if (_activeJob.bottle_target) {
+        const pct  = Math.min(_runningCount / _activeJob.bottle_target, 1) * 100;
+        const toGo = Math.max(_activeJob.bottle_target - _runningCount, 0);
+        const bf   = document.getElementById('bar-fill');
+        const bp   = document.getElementById('bar-pct');
+        const btg  = document.getElementById('btg');
+        if (bf) {
+          bf.style.width = pct.toFixed(1) + '%';
+          bf.classList.remove('overdue', 'amber');
+        }
+        if (bp)  bp.textContent  = Math.floor(pct) + '%';
+        if (btg) btg.textContent =
+          _runningCount.toLocaleString() + ' / ' +
+          Number(_activeJob.bottle_target).toLocaleString() +
+          ' · ' + toGo.toLocaleString() + ' to go';
+      } else {
+        resetProgressBar();
+      }
     } else if (_activeJob.changeover_start && !_activeJob.actual_start) {
       const coS = Math.max(0, calcProdSecs(new Date(_activeJob.changeover_start), now));
       const ce  = document.getElementById('co-elapsed');
       if (ce) {
         ce.textContent = fmtSecs(coS);
-        ce.classList.toggle('overdue', coS >= 10800);
+        ce.classList.toggle('overdue', coS >= CO_TARGET_SECS);
+      }
+
+      // Changeover progress — fixed 2h target; red at / past 2h
+      const overdue = coS >= CO_TARGET_SECS;
+      const pct = Math.min(coS / CO_TARGET_SECS, 1) * 100;
+      const remain = Math.max(CO_TARGET_SECS - coS, 0);
+      const bf  = document.getElementById('bar-fill');
+      const bp  = document.getElementById('bar-pct');
+      const btg = document.getElementById('btg');
+      if (bf) {
+        bf.style.width = pct.toFixed(1) + '%';
+        bf.classList.toggle('overdue', overdue);
+        bf.classList.toggle('amber', !overdue);
+      }
+      if (bp) bp.textContent = Math.floor(pct) + '%';
+      if (btg) {
+        btg.textContent = overdue
+          ? 'Over 2h standard'
+          : (fmtSecs(remain) + ' to 2h');
       }
     }
-
-    // Progress bar — fills only while a job is actually running (hidden entirely during changeover)
-    if (_activeJob.actual_start && !_activeJob.actual_end && _activeJob.bottle_target) {
-      const pct  = Math.min(_runningCount / _activeJob.bottle_target, 1) * 100;
-      const toGo = Math.max(_activeJob.bottle_target - _runningCount, 0);
-      const bf   = document.getElementById('bar-fill');
-      const bp   = document.getElementById('bar-pct');
-      const btg  = document.getElementById('btg');
-      if (bf)  bf.style.width  = pct.toFixed(1) + '%';
-      if (bp)  bp.textContent  = Math.floor(pct) + '%';
-      if (btg) btg.textContent = toGo.toLocaleString() + ' bottles to go';
-    }
+  } else {
+    resetProgressBar();
   }
 
   // BPH idle dot + last seen
@@ -1020,12 +1120,7 @@ async function reloadJobs() {
       'schedule_slot,priority_band,created_at,clients(name)' +
       '&order=schedule_slot.asc.nullslast,created_at.asc'
     );
-    _jobs = jobs || [];
-    const active = _jobs.filter(j => !j.actual_end && (j.actual_start || j.changeover_start));
-    active.sort((a, b) =>
-      new Date(b.actual_start || b.changeover_start) - new Date(a.actual_start || a.changeover_start)
-    );
-    _activeJob = active.length ? active[0] : null;
+    await syncActiveJob(jobs);
     renderLeft(); renderNextJobs(); renderBays();
   } catch(e) { console.warn('[PD] reloadJobs error:', e); }
 }
@@ -1099,7 +1194,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   await loadWorkOvr();
   await loadProdWindows();
 
-  // Load jobs
+  // Load jobs + seed bottle count for the active production run
   const jobs = await dbGet(
     'jobs?stage=in.(new,active)' +
     '&select=id,product_name,bottle_target,job_bay,actual_start,actual_end,' +
@@ -1107,14 +1202,9 @@ document.addEventListener('DOMContentLoaded', async function () {
     'schedule_slot,priority_band,created_at,clients(name)' +
     '&order=schedule_slot.asc.nullslast,created_at.asc'
   );
-  _jobs = jobs || [];
-  const active = _jobs.filter(j => !j.actual_end && (j.actual_start || j.changeover_start));
-  active.sort((a, b) =>
-    new Date(b.actual_start || b.changeover_start) - new Date(a.actual_start || a.changeover_start)
-  );
-  _activeJob = active.length ? active[0] : null;
+  await syncActiveJob(jobs);
 
-  // Hourly bars
+  // Hourly bars (BPH strip only — not used for run progress)
   const hRows = await dbGet(
     'line_hourly_totals?line_id=eq.1&hour_utc=gte.' + todayStart() +
     '&select=hour_utc,total_bottles,last_event_at&order=hour_utc.asc'
@@ -1122,15 +1212,6 @@ document.addEventListener('DOMContentLoaded', async function () {
   _hourlyBars = (hRows || []).map(r => ({
     hourUtc: r.hour_utc, totalBottles: r.total_bottles || 0, lastEventAt: r.last_event_at
   }));
-
-  // Seed running count from hourly bars since job started
-  _runningCount = 0;
-  if (_activeJob && _activeJob.actual_start) {
-    const jobStart = new Date(_activeJob.actual_start).getTime();
-    _hourlyBars.forEach(b => {
-      if (new Date(b.hourUtc).getTime() + 3600000 > jobStart) _runningCount += b.totalBottles;
-    });
-  }
 
   // Live BPH
   const lRows = await dbGet('line_throughput_live?line_id=eq.1&select=bottles_per_hour,last_event_at');
@@ -1168,10 +1249,12 @@ document.addEventListener('DOMContentLoaded', async function () {
       { event: 'INSERT', schema: 'public', table: 'line_events', filter: 'line_id=eq.1' },
       payload => {
         const cnt = (payload.new && payload.new.count) ? Number(payload.new.count) : 1;
-        _runningCount += cnt;
-        _lastEventAt   = new Date();
+        _lastEventAt = new Date();
 
-        // Update hourly bar in memory
+        // Only accumulate toward the job progress bar while production is running
+        if (isRunCounting()) _runningCount += cnt;
+
+        // Update hourly bar in memory (BPH strip — always, any line activity)
         const h = new Date().getHours();
         let idx = -1;
         for (let ii = 0; ii < _hourlyBars.length; ii++) {
