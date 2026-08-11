@@ -1935,15 +1935,24 @@ window.APP = {
   loaded:    {}
 };
 
+// Ownership / ops dropdowns: only actual clients (not opportunities / legacy leads).
+// CRM pickers (deals, samples, quotes, Customers page) keep the full list.
+window.ACTIVE_CLIENTS_QS = 'lifecycle_stage=not.in.(opportunity,lead,prospect)';
+window.isActiveClient = function(c) {
+  if (!c) return false;
+  var s = c.lifecycle_stage || 'client';
+  return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
+};
+window.filterActiveClients = function(list) {
+  return (list || []).filter(window.isActiveClient);
+};
+
 async function loadClients() {
   if (APP.loaded.clients && APP.clients && APP.clients.length > 0) return APP.clients;
   try {
-    var rows = await db.select('clients', '?order=name.asc');
+    var rows = await db.select('clients', '?order=name.asc&' + window.ACTIVE_CLIENTS_QS);
     if (rows && rows.length > 0) {
-      APP.clients = rows.filter(function(r) {
-        var s = r.lifecycle_stage || 'client';
-        return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
-      });
+      APP.clients = rows;
       APP.loaded.clients = true;
     }
   } catch(e) {
@@ -5679,7 +5688,7 @@ window.openInviteModal = function() {
   function fillClientOptions(list) {
     if (!sel) return;
     sel.innerHTML = '<option value="">— Select client —</option>';
-    (list || []).filter(function(cl){return !cl.is_internal;})
+    window.filterActiveClients(list || []).filter(function(cl){return !cl.is_internal;})
       .sort(function(a,b){return (a.name||'').localeCompare(b.name||'');})
       .forEach(function(cl){
         var opt = document.createElement('option');
@@ -5691,7 +5700,7 @@ window.openInviteModal = function() {
       fillClientOptions(window._clients);
     } else {
       sel.innerHTML = '<option value="">— Loading clients… —</option>';
-      db.select('clients', '?select=id,name,is_internal,lifecycle_stage&order=name.asc&lifecycle_stage=not.in.(opportunity,lead,prospect)')
+      db.select('clients', '?select=id,name,is_internal,lifecycle_stage&order=name.asc&' + window.ACTIVE_CLIENTS_QS)
         .then(function(rows) {
           window._clients = rows || [];
           fillClientOptions(window._clients);
@@ -12173,27 +12182,22 @@ async function openBomModal(editId) {
   // Ensure clients are loaded before populating dropdown
   await loadClients();
 
-  // Populate client dropdown — for BOMs we want the FULL customer list
-  // (active Clients AND Opportunities/Leads/Prospects), since BOMs are
-  // often drafted for prospects before they become live clients.
+  // Populate client dropdown — active clients only (ops ownership; opportunities
+  // cannot own a BOM).
   var cliSel = el('bm-client');
   if (cliSel) {
     var _bomCustomers = [];
     try {
       _bomCustomers = await db.select('clients',
-        '?select=id,name,lifecycle_stage&order=name.asc&lifecycle_stage=not.eq.churned');
+        '?select=id,name,lifecycle_stage&order=name.asc&' + window.ACTIVE_CLIENTS_QS);
     } catch (_e) {
-      // Fall back to the cached (clients-only) list if the wider fetch fails.
       _bomCustomers = (APP.clients || []).map(function(c){
         return { id: c.id, name: c.name, lifecycle_stage: c.lifecycle_stage || 'client' };
       });
     }
-    var _OPP_STAGES = { opportunity:1, lead:1, prospect:1 };
     cliSel.innerHTML = '<option value="">— Select a customer to load their inventory —</option>'
       + (_bomCustomers || []).map(function(c){
-          var isOpp = _OPP_STAGES[c.lifecycle_stage] === 1;
-          var label = c.name + (isOpp ? '  •  Opportunity' : '');
-          return '<option value="' + c.id + '">' + label + '</option>';
+          return '<option value="' + c.id + '">' + c.name + '</option>';
         }).join('');
   }
 
@@ -19988,10 +19992,7 @@ window.loadBoms = async function initBoms() {
 
   function _syncClientsGlobal() {
     window.CLIENTS = CLIENTS; // keep ALL records — Customers page uses this with its own filter
-    var activeClients = CLIENTS.filter(function(c) {
-      var s = c.lifecycle_stage || 'client';
-      return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
-    });
+    var activeClients = window.filterActiveClients(CLIENTS);
     if (window.APP) {
       window.APP.clients = activeClients.map(function(c){ return { id: c.id, name: c.company }; });
       window.APP.loaded.clients = true;
@@ -19999,7 +20000,7 @@ window.loadBoms = async function initBoms() {
     // Also sync into _clients if the inventory module uses it
     if (window._clients) {
       window._clients.length = 0;
-      activeClients.forEach(function(c){ window._clients.push({ id: c.id, name: c.company }); });
+      activeClients.forEach(function(c){ window._clients.push({ id: c.id, name: c.company, lifecycle_stage: c.lifecycle_stage || 'client' }); });
     }
   }
 
@@ -24954,7 +24955,7 @@ window.ccxPrintRecord = function() {
     if (existing) {
       clientPicker = '<div style="font-size:15px;font-weight:700;color:var(--white);">' + _pEsc(_pClientName(clientId)) + '</div>';
     } else {
-      var opts = _pClients().slice().sort(function(a, b){
+      var opts = window.filterActiveClients(_pClients()).slice().sort(function(a, b){
         return (a.company || a.name || '').localeCompare(b.company || b.name || '');
       }).map(function(c){ return '<option value="' + _pEsc(c.id) + '">' + _pEsc(c.company || c.name || c.id) + '</option>'; }).join('');
       clientPicker = '<select id="pa-client" style="' + _pFieldStyle() + '">' + opts + '</select>';
@@ -29167,14 +29168,12 @@ window.openLPModal = async function(editId) {
                : null;
     if (!source) {
       try {
-        source = await window.db.select('clients', '?select=id,name,company,lifecycle_stage&order=name.asc&limit=1000');
+        source = await window.db.select('clients', '?select=id,name,company,lifecycle_stage&order=name.asc&limit=1000&' + window.ACTIVE_CLIENTS_QS);
         if (source) window._lpClientsCache = source;
       } catch(_) { source = []; }
     }
     var clients = (source || []).slice().filter(function(c) {
-      if (!c) return false;
-      var s = c.lifecycle_stage || 'client';
-      return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
+      return c && window.isActiveClient(c);
     });
     clients.sort(function(a,b){
       var aLh = ((a.company||a.name||'').toLowerCase().indexOf('lighthouse')>-1) ? 0 : 1;
@@ -29336,7 +29335,7 @@ async function loadLiquid() {
   var tbody = document.getElementById('liq-tbody');
   if (tbody) tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
 
-  _clients = await supa('clients', '?order=name.asc&limit=1000');
+  _clients = await supa('clients', '?order=name.asc&limit=1000&' + window.ACTIVE_CLIENTS_QS);
   _liquid  = await window.fetchAll('liquid_containers', '?order=type.asc,reference.asc');
 
   // Self-healing fleet view: every registered (non-archived) tank/tanker should have an
@@ -29437,7 +29436,7 @@ async function loadLiquid() {
   if (cliSel) {
     var prevVal = cliSel.value;
     var opts = '<option value="">All Clients</option>';
-    _clients.filter(function(c){ var s = c.lifecycle_stage || 'client'; return s !== 'opportunity' && s !== 'lead' && s !== 'prospect'; }).forEach(function(c){
+    _clients.filter(function(c){ return window.isActiveClient(c); }).forEach(function(c){
       opts += '<option value="' + c.id + '">' + window.escapeHtml(c.name) + '</option>';
     });
     cliSel.innerHTML = opts;
@@ -29670,7 +29669,11 @@ function ageStr(distDate) {
 window.openContainerModal = async function(editId) {
   var ov = document.getElementById('container-modal-overlay');
   if (!ov) return;
-  if (!_clients.length) _clients = await supa('clients', '?order=name.asc&lifecycle_stage=not.in.(opportunity,lead,prospect)');
+  if (!_clients.length) {
+    _clients = await supa('clients', '?order=name.asc&' + window.ACTIVE_CLIENTS_QS);
+  } else {
+    _clients = window.filterActiveClients(_clients);
+  }
 
   var gid = function(id){ return document.getElementById(id); };
   gid('cm-edit-id').value = editId || '';
@@ -31334,7 +31337,11 @@ window.saveTransfer = async function() {
 async function loadGoodsIn() {
   var tbody = document.getElementById('gin-tbody');
   if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
-  if (!_clients.length) _clients = await supa('clients','?order=name.asc');
+  if (!_clients.length) {
+    _clients = await supa('clients','?order=name.asc&' + window.ACTIVE_CLIENTS_QS);
+  } else {
+    _clients = window.filterActiveClients(_clients);
+  }
   _goodsIn = await supa('goods_in_notifications','?order=created_at.desc');
   renderGoodsIn();
 }
@@ -31504,8 +31511,12 @@ window.loadDryGoods = async function() {
   if (tbody) tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
 
   try {
-    // Load supporting data
-    if (!_clients.length) _clients = await supaFetch('clients', '?order=name.asc');
+    // Load supporting data — active clients only (ops ownership dropdowns)
+    if (!_clients.length) {
+      _clients = await supaFetch('clients', '?order=name.asc&' + window.ACTIVE_CLIENTS_QS);
+    } else {
+      _clients = window.filterActiveClients(_clients);
+    }
     _cats = await supaFetch('dry_goods_categories', '?order=sort_order.asc');
 
     // Load locations (silent — resolves location_id → name for legacy batches)
@@ -32622,7 +32633,11 @@ window._checkLabelFields = function(prefix) {
 };
 
 window.openNewSKUModal = async function() {
-  if (!_clients.length) _clients = await supaFetch('clients', '?order=name.asc&lifecycle_stage=not.in.(opportunity,lead,prospect)');
+  if (!_clients.length) {
+    _clients = await supaFetch('clients', '?order=name.asc&' + window.ACTIVE_CLIENTS_QS);
+  } else {
+    _clients = window.filterActiveClients(_clients);
+  }
   if (!_cats.length)    _cats    = await supaFetch('dry_goods_categories', '?order=sort_order.asc');
 
   var cliSel = document.getElementById('ns-client');
@@ -32665,9 +32680,23 @@ window.openEditSKUModal = async function(skuId) {
   document.getElementById('es-sku-id').value = skuId;
   document.getElementById('es-sku-id-label').textContent = skuId;
 
-  // Populate clients
+  // Populate clients — active clients only (ops ownership)
   var cliSel = document.getElementById('es-client');
-  cliSel.innerHTML = _clients.map(function(c){
+  if (!_clients.length) {
+    _clients = await supaFetch('clients', '?order=name.asc&' + window.ACTIVE_CLIENTS_QS);
+  } else {
+    _clients = window.filterActiveClients(_clients);
+  }
+  // Keep current owner selectable if it is legacy opportunity-owned stock
+  var editClients = _clients.slice();
+  if (sku.client_id && !editClients.some(function(c){ return c.id === sku.client_id; })) {
+    var orphanName = (window.CLIENTS || []).find(function(c){ return c.id === sku.client_id; });
+    editClients.push({
+      id: sku.client_id,
+      name: (orphanName && (orphanName.company || orphanName.name)) || sku.client_id
+    });
+  }
+  cliSel.innerHTML = editClients.map(function(c){
     return '<option value="'+c.id+'"'+(c.id===sku.client_id?' selected':'')+'>'+c.name+'</option>';
   }).join('');
 
@@ -34360,12 +34389,17 @@ window.saveAdjModal = async function() {
     document.getElementById('njm-job-id-label').textContent = editId ? editId : 'SOP 5.02.03';
     document.getElementById('njm-save-btn').textContent = editId ? 'Save Changes' : 'Create Job';
 
-    // Load clients
+    // Load clients — active clients only (do not trust a polluted window._clients cache)
     try {
-      var clients = (window._clients && window._clients.length) ? window._clients : await supaGet('clients?order=name.asc&select=id,name,phone&lifecycle_stage=not.in.(opportunity,lead,prospect)');
+      var clients = (window.APP && window.APP.clients && window.APP.clients.length)
+        ? window.APP.clients.slice()
+        : window.filterActiveClients(window._clients || []);
+      if (!clients.length) {
+        clients = await supaGet('clients?order=name.asc&select=id,name,phone&' + window.ACTIVE_CLIENTS_QS);
+      }
       var cliSel = document.getElementById('njm-client');
       cliSel.innerHTML = '<option value="">— Select client —</option>'
-        + clients.map(function(c){ return '<option value="' + c.id + '">' + c.name + '</option>'; }).join('');
+        + clients.map(function(c){ return '<option value="' + c.id + '">' + (c.name || c.company || c.id) + '</option>'; }).join('');
 
       // Load approved BOMs only — draft/pending BOMs cannot be used to create a job
       _njmBoms = await supaGet('boms?bom_status=eq.approved&order=product_name.asc&select=id,product_name,bom_status,client_id,abv,volume_cl,bottling_abv,chill_filtration,colouring,colour_spec,bph,bottles_per_shipper,additional_info');
@@ -36879,24 +36913,47 @@ window.saveAdjModal = async function() {
 
       // ── Step 1: components on site or ordered (+ job creation date) ──
       html += stepHd(1, 'Components on site or ordered',
-        'Ensure every required component is either physically on site or on order. Job Ready is the furthest outstanding ETA (including Liquid Ready).');
+        'Ensure every required component is either physically on site or on order. Job Ready is the furthest outstanding dry-goods ETA.');
       var jReady = (j_preseed && j_preseed.job_ready_date) || '';
       var jReadyManual = !!(j_preseed && j_preseed.job_ready_manual);
       var canEditSc = !!(window.canDo && window.canDo('jobs_edit_supply_chain'));
-      html += '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px 22px;font-size:12px;color:var(--muted);margin:0 0 12px;">'
-        + '<div>Job created: <span style="color:var(--white);font-weight:700;">' + createdStr + '</span></div>'
-        + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
-        + '<span>Job Ready:</span>'
-        + '<input type="date" id="sc-job-ready-date" value="' + (jReady || '') + '" '
-        + (canEditSc ? '' : 'disabled ')
-        + 'style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:4px 7px;font-size:11px;border-radius:3px;'
-        + (canEditSc ? '' : 'opacity:0.5;cursor:not-allowed;') + '">'
-        + '<span id="sc-job-ready-manual-badge" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--amber);'
-        + (jReadyManual ? '' : 'display:none;') + '">Manual</span>'
-        + (canEditSc
-          ? '<button type="button" id="sc-job-ready-reset" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:4px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Reset</button>'
+      var leadDays = null;
+      if (j && j.created_at && jReady) {
+        try {
+          var _cAt = new Date(j.created_at);
+          var _cDay = new Date(_cAt.getFullYear(), _cAt.getMonth(), _cAt.getDate());
+          var _rp = String(jReady).slice(0, 10).split('-');
+          var _rDay = new Date(+_rp[0], +_rp[1] - 1, +_rp[2]);
+          leadDays = Math.round((_rDay - _cDay) / 86400000);
+          if (isNaN(leadDays)) leadDays = null;
+        } catch (_ld) { leadDays = null; }
+      }
+      var leadLbl = (leadDays == null) ? '—' : (leadDays === 1 ? '1 day' : (leadDays === -1 ? '1 day' : Math.abs(leadDays) + ' days'));
+      if (leadDays != null && leadDays < 0) leadLbl = leadLbl + ' early';
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:18px 28px;align-items:end;margin:4px 0 18px;padding:16px 18px;background:rgba(255,255,255,0.025);border:1px solid var(--navy-border);border-radius:6px;">'
+        + '<div>'
+        +   '<div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;">Job Created</div>'
+        +   '<div id="sc-job-created-display" style="font-size:26px;font-weight:800;color:var(--white);letter-spacing:-0.02em;line-height:1.1;">' + createdStr + '</div>'
+        + '</div>'
+        + '<div>'
+        +   '<div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;">Job Ready</div>'
+        +   '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
+        +     '<input type="date" id="sc-job-ready-date" value="' + (jReady || '') + '" '
+        +     (canEditSc ? '' : 'disabled ')
+        +     'style="background:transparent;border:none;border-bottom:2px solid var(--navy-border);color:var(--white);padding:2px 0 4px;font-size:22px;font-weight:800;letter-spacing:-0.02em;font-family:Lato,sans-serif;line-height:1.1;min-width:168px;'
+        +     (canEditSc ? 'cursor:pointer;' : 'opacity:0.55;cursor:not-allowed;') + '">'
+        +     '<span id="sc-job-ready-manual-badge" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--amber);'
+        +     (jReadyManual ? '' : 'display:none;') + '">Manual</span>'
+        +     (canEditSc
+          ? '<button type="button" id="sc-job-ready-reset" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Reset</button>'
           : '')
-        + '</div></div>';
+        +   '</div>'
+        + '</div>'
+        + '<div>'
+        +   '<div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;">Created → Ready</div>'
+        +   '<div id="sc-lead-days-display" style="font-size:26px;font-weight:800;color:' + (leadDays == null ? 'var(--muted)' : 'var(--white)') + ';letter-spacing:-0.02em;line-height:1.1;">' + leadLbl + '</div>'
+        + '</div>'
+        + '</div>';
       html += '<div id="sc-tracker-mount"></div>';
 
       // ── Step 2: allocate the bay ──
@@ -37787,14 +37844,46 @@ window.saveAdjModal = async function() {
     var badge = document.getElementById('sc-job-ready-manual-badge');
     if (inp) inp.value = ready;
     if (badge) badge.style.display = (j && j.job_ready_manual) ? '' : 'none';
+
+    var leadEl = document.getElementById('sc-lead-days-display');
+    if (leadEl) {
+      var leadDays = null;
+      if (j && j.created_at && ready) {
+        try {
+          var cAt = new Date(j.created_at);
+          var cDay = new Date(cAt.getFullYear(), cAt.getMonth(), cAt.getDate());
+          var rp = ready.split('-');
+          var rDay = new Date(+rp[0], +rp[1] - 1, +rp[2]);
+          leadDays = Math.round((rDay - cDay) / 86400000);
+          if (isNaN(leadDays)) leadDays = null;
+        } catch (_e) { leadDays = null; }
+      }
+      if (leadDays == null) {
+        leadEl.textContent = '—';
+        leadEl.style.color = 'var(--muted)';
+      } else {
+        var abs = Math.abs(leadDays);
+        leadEl.textContent = abs + (abs === 1 ? ' day' : ' days') + (leadDays < 0 ? ' early' : '');
+        leadEl.style.color = 'var(--white)';
+      }
+    }
+
+    var liqDateStyle = 'font-size:13px;font-weight:700;color:var(--gold);letter-spacing:-0.01em;';
+    var liqEmptyStyle = 'font-size:13px;font-weight:600;color:var(--muted);opacity:0.45;';
     var liqEl = document.getElementById('sc-liquid-ready-display');
-    if (liqEl) liqEl.textContent = ready ? _fmtIsoDateShort(ready) : '—';
+    if (liqEl) {
+      liqEl.textContent = ready ? _fmtIsoDateShort(ready) : 'Awaiting';
+      liqEl.style.cssText = ready ? liqDateStyle : liqEmptyStyle;
+    }
     var prepEl = document.getElementById('sc-liquid-prep-display');
     if (prepEl) {
-      if (!ready) prepEl.textContent = '—';
-      else {
+      if (!ready) {
+        prepEl.textContent = 'Awaiting';
+        prepEl.style.cssText = liqEmptyStyle;
+      } else {
         var prep = window._minusWorkingDays(ready, 5);
-        prepEl.textContent = prep ? _fmtIsoDateShort(prep) : '—';
+        prepEl.textContent = prep ? _fmtIsoDateShort(prep) : 'Awaiting';
+        prepEl.style.cssText = prep ? liqDateStyle : liqEmptyStyle;
       }
     }
   };
@@ -38767,7 +38856,7 @@ window.saveAdjModal = async function() {
     var sel = document.getElementById('prod-report-client');
     if (!sel) return;
     while (sel.options.length > 1) sel.remove(1);
-    var clients = (window._clients || []).slice().sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+    var clients = window.filterActiveClients(window._clients || []).slice().sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
     clients.forEach(function(c) {
       var opt = document.createElement('option');
       opt.value = c.id;
@@ -47816,7 +47905,7 @@ window.saveAdjModal = async function() {
   var _blDestIdx   = 0;
 
   async function loadBlData() {
-    _blClients = await window.db.select('clients', '?order=name.asc');
+    _blClients = await window.db.select('clients', '?order=name.asc&' + window.ACTIVE_CLIENTS_QS);
     window._blClients = _blClients;
     var _blRaw = await window.db.select('liquid_containers', '?order=type.asc,reference.asc');
     _bl = (_blRaw || []).filter(function(c){ return !c.archived; });
@@ -48471,7 +48560,7 @@ window.saveAdjModal = async function() {
   // ════════════════════════════════════════════════════
   function initBLAC() {
     var csel = document.getElementById('blac-client');
-    var _blClientOpts = _blClients.filter(function(c){ var s = c.lifecycle_stage || 'client'; return s !== 'opportunity' && s !== 'lead' && s !== 'prospect'; }).map(function(c){ return '<option value="' + c.id + '">' + window.escapeHtml(c.name) + '</option>'; }).join('');
+    var _blClientOpts = window.filterActiveClients(_blClients).map(function(c){ return '<option value="' + c.id + '">' + window.escapeHtml(c.name) + '</option>'; }).join('');
     if (csel) {
       csel.innerHTML = _blClientOpts;
       Array.from(csel.options).forEach(function(o){ if (o.text.toLowerCase().indexOf('lighthouse') >= 0) { csel.value = o.value; } });
@@ -50287,10 +50376,7 @@ window.saveAdjModal = async function() {
     if (!sel) return;
     var clients = (typeof _blClients !== 'undefined' && _blClients) ? _blClients : (window._blClients || window.CLIENTS || []);
     var opts = '<option value="">— Select client —</option>';
-    clients.filter(function(c){
-      var s = c.lifecycle_stage || 'client';
-      return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
-    }).forEach(function(c){
+    window.filterActiveClients(clients).forEach(function(c){
       opts += '<option value="' + c.id + '">' + window.escapeHtml(c.name || c.company || c.id) + '</option>';
     });
     sel.innerHTML = opts;
@@ -50308,7 +50394,9 @@ window.saveAdjModal = async function() {
     subBlockHtml: _dlNewVesselSubBlockHtml,
     populateClients: async function(idx) {
       if (!_blClients || !_blClients.length) {
-        try { _blClients = await window.db.select('clients', '?order=name.asc'); } catch(e) {}
+        try { _blClients = await window.db.select('clients', '?order=name.asc&' + window.ACTIVE_CLIENTS_QS); } catch(e) {}
+      } else {
+        _blClients = window.filterActiveClients(_blClients);
       }
       _dlPopulateNewVesselClients(idx);
     },
@@ -51104,10 +51192,7 @@ window.saveAdjModal = async function() {
     if (!sel) return;
     var clients = (typeof _blClients !== 'undefined' && _blClients) ? _blClients : (window._blClients || window.CLIENTS || []);
     var opts = '<option value="">— Select owner —</option>';
-    clients.filter(function(c){
-      var s = c.lifecycle_stage || 'client';
-      return s !== 'opportunity' && s !== 'lead' && s !== 'prospect';
-    }).forEach(function(c){
+    window.filterActiveClients(clients).forEach(function(c){
       opts += '<option value="' + c.id + '">' + window.escapeHtml(c.name || c.company || c.id) + '</option>';
     });
     sel.innerHTML = opts;
