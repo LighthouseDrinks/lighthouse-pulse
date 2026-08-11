@@ -85,7 +85,7 @@ Action buttons gated by the production_control permission:
   • From Paused:     ▶ Resume · ■ Finish · ■ Stop · ✎ Times
 The button to end a production run is "■ Finish" — there is no "End Job" button.
 
-Next Jobs strip — auto-filled from Job Ready date (earliest first) into schedule slots 1–5. Empty until jobs have a Job Ready date. No manual pin/select. Columns: Slot · Job · Product · Client · Bottles · Liquid · Last BPH · Gates · ▶ Start. Starting a job (changeover or production) auto-clears its slot.
+Next Jobs strip — auto-filled from Job Ready date (earliest first) into schedule slots 1–5. Empty until jobs have a Job Ready date. No manual pin/select. Columns: Slot · Job · Product · Client · Bottles · Gates · ▶ Start. Starting a job (changeover or production) auto-clears its slot.
 Gate pills: BOM, S.Chain, Liquid (✓ green / ✗ red / ⚠ amber).
 Clicking ▶ Start… opens the "Start Job" dialog with two options:
   • ▶ Start Changeover (records changeover_start, date_commenced)
