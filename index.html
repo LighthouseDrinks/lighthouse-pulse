@@ -24258,7 +24258,7 @@ window._approvalsBadgePoll = async function() {
   <div class="card" style="padding:0;overflow:hidden;margin-top:16px;">
     <div style="padding:13px 18px 10px;border-bottom:1px solid var(--navy-border);">
       <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;">Next Jobs</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px;">Ordered by Job Ready (earliest first). Manual pin overrides autofill.</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px;">Auto-filled by Job Ready (earliest first). Empty until jobs have a Job Ready date.</div>
     </div>
     <div id="sched-next-jobs" style="padding:12px 18px;min-height:48px;">
       <div style="color:var(--muted);font-size:11px;">Loading...</div>
@@ -37224,7 +37224,9 @@ window.saveAdjModal = async function() {
         tbody.appendChild(tr);
       });
 
-      // Liquid Ready — job-level date that participates in Job Ready max
+      // Liquid Prep (−5 working days) + Liquid Ready (mirrors Job Ready) — read-only
+      var readyForLiq = (j && j.job_ready_date) || (j_preseed && j_preseed.job_ready_date) || '';
+      var prepIso = readyForLiq ? window._minusWorkingDays(String(readyForLiq).slice(0, 10), 5) : null;
       var liqTr = document.createElement('tr');
       liqTr.style.cssText = 'border-top:1px solid var(--navy-border);';
       liqTr.innerHTML =
@@ -37234,21 +37236,15 @@ window.saveAdjModal = async function() {
         + '<td style="padding:10px 6px;text-align:right;font-size:12px;color:var(--muted);">—</td>'
         + '<td style="padding:10px 12px;text-align:center;color:var(--muted);font-size:11px;">—</td>'
         + '<td style="padding:10px 12px;text-align:center;color:var(--muted);font-size:11px;">—</td>'
-        + '<td style="padding:10px 12px;color:var(--muted);font-size:11px;">—</td>'
-        + '<td style="padding:4px 12px;"></td>'
-        + '<td style="padding:10px 12px;color:var(--muted);font-size:11px;">—</td>'
+        + '<td colspan="2" style="padding:10px 12px 10px 0;">'
+        +   '<div style="font-size:9px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:3px;">Liquid Prep <span style="font-weight:500;letter-spacing:0;text-transform:none;">(5 working days before)</span></div>'
+        +   '<div id="sc-liquid-prep-display" style="font-size:12px;font-weight:700;color:var(--white);">' + (prepIso ? _fmtIsoDateShort(prepIso) : '—') + '</div>'
+        + '</td>'
+        + '<td style="padding:10px 12px;">'
+        +   '<div style="font-size:9px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:3px;">Liquid Ready</div>'
+        +   '<div id="sc-liquid-ready-display" style="font-size:12px;font-weight:700;color:var(--white);">' + (readyForLiq ? _fmtIsoDateShort(String(readyForLiq).slice(0, 10)) : '—') + '</div>'
+        + '</td>'
         + '<td style="padding:10px 12px;text-align:center;color:var(--muted);font-size:11px;">—</td>';
-      var liqDt = document.createElement('input');
-      liqDt.type = 'date';
-      liqDt.id = 'sc-liquid-ready-date';
-      liqDt.value = (j && j.liquid_ready_date) || (j_preseed && j_preseed.liquid_ready_date) || '';
-      liqDt.style.cssText = inpStyle + (canEditSc ? '' : 'opacity:0.5;cursor:not-allowed;');
-      liqDt.disabled = !canEditSc;
-      liqDt.onblur = function() {
-        if (this.disabled) return;
-        window.setLiquidReadyDate(jobId, this.value || null);
-      };
-      liqTr.cells[7].appendChild(liqDt);
       tbody.appendChild(liqTr);
 
       // Job Ready date input + Reset
@@ -37265,7 +37261,7 @@ window.saveAdjModal = async function() {
         resetBtn.onclick = function() { window.resetJobReadyDate(jobId); };
       }
 
-      // Keep Job Ready in sync when the SC tab is opened (stock may have changed).
+      // Keep Job Ready / Liquid Ready in sync when the SC tab is opened.
       try {
         await window.recomputeJobReady(jobId, { skipSlotSync: true });
         window._refreshScJobReadyUI(jobId);
@@ -37625,10 +37621,42 @@ window.saveAdjModal = async function() {
     return n.getFullYear() + '-' + String(n.getMonth() + 1).padStart(2, '0') + '-' + String(n.getDate()).padStart(2, '0');
   }
 
-  // Recompute jobs.job_ready_date from component ETAs + liquid_ready_date.
-  // Physical stock (not allocation-netted) counts as on-site — no ETA needed.
-  // Missing ETA on any outstanding line, or missing liquid_ready_date → null.
-  // Respects job_ready_manual unless opts.clearManual / forceRecompute.
+  function _fmtIsoDateShort(iso) {
+    if (!iso) return '—';
+    try {
+      var p = String(iso).slice(0, 10).split('-');
+      if (p.length === 3) {
+        return new Date(+p[0], +p[1] - 1, +p[2]).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
+      }
+    } catch (_e) {}
+    return String(iso).slice(0, 10);
+  }
+
+  // Subtract N working days (Mon–Fri, skipping Irish bank holidays when helper is available).
+  window._minusWorkingDays = function(isoDate, n) {
+    if (!isoDate) return null;
+    var p = String(isoDate).slice(0, 10).split('-');
+    if (p.length !== 3) return null;
+    var d = new Date(+p[0], +p[1] - 1, +p[2]);
+    var left = n || 0;
+    while (left > 0) {
+      d.setDate(d.getDate() - 1);
+      var dow = d.getDay();
+      var ds = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      var nonWorking = false;
+      if (typeof window._isNonWorkingDayFn === 'function') {
+        nonWorking = window._isNonWorkingDayFn(d);
+      } else {
+        nonWorking = (dow === 0 || dow === 6);
+      }
+      if (!nonWorking) left--;
+    }
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  };
+
+  // Recompute jobs.job_ready_date from dry-goods ETAs only (on-site lines skipped).
+  // Liquid Ready always mirrors Job Ready. Missing ETA on any outstanding line → null.
+  // Respects job_ready_manual unless opts.clearManual / forceRecompute (still mirrors liquid).
   window.recomputeJobReady = async function(jobId, opts) {
     opts = opts || {};
     if (!jobId) return null;
@@ -37638,60 +37666,58 @@ window.saveAdjModal = async function() {
       var job = jobRows && jobRows[0];
       if (!job) return null;
 
-      if (job.job_ready_manual && !opts.clearManual && !opts.forceRecompute) {
-        return job.job_ready_date || null;
-      }
-
-      var liquidSkuId = null;
-      if (job.bom_id) {
-        try {
-          var bomRows = await supaGet('boms?id=eq.' + encodeURIComponent(job.bom_id) + '&select=liquid_sku_id');
-          if (bomRows && bomRows[0]) liquidSkuId = bomRows[0].liquid_sku_id || null;
-        } catch (_be) { /* non-fatal */ }
-      }
-
-      var comps = await supaGet('job_components?job_id=eq.' + encodeURIComponent(jobId)
-        + '&select=id,sku_id,qty_required,expected_delivery,is_excluded');
-      comps = (comps || []).filter(function(c) {
-        if (c.is_excluded) return false;
-        if (liquidSkuId && c.sku_id === liquidSkuId) return false;
-        return true;
-      });
-
-      var skuIds = [];
-      comps.forEach(function(c) { if (c.sku_id) skuIds.push(c.sku_id); });
-      var stockMap = {};
-      if (skuIds.length) {
-        var uniq = skuIds.filter(function(id, i, a) { return a.indexOf(id) === i; });
-        var batches = await supaGet('dry_goods_batches?sku_id=in.(' + uniq.join(',') + ')&select=sku_id,quantity_remaining');
-        (batches || []).forEach(function(b) {
-          stockMap[b.sku_id] = (stockMap[b.sku_id] || 0) + (parseFloat(b.quantity_remaining) || 0);
-        });
-      }
-
-      var dates = [];
-      var incomplete = false;
-      comps.forEach(function(c) {
-        var req = parseFloat(c.qty_required) || 0;
-        var onSite = !!(c.sku_id && (stockMap[c.sku_id] || 0) >= req);
-        if (onSite) return;
-        if (!c.expected_delivery) { incomplete = true; return; }
-        dates.push(String(c.expected_delivery).slice(0, 10));
-      });
-
-      if (!job.liquid_ready_date) incomplete = true;
-      else dates.push(String(job.liquid_ready_date).slice(0, 10));
-
       var computed = null;
-      if (!incomplete) {
-        if (!dates.length) computed = _todayISODateLocal();
-        else {
-          dates.sort();
-          computed = dates[dates.length - 1];
+      if (job.job_ready_manual && !opts.clearManual && !opts.forceRecompute) {
+        computed = job.job_ready_date || null;
+      } else {
+        var liquidSkuId = null;
+        if (job.bom_id) {
+          try {
+            var bomRows = await supaGet('boms?id=eq.' + encodeURIComponent(job.bom_id) + '&select=liquid_sku_id');
+            if (bomRows && bomRows[0]) liquidSkuId = bomRows[0].liquid_sku_id || null;
+          } catch (_be) { /* non-fatal */ }
+        }
+
+        var comps = await supaGet('job_components?job_id=eq.' + encodeURIComponent(jobId)
+          + '&select=id,sku_id,qty_required,expected_delivery,is_excluded');
+        comps = (comps || []).filter(function(c) {
+          if (c.is_excluded) return false;
+          if (liquidSkuId && c.sku_id === liquidSkuId) return false;
+          return true;
+        });
+
+        var skuIds = [];
+        comps.forEach(function(c) { if (c.sku_id) skuIds.push(c.sku_id); });
+        var stockMap = {};
+        if (skuIds.length) {
+          var uniq = skuIds.filter(function(id, i, a) { return a.indexOf(id) === i; });
+          var batches = await supaGet('dry_goods_batches?sku_id=in.(' + uniq.join(',') + ')&select=sku_id,quantity_remaining');
+          (batches || []).forEach(function(b) {
+            stockMap[b.sku_id] = (stockMap[b.sku_id] || 0) + (parseFloat(b.quantity_remaining) || 0);
+          });
+        }
+
+        var dates = [];
+        var incomplete = false;
+        comps.forEach(function(c) {
+          var req = parseFloat(c.qty_required) || 0;
+          var onSite = !!(c.sku_id && (stockMap[c.sku_id] || 0) >= req);
+          if (onSite) return;
+          if (!c.expected_delivery) { incomplete = true; return; }
+          dates.push(String(c.expected_delivery).slice(0, 10));
+        });
+
+        if (!incomplete) {
+          if (!dates.length) computed = _todayISODateLocal();
+          else {
+            dates.sort();
+            computed = dates[dates.length - 1];
+          }
         }
       }
 
-      var patch = { job_ready_date: computed };
+      // Liquid Ready always mirrors Job Ready (including null / manual ready).
+      var patch = { job_ready_date: computed, liquid_ready_date: computed };
       if (opts.clearManual) patch.job_ready_manual = false;
       await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
 
@@ -37700,11 +37726,12 @@ window.saveAdjModal = async function() {
         var cached = arr.find(function(x) { return x.id === jobId; });
         if (cached) {
           cached.job_ready_date = computed;
+          cached.liquid_ready_date = computed;
           if (opts.clearManual) cached.job_ready_manual = false;
         }
       }
       _bumpCache(typeof _jobs !== 'undefined' ? _jobs : null);
-      _bumpCache(typeof _schedJobs !== 'undefined' ? _schedJobs : null);
+      try { _bumpCache(typeof _schedJobs !== 'undefined' ? _schedJobs : null); } catch (_c) {}
 
       if (typeof window.renderJobsTable === 'function') {
         try { window.renderJobsTable(); } catch (_r) {}
@@ -37727,27 +37754,20 @@ window.saveAdjModal = async function() {
     var val = dateStr ? String(dateStr).slice(0, 10) : null;
     await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), {
       job_ready_date: val,
+      liquid_ready_date: val,
       job_ready_manual: true
     });
     var cached = (_jobs || []).find(function(x) { return x.id === jobId; });
-    if (cached) { cached.job_ready_date = val; cached.job_ready_manual = true; }
+    if (cached) {
+      cached.job_ready_date = val;
+      cached.liquid_ready_date = val;
+      cached.job_ready_manual = true;
+    }
     if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
+    if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
     if (typeof window.syncScheduleSlotsFromReady === 'function') {
       try { await window.syncScheduleSlotsFromReady({ silent: true }); } catch (_s) {}
     }
-  };
-
-  window.setLiquidReadyDate = async function(jobId, dateStr) {
-    if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) {
-      window.toast && window.toast('You do not have permission to edit supply chain.', 'error');
-      return;
-    }
-    var val = dateStr ? String(dateStr).slice(0, 10) : null;
-    await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), { liquid_ready_date: val });
-    var cached = (_jobs || []).find(function(x) { return x.id === jobId; });
-    if (cached) cached.liquid_ready_date = val;
-    await window.recomputeJobReady(jobId);
-    if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
   };
 
   window.resetJobReadyDate = async function(jobId) {
@@ -37762,10 +37782,21 @@ window.saveAdjModal = async function() {
 
   window._refreshScJobReadyUI = function(jobId) {
     var j = (_jobs || []).find(function(x) { return x.id === jobId; });
+    var ready = j && j.job_ready_date ? String(j.job_ready_date).slice(0, 10) : '';
     var inp = document.getElementById('sc-job-ready-date');
     var badge = document.getElementById('sc-job-ready-manual-badge');
-    if (inp && j) inp.value = j.job_ready_date || '';
+    if (inp) inp.value = ready;
     if (badge) badge.style.display = (j && j.job_ready_manual) ? '' : 'none';
+    var liqEl = document.getElementById('sc-liquid-ready-display');
+    if (liqEl) liqEl.textContent = ready ? _fmtIsoDateShort(ready) : '—';
+    var prepEl = document.getElementById('sc-liquid-prep-display');
+    if (prepEl) {
+      if (!ready) prepEl.textContent = '—';
+      else {
+        var prep = window._minusWorkingDays(ready, 5);
+        prepEl.textContent = prep ? _fmtIsoDateShort(prep) : '—';
+      }
+    }
   };
 
   // Allocate / release a job's claim on a shared SKU. Allocation reserves this job's
@@ -46109,6 +46140,8 @@ window.saveAdjModal = async function() {
     var dow = dt.getDay();
     return dow === 0 || dow === 6 || _isBankHoliday(ds);
   }
+  // Expose for Liquid Prep (Job Ready − 5 working days) in the Jobs/SC module.
+  window._isNonWorkingDayFn = _isNonWorkingDay;
 
   // Load working overrides from app_settings
   async function loadWorkingOverrides() {
@@ -46534,10 +46567,9 @@ window.saveAdjModal = async function() {
     });
   }
 
-  // ── Render: Next Jobs (auto from Job Ready; manual pin overrides) ────────────
-  // Slots persist on jobs.schedule_slot (1-5). Autofill writes slots from
-  // job_ready_date order; schedule_slot_pinned keeps manual overrides.
-  // Starting a job clears its slot (+ pin).
+  // ── Render: Next Jobs (fully auto from Job Ready; no manual pins) ────────────
+  // Slots persist on jobs.schedule_slot (1-5). Autofill writes contiguous slots
+  // from job_ready_date order only. Starting a job clears its slot.
   var SCHED_SLOTS = 5;
 
   function _jobReadySort(a, b) {
@@ -46561,83 +46593,69 @@ window.saveAdjModal = async function() {
     return String(d).slice(0, 10);
   }
 
-  // Auto-assign schedule_slot 1–5 from Job Ready order. Pinned slots are preserved.
+  // Auto-assign schedule_slot 1–5 from Job Ready order. No pins — empty when none ready.
   window.syncScheduleSlotsFromReady = async function(opts) {
     opts = opts || {};
     try {
       var jobs = opts.jobs;
       if (!jobs) {
         jobs = await sbGet('jobs?stage=in.(new,active)'
-          + '&select=id,job_ready_date,schedule_slot,schedule_slot_pinned,actual_start,changeover_start,stage,created_at'
+          + '&select=id,job_ready_date,schedule_slot,actual_start,changeover_start,stage,created_at'
           + '&order=job_ready_date.asc.nullslast,created_at.asc');
       }
       jobs = (jobs || []).filter(function(j) {
         return j.stage !== 'complete' && !j.actual_start && !j.changeover_start;
       });
 
-      var pinnedBySlot = {};
-      var occupiedIds = {};
-      jobs.forEach(function(j) {
-        var s = j.schedule_slot;
-        if (j.schedule_slot_pinned && s >= 1 && s <= SCHED_SLOTS) {
-          pinnedBySlot[s] = j;
-          occupiedIds[j.id] = true;
-        }
-      });
-
       var pool = jobs.filter(function(j) {
-        if (occupiedIds[j.id]) return false;
-        if (!j.job_ready_date) return false;
-        return true;
+        return !!j.job_ready_date;
       }).sort(_jobReadySort);
 
       var desired = {};
-      for (var s = 1; s <= SCHED_SLOTS; s++) {
-        if (pinnedBySlot[s]) desired[s] = pinnedBySlot[s].id;
-      }
-      var pi = 0;
-      for (var s2 = 1; s2 <= SCHED_SLOTS; s2++) {
-        if (desired[s2]) continue;
-        if (pi >= pool.length) break;
-        var pick = pool[pi++];
-        desired[s2] = pick.id;
-        occupiedIds[pick.id] = true;
+      for (var i = 0; i < pool.length && i < SCHED_SLOTS; i++) {
+        desired[i + 1] = pool[i].id;
       }
 
-      // Clear unpinned jobs that shouldn't keep their slot
-      for (var i = 0; i < jobs.length; i++) {
-        var j = jobs[i];
-        if (j.schedule_slot_pinned) continue;
+      for (var ji = 0; ji < jobs.length; ji++) {
+        var j = jobs[ji];
         var should = null;
         for (var ds = 1; ds <= SCHED_SLOTS; ds++) {
           if (desired[ds] === j.id) { should = ds; break; }
         }
         if (j.schedule_slot != null && j.schedule_slot !== should) {
-          await sbPatch('jobs', '?id=eq.' + encodeURIComponent(j.id), { schedule_slot: null });
+          await sbPatch('jobs', '?id=eq.' + encodeURIComponent(j.id), {
+            schedule_slot: null,
+            schedule_slot_pinned: false
+          });
           j.schedule_slot = null;
           if (_schedJobs) {
             var c1 = _schedJobs.find(function(x) { return x.id === j.id; });
-            if (c1) c1.schedule_slot = null;
+            if (c1) { c1.schedule_slot = null; c1.schedule_slot_pinned = false; }
           }
         }
       }
 
-      // Assign desired slots
       for (var slot = 1; slot <= SCHED_SLOTS; slot++) {
         var wantId = desired[slot];
         if (!wantId) continue;
         var cur = jobs.find(function(x) { return x.id === wantId; });
         if (!cur || cur.schedule_slot === slot) continue;
         var occupant = jobs.find(function(x) { return x.schedule_slot === slot && x.id !== wantId; });
-        if (occupant && !occupant.schedule_slot_pinned) {
-          await sbPatch('jobs', '?id=eq.' + encodeURIComponent(occupant.id), { schedule_slot: null });
+        if (occupant) {
+          await sbPatch('jobs', '?id=eq.' + encodeURIComponent(occupant.id), {
+            schedule_slot: null,
+            schedule_slot_pinned: false
+          });
           occupant.schedule_slot = null;
         }
-        await sbPatch('jobs', '?id=eq.' + encodeURIComponent(wantId), { schedule_slot: slot });
+        await sbPatch('jobs', '?id=eq.' + encodeURIComponent(wantId), {
+          schedule_slot: slot,
+          schedule_slot_pinned: false
+        });
         cur.schedule_slot = slot;
         if (_schedJobs) {
           var c2 = _schedJobs.find(function(x) { return x.id === wantId; });
-          if (c2) c2.schedule_slot = slot;
+          if (c2) { c2.schedule_slot = slot; c2.schedule_slot_pinned = false; }
         }
       }
     } catch (e) {
@@ -46652,16 +46670,14 @@ window.saveAdjModal = async function() {
     var lineOccupied = _schedJobs.some(function(j) {
       return (j.actual_start && !j.actual_end && j.stage !== 'complete') || (j.changeover_start && !j.actual_start);
     });
-    // Map slot number → the (still-pending) job assigned to it.
     var slotMap = {};
     _schedJobs.forEach(function(j) {
       var s = j.schedule_slot;
       if (s == null) return;
-      if (j.actual_start || j.changeover_start || j.stage === 'complete') return; // stale; auto-clear handles removal
+      if (j.actual_start || j.changeover_start || j.stage === 'complete') return;
       if (s >= 1 && s <= SCHED_SLOTS) slotMap[s] = j;
     });
-    var cols = '40px 84px 2fr 100px 70px 70px 70px 150px' + (canControl ? ' 184px' : '');
-    // Gate pill helpers (BOM is three-state: approved/flagged/pending)
+    var cols = '40px 84px 2fr 100px 70px 70px 70px 150px' + (canControl ? ' 100px' : '');
     function _gBomTick(jobId) {
       if (_schedBomDone[jobId])    return '<span title="BOM: client approved" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.35);white-space:nowrap;">&#10003; BOM</span>';
       if (_schedBomFlagged[jobId]) return '<span title="BOM: client flagged a concern" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.45);white-space:nowrap;">&#9888; BOM</span>';
@@ -46682,18 +46698,11 @@ window.saveAdjModal = async function() {
       var j = slotMap[s];
       var stripe = (s % 2 ? 'background:rgba(255,255,255,0.015);' : '');
       h += '<div style="display:grid;grid-template-columns:' + cols + ';gap:6px;align-items:center;padding:7px 12px;border-bottom:1px solid rgba(36,61,87,0.4);' + stripe + '">';
-      h += '<div style="font-size:13px;font-weight:700;color:var(--amber);">#' + s
-        + (j && j.schedule_slot_pinned ? '<span title="Manually pinned" style="margin-left:4px;font-size:8px;letter-spacing:0.06em;text-transform:uppercase;color:var(--gold);">pin</span>' : '')
-        + '</div>';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--amber);">#' + s + '</div>';
       if (!j) {
-        // Empty slot — spans the remaining columns
-        h += '<div style="grid-column:2 / -1;display:flex;align-items:center;gap:10px;">';
-        if (canControl) {
-          h += '<button onclick="window.schedPickSlotJob(' + s + ')" style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px dashed rgba(201,168,76,0.5);color:var(--gold);padding:6px 14px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">+ Select job</button>';
-        } else {
-          h += '<span style="font-size:11px;color:var(--muted);font-style:italic;">Empty</span>';
-        }
-        h += '</div></div>';
+        h += '<div style="grid-column:2 / -1;display:flex;align-items:center;gap:10px;">'
+          + '<span style="font-size:11px;color:var(--muted);font-style:italic;">Empty</span>'
+          + '</div></div>';
         continue;
       }
       h += '<a href="javascript:void(0)" onclick="window.openJobDetail&&window.openJobDetail(\'' + esc(j.id) + '\')" style="font-size:12px;font-weight:700;color:var(--gold);text-decoration:none;">' + esc(j.id) + '</a>';
@@ -46707,8 +46716,6 @@ window.saveAdjModal = async function() {
       if (canControl) {
         h += '<div style="display:flex;justify-content:flex-end;align-items:center;gap:5px;">'
           + '<button onclick="window.schedOpenStartDialog(\'' + esc(j.id) + '\')" ' + (lineOccupied ? 'disabled title="Another job is already running or in changeover" ' : '') + 'style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green);border:none;color:#0d1b2a;padding:5px 9px;border-radius:3px;font-family:Lato,sans-serif;' + (lineOccupied ? 'opacity:0.4;cursor:not-allowed;' : 'cursor:pointer;') + '">&#9654; Start</button>'
-          + '<button onclick="window.schedPickSlotJob(' + s + ')" title="Swap the job in this slot" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 8px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Change</button>'
-          + '<button onclick="window.schedClearSlot(' + s + ')" title="Empty this slot" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid rgba(224,93,93,0.35);color:var(--red);padding:5px 8px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">&times;</button>'
           + '</div>';
       }
       h += '</div>';
@@ -46716,7 +46723,6 @@ window.saveAdjModal = async function() {
     h += '</div>';
     h += '<div style="font-size:10px;color:var(--muted);margin-top:8px;text-align:right;"><button onclick="window._printNextJobs&&window._printNextJobs()" style="font-size:9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Print</button></div>';
     el.innerHTML = h;
-    // Async load Last BPH per BOM and inject into cells
     Object.keys(slotMap).forEach(function(s) {
       var j = slotMap[s];
       if (!j || !j.bom_id) return;
@@ -46727,73 +46733,15 @@ window.saveAdjModal = async function() {
     });
   }
 
-  // ── Slot picker / assign / clear ─────────────────────────────────────────────
-  window.schedPickSlotJob = function(slot) {
-    if (!window.canDo || !window.canDo('production_control')) { window.toast && window.toast('Permission denied.', 'error'); return; }
-    var existing = document.getElementById('sched-slot-picker-overlay');
-    if (existing) existing.remove();
-    // Pool: pending (not started/changeover/complete) jobs, not already sitting in ANOTHER slot.
-    var pool = (_schedJobs || []).filter(function(j) {
-      if (j.actual_start || j.changeover_start || j.stage === 'complete') return false;
-      if (j.schedule_slot != null && j.schedule_slot !== slot) return false;
-      return true;
-    }).sort(_jobReadySort);
-    var ov = document.createElement('div');
-    ov.id = 'sched-slot-picker-overlay';
-    ov.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.72);display:flex;align-items:center;justify-content:center;font-family:Lato,sans-serif;';
-    var html = '<div style="width:640px;max-width:95vw;max-height:85vh;overflow:auto;background:#0d1b2a;border:1px solid rgba(255,255,255,0.12);border-radius:8px;box-shadow:0 16px 48px rgba(0,0,0,0.7);">'
-      + '<div style="padding:18px 22px;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;align-items:flex-start;justify-content:space-between;gap:16px;">'
-      + '<div><div style="font-size:9px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">Select Job for Slot #' + slot + '</div>'
-      + '<div style="font-size:13px;color:var(--muted);">Manual pin — this slot will not be displaced by autofill.</div></div>'
-      + '<button id="sched-slot-picker-close" style="background:none;border:none;color:rgba(255,255,255,0.4);cursor:pointer;font-size:22px;line-height:1;padding:0;">&times;</button>'
-      + '</div><div style="padding:14px 18px;">';
-    if (!pool.length) {
-      html += '<div style="color:var(--muted);font-size:12px;padding:18px 4px;">No available jobs to assign.</div>';
-    } else {
-      pool.forEach(function(j) {
-        var btls = j.bottle_target ? Number(j.bottle_target).toLocaleString() + ' btls' : '—';
-        var readyLbl = _fmtReadyShort(j.job_ready_date);
-        html += '<button data-slot-job="' + esc(j.id) + '" style="width:100%;text-align:left;background:rgba(255,255,255,0.025);border:1px solid var(--navy-border);border-radius:5px;padding:11px 13px;margin-bottom:8px;cursor:pointer;font-family:Lato,sans-serif;color:var(--white);display:grid;grid-template-columns:72px 1fr 110px;gap:10px;align-items:center;">'
-          + '<span style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--amber);">' + esc(readyLbl) + '</span>'
-          + '<span style="min-width:0;"><span style="display:block;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(window.jobDisplayName(j, _schedBomMap) || j.id) + '</span><span style="display:block;font-size:10px;color:var(--muted);margin-top:2px;">' + esc(j.clientName || '—') + ' · ' + esc(j.id) + '</span></span>'
-          + '<span style="font-size:11px;color:var(--gold);text-align:right;">' + btls + '</span>'
-          + '</button>';
-      });
-    }
-    html += '</div></div>';
-    ov.innerHTML = html;
-    document.body.appendChild(ov);
-    function close() { var e = document.getElementById('sched-slot-picker-overlay'); if (e) e.remove(); }
-    document.getElementById('sched-slot-picker-close').onclick = close;
-    ov.addEventListener('click', function(e) {
-      if (e.target === ov) return close();
-      var btn = e.target.closest && e.target.closest('[data-slot-job]');
-      if (!btn) return;
-      var id = btn.getAttribute('data-slot-job');
-      close();
-      window._schedAssignSlot(slot, id);
-    });
+  // Slot picker / assign / clear retired — Next 5 is fully automatic from Job Ready.
+  window.schedPickSlotJob = function() {
+    window.toast && window.toast('Next Jobs fill automatically from Job Ready dates.', 'info');
   };
-
-  window._schedAssignSlot = async function(slot, jobId) {
-    if (!window.canDo || !window.canDo('production_control')) { window.toast && window.toast('Permission denied.', 'error'); return; }
-    try {
-      // Free the slot first (unique index) — clear whoever currently sits in it.
-      var occupant = (_schedJobs || []).find(function(x){ return x.schedule_slot === slot && x.id !== jobId; });
-      if (occupant) await sbPatch('jobs', '?id=eq.' + occupant.id, { schedule_slot: null, schedule_slot_pinned: false });
-      await sbPatch('jobs', '?id=eq.' + jobId, { schedule_slot: slot, schedule_slot_pinned: true });
-      window.toast && window.toast('Slot #' + slot + ' pinned.', 'success');
-      await loadSchedule();
-    } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
+  window._schedAssignSlot = async function() {
+    window.toast && window.toast('Next Jobs fill automatically from Job Ready dates.', 'info');
   };
-
-  window.schedClearSlot = async function(slot) {
-    if (!window.canDo || !window.canDo('production_control')) { window.toast && window.toast('Permission denied.', 'error'); return; }
-    try {
-      var occupant = (_schedJobs || []).find(function(x){ return x.schedule_slot === slot; });
-      if (occupant) await sbPatch('jobs', '?id=eq.' + occupant.id, { schedule_slot: null, schedule_slot_pinned: false });
-      await loadSchedule();
-    } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
+  window.schedClearSlot = async function() {
+    window.toast && window.toast('Next Jobs fill automatically from Job Ready dates.', 'info');
   };
 
   function _schedQueuedJobs(excludeId) {
