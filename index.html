@@ -22568,6 +22568,7 @@ window.loadBoms = async function initBoms() {
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <input type="month" id="cbw-log-month" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:7px 10px;font-size:12px;border-radius:3px;font-family:Lato,sans-serif;">
         <button onclick="window.loadCBWLog()" class="btn btn-outline" style="font-size:12px;padding:7px 16px;">View Month</button>
+        <button onclick="window._downloadCBWLog()" class="btn btn-outline" style="font-size:12px;padding:7px 16px;">Download CSV</button>
         <button onclick="window._emailCBWLog(false)" class="btn btn-gold" style="font-size:12px;padding:7px 16px;">&#9993; Email CBW — Previous Month</button>
         <button onclick="window._emailCBWLog(true)" title="Send test copy to yourself" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:6px 12px;cursor:pointer;border-radius:4px;font-family:Lato,sans-serif;">Test &#9993;</button>
       </div>
@@ -29208,10 +29209,54 @@ window.loadReconciliation = async function() {
 };
 
 // ── CBW BOTTLING LOG ─────────────────────────────────────────────────────────
+// Column layout matches the bonded CBW Excel monthly tabs:
+// Date | Rotation Number | Container ID | Qty | ABV | Water | Total L | Alc % |
+// Batch No | Product Name | 10cl | 5cl | 50cl | 100ml | 70cl | 750ml | 1000ml |
+// Cases | Residue | Losses | New Rotation | Signed
 
-// Helper: fetch all data for completed jobs in a given YYYY-MM month
+var _CBW_SIZE_KEYS = ['10cl','5cl','50cl','100ml','70cl','750ml','1000ml'];
+
+function _cbwVesselLabel(type) {
+  var t = String(type || '').toLowerCase();
+  if (t === 'ibc') return 'IBC';
+  if (t === 'tank') return 'Tank';
+  if (t === 'cask') return 'Cask';
+  if (t === 'blue_drum') return 'Blue drum';
+  if (t === 'tanker') return 'Tanker';
+  return type ? String(type) : '';
+}
+
+function _cbwSizeBucket(volumeCl) {
+  var v = parseFloat(volumeCl);
+  if (v === 5) return '5cl';
+  if (v === 10) return '10cl';
+  if (v === 50) return '50cl';
+  if (v === 70) return '70cl';
+  if (v === 75) return '750ml';
+  if (v === 100) return '1000ml';
+  return '70cl';
+}
+
+function _cbwEmptySizes() {
+  var o = {};
+  _CBW_SIZE_KEYS.forEach(function(k){ o[k] = 0; });
+  return o;
+}
+
+function _cbwFmtCases(n) {
+  if (n == null || n === '') return '';
+  var x = parseFloat(n);
+  if (!isFinite(x) || x === 0) return '';
+  if (Math.abs(x - Math.round(x)) < 1e-9) return String(Math.round(x));
+  return x.toFixed(2);
+}
+
+function _cbwFmtNum(n, empty) {
+  if (n == null || !isFinite(n) || n === 0) return empty;
+  return (Math.round(n * 10) / 10).toFixed(1);
+}
+
 async function _cbwFetchMonth(yearMonth) {
-  // Build date range for the month
   var yr  = parseInt(yearMonth.slice(0,4), 10);
   var mo  = parseInt(yearMonth.slice(5,7), 10);
   var from = yearMonth + '-01T00:00:00.000Z';
@@ -29226,13 +29271,11 @@ async function _cbwFetchMonth(yearMonth) {
 
   var jobIds = jobs.map(function(j){ return j.id; });
 
-  // Fetch liquid signoffs and BOMs in parallel
   var signoffs = await supa('job_liquid_signoff', '?job_id=in.(' + jobIds.join(',') + ')&select=job_id,linked_containers_json,linked_container_id,water_required,water_added,final_litres');
   var bomIds   = jobs.map(function(j){ return j.bom_id; }).filter(function(v,i,a){ return v && a.indexOf(v)===i; });
   var boms     = bomIds.length ? await supa('boms', '?id=in.(' + bomIds.join(',') + ')&select=id,product_name,volume_cl,bottling_abv,abv,bottles_per_shipper,additional_info') : [];
   if (boms && boms.length && window._mergeBomMap) window._mergeBomMap(boms);
 
-  // Collect all container IDs
   var allContIds = [];
   signoffs.forEach(function(s) {
     var lc = [];
@@ -29240,9 +29283,8 @@ async function _cbwFetchMonth(yearMonth) {
     if (!lc.length && s.linked_container_id) lc = [{ id: s.linked_container_id }];
     lc.forEach(function(c){ if (c.id && allContIds.indexOf(c.id) === -1) allContIds.push(c.id); });
   });
-  var conts = allContIds.length ? await supa('liquid_containers', '?id=in.(' + allContIds.join(',') + ')&select=id,reference,cbw_rotation,abv,spirit_type') : [];
+  var conts = allContIds.length ? await supa('liquid_containers', '?id=in.(' + allContIds.join(',') + ')&select=id,reference,cbw_rotation,abv,spirit_type,type') : [];
 
-  // Build lookup maps
   var soMap  = {}; signoffs.forEach(function(s){ soMap[s.job_id] = s; });
   var bomMap = {}; boms.forEach(function(b){ bomMap[b.id] = b; });
   var cMap   = {}; conts.forEach(function(c){ cMap[c.id] = c; });
@@ -29250,7 +29292,6 @@ async function _cbwFetchMonth(yearMonth) {
   return jobs.map(function(j) {
     var so  = soMap[j.id]  || {};
     var bom = bomMap[j.bom_id] || {};
-    var ai  = bom.additional_info || {};
 
     var lc = [];
     try { lc = JSON.parse(so.linked_containers_json || '[]'); } catch(e) {}
@@ -29267,25 +29308,25 @@ async function _cbwFetchMonth(yearMonth) {
     var volumeCl    = parseFloat(bom.volume_cl || 0);
     var bottlesFill = parseInt(j.actual_bottles_produced || 0);
     var filledLitres = volumeCl && bottlesFill ? (bottlesFill * volumeCl) / 100 : 0;
-    // Losses basis: finalLitres is the BOTTLING BATCH (drawn source + water). The
-    // job's liquid_leftover is the UNDRAWN remainder that stayed in the source and
-    // never entered the batch, so it must NOT be subtracted here (doing so would
-    // understate losses). It is reported separately as `residue` below. While the
-    // field was always 0 this subtraction was a no-op; now that it is populated we
-    // decouple it so the loss figure stays correct.
     var losses      = finalLitres > 0 ? Math.max(0, finalLitres - filledLitres) : null;
 
-    var bottlesPerCase  = parseInt(bom.bottles_per_shipper || 0) || null;
-    var casesPerLayer   = parseInt((ai.casesLayer||0)) || null;
-    var layersPerPallet = parseInt((ai.layersPallet||0)) || null;
-    var casesPerPallet  = (casesPerLayer && layersPerPallet) ? casesPerLayer * layersPerPallet : null;
+    var sizes = _cbwEmptySizes();
+    if (bottlesFill > 0) sizes[_cbwSizeBucket(volumeCl)] = bottlesFill;
+
+    var typeSeen = [];
+    linkedConts.forEach(function(c) {
+      var label = _cbwVesselLabel(c.type);
+      if (label && typeSeen.indexOf(label) === -1) typeSeen.push(label);
+    });
+
+    var rotParts = linkedConts.map(function(c){ return (c.cbw_rotation || '').trim(); }).filter(Boolean);
 
     return {
       job:           j,
       client:        (j.clients && j.clients.name) || '',
       date:          j.date_completed,
-      rotations:     linkedConts.map(function(c){ return c.cbw_rotation || '—'; }).join(', '),
-      containerRefs: linkedConts.map(function(c){ return c.reference   || c.id; }).join(', '),
+      rotations:     rotParts.length ? rotParts.join('-') : '—',
+      containerId:   typeSeen.join(', '),
       srcLitres:     srcLitres,
       srcAbv:        srcAbv,
       waterAdded:    waterAdded,
@@ -29293,23 +29334,27 @@ async function _cbwFetchMonth(yearMonth) {
       bottlingAbv:   bottlingAbv,
       batchNo:       j.lot_number || '',
       productName:   j.product_name || '',
-      productLabel:  (window.jobLabel && window.jobLabel(j)) || j.product_name || '',
       bottlesFilled: bottlesFill,
       volumeCl:      volumeCl,
+      sizes:         sizes,
+      cases:         parseFloat(j.actual_cases || 0) || 0,
       residue:       parseFloat(j.liquid_leftover || 0),
       losses:        losses,
       newRotation:   j.cbw_new_rotation_no || '',
-      signedAt:      j.results_signed_at,
-      signedBy:      j.results_signed_by || '',
-      bottlesPerCase:  bottlesPerCase,
-      casesPerPallet:  casesPerPallet
+      signedBy:      j.results_signed_by || ''
     };
   });
 }
 
 function _cbwFmtDate(ts) {
   if (!ts) return '';
-  try { return new Date(ts).toLocaleDateString('en-IE',{day:'2-digit',month:'short',year:'numeric'}); } catch(e){ return ts; }
+  try {
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return '';
+    var dd = String(d.getDate()).padStart(2, '0');
+    var mm = String(d.getMonth() + 1).padStart(2, '0');
+    return dd + '/' + mm + '/' + d.getFullYear();
+  } catch(e) { return ''; }
 }
 
 window.loadCBWLog = async function() {
@@ -29321,13 +29366,17 @@ window.loadCBWLog = async function() {
   var yearMonth = (monthEl && monthEl.value) || (now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0'));
   if (monthEl && !monthEl.value) monthEl.value = yearMonth;
 
+  var yr = parseInt(yearMonth.slice(0,4), 10);
+  var mo = parseInt(yearMonth.slice(5,7), 10);
+  var monthLabel = new Date(yr, mo - 1, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' });
+
   el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">Loading…</div>';
 
   try {
     var rows = await _cbwFetchMonth(yearMonth);
 
     if (!rows.length) {
-      el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">No completed jobs found for ' + yearMonth + '.</div>';
+      el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:32px 0;text-align:center;">No completed jobs found for ' + monthLabel + '.</div>';
       return;
     }
 
@@ -29335,69 +29384,84 @@ window.loadCBWLog = async function() {
       return '<th style="padding:7px 10px;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;' + (right?'text-align:right;':'') + '">' + t + '</th>';
     };
     var td = function(v, right, muted) {
-      return '<td style="padding:7px 10px;font-size:12px;color:' + (muted?'var(--muted)':'var(--text)') + ';white-space:nowrap;' + (right?'text-align:right;':'') + '">' + (v!=null?window.escapeHtml(String(v)):'—') + '</td>';
+      return '<td style="padding:7px 10px;font-size:12px;color:' + (muted?'var(--muted)':'var(--text)') + ';white-space:nowrap;' + (right?'text-align:right;':'') + '">' + (v!=null && v !== ''?window.escapeHtml(String(v)):'') + '</td>';
     };
     var subHead = function(label, span) {
       return '<th colspan="' + span + '" style="padding:5px 10px;font-size:9px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:var(--gold);background:rgba(201,168,76,0.07);border-bottom:1px solid rgba(201,168,76,0.2);white-space:nowrap;">' + label + '</th>';
     };
 
     var html = '<div style="overflow-x:auto;">'
-      + '<table style="width:100%;border-collapse:collapse;font-size:12px;min-width:1200px;">'
+      + '<table style="width:100%;border-collapse:collapse;font-size:12px;min-width:1400px;">'
       + '<thead>'
       + '<tr>'
-      + subHead('GI Product for Bottling (Duty Suspended)', 5)
-      + subHead('Blending', 6)
-      + subHead('Volume Filled', 3)
-      + subHead('Sign-off', 3)
+      + subHead(monthLabel, 10)
+      + subHead('Volume Filled', 7)
+      + '<th></th>'
+      + subHead('Litres', 2)
+      + '<th colspan="2"></th>'
       + '</tr>'
       + '<tr style="border-bottom:2px solid var(--navy-border);">'
-      + th('Date') + th('Rotation No.') + th('Container ID') + th('Qty (L)',true) + th('ABV',true)
-      + th('Water (L)',true) + th('Total Litres',true) + th('Alc %',true) + th('Batch No.') + th('Product') + th('Product Label')
-      + th('Bottles Filled') + th('Residue (L)',true) + th('Losses (L)',true)
-      + th('New Rot. No.') + th('Sign-off Date') + th('Signed By')
+      + th('Date') + th('Rotation Number') + th('Container ID') + th('Qty',true) + th('ABV',true)
+      + th('Water',true) + th('Total L',true) + th('Alc %',true) + th('Batch No') + th('Product Name')
+      + th('10cl',true) + th('5cl',true) + th('50cl',true) + th('100ml',true) + th('70cl',true) + th('750ml',true) + th('1000ml',true)
+      + th('Cases',true) + th('Residue',true) + th('Losses',true)
+      + th('New Rotation') + th('Signed')
       + '</tr>'
       + '</thead><tbody>';
 
+    var tot = { src:0, water:0, total:0, cases:0, residue:0, losses:0 };
+    var totSizes = _cbwEmptySizes();
+
     rows.forEach(function(r, i) {
       var bg = i % 2 === 0 ? '' : 'background:rgba(255,255,255,0.02);';
-      var bottlesStr = r.bottlesFilled && r.volumeCl
-        ? r.bottlesFilled.toLocaleString() + ' × ' + r.volumeCl + 'cl'
-        : (r.bottlesFilled ? r.bottlesFilled.toLocaleString() + ' btls' : '—');
+      tot.src += r.srcLitres || 0;
+      tot.water += r.waterAdded || 0;
+      tot.total += r.totalLitres || 0;
+      tot.cases += r.cases || 0;
+      tot.residue += r.residue || 0;
+      tot.losses += r.losses || 0;
+      _CBW_SIZE_KEYS.forEach(function(k){ totSizes[k] += (r.sizes && r.sizes[k]) || 0; });
+
       html += '<tr style="border-bottom:1px solid var(--navy-border);' + bg + '">'
         + td(_cbwFmtDate(r.date))
         + td(r.rotations)
-        + td(r.containerRefs)
-        + td(r.srcLitres > 0 ? r.srcLitres.toFixed(1) : '—', true)
-        + td(r.srcAbv > 0 ? r.srcAbv.toFixed(1) + '%' : '—', true)
-        + td(r.waterAdded > 0 ? r.waterAdded.toFixed(1) : '0', true)
-        + td(r.totalLitres > 0 ? r.totalLitres.toFixed(1) : '—', true)
-        + td(r.bottlingAbv > 0 ? r.bottlingAbv.toFixed(1) + '%' : '—', true)
+        + td(r.containerId)
+        + td(_cbwFmtNum(r.srcLitres, ''), true)
+        + td(r.srcAbv > 0 ? r.srcAbv.toFixed(1) + '%' : '', true)
+        + td(_cbwFmtNum(r.waterAdded, '0'), true)
+        + td(_cbwFmtNum(r.totalLitres, ''), true)
+        + td(r.bottlingAbv > 0 ? r.bottlingAbv.toFixed(1) + '%' : '', true)
         + td(r.batchNo)
-        + td(r.productName)
-        + td(r.productLabel || r.productName)
-        + td(bottlesStr)
-        + td(r.residue > 0 ? r.residue.toFixed(1) : '0', true)
-        + td(r.losses != null ? r.losses.toFixed(1) : '—', true)
+        + td(r.productName);
+      _CBW_SIZE_KEYS.forEach(function(k) {
+        var n = r.sizes && r.sizes[k];
+        html += td(n ? n.toLocaleString('en-IE') : '', true);
+      });
+      html += td(_cbwFmtCases(r.cases), true)
+        + td(_cbwFmtNum(r.residue, '0'), true)
+        + td(r.losses != null ? r.losses.toFixed(1) : '', true)
         + '<td style="padding:7px 10px;font-size:12px;">'
         + '<input value="' + window.escapeHtml(r.newRotation) + '" placeholder="—" data-jobid="' + r.job.id + '"'
         + ' onchange="window._cbwSaveNewRot(this)" style="background:transparent;border:1px solid var(--navy-border);color:var(--white);padding:3px 8px;font-size:11px;border-radius:3px;width:110px;font-family:Lato,sans-serif;">'
         + '</td>'
-        + td(_cbwFmtDate(r.signedAt), false, true)
         + td(r.signedBy, false, true)
         + '</tr>';
     });
 
     html += '<tr style="background:rgba(201,168,76,0.05);border-top:2px solid var(--navy-border);font-weight:700;">'
       + '<td colspan="3" style="padding:8px 10px;font-size:12px;color:var(--muted);">Totals — ' + rows.length + ' job' + (rows.length>1?'s':'') + '</td>'
-      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.srcLitres; },0).toFixed(1) + '</td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + tot.src.toFixed(1) + '</td>'
       + '<td></td>'
-      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.waterAdded; },0).toFixed(1) + '</td>'
-      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.totalLitres; },0).toFixed(1) + '</td>'
-      + '<td></td><td></td><td></td><td></td>'
-      + '<td style="padding:8px 10px;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.bottlesFilled; },0).toLocaleString() + ' btls</td>'
-      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + r.residue; },0).toFixed(1) + '</td>'
-      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + rows.reduce(function(s,r){ return s + (r.losses||0); },0).toFixed(1) + '</td>'
-      + '<td colspan="3"></td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + tot.water.toFixed(1) + '</td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + tot.total.toFixed(1) + '</td>'
+      + '<td></td><td></td><td></td>';
+    _CBW_SIZE_KEYS.forEach(function(k) {
+      html += '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + (totSizes[k] ? totSizes[k].toLocaleString('en-IE') : '') + '</td>';
+    });
+    html += '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + _cbwFmtCases(tot.cases) + '</td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + tot.residue.toFixed(1) + '</td>'
+      + '<td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--white);">' + tot.losses.toFixed(1) + '</td>'
+      + '<td colspan="2"></td>'
       + '</tr>';
 
     html += '</tbody></table></div>';
@@ -29419,6 +29483,91 @@ window._cbwSaveNewRot = async function(input) {
   } catch(e) {
     window.toast && window.toast('Could not save rotation: ' + e.message, 'error');
     input.style.borderColor = 'var(--red)';
+  }
+};
+
+function _cbwEscCsv(v) {
+  if (v == null) return '';
+  var s = String(v);
+  if (s.indexOf(',') >= 0 || s.indexOf('"') >= 0 || s.indexOf('\n') >= 0) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+function _cbwBuildCsv(rows, monthLabel) {
+  var lines = [];
+  lines.push([
+    monthLabel, '', '', '', '', '', '', '', '', '',
+    'Volume Filled', '', '', '', '', '', '',
+    '',
+    'Litres', '',
+    '', ''
+  ].map(_cbwEscCsv).join(','));
+  lines.push([
+    'Date', 'Rotation Number', 'Container ID', 'Qty', 'ABV',
+    'Water', 'Total L', 'Alc %', 'Batch No', 'Product Name',
+    '10cl', '5cl', '50cl', '100ml', '70cl', '750ml', '1000ml',
+    'Cases', 'Residue', 'Losses',
+    'New Rotation', 'Signed'
+  ].map(_cbwEscCsv).join(','));
+
+  (rows || []).forEach(function(r) {
+    var cells = [
+      _cbwFmtDate(r.date),
+      r.rotations === '—' ? '' : r.rotations,
+      r.containerId,
+      _cbwFmtNum(r.srcLitres, ''),
+      r.srcAbv > 0 ? r.srcAbv.toFixed(1) + '%' : '',
+      _cbwFmtNum(r.waterAdded, '0'),
+      _cbwFmtNum(r.totalLitres, ''),
+      r.bottlingAbv > 0 ? r.bottlingAbv.toFixed(1) + '%' : '',
+      r.batchNo,
+      r.productName
+    ];
+    _CBW_SIZE_KEYS.forEach(function(k) {
+      var n = r.sizes && r.sizes[k];
+      cells.push(n ? String(n) : '');
+    });
+    cells.push(
+      _cbwFmtCases(r.cases),
+      _cbwFmtNum(r.residue, '0'),
+      r.losses != null ? r.losses.toFixed(1) : '',
+      r.newRotation,
+      r.signedBy
+    );
+    lines.push(cells.map(_cbwEscCsv).join(','));
+  });
+  return lines.join('\r\n');
+}
+
+window._downloadCBWLog = async function() {
+  var monthEl = document.getElementById('cbw-log-month');
+  var now = new Date();
+  var yearMonth = (monthEl && monthEl.value) || (now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0'));
+  var yr = parseInt(yearMonth.slice(0,4), 10);
+  var mo = parseInt(yearMonth.slice(5,7), 10);
+  var monthLabel = new Date(yr, mo - 1, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' });
+
+  window.toast && window.toast('Building ' + monthLabel + ' CSV…');
+  try {
+    var rows = await _cbwFetchMonth(yearMonth);
+    if (!rows.length) {
+      window.toast && window.toast('No completed jobs found for ' + monthLabel + '.', 'error');
+      return;
+    }
+    var csv = _cbwBuildCsv(rows, monthLabel);
+    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'CBW_Bottling_Log_' + yearMonth + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 30000);
+  } catch(e) {
+    window.toast && window.toast('Failed to download log: ' + (e.message || e), 'error');
   }
 };
 
@@ -29451,59 +29600,7 @@ window._emailCBWLog = async function(isTest) {
       return;
     }
 
-    // Build CSV
-    var esc_csv = function(v) {
-      if (v == null) return '';
-      var s = String(v);
-      if (s.indexOf(',') >= 0 || s.indexOf('"') >= 0 || s.indexOf('\n') >= 0) {
-        return '"' + s.replace(/"/g, '""') + '"';
-      }
-      return s;
-    };
-
-    var csvLines = [];
-    // Row 1: month header + section sub-headings
-    csvLines.push([
-      monthLabel + ' — GI Product for Bottling (Duty Suspended)', '', '', '', '',
-      'Blending', '', '', '', '', '',
-      'Volume Filled', '', '',
-      '', '', ''
-    ].map(esc_csv).join(','));
-
-    // Row 2: column headers
-    csvLines.push([
-      'Date', 'Rotation No.', 'Container ID', 'Quantity (L)', 'ABV',
-      'Water (L)', 'Total Litres for Bottling', 'Alc %', 'Bottling Batch No.', 'Product Name', 'Product Label',
-      'Bottles Filled', 'Litres Residue', 'Litres Losses',
-      'New Rotation No.', 'Date', 'Signed'
-    ].map(esc_csv).join(','));
-
-    rows.forEach(function(r) {
-      var bottlesStr = r.bottlesFilled && r.volumeCl
-        ? r.bottlesFilled.toLocaleString() + ' x ' + r.volumeCl + 'cl'
-        : (r.bottlesFilled ? String(r.bottlesFilled) : '');
-      csvLines.push([
-        _cbwFmtDate(r.date),
-        r.rotations,
-        r.containerRefs,
-        r.srcLitres > 0 ? r.srcLitres.toFixed(1) : '',
-        r.srcAbv > 0 ? r.srcAbv.toFixed(1) + '%' : '',
-        r.waterAdded > 0 ? r.waterAdded.toFixed(1) : '0',
-        r.totalLitres > 0 ? r.totalLitres.toFixed(1) : '',
-        r.bottlingAbv > 0 ? r.bottlingAbv.toFixed(1) + '%' : '',
-        r.batchNo,
-        r.productName,
-        r.productLabel,
-        bottlesStr,
-        r.residue > 0 ? r.residue.toFixed(1) : '0',
-        r.losses != null ? r.losses.toFixed(1) : '',
-        r.newRotation,
-        _cbwFmtDate(r.signedAt),
-        r.signedBy
-      ].map(esc_csv).join(','));
-    });
-
-    var csvContent = csvLines.join('\r\n');
+    var csvContent = _cbwBuildCsv(rows, monthLabel);
     var csvBase64  = btoa(unescape(encodeURIComponent(csvContent)));
 
     var subject = 'CBW Bottling Log — ' + monthLabel;
