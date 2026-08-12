@@ -877,6 +877,9 @@
         <div>
           <label style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;display:block;">PO Number *</label>
           <input type="text" id="pjm-po" placeholder="e.g. PO-2026-0042" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.15);color:var(--white);padding:8px 10px;border-radius:4px;font-size:14px;">
+          <div id="pjm-po-attach-list" style="display:flex;flex-direction:column;gap:6px;margin-top:8px;"></div>
+          <input id="pjm-po-files" type="file" multiple style="display:none;" onchange="window._pjmPoFilesPicked(this)">
+          <button type="button" onclick="document.getElementById('pjm-po-files').click()" class="btn btn-outline" style="font-size:11px;padding:6px 12px;margin-top:8px;">Attach PO document</button>
         </div>
         <div style="grid-column:1/-1;">
           <label style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;display:block;">Number of Bottles *</label>
@@ -2117,11 +2120,13 @@ function toast(msg, type = 'success') {
     opts = opts || {};
     var title = opts.title || 'Confirm';
     var destructive = !!opts.destructive;
-    var accent = destructive ? 'var(--red)' : 'var(--gold)';
+    var warn = opts.variant === 'warn';
+    var accent = destructive ? 'var(--red)' : warn ? 'var(--amber)' : 'var(--gold)';
     var okLabel = opts.confirmLabel || (destructive ? 'Confirm' : 'OK');
     var cancelLabel = opts.cancelLabel || 'Cancel';
-    var okBg = destructive ? 'var(--red)' : 'var(--gold)';
+    var okBg = destructive ? 'var(--red)' : warn ? 'var(--amber)' : 'var(--gold)';
     var okFg = destructive ? '#fff' : 'var(--navy-dark,#0a1628)';
+    var bodyColor = (destructive || warn) ? 'var(--white)' : 'var(--muted)';
     return new Promise(function(resolve) {
       var ov = document.createElement('div');
       ov.className = 'lp-dialog-overlay';
@@ -2132,7 +2137,7 @@ function toast(msg, type = 'success') {
       ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:2000000;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
       ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid ' + accent + ';border-radius:8px;padding:26px 28px 22px;max-width:440px;width:100%;box-shadow:0 16px 48px rgba(0,0,0,0.45);">'
         + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:' + accent + ';font-weight:700;margin-bottom:8px;">' + _lpEsc(title) + '</div>'
-        + '<div style="font-size:13px;color:var(--muted);line-height:1.65;margin-bottom:22px;">' + _lpMsgHtml(message) + '</div>'
+        + '<div style="font-size:13px;color:' + bodyColor + ';line-height:1.65;margin-bottom:22px;">' + _lpMsgHtml(message) + '</div>'
         + '<div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">'
         + '<button type="button" class="lp-dlg-x" style="padding:9px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">' + _lpEsc(cancelLabel) + '</button>'
         + '<button type="button" class="lp-dlg-ok" style="padding:9px 20px;background:' + okBg + ';border:none;border-radius:4px;color:' + okFg + ';cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">' + _lpEsc(okLabel) + '</button>'
@@ -3738,6 +3743,132 @@ window._portalUploadFile = async function(file, bucket, subpath) {
   return { url: SUPA + '/storage/v1/object/public/' + bucket + '/' + path, path: path, name: file.name };
 };
 
+window._portalDeleteFile = async function(bucket, path) {
+  if (!bucket || !path) return;
+  try {
+    var token = await window._freshAccessToken();
+    if (!token) return;
+    await fetch(SUPA_URL + '/storage/v1/object/' + bucket + '/' + path, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + token, 'apikey': SUPA_KEY }
+    });
+  } catch (_e) {}
+};
+
+window._PO_ATTACH_BUCKET = 'job-po-documents';
+window._PO_ATTACH_MAX = 25 * 1048576;
+
+window._poAttachNewDraftKey = function() {
+  return (crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : ('d' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+};
+
+window._poAttachNormalize = function(arr) {
+  if (!arr) return [];
+  if (typeof arr === 'string') {
+    try { arr = JSON.parse(arr); } catch (_e) { return []; }
+  }
+  if (!Array.isArray(arr)) return [];
+  return arr.filter(function(a) { return a && a.url; }).map(function(a) {
+    return { name: a.name || 'file', url: a.url, path: a.path || '' };
+  });
+};
+
+window._poAttachLinksHtml = function(arr) {
+  var esc = window.escapeHtml;
+  var list = window._poAttachNormalize(arr);
+  if (!list.length) return '';
+  return list.map(function(a) {
+    return '<a href="' + esc(a.url) + '" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:none;">' + esc(a.name || 'file') + '</a>';
+  }).join('<span style="color:var(--muted);"> \u00b7 </span>');
+};
+
+window._poAttachRenderEditor = function(hostId, attachments, removeFnName) {
+  var host = document.getElementById(hostId); if (!host) return;
+  var esc = window.escapeHtml;
+  var list = window._poAttachNormalize(attachments);
+  if (!list.length) {
+    host.innerHTML = '<span style="font-size:11px;color:var(--muted);">No PO document attached yet.</span>';
+    return;
+  }
+  host.innerHTML = list.map(function(a, i) {
+    return '<div style="display:flex;align-items:center;gap:8px;background:var(--navy-mid);border:1px solid var(--navy-border);border-radius:4px;padding:6px 10px;">'
+      + '<span style="font-size:13px;">&#128206;</span>'
+      + '<a href="' + esc(a.url) + '" target="_blank" rel="noopener" style="flex:1;min-width:0;font-size:12px;color:var(--gold);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(a.name || 'file') + '</a>'
+      + '<button type="button" onclick="' + removeFnName + '(' + i + ')" title="Remove" style="background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:0 2px;">&times;</button>'
+      + '</div>';
+  }).join('');
+};
+
+window._poAttachSubpath = function(clientId, ownerKey) {
+  var folder = (clientId && String(clientId).trim()) ? String(clientId).trim() : 'unassigned';
+  var key = (ownerKey && String(ownerKey).trim()) ? String(ownerKey).trim() : window._poAttachNewDraftKey();
+  return folder + '/' + key;
+};
+
+var _pjmPoAttachments = [];
+var _pjmPoDraftKey = '';
+
+function _pjmPoRender() {
+  window._poAttachRenderEditor('pjm-po-attach-list', _pjmPoAttachments, 'window._pjmPoRemove');
+}
+
+function _pjmPoSessionSave() {
+  try {
+    sessionStorage.setItem('lp-pjm-po-attachments', JSON.stringify(_pjmPoAttachments));
+    sessionStorage.setItem('lp-pjm-po-draft-key', _pjmPoDraftKey || '');
+  } catch (_e) {}
+}
+
+function _pjmPoSessionClear() {
+  try {
+    sessionStorage.removeItem('lp-pjm-po-attachments');
+    sessionStorage.removeItem('lp-pjm-po-draft-key');
+  } catch (_e) {}
+}
+
+window._pjmPoFilesPicked = async function(input) {
+  var files = Array.prototype.slice.call(input.files || []);
+  input.value = '';
+  if (!files.length) return;
+  var user = window.CURRENT_USER;
+  var clientId = user && user.client_id;
+  if (!clientId) {
+    window.toast && window.toast('Your account isn\'t linked to a client.', 'error');
+    return;
+  }
+  if (!_pjmPoDraftKey) _pjmPoDraftKey = window._poAttachNewDraftKey();
+  var subpath = window._poAttachSubpath(clientId, _pjmPoDraftKey);
+  var statusEl = document.getElementById('pjm-status');
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    if (f.size > window._PO_ATTACH_MAX) {
+      if (statusEl) statusEl.innerHTML = '<span style="color:#ff9c9c;">"' + window.escapeHtml(f.name) + '" is over 25 MB.</span>';
+      continue;
+    }
+    try {
+      if (statusEl) statusEl.innerHTML = '<span style="color:var(--muted);">Uploading ' + window.escapeHtml(f.name) + '\u2026</span>';
+      var up = await window._portalUploadFile(f, window._PO_ATTACH_BUCKET, subpath);
+      _pjmPoAttachments.push({ name: f.name, url: up.url, path: up.path });
+      _pjmPoRender();
+      _pjmPoSessionSave();
+      if (statusEl) statusEl.innerHTML = '';
+    } catch (upErr) {
+      window.logError && window.logError('pjmPoUpload', upErr);
+      if (statusEl) statusEl.innerHTML = '<span style="color:#ff9c9c;">Could not upload "' + window.escapeHtml(f.name) + '": ' + window.escapeHtml(upErr.message || upErr) + '</span>';
+    }
+  }
+};
+
+window._pjmPoRemove = async function(i) {
+  var a = _pjmPoAttachments[i];
+  if (!a) return;
+  _pjmPoAttachments.splice(i, 1);
+  _pjmPoRender();
+  _pjmPoSessionSave();
+  if (a.path) window._portalDeleteFile(window._PO_ATTACH_BUCKET, a.path);
+};
+
 // ── Request New Job modal ─────────────────────────────────────────────────────
 window.openPortalJobModal = async function(reviseId) {
   var user   = window.CURRENT_USER;
@@ -3756,6 +3887,8 @@ window.openPortalJobModal = async function(reviseId) {
   document.getElementById('pjm-submit').disabled = false;
   var _sp = document.getElementById('pjm-stock-panel');
   if (_sp) _sp.style.display = 'none';
+  _pjmPoAttachments = [];
+  _pjmPoDraftKey = '';
 
   // Load this client's APPROVED BOMs for the dropdown
   var sel = document.getElementById('pjm-bom');
@@ -3797,9 +3930,21 @@ window.openPortalJobModal = async function(reviseId) {
         document.getElementById('pjm-date').value = s.desired_bottling_date || '';
         document.getElementById('pjm-approved-by').value = s.client_approved_by || '';
         document.getElementById('pjm-notes').value = s.notes || '';
+        _pjmPoAttachments = window._poAttachNormalize(s.po_attachments);
+        _pjmPoDraftKey = reviseId;
       }
     } catch(e) { window.logError('openPortalJobModal:revise', e); }
+  } else {
+    try {
+      _pjmPoDraftKey = sessionStorage.getItem('lp-pjm-po-draft-key') || window._poAttachNewDraftKey();
+      var rawPo = sessionStorage.getItem('lp-pjm-po-attachments');
+      _pjmPoAttachments = rawPo ? window._poAttachNormalize(JSON.parse(rawPo)) : [];
+    } catch (_se) {
+      _pjmPoDraftKey = window._poAttachNewDraftKey();
+      _pjmPoAttachments = [];
+    }
   }
+  _pjmPoRender();
 
   var ov = document.getElementById('portal-job-overlay');
   ov.style.display = 'flex';
@@ -3955,6 +4100,7 @@ window.submitPortalJob = async function() {
       bom_id:                 bomId,
       product_name:           product,
       po_number:              po,
+      po_attachments:         _pjmPoAttachments.length ? _pjmPoAttachments : null,
       qty_bottles:            parseInt(btl, 10),
       litres_target:          null,
       desired_bottling_date:  date || null,
@@ -3966,6 +4112,7 @@ window.submitPortalJob = async function() {
       parent_submission_id:   reviseId || null
     };
     await window.db.insert('client_job_submissions', payload);
+    _pjmPoSessionClear();
 
     // Mark the previous rejected submission as superseded so it drops off the list
     if (reviseId) {
@@ -4347,6 +4494,7 @@ window.openPortalJobView = async function(jobId) {
       + row('Target Quantity', esc(qty))
       + row('Scheduled Date',  esc(displayDate))
       + row('PO Reference',    esc(j.po_number || ''))
+      + (function(){ var d = window._poAttachLinksHtml(j.po_attachments); return d ? row('PO Documents', d) : ''; })()
       + row('Linked BOM',      esc(bomLabel))
       + row('Job Created',     esc(createdDate))
       + (notes ? sec('Notes') + row('Notes', esc(notes)) : '')
@@ -7055,6 +7203,9 @@ window.copyInviteLink = function() {
       <div class="mfield">
         <label>PO Number *</label>
         <input type="text" id="njm-po" placeholder="e.g. PO-2026-0042">
+        <div id="njm-po-attach-list" style="display:flex;flex-direction:column;gap:6px;margin-top:8px;"></div>
+        <input id="njm-po-files" type="file" multiple style="display:none;" onchange="window._njmPoFilesPicked(this)">
+        <button type="button" onclick="document.getElementById('njm-po-files').click()" class="btn btn-outline" style="font-size:11px;padding:6px 12px;margin-top:8px;">Attach PO document</button>
       </div>
       <div class="mfield">
         <label>Job Origin *</label>
@@ -7954,6 +8105,7 @@ window.copyInviteLink = function() {
       <div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">Job Detail</div>
       <div style="font-size:20px;font-weight:700;color:var(--white);font-family:Merriweather,serif;" id="jd-title">—</div>
       <div style="font-size:12px;color:var(--muted);margin-top:3px;" id="jd-meta">—</div>
+      <div id="jd-po-files" style="display:none;margin-top:6px;font-size:12px;"></div>
       <div id="jd-bom-draft-mark" style="display:none;margin-top:8px;font-size:12px;color:var(--amber);line-height:1.4;"></div>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
@@ -23407,6 +23559,11 @@ window.viewJobSubmission = async function(id) {
       + ro('Client', cname)
       + ro('BOM', bomDisplay)
       + ro('PO Number', s.po_number || '—')
+      + (window._poAttachLinksHtml(s.po_attachments)
+        ? '<div style="display:flex;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px;">'
+          + '<div style="width:190px;color:var(--muted);flex-shrink:0;">PO Documents</div>'
+          + '<div style="color:var(--white);word-break:break-word;">' + window._poAttachLinksHtml(s.po_attachments) + '</div></div>'
+        : '')
       + ro('Submitted Bottles', s.qty_bottles ? Number(s.qty_bottles).toLocaleString() : '—')
       + ro('Client Desired Date', s.desired_bottling_date || '—')
       + ro('Approved By (Client)', s.client_approved_by || '—')
@@ -23664,6 +23821,7 @@ window.approveJobSubmission = async function(id, opts) {
       bom_id:             s.bom_id             || null,
       product_name:       s.product_name,
       po_number:          s.po_number          || null,
+      po_attachments:     s.po_attachments     || null,
       job_target_type:    confirmedBottles      ? 'bottles' : 'liquid',
       bottle_target:      confirmedBottles      || null,
       liquid_litres:      s.litres_target      ? parseFloat(s.litres_target) : null,
@@ -35135,6 +35293,80 @@ window.saveAdjModal = async function() {
     if (inp) inp.placeholder = unlocked ? 'Client representative who agreed to start ordering' : 'Client representative name';
   }
 
+  var _njmPoAttachments = [];
+  var _njmPoDraftKey = '';
+
+  function _njmPoRender() {
+    window._poAttachRenderEditor('njm-po-attach-list', _njmPoAttachments, 'window._njmPoRemove');
+  }
+
+  function _njmPoSessionSave() {
+    var editEl = document.getElementById('njm-edit-id');
+    if (editEl && editEl.value) return;
+    try {
+      sessionStorage.setItem('lp-njm-po-attachments', JSON.stringify(_njmPoAttachments));
+      sessionStorage.setItem('lp-njm-po-draft-key', _njmPoDraftKey || '');
+    } catch (_e) {}
+  }
+
+  function _njmPoSessionClear() {
+    try {
+      sessionStorage.removeItem('lp-njm-po-attachments');
+      sessionStorage.removeItem('lp-njm-po-draft-key');
+    } catch (_e) {}
+  }
+
+  async function _njmPoPersistIfEdit() {
+    var editId = (document.getElementById('njm-edit-id') || {}).value;
+    if (!editId) { _njmPoSessionSave(); return; }
+    try {
+      await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(editId), {
+        po_attachments: _njmPoAttachments.length ? _njmPoAttachments : null
+      });
+      var j = (_jobs || []).find(function(x){ return x.id === editId; });
+      if (j) j.po_attachments = _njmPoAttachments.slice();
+    } catch (e) {
+      window.logError && window.logError('njmPoPersist', e);
+      window.toast && window.toast('Could not save PO attachment.', 'error');
+    }
+  }
+
+  window._njmPoFilesPicked = async function(input) {
+    var files = Array.prototype.slice.call(input.files || []);
+    input.value = '';
+    if (!files.length) return;
+    var clientId = ((document.getElementById('njm-client') || {}).value) || 'unassigned';
+    var editId = (document.getElementById('njm-edit-id') || {}).value;
+    if (!_njmPoDraftKey) _njmPoDraftKey = editId || window._poAttachNewDraftKey();
+    var subpath = window._poAttachSubpath(clientId, _njmPoDraftKey);
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (f.size > window._PO_ATTACH_MAX) {
+        window.toast && window.toast('"' + f.name + '" is over 25 MB.', 'error');
+        continue;
+      }
+      try {
+        window.toast && window.toast('Uploading ' + f.name + '\u2026');
+        var up = await window._portalUploadFile(f, window._PO_ATTACH_BUCKET, subpath);
+        _njmPoAttachments.push({ name: f.name, url: up.url, path: up.path });
+        _njmPoRender();
+        await _njmPoPersistIfEdit();
+      } catch (upErr) {
+        window.logError && window.logError('njmPoUpload', upErr);
+        window.toast && window.toast('Could not upload "' + f.name + '": ' + (upErr.message || upErr), 'error');
+      }
+    }
+  };
+
+  window._njmPoRemove = async function(i) {
+    var a = _njmPoAttachments[i];
+    if (!a) return;
+    _njmPoAttachments.splice(i, 1);
+    _njmPoRender();
+    if (a.path) window._portalDeleteFile(window._PO_ATTACH_BUCKET, a.path);
+    await _njmPoPersistIfEdit();
+  };
+
   window.openNewJobModal = async function(editId) {
     document.getElementById('njm-edit-id').value = editId || '';
     document.getElementById('njm-title').textContent = editId ? 'Edit Job' : 'New Job';
@@ -35230,6 +35462,23 @@ window.saveAdjModal = async function() {
         window.calcJobYield();
       }
     }
+
+    var jobEditId = (typeof editId === 'string' && editId) ? editId : '';
+    if (jobEditId) {
+      var jPo = (_jobs || []).find(function(x){ return x.id === jobEditId; });
+      _njmPoAttachments = window._poAttachNormalize(jPo && jPo.po_attachments);
+      _njmPoDraftKey = jobEditId;
+    } else {
+      try {
+        _njmPoDraftKey = sessionStorage.getItem('lp-njm-po-draft-key') || window._poAttachNewDraftKey();
+        var rawPo = sessionStorage.getItem('lp-njm-po-attachments');
+        _njmPoAttachments = rawPo ? window._poAttachNormalize(JSON.parse(rawPo)) : [];
+      } catch (_se) {
+        _njmPoDraftKey = window._poAttachNewDraftKey();
+        _njmPoAttachments = [];
+      }
+    }
+    _njmPoRender();
 
     document.getElementById('new-job-modal-overlay').style.display = 'flex';
     document.body.style.overflow = 'hidden';
@@ -35516,6 +35765,7 @@ window.saveAdjModal = async function() {
         client_id:          gv('njm-client'),
         product_name:       gv('njm-product'),
         po_number:          gv('njm-po'),
+        po_attachments:     _njmPoAttachments.length ? _njmPoAttachments : null,
         client_phone:       gv('njm-phone')||null,
         bom_id:             gv('njm-bom'),
         job_origin:         gv('njm-origin'),
@@ -35562,6 +35812,7 @@ window.saveAdjModal = async function() {
         payload.id = nextJobId;
         var res = await supaMut('POST', 'jobs', '', payload);
         saved = (res && res[0]) || { id: nextJobId };
+        _njmPoSessionClear();
         // Close New Job modal FIRST so the Task Assignment popup is visible on top
         window.closeNewJobModal();
         // Reset the button eagerly — the popup below is its own async interaction
@@ -35987,6 +36238,12 @@ window.saveAdjModal = async function() {
     // Header
     document.getElementById('jd-title').textContent = window.jobLabel(j) || jobId;
     document.getElementById('jd-meta').textContent = jobId + (j.po_number ? ' · PO: ' + j.po_number : '') + (j.clients && j.clients.name ? ' · ' + j.clients.name : '');
+    var _jdPoFiles = document.getElementById('jd-po-files');
+    if (_jdPoFiles) {
+      var _jdPoLinks = window._poAttachLinksHtml(j.po_attachments);
+      _jdPoFiles.innerHTML = _jdPoLinks ? 'PO files: ' + _jdPoLinks : '';
+      _jdPoFiles.style.display = _jdPoLinks ? '' : 'none';
+    }
     var _jdMark = document.getElementById('jd-bom-draft-mark');
     if (_jdMark) {
       var _jdBom = (j.bom_id && _jobsBomMap[j.bom_id]) || (j.bom_id && window._globalBomMap && window._globalBomMap[j.bom_id]) || null;
@@ -38724,11 +38981,9 @@ window.saveAdjModal = async function() {
       return;
     }
     var warned = await window.lpConfirm(
-      'You are adding a temporary SKU to this job only.\n\n'
-        + 'This does not change the saved BOM. The next job that uses this BOM will not include this SKU.\n\n'
-        + 'If this SKU is substituting something on the BOM, exclude the SKU that is not being used — otherwise both will be picked and deducted.\n\n'
-        + 'If you pick another client\'s SKU, stock will be deducted from that client\'s inventory when this job is completed.',
-      { title: 'Temporary SKU — job specific', confirmLabel: 'I understand — continue', cancelLabel: 'Cancel' }
+      'If you add a temporary SKU, you likely need to exclude an existing SKU from the BOM. Please verify this.\n\n'
+        + 'This is a temporary measure and only applies to this job.',
+      { title: 'Warning', variant: 'warn', confirmLabel: 'Continue', cancelLabel: 'Cancel' }
     );
     if (!warned) return;
 
@@ -39321,6 +39576,9 @@ window.saveAdjModal = async function() {
     html += sec('Job Information');
     html += rowAll('Client', clientName);
     html += rowAll('BOM', bomLabel);
+    html += rowAll('PO Number', j.po_number);
+    var _jsPoDocs = window._poAttachLinksHtml(j.po_attachments);
+    if (_jsPoDocs) html += rowAll('PO Documents', _jsPoDocs);
     html += rowAll('Payment Terms', payLabel[j.payment_type] || j.payment_type);
     html += rowAll('Accepted by Lighthouse', j.accepted_by);
     html += rowAll('Bay', (j.job_bay && !j.bay_released_at) ? j.job_bay : null);
