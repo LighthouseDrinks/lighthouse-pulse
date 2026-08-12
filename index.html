@@ -13396,11 +13396,22 @@ async function _propagateBomToActiveJobs(bomId) {
       if (setChanged) {
         try {
           var prepRows = await window.db.select('job_drygoods_prep',
-            '?job_id=eq.' + job.id + '&signed_by_coordinator=not.is.null&select=id&limit=1');
+            '?job_id=eq.' + job.id + '&signed_by_coordinator=not.is.null&select=id,signoff_history,signed_by_coordinator&limit=1');
           if (prepRows && prepRows.length) {
+            // Record the auto-invalidation in the same audit trail as manual
+            // reopens so the Supply Chain tab shows why the sign-off vanished.
+            var prepHist = window._scParseSignoffHistory ? window._scParseSignoffHistory(prepRows[0].signoff_history) : [];
+            prepHist.push({
+              action: 'reopened',
+              by: 'System \u2014 BOM sync',
+              at: new Date().toISOString(),
+              reason: 'BOM component set changed',
+              previously_signed_by: prepRows[0].signed_by_coordinator || null
+            });
             await window.db.update('job_drygoods_prep', '?job_id=eq.' + job.id, {
               signed_by_coordinator: null,
-              signed_at_coordinator: null
+              signed_at_coordinator: null,
+              signoff_history: prepHist
             });
             summary.signoffsCleared += 1;
           }
@@ -23619,7 +23630,7 @@ window._approvalsBadgePoll = async function() {
   <!-- Liquid Plan FYI hint — informational only; no writes -->
   <div id="jobs-liquid-plan-hint" style="display:none;margin-bottom:12px;padding:8px 14px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.22);border-radius:4px;font-size:11px;color:var(--muted);align-items:center;gap:8px;">
     <span style="color:var(--gold);font-weight:700;letter-spacing:0.06em;text-transform:uppercase;font-size:9px;">FYI</span>
-    Informational queue — ordered by Job Ready. Planned Prep is Ready minus 5 working days. Does not change Schedule or Supply Chain.
+    Informational queue — grouped by Planned Prep week (Monday start). Planned Prep is Ready minus 5 working days. Does not change Schedule or Supply Chain.
   </div>
 
   <!-- Search + Sort -->
@@ -23627,6 +23638,7 @@ window._approvalsBadgePoll = async function() {
     <input type="text" id="jobs-search" placeholder="Search jobs, clients, products…" oninput="window.renderJobsTable()"
       style="font-family:Lato,sans-serif;font-size:12px;background:var(--navy-card);border:1px solid var(--navy-border);padding:9px 14px;color:var(--white);outline:none;width:300px;border-radius:4px;"
       onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='var(--navy-border)'">
+    <button id="jobs-liquid-plan-export" type="button" onclick="window.exportLiquidPlanPDF&&window.exportLiquidPlanPDF()" style="display:none;background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:8px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Export PDF</button>
     <select id="jobs-sort" onchange="window.renderJobsTable()"
       style="font-family:Lato,sans-serif;font-size:11px;background:var(--navy-card);border:1px solid var(--navy-border);padding:9px 12px;color:var(--muted);outline:none;border-radius:4px;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666'/%3E%3C/svg%3E&quot;);background-repeat:no-repeat;background-position:right 10px center;padding-right:28px;"
       onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='var(--navy-border)'">
@@ -23659,13 +23671,14 @@ window._approvalsBadgePoll = async function() {
             <th class="mob-hide">Target</th>
             <th id="jobs-th-ready" class="mob-hide">Job Ready</th>
             <th class="mob-hide">Sign-offs</th>
+            <th class="mob-hide">Supply Chain</th>
             <th>Stage</th>
             <th id="jobs-th-invoiced" class="mob-hide" style="display:none;">Invoiced</th>
             <th></th>
           </tr>
         </thead>
         <tbody id="jobs-tbody-new">
-          <tr><td colspan="9" style="text-align:center;padding:48px;color:var(--muted);font-size:12px;">No jobs yet — click <strong style="color:var(--gold)">New Job</strong> to get started.</td></tr>
+          <tr><td colspan="10" style="text-align:center;padding:48px;color:var(--muted);font-size:12px;">No jobs yet — click <strong style="color:var(--gold)">New Job</strong> to get started.</td></tr>
         </tbody>
         <tfoot id="jobs-tfoot"></tfoot>
       </table>
@@ -33870,6 +33883,7 @@ window.saveAdjModal = async function() {
   var _bomFlagged = {}; // job_id -> true if client flagged a concern
   var _loadJobsInFlight = false; // prevents concurrent loadJobs() race
   var _scDone  = {}; // job_id -> true if supply-chain signed off
+  var _scSkuReady = {}; // job_id -> true if every non-excluded SC SKU is on-site or ordered
   var _lsDone  = {}; // job_id -> true if liquid signed off
   var _qaDone  = {}; // job_id -> true if quality check exists
   var _bomNameBackfilled = new Set(); // job ids already converged to their BOM name this session
@@ -33943,6 +33957,7 @@ window.saveAdjModal = async function() {
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_drygoods_prep' },  _refresh)
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_liquid_signoff' }, _refresh)
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_bom_approvals' },  _refresh)
+      .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_components' },     _refresh)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'jobs' },               _refresh)
       .subscribe();
   })();
@@ -33972,7 +33987,8 @@ window.saveAdjModal = async function() {
       supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
       supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved'),
       supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged'),
-      supaGet('boms?select=id,product_name,volume_cl,abv,additional_info,liquid_spec')
+      supaGet('boms?select=id,product_name,volume_cl,abv,additional_info,liquid_spec'),
+      supaGet('job_components?select=job_id,sku_id,qty_required,is_ordered,is_excluded,is_allocated')
     ]);
     if (settled[0].status === 'fulfilled' && Array.isArray(settled[0].value)) _jobs = settled[0].value;
     else if (settled[0].status === 'rejected') console.warn('Jobs load error:', settled[0].reason);
@@ -33986,6 +34002,56 @@ window.saveAdjModal = async function() {
     if (settled[4].status === 'fulfilled') (settled[4].value||[]).forEach(function(r){ if (r.job_id) _bomFlagged[r.job_id] = true; });
     _jobsBomMap = {};
     if (settled[5].status === 'fulfilled') (settled[5].value||[]).forEach(function(b){ if (b.id) _jobsBomMap[b.id] = b; });
+
+    // Supply Chain column: all non-excluded SKUs on-site (net stock) or ordered.
+    _scSkuReady = {};
+    try {
+      var compsAll = (settled[6].status === 'fulfilled' && Array.isArray(settled[6].value)) ? settled[6].value : [];
+      var skuSet = {};
+      compsAll.forEach(function(c) { if (c.sku_id) skuSet[c.sku_id] = true; });
+      var uniqSkus = Object.keys(skuSet);
+      var stockMap = {};
+      if (uniqSkus.length) {
+        var batches = await supaGet('dry_goods_batches?sku_id=in.(' + uniqSkus.join(',') + ')&select=sku_id,quantity_remaining');
+        (batches || []).forEach(function(b) {
+          stockMap[b.sku_id] = (stockMap[b.sku_id] || 0) + (parseFloat(b.quantity_remaining) || 0);
+        });
+      }
+      var stageByJob = {};
+      _jobs.forEach(function(j) { if (j && j.id) stageByJob[j.id] = _normStage(j.stage); });
+      var ACTIVE_SC = { new: 1, active: 1, on_hold: 1 };
+      var allocBySku = {};
+      compsAll.forEach(function(r) {
+        if (!r.sku_id || r.is_excluded || !r.is_allocated) return;
+        if (!ACTIVE_SC[stageByJob[r.job_id]]) return;
+        if (!allocBySku[r.sku_id]) allocBySku[r.sku_id] = [];
+        allocBySku[r.sku_id].push({ job_id: r.job_id, qty: r.qty_required || 0 });
+      });
+      var byJob = {};
+      compsAll.forEach(function(c) {
+        if (!c.job_id) return;
+        if (!byJob[c.job_id]) byJob[c.job_id] = [];
+        byJob[c.job_id].push(c);
+      });
+      Object.keys(byJob).forEach(function(jobId) {
+        var countable = byJob[jobId].filter(function(c) { return !c.is_excluded; });
+        if (!countable.length) return;
+        _scSkuReady[jobId] = countable.every(function(c) {
+          if (c.is_ordered) return true;
+          if (!c.sku_id) return false;
+          var onSite = stockMap[c.sku_id] || 0;
+          var reqQty = c.qty_required || 0;
+          var committed = 0;
+          (allocBySku[c.sku_id] || []).forEach(function(a) {
+            if (a.job_id !== jobId) committed += a.qty;
+          });
+          return (onSite - committed) >= reqQty;
+        });
+      });
+    } catch (e) {
+      console.warn('Supply Chain ready map failed:', e);
+      _scSkuReady = {};
+    }
 
     // Backfill any job whose stored product_name has drifted from its linked
     // BOM's name (the BOM is the source of truth). Display already resolves the
@@ -34066,9 +34132,97 @@ window.saveAdjModal = async function() {
       + '<th class="mob-hide">Target</th>'
       + '<th id="jobs-th-ready" class="mob-hide">Job Ready</th>'
       + '<th class="mob-hide">Sign-offs</th>'
+      + '<th class="mob-hide">Supply Chain</th>'
       + '<th>Stage</th>'
       + '<th id="jobs-th-invoiced" class="mob-hide" style="display:none;">Invoiced</th>'
       + '<th></th>';
+  }
+
+  // Monday YYYY-MM-DD for an ISO date (UK week convention).
+  function _lpWeekStartIso(iso) {
+    if (!iso) return null;
+    var p = String(iso).slice(0, 10).split('-');
+    if (p.length !== 3) return null;
+    var d = new Date(+p[0], +p[1] - 1, +p[2]);
+    if (isNaN(d.getTime())) return null;
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function _lpFmtWeekLabel(weekKey) {
+    var p = String(weekKey).split('-');
+    if (p.length !== 3) return 'Week beginning ' + weekKey;
+    var d = new Date(+p[0], +p[1] - 1, +p[2]);
+    return 'Week beginning ' + d.toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  function _lpFmtDatePlain(iso) {
+    if (!iso) return '—';
+    try {
+      var p = String(iso).slice(0, 10).split('-');
+      if (p.length === 3) {
+        return new Date(+p[0], +p[1] - 1, +p[2]).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
+      }
+    } catch (_e) {}
+    return String(iso).slice(0, 10);
+  }
+
+  // Shared list + week buckets for Liquid Plan table and PDF export.
+  function _getLiquidPlanWeeks() {
+    var search = ((document.getElementById('jobs-search') || {}).value || '').toLowerCase();
+    var rows = (_jobs || []).filter(function(j) {
+      var ns = _normStage(j.stage);
+      if (ns !== 'new' && ns !== 'active') return false;
+      if (j.actual_start || j.changeover_start) return false;
+      if (!j.job_ready_date) return false;
+      if (search) {
+        var label = (window.jobDisplayName(j, _jobsBomMap) || '').toLowerCase();
+        var spirit = ((_jobsBomMap[j.bom_id] && _jobsBomMap[j.bom_id].liquid_spec) || '').toLowerCase();
+        return label.indexOf(search) >= 0
+          || (j.id || '').toLowerCase().indexOf(search) >= 0
+          || spirit.indexOf(search) >= 0
+          || ((j.clients && j.clients.name) || '').toLowerCase().indexOf(search) >= 0;
+      }
+      return true;
+    }).map(function(j) {
+      var readyIso = String(j.job_ready_date).slice(0, 10);
+      var prepIso = (typeof window._minusWorkingDays === 'function')
+        ? window._minusWorkingDays(readyIso, 5)
+        : readyIso;
+      return {
+        job: j,
+        readyIso: readyIso,
+        prepIso: prepIso || readyIso,
+        product: window.jobDisplayName(j, _jobsBomMap) || j.product_name || j.id || '',
+        spirit: (_jobsBomMap[j.bom_id] && _jobsBomMap[j.bom_id].liquid_spec) || '—'
+      };
+    }).sort(function(a, b) {
+      var ap = String(a.prepIso || '').slice(0, 10);
+      var bp = String(b.prepIso || '').slice(0, 10);
+      if (ap !== bp) return ap < bp ? -1 : 1;
+      if (a.readyIso !== b.readyIso) return a.readyIso < b.readyIso ? -1 : 1;
+      return (new Date(a.job.created_at) - new Date(b.job.created_at));
+    });
+
+    var weekMap = {};
+    var weekOrder = [];
+    rows.forEach(function(row) {
+      var key = _lpWeekStartIso(row.prepIso) || _lpWeekStartIso(row.readyIso) || 'unknown';
+      if (!weekMap[key]) {
+        weekMap[key] = {
+          weekKey: key,
+          weekLabel: key === 'unknown' ? 'Unscheduled' : _lpFmtWeekLabel(key),
+          jobs: []
+        };
+        weekOrder.push(key);
+      }
+      weekMap[key].jobs.push(row);
+    });
+
+    return {
+      weeks: weekOrder.map(function(k) { return weekMap[k]; }),
+      total: rows.length
+    };
   }
 
   // FYI-only: projects Job Ready into a prep/bottling queue. Read-only — no DB writes,
@@ -34088,63 +34242,150 @@ window.saveAdjModal = async function() {
       + '<th class="mob-hide">Planned Prep</th>'
       + '<th class="mob-hide">Planned Bottling</th>';
 
-    function _fmtPlanDate(iso) {
-      if (!iso) return '<span style="color:var(--muted);">—</span>';
-      try {
-        var p = String(iso).slice(0, 10).split('-');
-        if (p.length === 3) {
-          return new Date(+p[0], +p[1] - 1, +p[2]).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
-        }
-      } catch (_e) {}
-      return String(iso).slice(0, 10);
-    }
-
-    var search = ((document.getElementById('jobs-search') || {}).value || '').toLowerCase();
-    var list = (_jobs || []).filter(function(j) {
-      var ns = _normStage(j.stage);
-      if (ns !== 'new' && ns !== 'active') return false;
-      if (j.actual_start || j.changeover_start) return false;
-      if (!j.job_ready_date) return false;
-      if (search) {
-        var label = (window.jobDisplayName(j, _jobsBomMap) || '').toLowerCase();
-        var spirit = ((_jobsBomMap[j.bom_id] && _jobsBomMap[j.bom_id].liquid_spec) || '').toLowerCase();
-        return label.indexOf(search) >= 0
-          || (j.id || '').toLowerCase().indexOf(search) >= 0
-          || spirit.indexOf(search) >= 0
-          || ((j.clients && j.clients.name) || '').toLowerCase().indexOf(search) >= 0;
-      }
-      return true;
-    }).sort(function(a, b) {
-      var ar = String(a.job_ready_date).slice(0, 10);
-      var br = String(b.job_ready_date).slice(0, 10);
-      if (ar !== br) return ar < br ? -1 : 1;
-      return (new Date(a.created_at) - new Date(b.created_at));
-    });
-
-    if (!list.length) {
+    var plan = _getLiquidPlanWeeks();
+    if (!plan.total) {
       tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:48px;color:var(--muted);font-size:12px;">No liquids planned — jobs appear here once a Job Ready date is set.</td></tr>';
       return;
     }
 
-    tbody.innerHTML = list.map(function(j, idx) {
-      var jid = String(j.id).replace(/'/g, "\\'");
-      var esc = window.escapeHtml || function(s) { return String(s == null ? '' : s); };
-      var product = esc(window.jobDisplayName(j, _jobsBomMap) || j.product_name || j.id);
-      var spirit = esc((_jobsBomMap[j.bom_id] && _jobsBomMap[j.bom_id].liquid_spec) || '—');
-      var readyIso = String(j.job_ready_date).slice(0, 10);
-      var prepIso = (typeof window._minusWorkingDays === 'function')
-        ? window._minusWorkingDays(readyIso, 5)
-        : null;
-      return '<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openJobDetail&&window.openJobDetail(\'' + jid + '\')">'
-        + '<td style="font-size:13px;font-weight:700;color:var(--amber);">#' + (idx + 1) + '</td>'
-        + '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + esc(j.id) + '</td>'
-        + '<td style="font-weight:600;color:var(--white);">' + product + '</td>'
-        + '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + spirit + '</td>'
-        + '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">' + _fmtPlanDate(prepIso) + '</td>'
-        + '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">' + _fmtPlanDate(readyIso) + '</td>'
-        + '</tr>';
-    }).join('');
+    var esc = window.escapeHtml || function(s) { return String(s == null ? '' : s); };
+    var html = '';
+    plan.weeks.forEach(function(week) {
+      var countLabel = week.jobs.length + ' job' + (week.jobs.length !== 1 ? 's' : '');
+      html += '<tr class="lp-week-header" style="pointer-events:none;">'
+        + '<td colspan="6" style="padding:8px 12px;background:rgba(200,168,106,0.07);border-top:1px solid var(--navy-border);border-bottom:1px solid var(--navy-border);">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">'
+        + '<span style="font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);">' + esc(week.weekLabel) + '</span>'
+        + '<span style="font-size:10px;color:var(--muted);">' + countLabel + '</span>'
+        + '</div></td></tr>';
+      week.jobs.forEach(function(row, idx) {
+        var j = row.job;
+        var jid = String(j.id).replace(/'/g, "\\'");
+        html += '<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openJobDetail&&window.openJobDetail(\'' + jid + '\')">'
+          + '<td style="font-size:13px;font-weight:700;color:var(--amber);">#' + (idx + 1) + '</td>'
+          + '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + esc(j.id) + '</td>'
+          + '<td style="font-weight:600;color:var(--white);">' + esc(row.product) + '</td>'
+          + '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + esc(row.spirit) + '</td>'
+          + '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">' + esc(_lpFmtDatePlain(row.prepIso)) + '</td>'
+          + '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">' + esc(_lpFmtDatePlain(row.readyIso)) + '</td>'
+          + '</tr>';
+      });
+    });
+    tbody.innerHTML = html;
   }
+
+  window.exportLiquidPlanPDF = function() {
+    var plan = _getLiquidPlanWeeks();
+    if (!plan.total) {
+      if (window.toast) window.toast('No liquids planned to export.', 'warn');
+      else if (window.toastMsg) window.toastMsg('No liquids planned to export.', 'error');
+      return;
+    }
+
+    var jsPDFns = window.jspdf || window.jsPDF;
+    var Ctor = jsPDFns && (jsPDFns.jsPDF || jsPDFns);
+    if (!Ctor) {
+      if (window.toast) window.toast('PDF library not loaded.', 'warn');
+      else if (window.toastMsg) window.toastMsg('PDF library not loaded.', 'error');
+      return;
+    }
+
+    var doc = new Ctor({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    var pageW = doc.internal.pageSize.getWidth();
+    var pageH = doc.internal.pageSize.getHeight();
+    var stamp = new Date().toISOString().slice(0, 10);
+    var headers = ['#', 'Job', 'Product', 'Spirit / Blend', 'Planned Prep', 'Planned Bottling'];
+    var colW = [10, 28, 48, 40, 28, 30];
+    var marginX = 12;
+    var startY = 30;
+    var rowH = 8;
+
+    function drawHeaderBlock() {
+      doc.setTextColor(20, 27, 42); doc.setFontSize(15); doc.setFont(undefined, 'bold');
+      doc.text('LIQUID PLAN', marginX, 16);
+      doc.setFont(undefined, 'normal'); doc.setFontSize(9); doc.setTextColor(90, 90, 90);
+      doc.text(plan.total + ' job' + (plan.total !== 1 ? 's' : '') + '  |  Grouped by Planned Prep week  |  ' + stamp, marginX, 22);
+    }
+
+    function drawTableHeader(y) {
+      doc.setFillColor(20, 27, 42);
+      doc.rect(marginX, y - 5.5, pageW - marginX * 2, rowH, 'F');
+      doc.setTextColor(255, 255, 255); doc.setFontSize(8); doc.setFont(undefined, 'bold');
+      var x = marginX + 2;
+      headers.forEach(function(h, i) { doc.text(h, x, y); x += colW[i]; });
+      doc.setFont(undefined, 'normal'); doc.setTextColor(30, 30, 30);
+    }
+
+    function ensureSpace(need) {
+      if (y + need > pageH - 14) {
+        doc.addPage('a4', 'portrait');
+        drawHeaderBlock();
+        y = startY;
+        drawTableHeader(y);
+        y += rowH;
+        doc.setFontSize(8);
+      }
+    }
+
+    drawHeaderBlock();
+    var y = startY;
+    drawTableHeader(y);
+    y += rowH;
+    doc.setFontSize(8);
+
+    plan.weeks.forEach(function(week) {
+      ensureSpace(rowH * 2);
+      doc.setFillColor(245, 240, 228);
+      doc.rect(marginX, y - 5.5, pageW - marginX * 2, rowH, 'F');
+      doc.setTextColor(20, 27, 42); doc.setFont(undefined, 'bold'); doc.setFontSize(9);
+      var weekTitle = week.weekLabel + '  ·  ' + week.jobs.length + ' job' + (week.jobs.length !== 1 ? 's' : '');
+      doc.text(weekTitle, marginX + 2, y);
+      doc.setFont(undefined, 'normal'); doc.setFontSize(8);
+      y += rowH;
+
+      week.jobs.forEach(function(row, idx) {
+        ensureSpace(rowH);
+        if (idx % 2 === 1) {
+          doc.setFillColor(245, 245, 245);
+          doc.rect(marginX, y - 5.5, pageW - marginX * 2, rowH, 'F');
+        }
+        doc.setTextColor(30, 30, 30);
+        var cells = [
+          String(idx + 1),
+          String(row.job.id || ''),
+          String(row.product || ''),
+          String(row.spirit || ''),
+          _lpFmtDatePlain(row.prepIso),
+          _lpFmtDatePlain(row.readyIso)
+        ];
+        var x = marginX + 2;
+        cells.forEach(function(cell, i) {
+          var txt = doc.splitTextToSize(cell, colW[i] - 3)[0] || '';
+          doc.text(txt, x, y);
+          x += colW[i];
+        });
+        y += rowH;
+      });
+    });
+
+    var fname = 'liquid-plan-' + stamp + '.pdf';
+    try {
+      doc.save(fname);
+    } catch (e) {
+      var blob = doc.output('blob');
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function() { URL.revokeObjectURL(url); }, 30000);
+    }
+
+    var done = plan.total + ' job' + (plan.total !== 1 ? 's' : '') + ' exported to PDF.';
+    if (window.toast) window.toast(done, 'success');
+    else if (window.toastMsg) window.toastMsg(done, 'success');
+  };
 
   window.renderJobsTable = function() {
     var tbody = document.getElementById('jobs-tbody-new');
@@ -34162,7 +34403,7 @@ window.saveAdjModal = async function() {
     if (_thReady) _thReady.textContent = _showCompleted ? 'Job Completed' : 'Job Ready';
     var _thInvoiced = document.getElementById('jobs-th-invoiced');
     if (_thInvoiced) _thInvoiced.style.display = _showCompleted ? '' : 'none';
-    var _colCount = _showCompleted ? 10 : 9;
+    var _colCount = _showCompleted ? 11 : 10;
     var search = (document.getElementById('jobs-search')||{}).value||'';
     var list = _jobs.filter(function(j) {
       var ns = _normStage(j.stage);
@@ -34289,7 +34530,7 @@ window.saveAdjModal = async function() {
       _tfoot.innerHTML = '<tr style="border-top:2px solid var(--navy-border);background:rgba(255,255,255,0.02);">'
         + '<td colspan="4" class="mob-hide" style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);padding:10px 12px;text-align:right;">Total Bottles</td>'
         + '<td class="mob-hide" style="font-size:14px;font-weight:700;color:var(--gold);padding:10px 12px;">' + _totalBottles.toLocaleString() + ' btls</td>'
-        + '<td colspan="' + (_showCompleted ? 5 : 4) + '"></td>'
+        + '<td colspan="' + (_showCompleted ? 6 : 5) + '"></td>'
         + '</tr>';
     }
 
@@ -34321,6 +34562,16 @@ window.saveAdjModal = async function() {
         + (_showCompleted ? _fmtCompletedCell(j) : _fmtReady(j.job_ready_date))
         + '</td>';
       row += '<td class="mob-hide">' + signoffs + '</td>';
+      var _scReady = !!_scSkuReady[j.id];
+      row += '<td class="mob-hide" style="text-align:center;" onclick="event.stopPropagation();" title="'
+        + (_scReady
+          ? 'All supply chain SKUs are on site or ordered'
+          : 'Supply chain incomplete — one or more SKUs still need to be on site or ordered')
+        + '">'
+        + '<input type="checkbox"' + (_scReady ? ' checked' : '')
+        + ' disabled style="pointer-events:none;cursor:not-allowed;'
+        + (_scReady ? 'accent-color:var(--green);' : 'opacity:0.4;') + '">'
+        + '</td>';
       // Only show bay chip for active stages — complete/cancelled jobs show a "Released" chip
       // which makes the stage cell too wide and pushes the action buttons out of column.
       var _stageActive = j.stage !== 'complete' && j.stage !== 'cancelled';
@@ -34364,6 +34615,11 @@ window.saveAdjModal = async function() {
         + bomTick(j.id, 'BOM',          'Bill of Materials Sign-Off')
         + soTick(_scDone[j.id], 'Supply Chain', 'Supply Chain Sign-Off')
         + soTick(_lsDone[j.id], 'Liquid',        'Liquid Sign-Off', _liquidSpirit)
+        + '</span></div>';
+      row += '<div class="mob-d-item"><span class="mob-d-label">Supply Chain</span><span class="mob-d-value">'
+        + (_scReady
+          ? '<span style="color:var(--green);font-weight:700;">&#10003; Complete</span>'
+          : '<span style="color:var(--muted);">Incomplete</span>')
         + '</span></div>';
       row += '</div></td></tr>';
       return row;
@@ -34514,6 +34770,8 @@ window.saveAdjModal = async function() {
     if (hint) hint.style.display = (stage === 'live') ? '' : 'none';
     var lpHint = document.getElementById('jobs-liquid-plan-hint');
     if (lpHint) lpHint.style.display = (stage === 'liquid_plan') ? 'flex' : 'none';
+    var lpExport = document.getElementById('jobs-liquid-plan-export');
+    if (lpExport) lpExport.style.display = (stage === 'liquid_plan') ? '' : 'none';
     var sortEl = document.getElementById('jobs-sort');
     var groupEl = document.getElementById('jobs-groupby');
     if (sortEl) sortEl.style.display = (stage === 'liquid_plan') ? 'none' : '';
@@ -37170,6 +37428,28 @@ window.saveAdjModal = async function() {
           : 'When all dry goods are picked and physically in their allocated bay, sign off the supply chain.');
       html += '<div id="sc-signoff-mount" style="margin-bottom:6px;"></div>';
 
+      // Sign-off history — audit trail of sign-offs and reopens (incl. BOM
+      // auto-invalidations), mirroring the Liquid Sign-Off history block.
+      var scHist = window._scParseSignoffHistory(compSignoff && compSignoff.signoff_history);
+      if (scHist.length) {
+        html += '<div style="margin-top:12px;">'
+          + '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px;">Sign-Off History</div>'
+          + '<div style="font-size:11px;color:var(--muted);">';
+        scHist.slice().reverse().forEach(function(h) {
+          var colour = h.action === 'signed' ? 'var(--green)' : 'var(--amber)';
+          var icon   = h.action === 'signed' ? '&#10003;' : '&#9888;';
+          html += '<div style="display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--navy-border);">'
+            + '<span style="color:' + colour + ';font-size:12px;">' + icon + '</span>'
+            + '<div><span style="color:var(--white);">' + escH(h.action === 'signed' ? 'Signed off' : 'Reopened') + '</span>'
+            + ' by <strong style="color:var(--white);">' + escH(h.by||'\u2014') + '</strong>'
+            + (h.reason ? ' &mdash; <em>' + escH(h.reason) + '</em>' : '')
+            + '<span style="color:var(--muted);margin-left:8px;">' + (h.at ? new Date(h.at).toLocaleString('en-IE') : '\u2014') + '</span>'
+            + '</div>'
+            + '</div>';
+        });
+        html += '</div></div>';
+      }
+
       el.innerHTML = html;
 
       // Store comps on window so printPickingList can access them
@@ -37541,7 +37821,12 @@ window.saveAdjModal = async function() {
       var signoffMount = document.getElementById('sc-signoff-mount');
       if (signoffMount) {
         if (isSignedOff) {
-          signoffMount.innerHTML = '<div style="background:rgba(61,186,120,0.1);border:1px solid var(--green);border-radius:5px;padding:8px 14px;font-size:12px;color:var(--green);display:inline-block;">\u2713 Signed off by ' + escH(compSignoff.signed_by_coordinator) + (compSignoff.signed_at_coordinator ? ' on ' + compSignoff.signed_at_coordinator.slice(0,10) : '') + '</div>';
+          signoffMount.innerHTML = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
+            + '<div style="background:rgba(61,186,120,0.1);border:1px solid var(--green);border-radius:5px;padding:8px 14px;font-size:12px;color:var(--green);">\u2713 Signed off by ' + escH(compSignoff.signed_by_coordinator) + (compSignoff.signed_at_coordinator ? ' on ' + compSignoff.signed_at_coordinator.slice(0,10) : '') + '</div>'
+            + '<button id="comp-reopen-btn" class="btn btn-outline" style="font-size:11px;padding:6px 14px;border-color:var(--amber);color:var(--amber);">&#9888; Reopen</button>'
+            + '</div>';
+          var roBtn = document.getElementById('comp-reopen-btn');
+          if (roBtn) roBtn.addEventListener('click', function() { window.unsignComponentsSignoff(jobId, compSignoff.id); });
         } else if (!labelApproved) {
           // Blocked until the client approves the labels in Step 4.
           var _disabledBtnStyle = 'background:rgba(201,168,76,0.15);color:rgba(201,168,76,0.45);font-weight:700;border:none;border-radius:6px;font-size:12px;padding:9px 18px;cursor:not-allowed;font-family:Lato,sans-serif;display:inline-flex;align-items:center;gap:7px;';
@@ -37658,16 +37943,20 @@ window.saveAdjModal = async function() {
     try {
       // Upsert into job_drygoods_prep as sign-off record
       var existing = await supaGet('job_drygoods_prep?job_id=eq.'+jobId+'&limit=1');
+      var hist = window._scParseSignoffHistory(existing.length ? existing[0].signoff_history : null);
+      hist.push({ action: 'signed', by: displayName, at: new Date().toISOString() });
       if (existing.length) {
         await supaMut('PATCH','job_drygoods_prep','?id=eq.'+existing[0].id,{
           signed_by_coordinator: displayName,
-          signed_at_coordinator: new Date().toISOString()
+          signed_at_coordinator: new Date().toISOString(),
+          signoff_history: hist
         });
       } else {
         await supaMut('POST','job_drygoods_prep','',{
           job_id: jobId,
           signed_by_coordinator: displayName,
-          signed_at_coordinator: new Date().toISOString()
+          signed_at_coordinator: new Date().toISOString(),
+          signoff_history: hist
         });
       }
       // Mark components task complete
@@ -37684,6 +37973,59 @@ window.saveAdjModal = async function() {
         if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
       } catch(e) { /* non-fatal: realtime/refresh will reconcile */ }
       await window.autoCompleteTask(jobId, 'components');
+      loadComponentsTab(jobId);
+    } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
+  };
+
+  // Robust parse for job_drygoods_prep.signoff_history. PostgREST returns the
+  // jsonb column as a real array, but tolerate a stringified form too (the
+  // liquid sign-off stores its history stringified) so both shapes work.
+  window._scParseSignoffHistory = function(raw) {
+    if (Array.isArray(raw)) return raw.slice();
+    if (typeof raw === 'string' && raw.trim()) {
+      try { var p = JSON.parse(raw); return Array.isArray(p) ? p : []; } catch(e) {}
+    }
+    return [];
+  };
+
+  // Reopen a signed-off Supply Chain so it can be amended and re-signed.
+  // Mirrors unsignLiquidSignoff: requires a reason, records who/when/why in
+  // signoff_history, and clears the coordinator sign-off fields.
+  window.unsignComponentsSignoff = async function(jobId, existingId) {
+    if (!(window.canDo && window.canDo('jobs_signoff_components'))) { window.toast && window.toast('You do not have permission to reopen a supply chain sign-off.', 'error'); return; }
+    if (!existingId) return;
+    var reason = await window.lpPrompt('Reason for reopening this sign-off (required):', '', { title: 'Reopen supply chain sign-off', placeholder: 'Reason' });
+    if (reason === null) return; // cancelled
+    if (!String(reason).trim()) { window.toast && window.toast('Please enter a reason.', 'error'); return; }
+    reason = String(reason).trim();
+    var who = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'Unknown';
+
+    // Fetch current history + signer so the trail records who had signed off.
+    var rows = await supaGet('job_drygoods_prep?id=eq.'+existingId+'&select=signoff_history,signed_by_coordinator&limit=1');
+    var existing = rows[0] || {};
+    var hist = window._scParseSignoffHistory(existing.signoff_history);
+    hist.push({ action: 'reopened', by: who, at: new Date().toISOString(), reason: reason, previously_signed_by: existing.signed_by_coordinator || null });
+
+    try {
+      await supaMut('PATCH', 'job_drygoods_prep', '?id=eq.'+existingId, {
+        signed_by_coordinator: null,
+        signed_at_coordinator: null,
+        signoff_history: hist
+      });
+      // Sign-off completed the components task — reopening reverts it so the
+      // jobs-table pill and the sign-off state don't disagree.
+      try {
+        var tasks = await supaGet('job_tasks?job_id=eq.'+jobId+'&task_type=eq.components&status=eq.completed&limit=1');
+        if (tasks.length) await supaMut('PATCH','job_tasks','?id=eq.'+tasks[0].id,{ status:'pending', completed_at: null, completed_by: null });
+      } catch(e2) { window.logError && window.logError('reopen components task', e2); }
+      window.toast && window.toast('Supply chain sign-off reopened. Reason recorded.', 'success');
+      // Optimistic: flip the pill back immediately for the acting user so the
+      // jobs table / overview dots don't wait for the realtime round-trip.
+      try {
+        if (typeof _scDone === 'object') _scDone[jobId] = false;
+        if (typeof renderJobsTable === 'function') renderJobsTable();
+        if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
+      } catch(e3) { /* non-fatal: realtime/refresh will reconcile */ }
       loadComponentsTab(jobId);
     } catch(e) { window.toast && window.toast('Error: '+e.message,'error'); }
   };
