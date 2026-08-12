@@ -29272,6 +29272,7 @@ async function _cbwFetchMonth(yearMonth) {
   var jobIds = jobs.map(function(j){ return j.id; });
 
   var signoffs = await supa('job_liquid_signoff', '?job_id=in.(' + jobIds.join(',') + ')&select=job_id,linked_containers_json,linked_container_id,water_required,water_added,final_litres');
+  var hist     = await supa('liquid_history', '?job_id=in.(' + jobIds.join(',') + ')&event_type=eq.bottling_deduction&select=job_id,litres_changed,litres_before,litres_after');
   var bomIds   = jobs.map(function(j){ return j.bom_id; }).filter(function(v,i,a){ return v && a.indexOf(v)===i; });
   var boms     = bomIds.length ? await supa('boms', '?id=in.(' + bomIds.join(',') + ')&select=id,product_name,volume_cl,bottling_abv,abv,bottles_per_shipper,additional_info') : [];
   if (boms && boms.length && window._mergeBomMap) window._mergeBomMap(boms);
@@ -29288,6 +29289,13 @@ async function _cbwFetchMonth(yearMonth) {
   var soMap  = {}; signoffs.forEach(function(s){ soMap[s.job_id] = s; });
   var bomMap = {}; boms.forEach(function(b){ bomMap[b.id] = b; });
   var cMap   = {}; conts.forEach(function(c){ cMap[c.id] = c; });
+  var drawByJob = {};
+  (hist || []).forEach(function(h) {
+    var lc = h.litres_changed != null
+      ? Math.abs(parseFloat(h.litres_changed) || 0)
+      : Math.max(0, (parseFloat(h.litres_before) || 0) - (parseFloat(h.litres_after) || 0));
+    drawByJob[h.job_id] = (drawByJob[h.job_id] || 0) + lc;
+  });
 
   return jobs.map(function(j) {
     var so  = soMap[j.id]  || {};
@@ -29298,9 +29306,24 @@ async function _cbwFetchMonth(yearMonth) {
     if (!lc.length && so.linked_container_id) lc = [{ id: so.linked_container_id }];
     var linkedConts = lc.map(function(l){ return cMap[l.id] || { id: l.id, reference: l.id }; });
 
+    // Excel: Water = blending water added; Total L = spirit drawn + water
+    // (liquid ready to bottle). Sign-off final_litres is null on every job, so
+    // _soFinal collapses to water_added — which put the same figure in both
+    // columns. Prefer actual bottling deductions for Qty / Total L.
     var waterAdded  = window._soWater(so);
-    var finalLitres = window._soFinal(so);
-    var srcLitres   = Math.max(0, finalLitres - waterAdded);
+    var drawnLitres = drawByJob[j.id] || 0;
+    var plannedFinal = parseFloat(so.final_litres || 0) || 0;
+    var srcLitres, finalLitres;
+    if (drawnLitres > 0) {
+      srcLitres   = drawnLitres;
+      finalLitres = drawnLitres + waterAdded;
+    } else if (plannedFinal > 0) {
+      finalLitres = window._soFinal(so);
+      srcLitres   = Math.max(0, finalLitres - waterAdded);
+    } else {
+      srcLitres   = 0;
+      finalLitres = waterAdded;
+    }
     var bottlingAbv = parseFloat(j.bottling_abv || bom.bottling_abv || bom.abv || 0);
     var srcAbv      = linkedConts.length
       ? linkedConts.reduce(function(s,c){ return s + parseFloat(c.abv||0); }, 0) / linkedConts.length
