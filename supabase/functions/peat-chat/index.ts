@@ -61,8 +61,8 @@ STAFF ROLES (exact role values in app_users.role)
 JOB WORKFLOW
 ════════════════════════════════════════════════════
 Three stages in order (exact DB values — no others exist in Pulse):
-  1. new    — job created; BOM being confirmed with client; bay being sought; auto-scheduler computing projected start
-  2. active — BOM client-approved + bay committed; auto-promoted automatically; supply chain and liquid sign-offs completed here before production finishes
+  1. new    — job created; supply chain can start even if the BOM is still draft; client confirmation and bay assignment happen here; auto-promotes to active only when the BOM is approved AND the client has confirmed AND a bay is held
+  2. active — BOM approved & locked + client-approved + bay committed; auto-promoted automatically; supply chain and liquid sign-offs completed here before production finishes
   3. complete — all sign-offs done, production finished, results recorded; job closed out
 
 Also valid: on_hold, cancelled (can be set at any stage).
@@ -90,11 +90,11 @@ Gate pills: BOM, S.Chain, Liquid (✓ green / ✗ red / ⚠ amber).
 Clicking ▶ Start… opens the "Start Job" dialog with two options:
   • ▶ Start Changeover (records changeover_start, date_commenced)
   • ▶ Start Production (skip changeover) (records actual_start)
-If gates are not all green a red warning appears, but the user can still proceed.
+If gates are not all green a red warning appears, but the user can still proceed — EXCEPT when the linked BOM is not approved (still draft or pending QC). Starting production on an unlocked spec is hard-blocked.
 
 Bay Board — 5 numbered bays (jobs.job_bay 1–5). Warehouse can Mark Clear; Client Coordinator / managers can assign or release. Bay states: empty, staged (assigned, not started), changeover, running, paused. When a bay frees, jobs are offered by Job Ready date (earliest first; awaiting dates last). Bay assignment is manual — not auto-linked to ready date. DB: jobs.job_bay, bay_assigned_at, bay_released_at, job_ready_date, bay_release_reason.
 
-Job Ready — jobs.job_ready_date is the furthest outstanding dry-goods ETA (max of non-on-site component expected_delivery dates). Auto-fills only when every required dry-goods line is on-site or has an ETA. All dry-goods on-site → today. Liquid Ready always mirrors Job Ready. Liquid Prep (Supply Chain) is Job Ready minus 5 working days. Manual Job Ready override + Reset on the Supply Chain tab. Jobs list sorts by Job Ready (nulls/awaiting dates last). H/M/L priority bands are retired.
+Job Ready — jobs.job_ready_date is the furthest outstanding dry-goods ETA (max of non-on-site component expected_delivery dates). Auto-fills only when every required dry-goods line is on-site or has an ETA. All dry-goods on-site → today. Liquid Ready always mirrors Job Ready. Liquid Prep (Supply Chain) is Job Ready minus 5 working days. Manual Job Ready override + Reset on the Supply Chain tab. Jobs list sorts by Job Ready (nulls/awaiting dates last). H/M/L priority bands are retired. Jobs whose linked BOM is not approved show an amber BOM DRAFT / BOM PENDING QC marker on the product cell.
 
 Changeover timer: amber from 0; turns red at 2 hours (7200 s productive). Default scheduling assumption is 400 BPH and a 2-hour changeover.
 
@@ -115,6 +115,10 @@ Statuses (in order): draft → pending → approved
 • approved: finalised; visible to the client on their portal
 • Clients only ever see approved BOMs — never draft or pending
 • Staff can Request Edit on an approved BOM; this creates a task for the client_coordinator
+• Staff CAN create a Pulse job from a draft or pending BOM so supply chain / ordering can start while the spec is still moving. The Jobs list shows an amber "BOM DRAFT" (or "BOM PENDING QC") marker on the job row. Client portal job requests still require an approved BOM.
+• Saving a draft BOM soft-syncs new SKUs onto linked jobs (quantities update; ordered / allocated / PO lines are never deleted).
+• Client BOM confirmation email is not sent until the BOM is approved. After Approve & lock, Pulse offers to send confirmation for linked jobs.
+• A job cannot move New → Active, cannot Complete, and cannot Start on the Schedule while the linked BOM is still draft or pending.
 
 REVISION HISTORY
 • Every BOM carries a revision_number (starts at 1), revised_at, and revised_by.

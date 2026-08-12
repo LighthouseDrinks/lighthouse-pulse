@@ -7035,6 +7035,9 @@ window.copyInviteLink = function() {
         <select id="njm-bom" onchange="window.onJobBomSelect()">
           <option value="">— Select BOM to auto-populate job —</option>
         </select>
+        <div id="njm-draft-warn" style="display:none;margin-top:8px;padding:10px 12px;background:rgba(232,156,58,0.1);border:1px solid rgba(232,156,58,0.4);border-left:3px solid var(--amber);border-radius:4px;font-size:12px;color:var(--text);line-height:1.5;">
+          <strong style="color:var(--amber);">BOM is not locked.</strong> Creating this job will start supply chain. The spec can still change. Client confirmation and production wait until the BOM is approved.
+        </div>
       </div>
     </div>
 
@@ -7114,7 +7117,7 @@ window.copyInviteLink = function() {
     <div class="inv-section-title">Sign-Off</div>
     <div class="modal-grid">
       <div class="mfield">
-        <label>Approved By (Client) *</label>
+        <label id="njm-client-approved-label">Approved By (Client) *</label>
         <input type="text" id="njm-client-approved-by" placeholder="Client representative name">
       </div>
       <div class="mfield">
@@ -7652,7 +7655,9 @@ window.copyInviteLink = function() {
       </div>
       <div class="mfield span2">
         <label>Source Spirit Type <span style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--muted);font-size:11px;">— single-spirit products</span></label>
-        <input type="text" id="bm-source-spirit" list="bm-spirit-type-list" placeholder="e.g. Single Malt ex Bourbon" autocomplete="off" style="width:100%;box-sizing:border-box;">
+        <select id="bm-source-spirit">
+          <option value="">— Select spirit type —</option>
+        </select>
         <div class="field-hint">For single-spirit products: the spirit type a vessel must match to be linked at sign-off. Leave blank for blends &mdash; those are enforced from the Blend Recipe below.</div>
       </div>
     </div>
@@ -7948,6 +7953,7 @@ window.copyInviteLink = function() {
     <div>
       <div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">Job Detail</div>
       <div style="font-size:20px;font-weight:700;color:var(--white);font-family:Merriweather,serif;" id="jd-title">—</div>
+      <div id="jd-bom-draft-mark" style="margin-top:6px;"></div>
       <div style="font-size:12px;color:var(--muted);margin-top:3px;" id="jd-meta">—</div>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
@@ -11238,15 +11244,8 @@ async function saveJob(){
   if(!product)  { await window.lpAlert('Please enter a Product Full Name.', { variant: 'warn' }); return; }
   if(!clientId) { await window.lpAlert('Please select a client.', { variant: 'warn' }); return; }
 
-  // BOM must be approved before a job can be created
-  var _legacySpecId = (function(){ var e=el('mf-specid'); return e?e.value.trim():''; })();
-  if (_legacySpecId) {
-    var _legacyBom = (window.BOMS || []).find(function(b){ return b.id === _legacySpecId; });
-    if (_legacyBom && _legacyBom.status !== 'approved') {
-      await window.lpAlert('BOM must be approved before a job can be created.', { variant: 'warn' });
-      return;
-    }
-  }
+  // Staff may create a job from a draft/pending BOM so supply chain can start.
+  // Production stays blocked until the spec is approved.
 
   window._saveJobInFlight = true;
 
@@ -12306,10 +12305,9 @@ async function openBomModal(editId) {
   window._bmLabelPhotos = {};
   if (typeof window._bmRenderLabelPhotos === 'function') window._bmRenderLabelPhotos();
 
-  // Reset blend recipe rows (edit branch re-hydrates below) + load spirit datalist.
+  // Reset blend recipe rows (edit branch re-hydrates below) + load spirit types.
   if (window.bmResetBlendRecipe) window.bmResetBlendRecipe([]);
-  if (window.bmPopulateSpiritTypes) window.bmPopulateSpiritTypes();
-  if (el('bm-source-spirit')) el('bm-source-spirit').value = '';
+  if (!editId && window.bmPopulateSpiritTypes) await window.bmPopulateSpiritTypes('');
 
   // Default the Lighthouse-stock toggle off — the edit branch re-detects below.
   window._bomIncludeLhStock = false;
@@ -12364,7 +12362,7 @@ async function openBomModal(editId) {
 
       // Hydrate blend recipe rows from the stored BOM
       if (window.bmResetBlendRecipe) window.bmResetBlendRecipe(b.blendRecipe || []);
-      if (el('bm-source-spirit')) el('bm-source-spirit').value = b.sourceSpiritType || '';
+      if (window.bmPopulateSpiritTypes) await window.bmPopulateSpiritTypes(b.sourceSpiritType || '');
 
       // Detect whether this draft uses any shared Lighthouse (CLI-000) stock. If
       // so, auto-enable the toggle so onBomClientChange loads those goods into the
@@ -12965,20 +12963,52 @@ window.bmResetBlendRecipe = function(recipe) {
   (recipe || []).forEach(function(r) { window.bmAddBlendRow(r.spirit_type, r.pct); });
   window.bmUpdateBlendTotal();
 };
-// Populate the spirit-type datalist from existing containers (best-effort).
-window.bmPopulateSpiritTypes = async function() {
+// Populate the source-spirit <select> and the blend-recipe datalist from
+// liquid products plus distinct container spirit_type values.
+window.bmPopulateSpiritTypes = async function(currentValue) {
   var dl = el('bm-spirit-type-list');
-  if (!dl) return;
+  var sel = el('bm-source-spirit');
+  var seen = {}, opts = [];
+  function add(v) {
+    v = (v || '').trim();
+    if (!v) return;
+    var k = v.toLowerCase();
+    if (seen[k]) return;
+    seen[k] = 1;
+    opts.push(v);
+  }
   try {
     var rows = await window.db.select('liquid_containers', '?select=spirit_type&spirit_type=not.is.null');
-    var seen = {}, opts = [];
-    (rows || []).forEach(function(r) {
-      var v = (r.spirit_type || '').trim();
-      if (v && !seen[v.toLowerCase()]) { seen[v.toLowerCase()] = 1; opts.push(v); }
+    (rows || []).forEach(function(r) { add(r.spirit_type); });
+  } catch(e) { /* containers are optional — register names still populate */ }
+  try {
+    var products = window.getLiquidProducts ? await window.getLiquidProducts() : [];
+    (products || []).forEach(function(p) { add(p && p.name); });
+  } catch(e) { /* non-critical */ }
+  opts.sort(function(a, b) { return a.localeCompare(b); });
+
+  if (dl) {
+    dl.innerHTML = opts.map(function(v) {
+      return '<option value="' + String(v).replace(/"/g, '&quot;') + '"></option>';
+    }).join('');
+  }
+  if (sel) {
+    var esc = window.escapeHtml || function(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    };
+    var cur = (currentValue || '').trim();
+    var html = '<option value="">— Select spirit type —</option>';
+    var matched = false;
+    opts.forEach(function(v) {
+      var isSel = (cur && v === cur);
+      if (isSel) matched = true;
+      html += '<option value="' + esc(v) + '"' + (isSel ? ' selected' : '') + '>' + esc(v) + '</option>';
     });
-    opts.sort();
-    dl.innerHTML = opts.map(function(v) { return '<option value="' + String(v).replace(/"/g,'&quot;') + '"></option>'; }).join('');
-  } catch(e) { /* non-critical: free-text entry still works */ }
+    if (cur && !matched) {
+      html += '<option value="' + esc(cur) + '" selected>' + esc(cur) + '</option>';
+    }
+    sel.innerHTML = html;
+  }
 };
 
 async function saveBomDraft() {
@@ -13110,7 +13140,17 @@ async function saveBomDraft() {
       if (idx >= 0) Object.assign(BOMS[idx], localDraftBom(editId));
       window.BOMS = BOMS;
       await _syncBomNameToLinkedJobs(editId, product);
-      window.toast && window.toast('Draft saved: ' + product, 'success');
+      try {
+        var draftSync = await _propagateBomToActiveJobs(editId, { soft: true });
+        if (draftSync && draftSync.keptOrdered) {
+          window.toast && window.toast('Draft saved: ' + product + '. An ordered supply-chain line was kept — the PO was not cancelled.', 'warn');
+        } else {
+          window.toast && window.toast('Draft saved: ' + product, 'success');
+        }
+      } catch (syncErr) {
+        window.logError && window.logError('saveBomDraft soft-sync', syncErr);
+        window.toast && window.toast('Draft saved: ' + product, 'success');
+      }
     } else {
       dbPayload.id = 'BOM-' + clientId.replace('CLI-','') + '-' + Date.now().toString(36).toUpperCase();
       var saved = await window.db.insert('boms', dbPayload);
@@ -13337,6 +13377,9 @@ async function _bomPatch(bomId, payload) {
   });
   window.renderBoms && window.renderBoms();
   window.loadPendingBomApprovals && window.loadPendingBomApprovals();
+  if (payload && payload.bom_status && typeof window._refreshBomStatusMaps === 'function') {
+    window._refreshBomStatusMaps(bomId, payload.bom_status);
+  }
 }
 
 window.requestBomApproval = async function(bomId) {
@@ -13376,18 +13419,20 @@ async function _bomCountActiveJobs(bomId) {
   }
 }
 
-// After a BOM is re-approved, walk every active job linked to it and full-sync
-// job_components so the Supply Chain tab matches the latest BOM:
+// After a BOM is re-approved (or a draft is saved with opts.soft), walk every
+// open job linked to it and sync job_components so the Supply Chain tab matches:
 //   - insert rows for new BOM SKUs
 //   - patch qty_required on existing rows (preserves PO / exclude / supplier fields)
-//   - remove rows for SKUs that were dropped from the BOM (only when sku_id is non-null)
+//   - full mode: remove rows for SKUs dropped from the BOM
+//   - soft mode (draft save): never delete ordered / allocated / PO lines
 // When the component set changes (insert or remove) the coordinator's Supply Chain
 // sign-off (job_drygoods_prep.signed_by_coordinator) is cleared so they must
 // re-confirm with the new components.
 // Per-job failures are logged but do not abort the loop; the caller wraps this
 // in its own try/catch so a sync failure can never mask the BOM approval itself.
-async function _propagateBomToActiveJobs(bomId) {
-  var summary = { jobsTouched: 0, inserted: 0, updated: 0, removed: 0, signoffsCleared: 0 };
+async function _propagateBomToActiveJobs(bomId, opts) {
+  var soft = !!(opts && opts.soft);
+  var summary = { jobsTouched: 0, inserted: 0, updated: 0, removed: 0, signoffsCleared: 0, keptOrdered: 0 };
   var jobs = await window.db.select('jobs',
     '?bom_id=eq.' + bomId +
     '&stage=in.(new,active,on_hold)' +
@@ -13440,10 +13485,17 @@ async function _propagateBomToActiveJobs(bomId) {
       var existingBySku = {};
       existing.forEach(function(r){ if (r.sku_id) existingBySku[r.sku_id] = r; });
 
-      // 1. Remove rows whose sku_id is non-null and not in the BOM
+      // 1. Remove rows whose sku_id is non-null and not in the BOM.
+      // Soft (draft-save) mode never deletes ordered / allocated / PO lines.
       var removeIds = [];
       existing.forEach(function(r){
-        if (r.sku_id && !bomSkuMap[r.sku_id]) removeIds.push(r.id);
+        if (!r.sku_id || bomSkuMap[r.sku_id]) return;
+        var protectedRow = !!(r.is_ordered || r.is_allocated || (r.po_value != null && String(r.po_value).trim() !== ''));
+        if (soft && protectedRow) {
+          summary.keptOrdered += 1;
+          return;
+        }
+        removeIds.push(r.id);
       });
       if (removeIds.length) {
         try {
@@ -13589,7 +13641,7 @@ window.approveBom = async function(bomId) {
       revised_at: now,
       revised_by: actor
     });
-    await _bomRecordHistory(bomId, 'approved', prevStatus, 'approved', actor, newRevision);
+      await _bomRecordHistory(bomId, 'approved', prevStatus, 'approved', actor, newRevision);
   } catch(e) {
     window.toast && window.toast('Failed: ' + e.message, 'error');
     return;
@@ -13618,6 +13670,27 @@ window.approveBom = async function(bomId) {
     syncFailed = true;
   }
   window.toast && window.toast('BOM approved and locked.' + syncMsg, syncFailed ? 'warn' : 'success');
+
+  // Jobs created from this BOM while it was draft never received a client
+  // confirmation email. Offer to send now that the spec is locked.
+  try {
+    var linkedJobs = await window.db.select('jobs',
+      '?bom_id=eq.' + bomId + '&stage=in.(new,active,on_hold)&select=id');
+    if (Array.isArray(linkedJobs) && linkedJobs.length && window._bomSendToClient) {
+      var sendNow = await window.lpConfirm(
+        'Send client BOM confirmation for ' + linkedJobs.length + ' linked job(s)?',
+        { title: 'Send BOM to client', confirmLabel: 'Send', destructive: false }
+      );
+      if (sendNow) {
+        for (var li = 0; li < linkedJobs.length; li++) {
+          try { await window._bomSendToClient(linkedJobs[li].id); }
+          catch (se) { window.logError && window.logError('approveBom send-to-client', se); }
+        }
+      }
+    }
+  } catch (offerErr) {
+    window.logError && window.logError('approveBom confirmation offer', offerErr);
+  }
 };
 
 // Builds a set of BOM IDs that are signed off on an uncompleted job. Called from
@@ -23721,7 +23794,7 @@ window._approvalsBadgePoll = async function() {
   <!-- Live Queue hint — shown only when Live Queue tab is active -->
   <div id="jobs-live-hint" style="margin-bottom:12px;padding:8px 14px;background:rgba(74,158,221,0.07);border:1px solid rgba(74,158,221,0.2);border-radius:4px;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:8px;">
     <span style="color:var(--blue);font-weight:700;letter-spacing:0.06em;text-transform:uppercase;font-size:9px;">Auto-flow</span>
-    Jobs move from <strong style="color:var(--amber);">New</strong> to <strong style="color:var(--blue);">Active</strong> automatically once the client signs off the BOM and a bay is assigned.
+    Jobs move from <strong style="color:var(--amber);">New</strong> to <strong style="color:var(--blue);">Active</strong> automatically once the BOM is approved, the client signs it off, and a bay is assigned.
   </div>
 
   <!-- Liquid Plan FYI hint — informational only; no writes -->
@@ -32658,6 +32731,55 @@ window.bomDisplayName = function(bom) {
   return extras ? base + ' — ' + extras : base;
 };
 
+window._bomStatusOf = function(bom) {
+  if (!bom) return '';
+  return bom.bom_status || bom.status || '';
+};
+
+// Live check used by production gates (start / New→Active / Complete / send-to-client).
+// Fail closed if the BOM cannot be read. No bom_id → treat as approved (legacy rows).
+window._linkedBomIsApproved = async function(bomId) {
+  if (!bomId) return true;
+  try {
+    var rows = await window.db.select('boms', '?id=eq.' + bomId + '&select=bom_status&limit=1');
+    var live = rows && rows[0] && rows[0].bom_status;
+    if (live && typeof window._refreshBomStatusMaps === 'function') {
+      window._refreshBomStatusMaps(bomId, live);
+    }
+    return live === 'approved';
+  } catch (e) {
+    var cached = window._globalBomMap && window._globalBomMap[bomId];
+    return !!(cached && (cached.bom_status || cached.status) === 'approved');
+  }
+};
+
+// Unmissable amber marker for the Jobs row / job-detail header. Empty when approved.
+window._bomJobMarkerHTML = function(bom) {
+  var st = window._bomStatusOf(bom);
+  if (!st || st === 'approved') return '';
+  var pending = st === 'pending';
+  var label = pending ? 'BOM PENDING QC' : 'BOM DRAFT';
+  var title = pending
+    ? 'This BOM is awaiting Quality approval. The spec is not locked — do not start production.'
+    : 'This BOM is still in draft. Supply chain can run, but the spec is not locked — do not start production.';
+  return '<span class="job-bom-draft-mark" title="' + String(title).replace(/"/g, '&quot;') + '"'
+    + ' style="display:inline-flex;align-items:center;margin-left:8px;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;padding:3px 8px;border-radius:3px;background:rgba(232,156,58,0.22);color:var(--amber);border:1px solid rgba(232,156,58,0.75);white-space:nowrap;vertical-align:middle;">'
+    + label + '</span>';
+};
+
+window._refreshBomStatusMaps = function(bomId, status) {
+  if (!bomId || !status) return;
+  var prev = window._globalBomMap && window._globalBomMap[bomId] && window._globalBomMap[bomId].bom_status;
+  if (window._globalBomMap) {
+    if (!window._globalBomMap[bomId]) window._globalBomMap[bomId] = { id: bomId };
+    window._globalBomMap[bomId].bom_status = status;
+  }
+  if (typeof window._patchJobsBomStatus === 'function') window._patchJobsBomStatus(bomId, status);
+  if (prev !== status && typeof window.renderJobsTable === 'function') {
+    try { window.renderJobsTable(); } catch (_e) {}
+  }
+};
+
 // ── Job display name helper ──────────────────────────────────────────────────
 // Builds an extended job label by combining the job's product_name with the
 // linked BOM's volume/ABV/region. Two jobs sharing a product (e.g. Lucky Penny)
@@ -32684,10 +32806,15 @@ window._globalBomMap = window._globalBomMap || {};
 
 window._mergeBomMap = function(map) {
   if (!map) return;
+  function mergeOne(b) {
+    if (!b || !b.id) return;
+    var existing = window._globalBomMap[b.id] || {};
+    window._globalBomMap[b.id] = Object.assign({}, existing, b);
+  }
   if (Array.isArray(map)) {
-    map.forEach(function(b){ if (b && b.id) window._globalBomMap[b.id] = b; });
+    map.forEach(mergeOne);
   } else {
-    Object.keys(map).forEach(function(k){ window._globalBomMap[k] = map[k]; });
+    Object.keys(map).forEach(function(k){ mergeOne(map[k]); });
   }
 };
 
@@ -32701,7 +32828,7 @@ window._fetchBomMapFor = async function(bomIds) {
   if (!unique.length) return localMap;
   try {
     var rows = await window.db.select('boms',
-      '?id=in.(' + unique.join(',') + ')&select=id,product_name,volume_cl,abv,additional_info');
+      '?id=in.(' + unique.join(',') + ')&select=id,product_name,volume_cl,abv,additional_info,bom_status');
     (rows || []).forEach(function(b){
       if (b && b.id) { localMap[b.id] = b; window._globalBomMap[b.id] = b; }
     });
@@ -33967,7 +34094,12 @@ window.saveAdjModal = async function() {
   // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
   var _jobs = [];
   var _jobBoms = [];
-  var _jobsBomMap = {}; // bom_id -> { product_name, volume_cl, abv, additional_info } for extended job labels (Jobs tab)
+  var _jobsBomMap = {}; // bom_id -> { product_name, volume_cl, abv, additional_info, bom_status }
+  window._patchJobsBomStatus = function(bomId, status) {
+    if (!bomId || !status) return;
+    if (_jobsBomMap[bomId]) _jobsBomMap[bomId].bom_status = status;
+    else _jobsBomMap[bomId] = { id: bomId, bom_status: status };
+  };
   var _currentJobId = null;
   var _jobStageFilter = 'live'; // 'live' = new + active combined (the default queue view)
   var _JOB_STAGE_TABS = ['live','liquid_plan','new','active','complete','on_hold','cancelled','all'];
@@ -34084,7 +34216,7 @@ window.saveAdjModal = async function() {
       supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
       supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved'),
       supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged'),
-      supaGet('boms?select=id,product_name,volume_cl,abv,additional_info,liquid_spec'),
+      supaGet('boms?select=id,product_name,volume_cl,abv,additional_info,liquid_spec,bom_status'),
       supaGet('job_components?select=job_id,sku_id,qty_required,is_ordered,is_excluded,is_allocated')
     ]);
     if (settled[0].status === 'fulfilled' && Array.isArray(settled[0].value)) _jobs = settled[0].value;
@@ -34099,6 +34231,7 @@ window.saveAdjModal = async function() {
     if (settled[4].status === 'fulfilled') (settled[4].value||[]).forEach(function(r){ if (r.job_id) _bomFlagged[r.job_id] = true; });
     _jobsBomMap = {};
     if (settled[5].status === 'fulfilled') (settled[5].value||[]).forEach(function(b){ if (b.id) _jobsBomMap[b.id] = b; });
+    if (window._mergeBomMap) window._mergeBomMap(_jobsBomMap);
 
     // Supply Chain column: all non-excluded SKUs on-site (net stock) or ordered.
     _scSkuReady = {};
@@ -34420,7 +34553,7 @@ window.saveAdjModal = async function() {
         html += '<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openJobDetail&&window.openJobDetail(\'' + jid + '\')">'
           + '<td style="font-size:13px;font-weight:700;color:var(--amber);">#' + (idx + 1) + '</td>'
           + '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + esc(j.id) + '</td>'
-          + '<td style="font-weight:600;color:var(--white);">' + esc(row.product) + '</td>'
+          + '<td style="font-weight:600;color:var(--white);">' + esc(row.product) + ((window._bomJobMarkerHTML && window._bomJobMarkerHTML(_jobsBomMap[j.bom_id])) || '') + '</td>'
           + '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + esc(row.spirit) + '</td>'
           + '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">' + esc(_lpFmtDatePlain(row.prepIso)) + '</td>'
           + '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">' + esc(_lpFmtDatePlain(row.readyIso)) + '</td>'
@@ -34671,10 +34804,13 @@ window.saveAdjModal = async function() {
       return '<span title="' + title + ': not yet signed off' + suffix + '" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);white-space:nowrap;">&#10007; ' + label + '</span>';
     }
     // Three-state BOM tick: approved (green), flagged concern (amber), pending (red)
-    function bomTick(jobId, label, title) {
+    function bomTick(job, label, title) {
+      var jobId = job && job.id;
+      var bomSt = window._bomStatusOf ? window._bomStatusOf(_jobsBomMap[job && job.bom_id]) : '';
+      var waitNote = (bomSt && bomSt !== 'approved') ? ' Client confirmation waits until the BOM is approved.' : '';
       if (_bomDone[jobId])    return '<span title="' + title + ': client approved" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.35);white-space:nowrap;">&#10003; ' + label + '</span>';
       if (_bomFlagged[jobId]) return '<span title="' + title + ': client flagged a concern" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.45);white-space:nowrap;">&#9888; ' + label + '</span>';
-      return '<span title="' + title + ': not yet confirmed" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);white-space:nowrap;">&#10007; ' + label + '</span>';
+      return '<span title="' + title + ': not yet confirmed.' + waitNote + '" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);white-space:nowrap;">&#10007; ' + label + '</span>';
     }
 
     // Compute bottle total for the filtered list and update the tfoot
@@ -34702,7 +34838,7 @@ window.saveAdjModal = async function() {
       var _liquidSpirit = _jobBom && _jobBom.liquid_spec ? window.escapeHtml(_jobBom.liquid_spec) : '';
 
       var signoffs = '<div style="display:flex;flex-direction:row;flex-wrap:nowrap;gap:4px;align-items:center;">'
-        + bomTick(j.id, 'BOM',     'Bill of Materials Sign-Off')
+        + bomTick(j, 'BOM',     'Bill of Materials Sign-Off')
         + soTick(_scDone[j.id], 'S.Chain', 'Supply Chain Sign-Off')
         + soTick(_lsDone[j.id], 'Liquid',  'Liquid Sign-Off', _liquidSpirit)
         + '</div>';
@@ -34711,7 +34847,8 @@ window.saveAdjModal = async function() {
       row += '<td style="font-size:12px;font-weight:700;color:var(--amber);">' + (seq != null ? seq : '') + '</td>';
       row += '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + j.id + '</td>';
       var _jtLabel = window.jobDisplayName(j, _jobsBomMap);
-      row += '<td style="font-weight:600;color:var(--white);" title="' + _jtLabel.replace(/"/g, '&quot;') + '">' + _jtLabel + '<span class="mob-tap-hint">' + j.id + ' · ' + clientName + '</span></td>';
+      var _draftMark = (window._bomJobMarkerHTML && window._bomJobMarkerHTML(_jobBom)) || '';
+      row += '<td style="font-weight:600;color:var(--white);" title="' + _jtLabel.replace(/"/g, '&quot;') + '">' + _jtLabel + _draftMark + '<span class="mob-tap-hint">' + j.id + ' · ' + clientName + '</span></td>';
       row += '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + clientName + '</td>';
       row += '<td class="mob-hide" style="font-size:12px;">' + target + '</td>';
       row += '<td class="mob-hide" style="font-size:12px;color:var(--white);white-space:nowrap;">'
@@ -34763,12 +34900,13 @@ window.saveAdjModal = async function() {
       row += '<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="' + _colCount + '">';
       row += '<div class="mob-detail-inner">';
       row += '<div class="mob-d-item"><span class="mob-d-label">Client</span><span class="mob-d-value">' + clientName + '</span></div>';
+      if (_draftMark) row += '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">BOM</span><span class="mob-d-value">' + _draftMark + '</span></div>';
       row += '<div class="mob-d-item"><span class="mob-d-label">Target</span><span class="mob-d-value">' + target + '</span></div>';
       row += '<div class="mob-d-item"><span class="mob-d-label">' + (_showCompleted ? 'Job Completed' : 'Job Ready') + '</span><span class="mob-d-value">'
         + (_showCompleted ? _fmtCompletedCell(j) : _fmtReady(j.job_ready_date))
         + '</span></div>';
       row += '<div class="mob-d-item" style="grid-column:1/-1"><span class="mob-d-label">Sign-offs</span><span class="mob-d-value" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:2px;">'
-        + bomTick(j.id, 'BOM',          'Bill of Materials Sign-Off')
+        + bomTick(j, 'BOM',          'Bill of Materials Sign-Off')
         + soTick(_scDone[j.id], 'Supply Chain', 'Supply Chain Sign-Off')
         + soTick(_lsDone[j.id], 'Liquid',        'Liquid Sign-Off', _liquidSpirit)
         + '</span></div>';
@@ -34961,6 +35099,24 @@ window.saveAdjModal = async function() {
   // ── New Job Modal ─────────────────────────────────────────────────────────────
   var _njmBoms = []; // cached BOM list with full details
 
+  function _njmBomOptionText(b) {
+    var name = (window.bomDisplayName && window.bomDisplayName(b)) || b.product_name || b.id;
+    var st = b.bom_status || 'draft';
+    if (st === 'approved') return name;
+    if (st === 'pending') return name + '  [Pending QC]';
+    return name + '  [Draft]';
+  }
+
+  function _njmSyncDraftUi(bom) {
+    var warn = document.getElementById('njm-draft-warn');
+    var lab = document.getElementById('njm-client-approved-label');
+    var inp = document.getElementById('njm-client-approved-by');
+    var unlocked = !!(bom && (bom.bom_status || 'draft') !== 'approved');
+    if (warn) warn.style.display = unlocked ? '' : 'none';
+    if (lab) lab.textContent = unlocked ? 'Client go-ahead to order *' : 'Approved By (Client) *';
+    if (inp) inp.placeholder = unlocked ? 'Client representative who agreed to start ordering' : 'Client representative name';
+  }
+
   window.openNewJobModal = async function(editId) {
     document.getElementById('njm-edit-id').value = editId || '';
     document.getElementById('njm-title').textContent = editId ? 'Edit Job' : 'New Job';
@@ -34979,11 +35135,22 @@ window.saveAdjModal = async function() {
       cliSel.innerHTML = '<option value="">— Select client —</option>'
         + clients.map(function(c){ return '<option value="' + c.id + '">' + (c.name || c.company || c.id) + '</option>'; }).join('');
 
-      // Load approved BOMs only — draft/pending BOMs cannot be used to create a job
-      _njmBoms = await supaGet('boms?bom_status=eq.approved&order=product_name.asc&select=id,product_name,bom_status,client_id,abv,volume_cl,bottling_abv,chill_filtration,colouring,colour_spec,bph,bottles_per_shipper,additional_info');
+      // Load all BOMs — draft/pending are allowed so supply chain can start
+      // before the spec is locked. Option labels mark non-approved specs.
+      _njmBoms = await supaGet('boms?order=product_name.asc&select=id,product_name,bom_status,client_id,abv,volume_cl,bottling_abv,chill_filtration,colouring,colour_spec,bph,bottles_per_shipper,additional_info') || [];
+      function _njmStatusRank(s) {
+        if (s === 'approved') return 0;
+        if (s === 'pending') return 1;
+        return 2;
+      }
+      _njmBoms.sort(function(a, b) {
+        var ra = _njmStatusRank(a.bom_status), rb = _njmStatusRank(b.bom_status);
+        if (ra !== rb) return ra - rb;
+        return String(a.product_name || '').localeCompare(String(b.product_name || ''));
+      });
       var bomSel = document.getElementById('njm-bom');
       bomSel.innerHTML = '<option value="">— Select BOM to auto-populate job —</option>'
-        + _njmBoms.map(function(b){ return '<option value="' + b.id + '">' + window.bomDisplayName(b) + '</option>'; }).join('');
+        + _njmBoms.map(function(b){ return '<option value="' + b.id + '">' + _njmBomOptionText(b) + '</option>'; }).join('');
     } catch(e) { console.warn('Modal load error:', e); }
 
     if (!editId) {
@@ -35001,11 +35168,27 @@ window.saveAdjModal = async function() {
       document.getElementById('njm-chill').value = 'no';
       document.getElementById('njm-colouring').value = 'no';
       document.getElementById('njm-colour-spec').value = '';
+      _njmSyncDraftUi(null);
       window.toggleJobTarget();
       window.calcJobYield();
     } else {
       var j = _jobs.find(function(x){ return x.id === editId; });
       if (j) {
+        if (j.bom_id && !_njmBoms.some(function(b){ return b.id === j.bom_id; })) {
+          try {
+            var extra = await supaGet('boms?id=eq.' + j.bom_id + '&select=id,product_name,bom_status,client_id,abv,volume_cl,bottling_abv,chill_filtration,colouring,colour_spec,bph,bottles_per_shipper,additional_info&limit=1');
+            if (extra && extra[0]) {
+              _njmBoms.push(extra[0]);
+              var bomSelEdit = document.getElementById('njm-bom');
+              if (bomSelEdit) {
+                var opt = document.createElement('option');
+                opt.value = extra[0].id;
+                opt.textContent = _njmBomOptionText(extra[0]);
+                bomSelEdit.appendChild(opt);
+              }
+            }
+          } catch (_ex) {}
+        }
         var sv = function(id, v){ var e=document.getElementById(id); if(e) e.value=v||''; };
         sv('njm-client', j.client_id);
         sv('njm-product', j.product_name);
@@ -35029,6 +35212,7 @@ window.saveAdjModal = async function() {
           sv('njm-bottle-target', j.bottle_target);
         }
         sv('njm-abv-in', j.abv_in);
+        _njmSyncDraftUi(_njmBoms.find(function(b){ return b.id === j.bom_id; }) || null);
         window.toggleJobTarget();
         window.calcJobYield();
       }
@@ -35042,7 +35226,8 @@ window.saveAdjModal = async function() {
   window.onJobBomSelect = function() {
     var bomId = document.getElementById('njm-bom').value;
     var bom = _njmBoms.find(function(b){ return b.id === bomId; });
-    if (!bom) return;
+    if (!bom) { _njmSyncDraftUi(null); return; }
+    _njmSyncDraftUi(bom);
 
     // Auto-fill client and product
     var cliSel = document.getElementById('njm-client');
@@ -35283,15 +35468,9 @@ window.saveAdjModal = async function() {
     if (isLiquid && !gv('njm-litres-in'))    { window.toast && window.toast('Litres of liquid required is required.','error'); return; }
     if (!isLiquid && !gv('njm-bottle-target')) { window.toast && window.toast('Bottle target is required.','error'); return; }
 
-    // BOM must be approved before a job can be created
-    if (!editId) {
-      var _selectedBomId = gv('njm-bom');
-      var _selectedBom = (_njmBoms || []).find(function(b){ return b.id === _selectedBomId; });
-      if (_selectedBom && _selectedBom.bom_status !== 'approved') {
-        window.toast && window.toast('BOM must be approved before a job can be created.', 'error');
-        return;
-      }
-    }
+    var _selectedBomId = gv('njm-bom');
+    var _selectedBom = (_njmBoms || []).find(function(b){ return b.id === _selectedBomId; });
+    var _bomApproved = !_selectedBom || _selectedBom.bom_status === 'approved';
 
     window._saveNewJobInFlight = true;
     var btn = document.getElementById('njm-save-btn');
@@ -35378,9 +35557,11 @@ window.saveAdjModal = async function() {
         if (saved && saved.id) {
           try { await initJobOnCreate(saved.id); }
           catch(tErr) { window.logError && window.logError('initJobOnCreate', tErr); }
-          // Auto-send BOM confirmation to client
-          try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(saved.id); }
-          catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate', bErr); }
+          // Auto-send BOM confirmation only when the spec is already locked
+          if (_bomApproved) {
+            try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(saved.id); }
+            catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate', bErr); }
+          }
         }
         await loadJobs();
       }
@@ -35792,6 +35973,11 @@ window.saveAdjModal = async function() {
 
     // Header
     document.getElementById('jd-title').textContent = window.jobLabel(j) || jobId;
+    var _jdMark = document.getElementById('jd-bom-draft-mark');
+    if (_jdMark) {
+      var _jdBom = (j.bom_id && _jobsBomMap[j.bom_id]) || (j.bom_id && window._globalBomMap && window._globalBomMap[j.bom_id]) || null;
+      _jdMark.innerHTML = (window._bomJobMarkerHTML && window._bomJobMarkerHTML(_jdBom)) || '';
+    }
     document.getElementById('jd-meta').textContent = jobId + (j.po_number ? ' · PO: ' + j.po_number : '') + (j.clients && j.clients.name ? ' · ' + j.clients.name : '');
     var badge = document.getElementById('jd-stage-badge');
     var ss = STAGE_STYLE[j.stage] || STAGE_STYLE.new;
@@ -35831,7 +36017,7 @@ window.saveAdjModal = async function() {
       if (j.stage === 'new') {
         advBtn.textContent = 'Move to Active →';
         advBtn.style.display = '';
-        stageInfo.textContent = 'Requires: Bill of Materials confirmed. Once BOM is signed off and a bay is assigned, this job will auto-move to Active.';
+        stageInfo.textContent = 'Requires: BOM approved and locked, then client confirmation. Once those are done and a bay is assigned, this job will auto-move to Active.';
       } else if (j.stage === 'active') {
         advBtn.textContent = 'Complete Job →';
         advBtn.style.display = '';
@@ -36170,9 +36356,10 @@ window.saveAdjModal = async function() {
   // AND a bay is actively held (assigned and not released).
   async function _maybeAutoActivateJob(jobId) {
     try {
-      var jobData = await supaGet('jobs?id=eq.' + jobId + '&select=stage,job_bay,bay_released_at');
+      var jobData = await supaGet('jobs?id=eq.' + jobId + '&select=stage,job_bay,bay_released_at,bom_id');
       var job = jobData && jobData[0];
       if (!job || job.stage !== 'new' || !job.job_bay || job.bay_released_at) return;
+      if (job.bom_id && window._linkedBomIsApproved && !(await window._linkedBomIsApproved(job.bom_id))) return;
       var bom = await supaGet('job_bom_approvals?job_id=eq.' + jobId + '&client_decision=eq.approved&limit=1');
       if (!bom || !bom.length) return;
       await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, { stage: 'active' });
@@ -36218,6 +36405,9 @@ window.saveAdjModal = async function() {
     // ── Gate 1: New → Active ─────────────────────────────────────────────────
     if (nextStage === 'active') {
       var blockers1 = [];
+      if (j.bom_id && window._linkedBomIsApproved && !(await window._linkedBomIsApproved(j.bom_id))) {
+        blockers1.push({ label: 'BOM approved & locked', hint: 'The linked BOM is still in draft or awaiting QC. Approve it before this job can become Active.' });
+      }
       var bomApproval = await supaGet('job_bom_approvals?job_id=eq.' + _currentJobId + '&client_decision=eq.approved&limit=1');
       if (!bomApproval || !bomApproval.length) {
         blockers1.push({ label: 'Bill of Materials', hint: 'Client must confirm the BOM before the job can become active.' });
@@ -36250,6 +36440,9 @@ window.saveAdjModal = async function() {
 
       // 2a. Tab sign-offs (not job_tasks — staff are notified via My Tasks on demand)
       var taskBlocking = [];
+      if (j.bom_id && window._linkedBomIsApproved && !(await window._linkedBomIsApproved(j.bom_id))) {
+        taskBlocking.push({ label: 'BOM approved & locked', hint: 'The linked BOM is still in draft or awaiting QC. Approve it before completing this job.' });
+      }
       try {
         var prepRows = await supaGet('job_drygoods_prep?job_id=eq.' + _currentJobId + '&limit=1');
         var prep = prepRows && prepRows[0];
@@ -44999,11 +45192,21 @@ window.saveAdjModal = async function() {
     var rec = await window._loadBomApproval(jobId);
     var status = !rec ? 'none' : (rec.client_decision === 'approved' ? 'approved' : rec.client_decision === 'flagged' ? 'flagged' : rec.client_email_sent_at ? 'sent' : 'draft');
 
+    var bomLocked = true;
+    try {
+      var _vj = await supaGet('jobs?id=eq.' + jobId + '&select=bom_id&limit=1');
+      var _vBid = _vj && _vj[0] && _vj[0].bom_id;
+      if (_vBid && window._linkedBomIsApproved) bomLocked = await window._linkedBomIsApproved(_vBid);
+    } catch (_ve) {}
+
     var header = '<div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;color:var(--gold);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid rgba(201,168,76,0.2);">BOM Client Confirmation</div>';
     var banner = '';
     var actions = '';
 
-    if (status === 'none') {
+    if (!bomLocked && (status === 'none' || status === 'draft')) {
+      banner = '<div style="font-size:12px;color:var(--amber);line-height:1.5;">The BOM is still in draft. Approve and lock it before sending to the client for confirmation.</div>';
+      actions = '<button disabled style="background:rgba(255,255,255,0.04);border:1px solid var(--navy-border);color:var(--muted);font-size:12px;padding:8px 16px;border-radius:3px;font-family:Lato,sans-serif;font-weight:700;margin-top:10px;display:inline-block;cursor:not-allowed;">&#9993; Send BOM to Client</button>';
+    } else if (status === 'none') {
       banner = '<div style="font-size:12px;color:var(--muted);line-height:1.5;">No confirmation sent yet. Send the BOM to the client for sign-off. The BOM task cannot be marked complete until the client has confirmed.</div>';
       actions = '<button onclick="window._bomSendToClient(\'' + jobId + '\')" style="background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.5);color:var(--gold);font-size:12px;padding:8px 16px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;font-weight:700;margin-top:10px;display:inline-block;">&#9993; Send BOM to Client</button>';
     } else if (status === 'draft') {
@@ -45086,6 +45289,14 @@ window.saveAdjModal = async function() {
   window._bomSendToClient = async function(jobId, prefillEmail, _skipGuard) {
     // Never stack a second prompt on top of an existing dialog.
     if (document.querySelector('.lp-dialog-overlay')) return;
+    try {
+      var _preJobs = await supaGet('jobs?id=eq.' + jobId + '&select=bom_id&limit=1');
+      var _preBomId = _preJobs && _preJobs[0] && _preJobs[0].bom_id;
+      if (_preBomId && window._linkedBomIsApproved && !(await window._linkedBomIsApproved(_preBomId))) {
+        window.toast && window.toast('Approve and lock the BOM before sending it to the client.', 'warn');
+        return;
+      }
+    } catch (_pe) { console.warn('BOM lock check before send failed:', _pe && _pe.message); }
     if (!_skipGuard) {
       if (window._bomSendBusy) return;
       window._bomSendBusy = true;
@@ -47138,7 +47349,7 @@ window.saveAdjModal = async function() {
       var bphMap = {};
       _schedBomMap = {};
       if (bomIds.length) {
-        var boms = await sbGet('boms?id=in.(' + bomIds.join(',') + ')&select=id,bph,product_name,volume_cl,abv,additional_info');
+        var boms = await sbGet('boms?id=in.(' + bomIds.join(',') + ')&select=id,bph,product_name,volume_cl,abv,additional_info,bom_status');
         boms.forEach(function(b) {
           bphMap[b.id] = b.bph || 0;
           _schedBomMap[b.id] = b;
@@ -48562,12 +48773,16 @@ window.saveAdjModal = async function() {
   // ── Start dialog opened from Next Jobs ───────────────────────────────────────
   // Asks Changeover vs Production, warns on red gates, re-checks job state at
   // confirm time to guard against another operator beating us to it.
-  window.schedOpenStartDialog = function(jobId) {
+  window.schedOpenStartDialog = async function(jobId) {
     if (!window.canDo || !window.canDo('production_control')) {
       window.toast && window.toast('Permission denied.', 'error'); return;
     }
     var j = (_schedJobs || []).find(function(x) { return x.id === jobId; });
     if (!j) { window.toast && window.toast('Job not found — reload and try again.', 'error'); return; }
+    if (j.bom_id && window._linkedBomIsApproved && !(await window._linkedBomIsApproved(j.bom_id))) {
+      window.toast && window.toast('Cannot start — the BOM is still in draft. Approve and lock the spec first.', 'error');
+      return;
+    }
     if (j.actual_start || j.changeover_start) {
       window.toast && window.toast('That job is already running or in changeover.', 'error');
       loadSchedule();
