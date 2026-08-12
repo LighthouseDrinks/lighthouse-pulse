@@ -34167,6 +34167,55 @@ window.saveAdjModal = async function() {
     return String(iso).slice(0, 10);
   }
 
+  // Shared week-section header for Liquid Plan + Live Queue (visually distinct block).
+  function _jobsWeekHeaderRow(label, count, colCount) {
+    var esc = window.escapeHtml || function(s) { return String(s == null ? '' : s); };
+    var countLabel = count + ' job' + (count !== 1 ? 's' : '');
+    return '<tr class="jobs-week-header" style="pointer-events:none;">'
+      + '<td colspan="' + colCount + '" style="padding:0;border-top:2px solid rgba(201,168,76,0.55);border-bottom:1px solid rgba(201,168,76,0.3);">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px 13px 0;'
+      + 'background:linear-gradient(90deg,rgba(201,168,76,0.28) 0%,rgba(201,168,76,0.12) 45%,rgba(201,168,76,0.04) 100%);">'
+      + '<div style="display:flex;align-items:center;gap:12px;min-width:0;">'
+      + '<span style="width:5px;align-self:stretch;min-height:26px;background:var(--gold);border-radius:0 3px 3px 0;flex-shrink:0;box-shadow:0 0 10px rgba(201,168,76,0.35);"></span>'
+      + '<span style="font-size:13px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:var(--gold);">' + esc(label) + '</span>'
+      + '</div>'
+      + '<span style="font-size:11px;font-weight:700;color:var(--white);background:rgba(201,168,76,0.22);border:1px solid rgba(201,168,76,0.45);padding:4px 12px;border-radius:3px;white-space:nowrap;flex-shrink:0;">' + countLabel + '</span>'
+      + '</div></td></tr>';
+  }
+
+  // Bucket jobs by Planned Prep week (Monday). Jobs with no Job Ready go last.
+  function _bucketJobsByPrepWeek(jobsArr) {
+    var weekMap = {};
+    var weekOrder = [];
+    var awaiting = [];
+    (jobsArr || []).forEach(function(j) {
+      if (!j.job_ready_date) {
+        awaiting.push(j);
+        return;
+      }
+      var readyIso = String(j.job_ready_date).slice(0, 10);
+      var prepIso = (typeof window._minusWorkingDays === 'function')
+        ? window._minusWorkingDays(readyIso, 5)
+        : readyIso;
+      var key = _lpWeekStartIso(prepIso || readyIso) || _lpWeekStartIso(readyIso) || 'unknown';
+      if (!weekMap[key]) {
+        weekMap[key] = {
+          weekKey: key,
+          weekLabel: key === 'unknown' ? 'Unscheduled' : _lpFmtWeekLabel(key),
+          jobs: []
+        };
+        weekOrder.push(key);
+      }
+      weekMap[key].jobs.push(j);
+    });
+    weekOrder.sort();
+    var weeks = weekOrder.map(function(k) { return weekMap[k]; });
+    if (awaiting.length) {
+      weeks.push({ weekKey: 'awaiting', weekLabel: 'Awaiting dates', jobs: awaiting });
+    }
+    return weeks;
+  }
+
   // Shared list + week buckets for Liquid Plan table and PDF export.
   function _getLiquidPlanWeeks() {
     var search = ((document.getElementById('jobs-search') || {}).value || '').toLowerCase();
@@ -34251,13 +34300,7 @@ window.saveAdjModal = async function() {
     var esc = window.escapeHtml || function(s) { return String(s == null ? '' : s); };
     var html = '';
     plan.weeks.forEach(function(week) {
-      var countLabel = week.jobs.length + ' job' + (week.jobs.length !== 1 ? 's' : '');
-      html += '<tr class="lp-week-header" style="pointer-events:none;">'
-        + '<td colspan="6" style="padding:8px 12px;background:rgba(200,168,106,0.07);border-top:1px solid var(--navy-border);border-bottom:1px solid var(--navy-border);">'
-        + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">'
-        + '<span style="font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);">' + esc(week.weekLabel) + '</span>'
-        + '<span style="font-size:10px;color:var(--muted);">' + countLabel + '</span>'
-        + '</div></td></tr>';
+      html += _jobsWeekHeaderRow(week.weekLabel, week.jobs.length, 6);
       week.jobs.forEach(function(row, idx) {
         var j = row.job;
         var jid = String(j.id).replace(/'/g, "\\'");
@@ -34568,9 +34611,9 @@ window.saveAdjModal = async function() {
           ? 'All supply chain SKUs are on site or ordered'
           : 'Supply chain incomplete — one or more SKUs still need to be on site or ordered')
         + '">'
-        + '<input type="checkbox"' + (_scReady ? ' checked' : '')
-        + ' disabled style="pointer-events:none;cursor:not-allowed;'
-        + (_scReady ? 'accent-color:var(--green);' : 'opacity:0.4;') + '">'
+        + (_scReady
+          ? '<span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;background:rgba(61,186,120,0.18);border:1px solid rgba(61,186,120,0.45);color:var(--green);font-size:14px;font-weight:700;line-height:1;">&#10003;</span>'
+          : '<span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;background:rgba(232,156,58,0.16);border:1px solid rgba(232,156,58,0.5);color:var(--amber);font-size:14px;font-weight:700;line-height:1;">&#10007;</span>')
         + '</td>';
       // Only show bay chip for active stages — complete/cancelled jobs show a "Released" chip
       // which makes the stage cell too wide and pushes the action buttons out of column.
@@ -34619,7 +34662,7 @@ window.saveAdjModal = async function() {
       row += '<div class="mob-d-item"><span class="mob-d-label">Supply Chain</span><span class="mob-d-value">'
         + (_scReady
           ? '<span style="color:var(--green);font-weight:700;">&#10003; Complete</span>'
-          : '<span style="color:var(--muted);">Incomplete</span>')
+          : '<span style="color:var(--amber);font-weight:700;">&#10007; Incomplete</span>')
         + '</span></div>';
       row += '</div></td></tr>';
       return row;
@@ -34628,8 +34671,7 @@ window.saveAdjModal = async function() {
     // Shared section renderer — one header row + its job rows (reused by both grouping modes)
     var _seqCounter = 0;
     function renderJobSection(title, jobsArr) {
-      var head = '<tr class="job-section-row"><td colspan="' + _colCount + '" style="background:rgba(255,255,255,0.03);border-top:1px solid var(--navy-border);border-bottom:1px solid var(--navy-border);padding:8px 12px;font-size:10px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);">'
-        + title + ' <span style="color:var(--muted);">(' + jobsArr.length + ')</span></td></tr>';
+      var head = _jobsWeekHeaderRow(title, jobsArr.length, _colCount);
       if (!jobsArr.length) {
         return head + '<tr><td colspan="' + _colCount + '" style="padding:12px;color:var(--muted);font-size:11px;font-style:italic;">No jobs.</td></tr>';
       }
@@ -34646,8 +34688,16 @@ window.saveAdjModal = async function() {
     }
 
     var groupBy = (document.getElementById('jobs-groupby')||{}).value || 'none';
-    var flat = _showCompleted || _jobStageFilter === 'cancelled' || groupBy === 'none';
-    if (flat) {
+    // Live Queue: same Planned Prep week blocks as Liquid Plan (sign-off group-by still wins).
+    var useWeekBlocks = (_jobStageFilter === 'live' && groupBy !== 'signoff');
+    var flat = !useWeekBlocks && (_showCompleted || _jobStageFilter === 'cancelled' || groupBy === 'none');
+    if (useWeekBlocks) {
+      var weekBuckets = _bucketJobsByPrepWeek(list);
+      tbody.innerHTML = weekBuckets.map(function(week) {
+        var head = _jobsWeekHeaderRow(week.weekLabel, week.jobs.length, _colCount);
+        return head + week.jobs.map(function(j, i) { return buildRow(j, i + 1); }).join('');
+      }).join('');
+    } else if (flat) {
       tbody.innerHTML = list.map(function(j, i) { return buildRow(j, i + 1); }).join('');
     } else if (groupBy === 'signoff') {
       var tiers = [['all','Ready — all signed off'],['partial','Partially signed off'],['none','Awaiting sign-off']];
