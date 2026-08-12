@@ -2056,6 +2056,86 @@ window.loadOverviewValues = async function loadOverviewValues() {
   } catch(e) { window.logError('loadOverviewValues:dryGoods', e); }
 };
 
+// CBW bottling-log glass totals (pouches excluded) through JOB-52 Hyde #6
+// (2026-08-12T08:32:00Z). January checksum 98,944. August Goat Mini uses
+// Pulse Results 3,920 (not Excel 3,600). July includes Red Earl JOB-49 857.
+window.CBW_BOTTLE_SEED = {
+  '2026-01': 98944,
+  '2026-02': 34908,
+  '2026-03': 27764,
+  '2026-04': 83785,
+  '2026-05': 45029,
+  '2026-06': 19951,
+  '2026-07': 29908,
+  '2026-08': 24300
+};
+window.CBW_PULSE_AFTER = { jobId: 'JOB-52', dateCompleted: '2026-08-12T08:32:00.000Z' };
+
+window.loadOverviewBottleKPIs = async function loadOverviewBottleKPIs() {
+  function setText(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; }
+  function fmt(n) { return Number(n || 0).toLocaleString('en-IE'); }
+  function seedSum(year, month) {
+    var total = 0;
+    var seed = window.CBW_BOTTLE_SEED || {};
+    Object.keys(seed).forEach(function(ym) {
+      var y = parseInt(ym.slice(0, 4), 10);
+      var m = parseInt(ym.slice(5, 7), 10);
+      if (y !== year) return;
+      if (month != null && m !== month) return;
+      total += seed[ym] || 0;
+    });
+    return total;
+  }
+  function jobMonth(iso) {
+    if (!iso) return null;
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return { y: d.getFullYear(), m: d.getMonth() + 1, bottles: 0 };
+  }
+
+  var now = new Date();
+  var year = now.getFullYear();
+  var month = now.getMonth() + 1;
+  var ytd = seedSum(year, null);
+  var mtd = seedSum(year, month);
+  var liveQ = 0;
+
+  try {
+    var after = (window.CBW_PULSE_AFTER && window.CBW_PULSE_AFTER.dateCompleted) || '2026-08-12T08:32:00.000Z';
+    var done = await db.select('jobs',
+      '?stage=eq.complete&date_completed=gt.' + after
+      + '&select=actual_bottles_produced,date_completed&limit=2000');
+    (done || []).forEach(function(j) {
+      var bottles = parseInt(j.actual_bottles_produced, 10) || 0;
+      var when = jobMonth(j.date_completed);
+      if (!when) return;
+      if (when.y === year) ytd += bottles;
+      if (when.y === year && when.m === month) mtd += bottles;
+    });
+  } catch (e) { window.logError('loadOverviewBottleKPIs:completed', e); }
+
+  try {
+    var live = await db.select('jobs',
+      '?stage=not.in.(complete,cancelled)&select=bottle_target,job_target_type,stage&limit=2000');
+    liveQ = (live || []).reduce(function(sum, j) {
+      var s = String(j.stage || '').toLowerCase();
+      if (s === 'complete' || s === 'cancelled') return sum;
+      if (j.job_target_type === 'liquid') return sum;
+      return sum + (parseInt(j.bottle_target, 10) || 0);
+    }, 0);
+  } catch (e) { window.logError('loadOverviewBottleKPIs:liveQ', e); }
+
+  var total = ytd + liveQ;
+  setText('ov-bottles-ytd', fmt(ytd));
+  setText('ov-bottles-mtd', fmt(mtd));
+  setText('ov-bottles-liveq', fmt(liveQ));
+  setText('ov-bottles-total', fmt(total));
+  setText('ov-bottles-ytd-sub', 'CBW log + completed jobs');
+  setText('ov-bottles-mtd-sub', 'This month · completed only');
+  setText('ov-bottles-liveq-sub', 'Live queue');
+  setText('ov-bottles-total-sub', 'YTD + queue');
+};
+
 async function loadContainers() {
   try {
     APP.containers = await db.select('liquid_containers', '?order=type.asc,reference.asc');
@@ -2508,9 +2588,10 @@ async function showDashboard(user) {
   // Trigger KPI loads and re-run jobs with the authenticated session — the
   // pre-auth load used the anon key and may have returned empty due to RLS.
   setTimeout(function() {
-    if (typeof window.loadCaskKPI          === 'function') window.loadCaskKPI();
-    if (typeof window.loadOverviewValues   === 'function') window.loadOverviewValues();
-    if (typeof window.loadEcomStockValue   === 'function') window.loadEcomStockValue();
+    if (typeof window.loadCaskKPI              === 'function') window.loadCaskKPI();
+    if (typeof window.loadOverviewValues       === 'function') window.loadOverviewValues();
+    if (typeof window.loadEcomStockValue       === 'function') window.loadEcomStockValue();
+    if (typeof window.loadOverviewBottleKPIs   === 'function') window.loadOverviewBottleKPIs();
   }, 400);
   // Reload jobs after auth — give any pre-auth in-flight load time to finish
   // before we try again (Supabase cold-start can add 1–2 s to first queries).
@@ -14514,6 +14595,29 @@ window.loadBoms = async function initBoms() {
       </div>
     </div>
 
+    <div class="kpi-strip">
+      <div class="kpi-card">
+        <div class="kpi-label">Bottles filled YTD</div>
+        <div class="kpi-value" id="ov-bottles-ytd">—</div>
+        <div class="kpi-sub" id="ov-bottles-ytd-sub">CBW log + completed jobs</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Bottles filled MTD</div>
+        <div class="kpi-value" id="ov-bottles-mtd">—</div>
+        <div class="kpi-sub" id="ov-bottles-mtd-sub">This month · completed only</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">In live Q</div>
+        <div class="kpi-value" id="ov-bottles-liveq">—</div>
+        <div class="kpi-sub" id="ov-bottles-liveq-sub">Live queue</div>
+      </div>
+      <div class="kpi-card highlight">
+        <div class="kpi-label">Total</div>
+        <div class="kpi-value" id="ov-bottles-total">—</div>
+        <div class="kpi-sub" id="ov-bottles-total-sub">YTD + queue</div>
+      </div>
+    </div>
+
   </div><!-- /kpi-stock-section -->
 
   <!-- GND Portfolio tile — hidden until loadGndPortfolio() finds matching customers -->
@@ -22609,6 +22713,7 @@ window.loadBoms = async function initBoms() {
       }, 50);
     }
     if (name === 'overview' && typeof window.loadGndPortfolio === 'function') setTimeout(window.loadGndPortfolio, 350);
+    if (name === 'overview' && typeof window.loadOverviewBottleKPIs === 'function') setTimeout(window.loadOverviewBottleKPIs, 200);
     if (name === 'pipeline' && typeof window.loadPipelinePage === 'function') setTimeout(window.loadPipelinePage, 100);
     if (name === 'samples'  && typeof window.loadSamplesPage  === 'function') setTimeout(window.loadSamplesPage,  100);
     if (name === 'my-tasks' && typeof window.loadMyTasksPage === 'function') setTimeout(window.loadMyTasksPage, 100);
@@ -55131,7 +55236,7 @@ window.saveAdjModal = async function() {
     { key:'is_broadcast_initiator',      label:'Send broadcasts',           help:'Open the staff-broadcast modal' },
     { key:'has_finance_access',          label:'Finance access',            help:'See Finance nav + xero-oauth/credit/ecom EFs' },
     { key:'has_finance_creds',           label:'Save Xero credentials',     help:'Subset of finance: connect/refresh Xero' },
-    { key:'has_stock_view',              label:'Stock value visibility',    help:'See stock-value KPIs on Overview' },
+    { key:'has_stock_view',              label:'Stock value visibility',    help:'See stock-value and bottle KPIs on Overview' },
     { key:'notify_on_client_submission', label:'Receive submission alerts', help:'Gets emailed when a client submits a request' }
   ];
   var ROLE_SB_GROUPS_DEF = [
