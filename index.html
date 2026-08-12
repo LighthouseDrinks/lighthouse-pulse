@@ -7619,6 +7619,15 @@ window.copyInviteLink = function() {
           Lighthouse Drinks items shown with [LH] prefix
         </span>
       </div>
+      <div id="bm-client-stock-row" style="margin-top:12px;display:none;align-items:center;gap:10px;flex-wrap:wrap;">
+        <label for="bm-include-client-stock" style="font-size:12px;color:var(--muted);letter-spacing:0.04em;white-space:nowrap;">Include client stock</label>
+        <select id="bm-include-client-stock" onchange="onBomIncludeClientChange()" style="font-family:Lato,sans-serif;font-size:13px;max-width:280px;">
+          <option value="">— None —</option>
+        </select>
+        <span id="bm-client-stock-hint" style="font-size:11px;color:var(--muted);display:none;">
+          Client items shown with a name prefix
+        </span>
+      </div>
     </div>
 
     <!-- SECTION 1: Product Identity -->
@@ -11826,9 +11835,10 @@ function renderBoms() {
 
 // Whether to append Lighthouse Drinks (CLI-000) dry goods to the BOM dropdowns
 window._bomIncludeLhStock = false;
+// Reverse: when the BOM client is CLI-000, optionally merge one other client's dry goods
+window._bomIncludeClientId = null;
 
-window.toggleLhStock = function() {
-  window._bomIncludeLhStock = !window._bomIncludeLhStock;
+window._applyLhStockToggleUI = function() {
   var btn  = el('bm-include-lh-stock');
   var hint = el('bm-lh-stock-hint');
   if (btn) {
@@ -11845,6 +11855,52 @@ window.toggleLhStock = function() {
     }
   }
   if (hint) hint.style.display = window._bomIncludeLhStock ? '' : 'none';
+};
+
+window.toggleLhStock = function() {
+  window._bomIncludeLhStock = !window._bomIncludeLhStock;
+  window._applyLhStockToggleUI();
+  onBomClientChange(true);
+};
+
+window._applyClientStockUI = function() {
+  var sel  = el('bm-include-client-stock');
+  var hint = el('bm-client-stock-hint');
+  var id   = window._bomIncludeClientId || '';
+  if (sel) {
+    if (id) {
+      var has = false;
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === id) { has = true; break; }
+      }
+      if (!has) {
+        var opt = document.createElement('option');
+        opt.value = id;
+        var nm = id;
+        var clist = (window.APP && window.APP.clients) ? window.APP.clients : (window.CLIENTS || []);
+        var found = clist.find(function(c){ return c.id === id; });
+        if (found && found.name) nm = found.name;
+        opt.textContent = nm;
+        sel.appendChild(opt);
+      }
+    }
+    sel.value = id;
+  }
+  if (hint) {
+    if (id && sel && sel.selectedIndex > 0) {
+      var name = sel.options[sel.selectedIndex].text;
+      hint.textContent = name + ' items shown with [' + name + '] prefix';
+      hint.style.display = '';
+    } else {
+      hint.style.display = 'none';
+    }
+  }
+};
+
+window.onBomIncludeClientChange = function() {
+  var sel = el('bm-include-client-stock');
+  window._bomIncludeClientId = (sel && sel.value) ? sel.value : null;
+  window._applyClientStockUI();
   onBomClientChange(true);
 };
 
@@ -12027,6 +12083,13 @@ window.onBomClientChange = async function(preserveSelections) {
   // Show/hide the LH stock toggle — not applicable when Lighthouse is the selected client
   var lhRow = el('bm-lh-stock-row');
   if (lhRow) lhRow.style.display = (clientId && clientId !== 'CLI-000') ? 'flex' : 'none';
+  // Reverse: include another client's stock only when the BOM is under Lighthouse
+  var cliRow = el('bm-client-stock-row');
+  if (cliRow) cliRow.style.display = (clientId === 'CLI-000') ? 'flex' : 'none';
+  if (clientId !== 'CLI-000' && window._bomIncludeClientId) {
+    window._bomIncludeClientId = null;
+    if (window._applyClientStockUI) window._applyClientStockUI();
+  }
 
   // Snapshot current selections so an inventory reload (e.g. toggling Lighthouse
   // stock) preserves the user's in-progress choices instead of wiping the BOM.
@@ -12117,6 +12180,19 @@ window.onBomClientChange = async function(preserveSelections) {
       lhSkus.forEach(function(sku) { routeSkuToBuckets(sku, '[LH] '); });
     }
 
+    // Reverse: append a chosen client's dry goods onto a Lighthouse BOM
+    if (window._bomIncludeClientId && clientId === 'CLI-000') {
+      var extraSkus = await window.db.select('dry_goods_skus',
+        '?client_id=eq.' + window._bomIncludeClientId + '&is_active=eq.true&order=description.asc');
+      var extraPrefix = '[' + window._bomIncludeClientId + '] ';
+      var incSel = el('bm-include-client-stock');
+      if (incSel && incSel.value) {
+        var incOpt = incSel.options[incSel.selectedIndex];
+        if (incOpt && incOpt.text) extraPrefix = '[' + incOpt.text + '] ';
+      }
+      (Array.isArray(extraSkus) ? extraSkus : []).forEach(function(sku) { routeSkuToBuckets(sku, extraPrefix); });
+    }
+
     // Populate dry goods dropdowns
     BOM_DROPDOWNS.forEach(function(d) {
       var sel = el(d.id); if (!sel) return;
@@ -12199,6 +12275,13 @@ async function openBomModal(editId) {
       + (_bomCustomers || []).map(function(c){
           return '<option value="' + c.id + '">' + c.name + '</option>';
         }).join('');
+    var incSel = el('bm-include-client-stock');
+    if (incSel) {
+      incSel.innerHTML = '<option value="">— None —</option>'
+        + (_bomCustomers || []).filter(function(c){ return c.id !== 'CLI-000'; })
+          .map(function(c){ return '<option value="' + c.id + '">' + c.name + '</option>'; })
+          .join('');
+    }
   }
 
   // Reset all dropdowns
@@ -12231,6 +12314,8 @@ async function openBomModal(editId) {
   // Default the Lighthouse-stock toggle off — the edit branch re-detects below.
   window._bomIncludeLhStock = false;
   if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
+  window._bomIncludeClientId = null;
+  if (window._applyClientStockUI) window._applyClientStockUI();
 
   ov.style.display = 'flex';
   document.body.style.overflow = 'hidden';
@@ -12285,11 +12370,12 @@ async function openBomModal(editId) {
       // so, auto-enable the toggle so onBomClientChange loads those goods into the
       // dropdowns — otherwise they'd be missing and could not be changed.
       window._bomIncludeLhStock = false;
+      window._bomIncludeClientId = null;
+      var _editSkuIds = [b.bottleSkuId, b.corkSkuId, b.roppSkuId, b.foilSkuId,
+        b.frontLabelSkuId, b.backLabelSkuId, b.neckLabelSkuId, b.outerCaseLabelSkuId,
+        b.shipperSkuId, b.dividerSkuId, b.stringTwineSkuId, b.monocartonSkuId,
+        b.giftTubeSkuId, b.tubeLidSkuId, b.tinSkuId, b.wireSkuId, b.medallionSkuId, b.coaSkuId].filter(Boolean);
       if (b.clientId && b.clientId !== 'CLI-000') {
-        var _editSkuIds = [b.bottleSkuId, b.corkSkuId, b.roppSkuId, b.foilSkuId,
-          b.frontLabelSkuId, b.backLabelSkuId, b.neckLabelSkuId, b.outerCaseLabelSkuId,
-          b.shipperSkuId, b.dividerSkuId, b.stringTwineSkuId, b.monocartonSkuId,
-          b.giftTubeSkuId, b.tubeLidSkuId, b.tinSkuId, b.wireSkuId, b.medallionSkuId, b.coaSkuId].filter(Boolean);
         if (_editSkuIds.length) {
           try {
             var _lhRows = await window.db.select('dry_goods_skus',
@@ -12298,7 +12384,18 @@ async function openBomModal(editId) {
           } catch(_) {}
         }
       }
+      if (b.clientId === 'CLI-000' && _editSkuIds.length) {
+        try {
+          var _foreignRows = await window.db.select('dry_goods_skus',
+            '?id=in.(' + _editSkuIds.join(',') + ')&select=id,client_id');
+          if (Array.isArray(_foreignRows)) {
+            var _foreign = _foreignRows.find(function(r){ return r.client_id && r.client_id !== 'CLI-000'; });
+            if (_foreign) window._bomIncludeClientId = _foreign.client_id;
+          }
+        } catch(_) {}
+      }
       if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
+      if (window._applyClientStockUI) window._applyClientStockUI();
 
       // Load client inventory, then restore dropdown selections by SKU ID
       window.onBomClientChange().then(function() {
@@ -12808,11 +12905,11 @@ function closeBomModal() {
   var ov = el('bom-modal-overlay');
   if (ov) ov.style.display = 'none';
   document.body.style.overflow = '';
-  // Reset LH stock toggle so the next BOM opens clean
-  if (window._bomIncludeLhStock) {
-    window._bomIncludeLhStock = false;
-    if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
-  }
+  // Reset stock-include controls so the next BOM opens clean
+  window._bomIncludeLhStock = false;
+  if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
+  window._bomIncludeClientId = null;
+  if (window._applyClientStockUI) window._applyClientStockUI();
 }
 
 // ── BOM Blend Recipe (optional multi-spirit %, by LPA) ──────────────────────
