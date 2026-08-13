@@ -85,7 +85,7 @@ Action buttons gated by the production_control permission:
   • From Paused:     ▶ Resume · ■ Finish · ■ Stop · ✎ Times
 The button to end a production run is "■ Finish" — there is no "End Job" button.
 
-Next Jobs strip — auto-filled from Job Ready date (earliest first) into schedule slots 1–5. Empty until jobs have a Job Ready date. No manual pin/select. Columns: Slot · Job · Product · Client · Ready · Bottles · Gates · ▶ Start. Starting a job (changeover or production) auto-clears its slot.
+Next Jobs strip — auto-filled into schedule slots 1–5. Default order is Job Ready (earliest first). Jobs in the current Jobs-page week block (including overdue Ready dates clamped into this week) can be reordered with up/down arrows on the Jobs Live Queue; Next Jobs mirrors that order live. Job Ready dates do not change when reordering. Empty until jobs have a Job Ready date. No manual pin/select. Columns: Slot · Job · Product · Client · Ready · Bottles · Gates · ▶ Start. Starting a job (changeover or production) auto-clears its slot.
 Gate pills: BOM, S.Chain, Liquid (✓ green / ✗ red / ⚠ amber).
 Clicking ▶ Start… opens the "Start Job" dialog with two options:
   • ▶ Start Changeover (records changeover_start, date_commenced)
@@ -94,7 +94,7 @@ If gates are not all green a red warning appears, but the user can still proceed
 
 Bay Board — 5 numbered bays (jobs.job_bay 1–5). Warehouse can Mark Clear; Client Coordinator / managers can assign or release. Bay states: empty, staged (assigned, not started), changeover, running, paused. When a bay frees, jobs are offered by Job Ready date (earliest first; awaiting dates last). Bay assignment is manual — not auto-linked to ready date. DB: jobs.job_bay, bay_assigned_at, bay_released_at, job_ready_date, bay_release_reason.
 
-Job Ready — jobs.job_ready_date is the furthest outstanding dry-goods ETA (max of non-on-site component expected_delivery dates). Auto-fills only when every required dry-goods line is on-site or has an ETA. All dry-goods on-site → today. Liquid Ready always mirrors Job Ready. Liquid Prep (Supply Chain) is Job Ready minus 5 working days. Manual Job Ready override + Reset on the Supply Chain tab. Jobs list sorts by Job Ready (nulls/awaiting dates last). H/M/L priority bands are retired. Jobs whose linked BOM is still draft or pending QC show an amber Pending QC chip and an amber row highlight, unless the client has already signed the BOM off.
+Job Ready — jobs.job_ready_date is the furthest outstanding dry-goods ETA (max of non-on-site component expected_delivery dates). Auto-fills only when every required dry-goods line is on-site or has an ETA. All dry-goods on-site → today. Liquid Ready always mirrors Job Ready. Liquid Prep (Supply Chain) is Job Ready minus 5 working days. Manual Job Ready override + Reset on the Supply Chain tab. Jobs list sorts by Job Ready (nulls/awaiting dates last). This-week Live Queue rows (overdue Ready dates are clamped into this week) can be reordered with up/down arrows; that order is what Next Jobs mirrors. Future weeks stay date-sorted with no arrows. H/M/L priority bands are retired. Jobs whose linked BOM is still draft or pending QC show an amber Pending QC chip and an amber row highlight, unless the client has already signed the BOM off.
 
 Changeover timer: amber from 0; turns red at 2 hours (7200 s productive). Default scheduling assumption is 400 BPH and a 2-hour changeover.
 

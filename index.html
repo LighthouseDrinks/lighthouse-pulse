@@ -34810,7 +34810,7 @@ window.saveAdjModal = async function() {
     var thead = document.querySelector('#jobs-main-table thead tr');
     if (!thead) return;
     thead.innerHTML =
-      '<th style="width:40px;">#</th>'
+      '<th style="width:72px;">#</th>'
       + '<th>Job No.</th>'
       + '<th>Product</th>'
       + '<th class="mob-hide">Client</th>'
@@ -34851,6 +34851,124 @@ window.saveAdjModal = async function() {
     if (thisWeek && weekKey < thisWeek) return thisWeek;
     return weekKey;
   }
+
+  window._lpThisWeekStartIso = _lpThisWeekStartIso;
+  window._lpWeekStartIso = _lpWeekStartIso;
+  window._lpClampWeekKeyForOpenJob = _lpClampWeekKeyForOpenJob;
+
+  window._jobInThisWeekBlock = function(j) {
+    if (!j || !j.job_ready_date) return false;
+    var ns = _normStage(j.stage);
+    if (ns === 'complete' || ns === 'cancelled') return false;
+    var key = _lpWeekStartIso(String(j.job_ready_date).slice(0, 10));
+    key = _lpClampWeekKeyForOpenJob(key, j);
+    return !!(key && key === _lpThisWeekStartIso());
+  };
+
+  function _jobsReadyCmp(a, b) {
+    var ar = a.job_ready_date || '';
+    var br = b.job_ready_date || '';
+    if (!ar && !br) return ((a.created_at || '') < (b.created_at || '') ? -1 : 1);
+    if (!ar) return 1;
+    if (!br) return -1;
+    if (ar !== br) return ar < br ? -1 : 1;
+    return ((a.created_at || '') < (b.created_at || '') ? -1 : 1);
+  }
+
+  window._jobsQueueSort = function(a, b) {
+    var thisWeek = _lpThisWeekStartIso();
+    var aWeek = window._jobInThisWeekBlock(a);
+    var bWeek = window._jobInThisWeekBlock(b);
+    if (aWeek && !bWeek) return -1;
+    if (!aWeek && bWeek) return 1;
+    if (aWeek && bWeek) {
+      var aKey = a.week_queue_key ? String(a.week_queue_key).slice(0, 10) : '';
+      var bKey = b.week_queue_key ? String(b.week_queue_key).slice(0, 10) : '';
+      var aOk = thisWeek && aKey === thisWeek && a.week_queue_pos != null;
+      var bOk = thisWeek && bKey === thisWeek && b.week_queue_pos != null;
+      if (aOk && bOk && a.week_queue_pos !== b.week_queue_pos) return a.week_queue_pos - b.week_queue_pos;
+      if (aOk && !bOk) return -1;
+      if (!aOk && bOk) return 1;
+    }
+    return _jobsReadyCmp(a, b);
+  };
+
+  function _canReorderJobs() {
+    return !!(window.canDo && (window.canDo('jobs_create') || window.canDo('production_control')));
+  }
+
+  function _jobsThisWeekQueued() {
+    return (_jobs || []).filter(function(j) {
+      var ns = _normStage(j.stage);
+      if (ns === 'complete' || ns === 'cancelled') return false;
+      if (j.actual_start || j.changeover_start) return false;
+      return window._jobInThisWeekBlock(j);
+    }).sort(window._jobsQueueSort);
+  }
+
+  async function _ensureWeekQueueSeeded(list) {
+    var thisWeek = _lpThisWeekStartIso();
+    if (!thisWeek || !list || !list.length) return list;
+    var need = list.some(function(j) {
+      var key = j.week_queue_key ? String(j.week_queue_key).slice(0, 10) : '';
+      return key !== thisWeek || j.week_queue_pos == null;
+    });
+    if (!need) return list;
+    for (var i = 0; i < list.length; i++) {
+      var pos = i + 1;
+      var key = list[i].week_queue_key ? String(list[i].week_queue_key).slice(0, 10) : '';
+      if (key === thisWeek && list[i].week_queue_pos === pos) continue;
+      list[i].week_queue_pos = pos;
+      list[i].week_queue_key = thisWeek;
+      try {
+        await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(list[i].id), {
+          week_queue_pos: pos,
+          week_queue_key: thisWeek
+        });
+      } catch (e) { console.warn('week queue seed', list[i].id, e); }
+    }
+    return list;
+  }
+
+  window.moveJobInWeek = async function(jobId, dir) {
+    if (!_canReorderJobs()) {
+      window.toast && window.toast('Permission denied.', 'error');
+      return;
+    }
+    dir = dir < 0 ? -1 : 1;
+    var list = _jobsThisWeekQueued();
+    if (list.length < 2) return;
+    await _ensureWeekQueueSeeded(list);
+    list.sort(window._jobsQueueSort);
+    var idx = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === jobId) { idx = i; break; }
+    }
+    var swap = idx + dir;
+    if (idx < 0 || swap < 0 || swap >= list.length) return;
+    var thisWeek = _lpThisWeekStartIso();
+    var a = list[idx], b = list[swap];
+    var tmp = a.week_queue_pos;
+    a.week_queue_pos = b.week_queue_pos;
+    b.week_queue_pos = tmp;
+    a.week_queue_key = thisWeek;
+    b.week_queue_key = thisWeek;
+    try {
+      await Promise.all([
+        supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(a.id), { week_queue_pos: a.week_queue_pos, week_queue_key: thisWeek }),
+        supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(b.id), { week_queue_pos: b.week_queue_pos, week_queue_key: thisWeek })
+      ]);
+    } catch (e) {
+      window.toast && window.toast('Error: ' + (e && e.message), 'error');
+      return;
+    }
+    if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
+    if (typeof window.syncScheduleSlotsFromReady === 'function') {
+      window.syncScheduleSlotsFromReady({ silent: true }).then(function() {
+        if (typeof window._refreshScheduleQueue === 'function') window._refreshScheduleQueue();
+      }).catch(function() {});
+    }
+  };
 
   function _lpFmtWeekLabel(weekKey) {
     var p = String(weekKey).split('-');
@@ -35295,7 +35413,7 @@ window.saveAdjModal = async function() {
         + '</tr>';
     }
 
-    function buildRow(j, seq) {
+    function buildRow(j, seq, weekMeta) {
       var stageStyle = STAGE_STYLE[j.stage] || STAGE_STYLE.planning;
       var stageLabel = STAGE_LABEL[j.stage] || j.stage;
       var clientName = (j.clients && j.clients.name) || window._clientName(j.client_id);
@@ -35319,7 +35437,19 @@ window.saveAdjModal = async function() {
 
       var row = '<tr class="mob-data-row" style="' + _rowStyle + '" onclick="window.openJobDetail(\'' + jid + '\')"'
         + (_bomDraft ? ' title="BOM is still in draft. Spec is not locked."' : '') + '>';
-      row += '<td style="font-size:12px;font-weight:700;color:var(--amber);">' + (seq != null ? seq : '') + '</td>';
+      var qInfo = weekMeta && weekMeta.queued && weekMeta.queued[j.id];
+      var showArrows = !!(weekMeta && weekMeta.thisWeek && qInfo && _canReorderJobs());
+      var arrows = '';
+      if (showArrows) {
+        var upDis = qInfo.idx === 0;
+        var dnDis = qInfo.idx === qInfo.len - 1;
+        var btn = 'background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:8px;line-height:1;padding:2px 4px;border-radius:3px;font-family:Lato,sans-serif;';
+        arrows = '<span style="display:inline-flex;flex-direction:column;gap:1px;margin-right:6px;vertical-align:middle;" onclick="event.stopPropagation();">'
+          + '<button type="button" ' + (upDis ? 'disabled ' : '') + 'onclick="event.stopPropagation();window.moveJobInWeek(\'' + jid + '\',-1)" style="' + btn + (upDis ? 'opacity:0.3;cursor:default;' : 'cursor:pointer;') + '" title="Move up">&#9650;</button>'
+          + '<button type="button" ' + (dnDis ? 'disabled ' : '') + 'onclick="event.stopPropagation();window.moveJobInWeek(\'' + jid + '\',1)" style="' + btn + (dnDis ? 'opacity:0.3;cursor:default;' : 'cursor:pointer;') + '" title="Move down">&#9660;</button>'
+          + '</span>';
+      }
+      row += '<td style="font-size:12px;font-weight:700;color:var(--amber);white-space:nowrap;">' + arrows + (seq != null ? seq : '') + '</td>';
       row += '<td style="font-family:monospace;font-size:11px;color:var(--gold);">' + j.id + '</td>';
       var _jtLabel = window.jobDisplayName(j, _jobsBomMap);
       row += '<td style="font-weight:600;color:var(--white);" title="' + _jtLabel.replace(/"/g, '&quot;') + '">' + _jtLabel + '<span class="mob-tap-hint">' + j.id + ' · ' + clientName + '</span></td>';
@@ -35417,9 +35547,19 @@ window.saveAdjModal = async function() {
     var flat = !useWeekBlocks && (_showCompleted || _jobStageFilter === 'cancelled' || groupBy === 'none');
     if (useWeekBlocks) {
       var weekBuckets = _bucketJobsByReadyWeek(list);
+      var thisWeekKey = _lpThisWeekStartIso();
+      var queuedMap = {};
+      var queuedList = _jobsThisWeekQueued();
+      queuedList.forEach(function(qj, qi) {
+        queuedMap[qj.id] = { idx: qi, len: queuedList.length };
+      });
+      weekBuckets.forEach(function(week) {
+        if (week.weekKey === thisWeekKey) week.jobs.sort(window._jobsQueueSort);
+      });
       tbody.innerHTML = weekBuckets.map(function(week) {
         var head = _jobsWeekHeaderRow(week.weekLabel, week.jobs.length, _colCount, _jobsPlannedBottles(week.jobs));
-        return head + week.jobs.map(function(j, i) { return buildRow(j, i + 1); }).join('');
+        var meta = { thisWeek: week.weekKey === thisWeekKey, queued: queuedMap };
+        return head + week.jobs.map(function(j, i) { return buildRow(j, i + 1, meta); }).join('');
       }).join('');
     } else if (flat) {
       tbody.innerHTML = list.map(function(j, i) { return buildRow(j, i + 1); }).join('');
@@ -39608,6 +39748,12 @@ window.saveAdjModal = async function() {
       var prevReady = job.job_ready_date ? String(job.job_ready_date).slice(0, 10) : null;
       var prevLiq = job.liquid_ready_date ? String(job.liquid_ready_date).slice(0, 10) : null;
       var nextReady = computed ? String(computed).slice(0, 10) : null;
+      // Incomplete / empty calc must not wipe a stored Job Ready (empties Next Jobs).
+      // Reset (clearManual) is the only path that may write null over an existing date.
+      if (!opts.clearManual && !nextReady && prevReady) {
+        computed = job.job_ready_date;
+        nextReady = prevReady;
+      }
       var changed = (prevReady !== nextReady) || (prevLiq !== nextReady) || !!opts.clearManual;
       if (changed) {
         var patch = { job_ready_date: computed, liquid_ready_date: computed };
@@ -48446,7 +48592,7 @@ window.saveAdjModal = async function() {
     try {
       // Load working-day overrides, production windows, and jobs
       await Promise.all([loadWorkingOverrides(), loadProductionWindows()]);
-      var jobs = await sbGet('jobs?stage=in.(new,active,complete)&select=id,product_name,client_id,bottle_target,job_target_type,liquid_litres,bom_id,scheduled_start,scheduled_end,schedule_notes,stage,job_bay,bay_assigned_at,bay_released_at,job_ready_date,schedule_slot,schedule_slot_pinned,actual_start,actual_end,paused_at,total_paused_secs,changeover_start,date_commenced,date_completed,actual_bottles_produced,actual_job_hours,created_at,clients(name)&order=job_ready_date.asc.nullslast,created_at.asc');
+      var jobs = await sbGet('jobs?stage=in.(new,active,complete)&select=id,product_name,client_id,bottle_target,job_target_type,liquid_litres,bom_id,scheduled_start,scheduled_end,schedule_notes,stage,job_bay,bay_assigned_at,bay_released_at,job_ready_date,schedule_slot,schedule_slot_pinned,week_queue_pos,week_queue_key,actual_start,actual_end,paused_at,total_paused_secs,changeover_start,date_commenced,date_completed,actual_bottles_produced,actual_job_hours,created_at,clients(name)&order=job_ready_date.asc.nullslast,created_at.asc');
       var bomIds = [];
       jobs.forEach(function(j) { if (j.bom_id && bomIds.indexOf(j.bom_id) < 0) bomIds.push(j.bom_id); });
       var bphMap = {};
@@ -48497,20 +48643,30 @@ window.saveAdjModal = async function() {
         _schedDowntime = await sbGet('downtime_logs?start_time=gte.' + sixtyDaysAgo + '&order=start_time.asc');
       } catch(e2) { _schedDowntime = []; }
       _schedBannerLoaded = true;
-      // Backfill Job Ready from component ETAs before autofilling Next Jobs slots.
-      _schedSuppressRt = true;
-      try {
-        if (typeof window.recomputeAllJobReadyDates === 'function') {
-          await window.recomputeAllJobReadyDates({ jobs: _schedJobs, skipRender: true, skipSlotSync: true });
-        }
-      } catch (_ra) { console.warn('schedule ready backfill', _ra); }
-      try { await window.syncScheduleSlotsFromReady({ silent: true, jobs: _schedJobs }); } catch (_ss) {}
-      _schedSuppressRt = false;
       _renderLineStatusBanner();
       renderNextJobs();
       renderScheduleEvents();
       renderRecentCorrections();
       if (typeof window._renderBayBoard === 'function') window._renderBayBoard();
+      // Job Ready backfill + slot sync must not block Start controls.
+      _schedSuppressRt = true;
+      Promise.resolve()
+        .then(function() {
+          if (typeof window.recomputeAllJobReadyDates === 'function') {
+            return window.recomputeAllJobReadyDates({ jobs: _schedJobs, skipRender: true, skipSlotSync: true });
+          }
+        })
+        .catch(function(_ra) { console.warn('schedule ready backfill', _ra); })
+        .then(function() {
+          return window.syncScheduleSlotsFromReady({ silent: true, jobs: _schedJobs });
+        })
+        .catch(function(_ss) {})
+        .then(function() {
+          _schedSuppressRt = false;
+          _renderLineStatusBanner();
+          renderNextJobs();
+          renderScheduleEvents();
+        });
     } catch(e) { _schedSuppressRt = false; console.warn('Schedule load error:', e); }
 
     // 1-second tick for live timers + 60-second list refresh for active changeovers
@@ -48656,9 +48812,7 @@ window.saveAdjModal = async function() {
       if (acts) acts.innerHTML = '';
       return;
     }
-    var active = (_schedJobs || []).find(function(j) {
-      return (j.actual_start && !j.actual_end) || (j.changeover_start && !j.actual_start);
-    });
+    var active = (_schedJobs || []).find(_schedJobIsActiveLine);
     if (!active) {
       card.style.borderLeftColor = 'var(--green)';
       card.onclick = null;
@@ -48773,16 +48927,16 @@ window.saveAdjModal = async function() {
       var jobs = opts.jobs;
       if (!jobs) {
         jobs = await sbGet('jobs?stage=in.(new,active)'
-          + '&select=id,job_ready_date,schedule_slot,actual_start,changeover_start,stage,created_at'
+          + '&select=id,job_ready_date,schedule_slot,actual_start,changeover_start,stage,created_at,week_queue_pos,week_queue_key'
           + '&order=job_ready_date.asc.nullslast,created_at.asc');
       }
       jobs = (jobs || []).filter(function(j) {
-        return j.stage !== 'complete' && !j.actual_start && !j.changeover_start;
+        return j.stage !== 'complete' && j.stage !== 'cancelled' && !j.actual_start && !j.changeover_start;
       });
 
       var pool = jobs.filter(function(j) {
         return !!j.job_ready_date;
-      }).sort(_jobReadySort);
+      }).sort(typeof window._jobsQueueSort === 'function' ? window._jobsQueueSort : _jobReadySort);
 
       var desired = {};
       for (var i = 0; i < pool.length && i < SCHED_SLOTS; i++) {
@@ -48840,14 +48994,12 @@ window.saveAdjModal = async function() {
     var el = document.getElementById('sched-next-jobs');
     if (!el) return;
     var canControl = window.canDo && window.canDo('production_control');
-    var lineOccupied = _schedJobs.some(function(j) {
-      return (j.actual_start && !j.actual_end && j.stage !== 'complete') || (j.changeover_start && !j.actual_start);
-    });
+    var lineOccupied = _schedJobs.some(_schedJobIsActiveLine);
     var slotMap = {};
     _schedJobs.forEach(function(j) {
       var s = j.schedule_slot;
       if (s == null) return;
-      if (j.actual_start || j.changeover_start || j.stage === 'complete') return;
+      if (j.actual_start || j.changeover_start || j.stage === 'complete' || j.stage === 'cancelled') return;
       if (s >= 1 && s <= SCHED_SLOTS) slotMap[s] = j;
     });
     var cols = '48px 88px 2.2fr 120px 90px 80px 170px' + (canControl ? ' 100px' : '');
@@ -48896,6 +49048,10 @@ window.saveAdjModal = async function() {
     h += '<div style="font-size:10px;color:var(--muted);margin-top:8px;text-align:right;"><button onclick="window._printNextJobs&&window._printNextJobs()" style="font-size:9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Print</button></div>';
     el.innerHTML = h;
   }
+  window._refreshScheduleQueue = function() {
+    _renderLineStatusBanner();
+    renderNextJobs();
+  };
 
   // Slot picker / assign / clear retired — Next 5 is fully automatic from Job Ready.
   window.schedPickSlotJob = function() {
@@ -48910,8 +49066,8 @@ window.saveAdjModal = async function() {
 
   function _schedQueuedJobs(excludeId) {
     return (_schedJobs || []).filter(function(j) {
-      return j.id !== excludeId && !j.actual_start && !j.changeover_start && j.stage !== 'complete';
-    }).sort(_jobReadySort);
+      return j.id !== excludeId && !j.actual_start && !j.changeover_start && j.stage !== 'complete' && j.stage !== 'cancelled';
+    }).sort(typeof window._jobsQueueSort === 'function' ? window._jobsQueueSort : _jobReadySort);
   }
 
   function _fmtSchedDt(dt) {
@@ -48980,9 +49136,7 @@ window.saveAdjModal = async function() {
     var now = new Date();
     var rows = { now: [], actual: [], projected: [] };
 
-    var active = (_schedJobs || []).filter(function(j) {
-      return (j.actual_start && !j.actual_end) || (j.changeover_start && !j.actual_start);
-    });
+    var active = (_schedJobs || []).filter(_schedJobIsActiveLine);
     active.forEach(function(j) {
       var isCo = j.changeover_start && !j.actual_start;
       rows.now.push({
@@ -49271,13 +49425,26 @@ window.saveAdjModal = async function() {
 
   // ── Job actions ──────────────────────────────────────────────────────────────
 
+  function _schedJobIsActiveLine(j) {
+    if (!j || j.stage === 'complete' || j.stage === 'cancelled') return false;
+    return (j.actual_start && !j.actual_end) || (j.changeover_start && !j.actual_start);
+  }
+
   function _schedLineOccupied(excludeJobId) {
     return _schedJobs.some(function(j) {
-      return j.id !== excludeJobId && (
-        (j.actual_start && !j.actual_end && j.stage !== 'complete') ||
-        (j.changeover_start && !j.actual_start)
-      );
+      return j.id !== excludeJobId && _schedJobIsActiveLine(j);
     });
+  }
+
+  function _schedApplyLocalStart(jobId, fields) {
+    var j = (_schedJobs || []).find(function(x) { return x.id === jobId; });
+    if (j) {
+      Object.assign(j, fields);
+      j.schedule_slot = null;
+      j.schedule_slot_pinned = false;
+    }
+    _renderLineStatusBanner();
+    renderNextJobs();
   }
 
   // ── Start Changeover ─────────────────────────────────────────────────────────
@@ -49303,8 +49470,17 @@ window.saveAdjModal = async function() {
         schedule_slot:    null,  // free its Next-Jobs slot once it leaves the queue
         schedule_slot_pinned: false
       });
+      _schedApplyLocalStart(jobId, {
+        changeover_start: nowIso,
+        date_commenced: nowIso,
+        actual_start: null,
+        actual_end: null,
+        date_completed: null,
+        paused_at: null,
+        total_paused_secs: 0
+      });
       window.toast && window.toast('Changeover started.', 'success');
-      await loadSchedule();
+      loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
   };
 
@@ -49335,8 +49511,9 @@ window.saveAdjModal = async function() {
       // Preserve date_commenced when changeover already anchored it; otherwise anchor to run start.
       if (!hadChangeover) patch.date_commenced = startIso;
       await sbPatch('jobs', '?id=eq.' + jobId, patch);
+      _schedApplyLocalStart(jobId, patch);
       window.toast && window.toast(hadChangeover ? 'Production started.' : 'Job started (no changeover).', 'success');
-      await loadSchedule();
+      loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
   };
 
