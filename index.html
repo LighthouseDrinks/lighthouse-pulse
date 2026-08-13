@@ -34626,15 +34626,77 @@ window.saveAdjModal = async function() {
     }
   }
 
+  function _applyQueueFieldsToJob(j, row) {
+    if (!j || !row) return false;
+    var changed = false;
+    ['week_queue_pos', 'week_queue_key', 'schedule_slot', 'schedule_slot_pinned'].forEach(function(k) {
+      if (!row.hasOwnProperty(k)) return;
+      if (j[k] !== row[k]) { j[k] = row[k]; changed = true; }
+    });
+    return changed;
+  }
+
+  window._applyRemoteJobQueue = function(rows) {
+    if (!rows || !rows.length) return;
+    var changed = false;
+    rows.forEach(function(r) {
+      if (!r || !r.id) return;
+      var j = (_jobs || []).find(function(x) { return x.id === r.id; });
+      if (_applyQueueFieldsToJob(j, r)) changed = true;
+    });
+    if (changed && typeof window.renderJobsTable === 'function') window.renderJobsTable();
+    if (typeof window._applyRemoteSchedQueue === 'function') window._applyRemoteSchedQueue(rows);
+  };
+
+  var _jobQueueChannel = null;
+  function _ensureJobQueueChannel() {
+    if (_jobQueueChannel || !window._sb) return _jobQueueChannel;
+    _jobQueueChannel = window._sb.channel('pulse_job_queue');
+    _jobQueueChannel.on('broadcast', { event: 'order' }, function(msg) {
+      var rows = msg && msg.payload && msg.payload.jobs;
+      window._applyRemoteJobQueue(rows);
+    });
+    _jobQueueChannel.subscribe();
+    return _jobQueueChannel;
+  }
+
+  window._broadcastJobQueue = function(rows) {
+    if (!rows || !rows.length) return;
+    var ch = _ensureJobQueueChannel();
+    if (ch) {
+      ch.send({ type: 'broadcast', event: 'order', payload: { jobs: rows } });
+    }
+  };
+
+  function _queueSnapshot() {
+    return (_jobs || []).filter(function(j) {
+      return j && j.id && (j.week_queue_pos != null || j.schedule_slot != null);
+    }).map(function(j) {
+      return {
+        id: j.id,
+        week_queue_pos: j.week_queue_pos,
+        week_queue_key: j.week_queue_key,
+        schedule_slot: j.schedule_slot,
+        schedule_slot_pinned: j.schedule_slot_pinned
+      };
+    });
+  }
+
   // ── Realtime: sign-off gates + dashboard dots ─────────────────────────────
   // Subscribes to the three sign-off tables so BOM/S.Chain/Liquid pills and
   // the dashboard status dots refresh automatically when any sign-off changes.
   (function _initSignoffRealtime() {
     if (!window._sb) return;
+    _ensureJobQueueChannel();
     var _debounceTimer;
     function _refresh() {
       clearTimeout(_debounceTimer);
       _debounceTimer = setTimeout(function() { loadJobs(); }, 600);
+    }
+    function _onJobsUpdate(payload) {
+      var row = payload && payload.new;
+      if (row && row.id) window._applyRemoteJobQueue([row]);
+      _refresh();
     }
     window._sb.channel('signoff_gates')
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_tasks' },          _refresh)
@@ -34642,7 +34704,7 @@ window.saveAdjModal = async function() {
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_liquid_signoff' }, _refresh)
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_bom_approvals' },  _refresh)
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_components' },     _refresh)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'jobs' },               _refresh)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'jobs' },               _onJobsUpdate)
       .subscribe();
   })();
 
@@ -34963,10 +35025,20 @@ window.saveAdjModal = async function() {
       return;
     }
     if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
+    if (typeof window._applyRemoteSchedQueue === 'function') {
+      window._applyRemoteSchedQueue([
+        { id: a.id, week_queue_pos: a.week_queue_pos, week_queue_key: a.week_queue_key },
+        { id: b.id, week_queue_pos: b.week_queue_pos, week_queue_key: b.week_queue_key }
+      ]);
+    }
+    if (typeof window._broadcastJobQueue === 'function') window._broadcastJobQueue(_queueSnapshot());
     if (typeof window.syncScheduleSlotsFromReady === 'function') {
       window.syncScheduleSlotsFromReady({ silent: true }).then(function() {
         if (typeof window._refreshScheduleQueue === 'function') window._refreshScheduleQueue();
-      }).catch(function() {});
+        if (typeof window._broadcastJobQueue === 'function') window._broadcastJobQueue(_queueSnapshot());
+      }).catch(function() {
+        if (typeof window._broadcastJobQueue === 'function') window._broadcastJobQueue(_queueSnapshot());
+      });
     }
   };
 
@@ -48658,6 +48730,21 @@ window.saveAdjModal = async function() {
         })
         .catch(function(_ra) { console.warn('schedule ready backfill', _ra); })
         .then(function() {
+          return sbGet('jobs?stage=in.(new,active)&select=id,week_queue_pos,week_queue_key,schedule_slot,schedule_slot_pinned,job_ready_date');
+        })
+        .then(function(fresh) {
+          (fresh || []).forEach(function(r) {
+            var j = (_schedJobs || []).find(function(x) { return x.id === r.id; });
+            if (!j) return;
+            j.week_queue_pos = r.week_queue_pos;
+            j.week_queue_key = r.week_queue_key;
+            j.schedule_slot = r.schedule_slot;
+            j.schedule_slot_pinned = r.schedule_slot_pinned;
+            if (r.job_ready_date) j.job_ready_date = r.job_ready_date;
+          });
+        })
+        .catch(function() {})
+        .then(function() {
           return window.syncScheduleSlotsFromReady({ silent: true, jobs: _schedJobs });
         })
         .catch(function(_ss) {})
@@ -48702,9 +48789,16 @@ window.saveAdjModal = async function() {
         clearTimeout(_schedRtDebounce);
         _schedRtDebounce = setTimeout(function() { loadSchedule(); }, 300);
       }
+      function _schedOnJobsChange(payload) {
+        var row = payload && payload.new;
+        if (row && row.id && typeof window._applyRemoteJobQueue === 'function') {
+          window._applyRemoteJobQueue([row]);
+        }
+        _schedRtRefresh();
+      }
       _schedRtChannel = window._sb
         .channel('schedule_jobs')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' },               _schedRtRefresh)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' },               _schedOnJobsChange)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'job_drygoods_prep' },  _schedRtRefresh)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'job_liquid_signoff' }, _schedRtRefresh)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'job_bom_approvals' },  _schedRtRefresh)
@@ -49051,6 +49145,55 @@ window.saveAdjModal = async function() {
   window._refreshScheduleQueue = function() {
     _renderLineStatusBanner();
     renderNextJobs();
+  };
+
+  function _schedApplyQueueOrderLocally() {
+    var jobs = (_schedJobs || []).filter(function(j) {
+      return j.stage !== 'complete' && j.stage !== 'cancelled' && !j.actual_start && !j.changeover_start;
+    });
+    var pool = jobs.filter(function(j) { return !!j.job_ready_date; })
+      .sort(typeof window._jobsQueueSort === 'function' ? window._jobsQueueSort : _jobReadySort);
+    jobs.forEach(function(j) {
+      j.schedule_slot = null;
+      j.schedule_slot_pinned = false;
+    });
+    for (var i = 0; i < pool.length && i < SCHED_SLOTS; i++) {
+      pool[i].schedule_slot = i + 1;
+      pool[i].schedule_slot_pinned = false;
+    }
+  }
+
+  window._applyRemoteSchedQueue = function(rows) {
+    if (!rows || !rows.length || !_schedJobs || !_schedJobs.length) return;
+    var changed = false;
+    var queueTouched = false;
+    rows.forEach(function(r) {
+      if (!r || !r.id) return;
+      var j = _schedJobs.find(function(x) { return x.id === r.id; });
+      if (!j) return;
+      var hasQueue = Object.prototype.hasOwnProperty.call(r, 'week_queue_pos')
+        || Object.prototype.hasOwnProperty.call(r, 'week_queue_key');
+      ['week_queue_pos', 'week_queue_key'].forEach(function(k) {
+        if (!Object.prototype.hasOwnProperty.call(r, k)) return;
+        if (j[k] !== r[k]) { j[k] = r[k]; changed = true; }
+      });
+      if (hasQueue) {
+        queueTouched = true;
+      } else {
+        ['schedule_slot', 'schedule_slot_pinned'].forEach(function(k) {
+          if (!Object.prototype.hasOwnProperty.call(r, k)) return;
+          if (j[k] !== r[k]) { j[k] = r[k]; changed = true; }
+        });
+      }
+    });
+    if (queueTouched) {
+      _schedApplyQueueOrderLocally();
+      changed = true;
+    }
+    if (changed) {
+      renderNextJobs();
+      _renderLineStatusBanner();
+    }
   };
 
   // Slot picker / assign / clear retired — Next 5 is fully automatic from Job Ready.
