@@ -34607,6 +34607,7 @@ window.saveAdjModal = async function() {
   // ── Load jobs ────────────────────────────────────────────────────────────────
   var _loadJobsPending = false; // queues a retry if a second call arrives while in-flight
   async function loadJobs() {
+    _initSignoffRealtime();
     if (_loadJobsInFlight) {
       // Don't drop the request — queue a retry for when the current load finishes.
       _loadJobsPending = true;
@@ -34626,12 +34627,23 @@ window.saveAdjModal = async function() {
     }
   }
 
+  function _normQueueVal(k, v) {
+    if (v == null || v === '') return null;
+    if (k === 'week_queue_pos' || k === 'schedule_slot') {
+      var n = Number(v);
+      return isNaN(n) ? null : n;
+    }
+    if (k === 'week_queue_key') return String(v).slice(0, 10);
+    return v;
+  }
+
   function _applyQueueFieldsToJob(j, row) {
     if (!j || !row) return false;
     var changed = false;
     ['week_queue_pos', 'week_queue_key', 'schedule_slot', 'schedule_slot_pinned'].forEach(function(k) {
-      if (!row.hasOwnProperty(k)) return;
-      if (j[k] !== row[k]) { j[k] = row[k]; changed = true; }
+      if (!Object.prototype.hasOwnProperty.call(row, k)) return;
+      var nv = _normQueueVal(k, row[k]);
+      if (j[k] !== nv) { j[k] = nv; changed = true; }
     });
     return changed;
   }
@@ -34649,23 +34661,35 @@ window.saveAdjModal = async function() {
   };
 
   var _jobQueueChannel = null;
+  var _jobQueueReady = false;
+  var _jobQueuePending = null;
   function _ensureJobQueueChannel() {
-    if (_jobQueueChannel || !window._sb) return _jobQueueChannel;
-    _jobQueueChannel = window._sb.channel('pulse_job_queue');
+    if (_jobQueueChannel) return _jobQueueChannel;
+    if (!window._sb) return null;
+    _jobQueueChannel = window._sb.channel('pulse_job_queue', {
+      config: { broadcast: { ack: true, self: false } }
+    });
     _jobQueueChannel.on('broadcast', { event: 'order' }, function(msg) {
       var rows = msg && msg.payload && msg.payload.jobs;
       window._applyRemoteJobQueue(rows);
     });
-    _jobQueueChannel.subscribe();
+    _jobQueueChannel.subscribe(function(status) {
+      _jobQueueReady = status === 'SUBSCRIBED';
+      if (_jobQueueReady && _jobQueuePending) {
+        var pending = _jobQueuePending;
+        _jobQueuePending = null;
+        _jobQueueChannel.send({ type: 'broadcast', event: 'order', payload: { jobs: pending } });
+      }
+    });
     return _jobQueueChannel;
   }
 
   window._broadcastJobQueue = function(rows) {
     if (!rows || !rows.length) return;
     var ch = _ensureJobQueueChannel();
-    if (ch) {
-      ch.send({ type: 'broadcast', event: 'order', payload: { jobs: rows } });
-    }
+    if (!ch) return;
+    if (!_jobQueueReady) { _jobQueuePending = rows; return; }
+    ch.send({ type: 'broadcast', event: 'order', payload: { jobs: rows } });
   };
 
   function _queueSnapshot() {
@@ -34682,12 +34706,34 @@ window.saveAdjModal = async function() {
     });
   }
 
+  var _queuePullInFlight = false;
+  async function _pullJobQueueNow() {
+    if (_queuePullInFlight) return;
+    _queuePullInFlight = true;
+    try {
+      var rows = await supaGet('jobs?stage=in.(new,active)&select=id,week_queue_pos,week_queue_key,schedule_slot,schedule_slot_pinned');
+      window._applyRemoteJobQueue(rows || []);
+    } catch (e) {
+    } finally {
+      _queuePullInFlight = false;
+    }
+  }
+
+  var _queuePollTimer = null;
+  function _startQueuePoll() {
+    if (_queuePollTimer) return;
+    _queuePollTimer = setInterval(_pullJobQueueNow, 2000);
+  }
+
   // ── Realtime: sign-off gates + dashboard dots ─────────────────────────────
-  // Subscribes to the three sign-off tables so BOM/S.Chain/Liquid pills and
-  // the dashboard status dots refresh automatically when any sign-off changes.
-  (function _initSignoffRealtime() {
-    if (!window._sb) return;
+  // Must run after window._sb exists (created in DOMContentLoaded). The old
+  // IIFE ran at parse time when _sb was still null, so nobody received moves.
+  var _jobsRtReady = false;
+  function _initSignoffRealtime() {
+    if (_jobsRtReady || !window._sb) return;
+    _jobsRtReady = true;
     _ensureJobQueueChannel();
+    _startQueuePoll();
     var _debounceTimer;
     function _refresh() {
       clearTimeout(_debounceTimer);
@@ -34696,6 +34742,7 @@ window.saveAdjModal = async function() {
     function _onJobsUpdate(payload) {
       var row = payload && payload.new;
       if (row && row.id) window._applyRemoteJobQueue([row]);
+      _pullJobQueueNow();
       _refresh();
     }
     window._sb.channel('signoff_gates')
@@ -34706,7 +34753,9 @@ window.saveAdjModal = async function() {
       .on('postgres_changes', { event: '*',      schema: 'public', table: 'job_components' },     _refresh)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'jobs' },               _onJobsUpdate)
       .subscribe();
-  })();
+  }
+
+  window._initJobsRealtime = _initSignoffRealtime;
 
   async function _doLoadJobs() {
     // Load staff map for name lookups. Key by BOTH auth_user_id and the
@@ -47861,6 +47910,7 @@ window.saveAdjModal = async function() {
     loadJobs();
   }
   document.addEventListener('DOMContentLoaded', function() {
+    _initSignoffRealtime();
     var _jobsNav = document.getElementById('sbnav-jobs');
     if (_jobsNav) { _jobsNav.addEventListener('click', function() { _loadJobsWithQueue(); }); }
     document.querySelectorAll('.nav-item').forEach(function(n) {
@@ -48778,6 +48828,7 @@ window.saveAdjModal = async function() {
       }
     }, 1000);
 
+    if (typeof window._initJobsRealtime === 'function') window._initJobsRealtime();
     // Realtime subscription — only subscribe once
     if (!_schedRtChannel && window._sb) {
       // Refresh the schedule (and its Gates column) on job changes or on any
