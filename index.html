@@ -330,6 +330,18 @@
           </tbody>
         </table>
       </div>
+      <div id="portal-jobs-lh-wrap" style="display:none;margin-top:28px;">
+        <div class="portal-heading" style="margin-bottom:4px;">Lighthouse produced</div>
+        <div class="portal-sub" style="margin-bottom:14px;">Jobs Lighthouse is producing for you on a Lighthouse-owned specification. Production stays on the Lighthouse account.</div>
+        <div class="card" style="overflow:auto;">
+          <table class="data-table">
+            <thead><tr>
+              <th>Job ID</th><th>Product</th><th>Target Qty</th><th>Status</th><th>Scheduled Date</th><th>Notes</th><th></th>
+            </tr></thead>
+            <tbody id="portal-jobs-lh-tbody"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -353,6 +365,18 @@
             <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>
           </tbody>
         </table>
+      </div>
+      <div id="portal-boms-lh-wrap" style="display:none;margin-top:28px;">
+        <div class="portal-heading" style="margin-bottom:4px;">Lighthouse produced</div>
+        <div class="portal-sub" style="margin-bottom:14px;">Specifications Lighthouse owns and produces for you. You can request a job; revisions are handled by Lighthouse.</div>
+        <div class="card" style="overflow:auto;">
+          <table class="data-table">
+            <thead><tr>
+              <th>Product Name</th><th>Liquid</th><th>ABV</th><th>Bottle Size</th><th>GI Verified</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody id="portal-boms-lh-tbody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
@@ -2770,11 +2794,18 @@ function _initPortalRealtime(clientId) {
     function refresh() { clearTimeout(_t); _t = setTimeout(function(){ loadPortalData(clientId); }, 700); }
     window._portalRtChannel = window._sb.channel('portal_jobs_' + clientId)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs', filter: 'client_id=eq.' + clientId }, refresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'client_job_submissions', filter: 'client_id=eq.' + clientId }, refresh)
       .subscribe();
+    if (window._portalLhPoll) clearInterval(window._portalLhPoll);
+    window._portalLhPoll = setInterval(function() {
+      var jobsPage = document.getElementById('portal-jobs');
+      if (jobsPage && jobsPage.classList.contains('active')) refresh();
+    }, 30000);
   } catch(e) { window.logError && window.logError('portal realtime init', e); }
 }
 function _teardownPortalRealtime() {
   try {
+    if (window._portalLhPoll) { clearInterval(window._portalLhPoll); window._portalLhPoll = null; }
     if (window._portalRtChannel && window._sb) {
       window._sb.removeChannel(window._portalRtChannel);
       window._portalRtChannel = null;
@@ -3112,7 +3143,7 @@ async function loadPortalData(clientId) {
 
   // Jobs table — merges real jobs + pending/rejected submissions
   try {
-    var jobs = await db.select('jobs', '?client_id=eq.' + clientId + '&order=created_at.desc');
+    var jobs = await db.select('v_portal_jobs', '?order=created_at.desc') || [];
     var subs = [];
     try {
       subs = await db.select('client_job_submissions',
@@ -3155,7 +3186,13 @@ async function loadPortalData(clientId) {
     var _PSS = window._PORTAL_STAGE_STYLE;
     var _PSL = window._PORTAL_STAGE_LABEL;
     window._portalJobs = jobs; // store for view modal
-    jobs.forEach(function(j) {
+    var ownJobs = [];
+    var lhJobs = [];
+    (jobs || []).forEach(function(j) {
+      if (j.is_lighthouse_produced) lhJobs.push(j);
+      else ownJobs.push(j);
+    });
+    function _portalJobRow(j) {
       var stageSty = _PSS[j.stage] || _PSS.new;
       var stageLbl = _PSL[j.stage] || j.stage || 'New';
       var stageBadge = '<span style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:3px 10px;border-radius:3px;' + stageSty + '">' + esc(stageLbl) + '</span>';
@@ -3166,7 +3203,7 @@ async function loadPortalData(clientId) {
       var dateStr = j.scheduled_start || j.bottling_date || j.scheduled_date;
       var displayDate = dateStr ? new Date(dateStr).toLocaleDateString('en-IE') : '—';
       var viewBtn = '<button onclick="window.openPortalJobView(\'' + esc(j.id) + '\')" style="background:var(--gold);color:#0a1520;border:none;padding:5px 12px;font-size:11px;font-weight:700;border-radius:3px;cursor:pointer;white-space:nowrap;">View Job →</button>';
-      rows.push('<tr>'
+      return '<tr>'
         + '<td><span class="job-num">' + esc(j.job_id || j.id) + '</span></td>'
         + '<td style="color:var(--white);font-weight:600;">' + esc((window.jobLabel && window.jobLabel(j)) || j.product_name || '—') + '</td>'
         + '<td>' + qty + '</td>'
@@ -3174,10 +3211,22 @@ async function loadPortalData(clientId) {
         + '<td>' + displayDate + '</td>'
         + '<td style="color:var(--muted);font-size:12px;">' + esc(j.notes || '') + '</td>'
         + '<td style="white-space:nowrap;">' + viewBtn + '</td>'
-        + '</tr>');
-    });
+        + '</tr>';
+    }
+    ownJobs.forEach(function(j) { rows.push(_portalJobRow(j)); });
     if (tb) tb.innerHTML = rows.length ? rows.join('')
       : '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No jobs on file. Click <strong>+ Request New Job</strong> to propose your first.</td></tr>';
+    var lhWrap = document.getElementById('portal-jobs-lh-wrap');
+    var lhTb = document.getElementById('portal-jobs-lh-tbody');
+    if (lhWrap && lhTb) {
+      if (lhJobs.length) {
+        lhWrap.style.display = '';
+        lhTb.innerHTML = lhJobs.map(_portalJobRow).join('');
+      } else {
+        lhWrap.style.display = 'none';
+        lhTb.innerHTML = '';
+      }
+    }
   } catch(e) {
     window.logError('loadPortalData:jobs', e);
     if (tb) tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#ff9c9c;padding:24px;">Couldn\u2019t load your jobs just now. Please refresh \u2014 if it keeps happening, contact Lighthouse.</td></tr>';
@@ -3186,7 +3235,8 @@ async function loadPortalData(clientId) {
 
   // BOMs table — real approved + pending/rejected submissions
   try {
-    var boms = await db.select('boms', '?client_id=eq.' + clientId + '&bom_status=eq.approved&order=created_at.desc');
+    var boms = await db.select('v_portal_boms', '?order=product_name.asc') || [];
+    window._portalBoms = boms;
     var bomSubs = [];
     try {
       bomSubs = await db.select('client_bom_submissions',
@@ -3204,6 +3254,7 @@ async function loadPortalData(clientId) {
 
     var tb2 = document.getElementById('portal-boms-tbody');
     var brows = [];
+    var lhBrows = [];
     bomSubs.forEach(function(s) {
       var badge = s.status === 'rejected'
         ? '<span style="background:rgba(232,79,79,0.18);color:#ff7e7e;border:1px solid rgba(232,79,79,0.4);padding:3px 8px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">REJECTED</span>'
@@ -3248,23 +3299,36 @@ async function loadPortalData(clientId) {
         }
       }
 
-      // Show "Request Revision" only if no pending request for this BOM
-      var revBtn = (!er || er.status === 'rejected')
+      // Show "Request Revision" only on the client's own BOMs
+      var revBtn = (!b.is_lighthouse_produced && (!er || er.status === 'rejected'))
         ? '<button onclick="window._openRevisionRequestModal(\'' + esc(b.id) + '\',\'' + esc(((window.bomDisplayName && window.bomDisplayName(b)) || b.product_name || '')) + '\')" style="background:transparent;border:1px solid rgba(201,168,76,0.5);color:var(--gold);padding:4px 10px;font-size:11px;font-weight:600;border-radius:3px;cursor:pointer;white-space:nowrap;margin-left:4px;">Request Revision</button>'
         : '';
       var viewBtn = '<button onclick="window.openPortalBomView(\'' + esc(b.id) + '\')" style="background:var(--gold);color:#0a1520;border:none;padding:5px 12px;font-size:11px;font-weight:700;border-radius:3px;cursor:pointer;white-space:nowrap;">View BOM →</button>';
-      brows.push('<tr>'
+      var rowHtml = '<tr>'
         + '<td style="color:var(--white);font-weight:600;">' + esc(window.bomDisplayName(b) || '—') + revBadge + '</td>'
         + '<td>' + esc(b.liquid_spec || '—') + '</td>'
         + '<td>' + (b.abv ? esc(b.abv) + '%' : '—') + '</td>'
         + '<td>' + (b.volume_cl ? esc(String(b.volume_cl)) + 'cl' : (b.volume ? esc(b.volume) + 'cl' : '—')) + '</td>'
         + '<td>' + verified + '</td>'
-        + '<td>' + approvedBadge + revReqHtml + '</td>'
+        + '<td>' + approvedBadge + (b.is_lighthouse_produced ? '' : revReqHtml) + '</td>'
         + '<td style="white-space:nowrap;">' + viewBtn + revBtn + '</td>'
-        + '</tr>');
+        + '</tr>';
+      if (b.is_lighthouse_produced) lhBrows.push(rowHtml);
+      else brows.push(rowHtml);
     });
     if (tb2) tb2.innerHTML = brows.length ? brows.join('')
       : '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">No BOMs on file. Click <strong>+ Propose New BOM</strong> to submit your first.</td></tr>';
+    var lhBomWrap = document.getElementById('portal-boms-lh-wrap');
+    var lhBomTb = document.getElementById('portal-boms-lh-tbody');
+    if (lhBomWrap && lhBomTb) {
+      if (lhBrows.length) {
+        lhBomWrap.style.display = '';
+        lhBomTb.innerHTML = lhBrows.join('');
+      } else {
+        lhBomWrap.style.display = 'none';
+        lhBomTb.innerHTML = '';
+      }
+    }
   } catch(e) { window.logError('loadPortalData:boms', e); }
 
   // Dry goods — grouped by category, showing LIVE on-site quantity only.
@@ -3312,15 +3376,15 @@ async function loadPortalSummary(clientId) {
 
   // Jobs Completed (all-time; stage written as 'complete' or 'Complete' depending on path)
   try {
-    var jobsDone = await db.select('jobs',
-      '?client_id=eq.' + clientId + '&stage=in.(complete,Complete)&select=id');
+    var jobsDone = await db.select('v_portal_jobs',
+      '?stage=in.(complete,Complete)&select=id');
     _portalSet('portal-kpi-jobs', (jobsDone.length || 0).toLocaleString());
   } catch(e) { window.logError('loadPortalSummary:jobsDone', e); }
 
   // Bottles Produced (all-time, completed jobs only)
   try {
-    var bottlesRows = await db.select('jobs',
-      '?client_id=eq.' + clientId + '&stage=in.(complete,Complete)&select=actual_bottles_produced');
+    var bottlesRows = await db.select('v_portal_jobs',
+      '?stage=in.(complete,Complete)&select=actual_bottles_produced');
     var totalBottles = (bottlesRows || []).reduce(function(sum, r) {
       return sum + (parseFloat(r.actual_bottles_produced) || 0);
     }, 0);
@@ -3387,14 +3451,14 @@ async function loadPortalSummary(clientId) {
 
   // Active BOMs count
   try {
-    var boms = await db.select('boms', '?client_id=eq.' + clientId + '&bom_status=eq.approved&select=id');
+    var boms = await db.select('v_portal_boms', '?select=id');
     _portalSet('portal-kpi-boms', (boms || []).length.toLocaleString());
   } catch(e) { window.logError('loadPortalSummary:boms', e); }
 
   // Last Bottling Run + Next Scheduled Job
   try {
-    var last = await db.select('jobs',
-      '?client_id=eq.' + clientId + '&stage=in.(complete,Complete)'
+    var last = await db.select('v_portal_jobs',
+      '?stage=in.(complete,Complete)'
       + '&order=date_completed.desc&limit=1&select=date_completed,product_name,bom_id');
     if (last && last.length) {
       if (last[0].bom_id && window._fetchBomMapFor) { try { await window._fetchBomMapFor([last[0].bom_id]); } catch(_e) {} }
@@ -3410,11 +3474,10 @@ async function loadPortalSummary(clientId) {
     // bottling_date) mirroring the jobs table, so an approved job that
     // hasn't been picked up by the projection engine yet still shows here
     // instead of "Nothing scheduled yet".
-    var upcoming = await db.select('jobs',
-      '?client_id=eq.' + clientId
-      + '&stage=not.in.(complete,Complete)'
+    var upcoming = await db.select('v_portal_jobs',
+      '?stage=not.in.(complete,Complete)'
       + '&order=created_at.desc'
-      + '&select=scheduled_start,scheduled_date,bottling_date,product_name,bom_id') || [];
+      + '&select=scheduled_start,scheduled_date,product_name,bom_id') || [];
     var nextJob = null, nextDate = null;
     upcoming.forEach(function(uj){
       var d = uj.scheduled_start || uj.scheduled_date || uj.bottling_date;
@@ -3994,20 +4057,32 @@ window.openPortalJobModal = async function(reviseId) {
   var sel = document.getElementById('pjm-bom');
   sel.innerHTML = '<option value="">— Loading BOMs… —</option>';
   try {
-    var boms = await db.select('boms',
-      '?client_id=eq.' + clientId + '&bom_status=eq.approved&order=product_name.asc') || [];
+    var boms = await db.select('v_portal_boms', '?order=product_name.asc') || [];
     if (!boms.length) {
       sel.innerHTML = '<option value="">— No approved BOMs on file —</option>';
       document.getElementById('pjm-status').innerHTML = '<span style="color:#ff9c9c;">Lighthouse must approve a BOM before you can request a job.</span>';
       document.getElementById('pjm-submit').disabled = true;
     } else {
-      sel.innerHTML = '<option value="">— Select an approved BOM —</option>' +
-        boms.map(function(b) {
+      var ownBoms = boms.filter(function(b){ return !b.is_lighthouse_produced; });
+      var lhBoms = boms.filter(function(b){ return b.is_lighthouse_produced; });
+      var html = '<option value="">— Select an approved BOM —</option>';
+      if (ownBoms.length) {
+        html += '<optgroup label="Your BOMs">' + ownBoms.map(function(b) {
           var label = (window.bomDisplayName && window.bomDisplayName(b)) || b.product_name || b.product || 'Unnamed BOM';
           return '<option value="' + esc(b.id) + '" data-product="' + esc(b.product_name || b.product || '') + '">'
             + esc(label)
             + '</option>';
-        }).join('');
+        }).join('') + '</optgroup>';
+      }
+      if (lhBoms.length) {
+        html += '<optgroup label="Lighthouse produced">' + lhBoms.map(function(b) {
+          var label = (window.bomDisplayName && window.bomDisplayName(b)) || b.product_name || b.product || 'Unnamed BOM';
+          return '<option value="' + esc(b.id) + '" data-product="' + esc(b.product_name || b.product || '') + '">'
+            + esc(label)
+            + '</option>';
+        }).join('') + '</optgroup>';
+      }
+      sel.innerHTML = html;
       window._pjmBoms = boms;
     }
   } catch(e) {
@@ -4124,11 +4199,11 @@ window._pjmCheckStock = async function() {
   var skuIds = COMPONENTS.map(function(c){ return bom[c.field]; });
 
   try {
-    var batches = await window.db.select('dry_goods_batches',
-      '?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,quantity_remaining');
+    var batches = await window.db.select('v_portal_sku_on_site',
+      '?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,qty_on_site');
     var onSite = {};
     (batches || []).forEach(function(b){
-      onSite[b.sku_id] = (onSite[b.sku_id] || 0) + Number(b.quantity_remaining || 0);
+      onSite[b.sku_id] = Number(b.qty_on_site || 0);
     });
 
     var anyShortfall = false;
@@ -4530,7 +4605,7 @@ window.openPortalJobView = async function(jobId) {
     // stage; fall back to the already-loaded list only if the fetch fails.
     var j = null;
     try {
-      var rows = await window.db.select('jobs', '?id=eq.' + jobId + '&limit=1');
+      var rows = await window.db.select('v_portal_jobs', '?id=eq.' + jobId + '&limit=1');
       j = rows && rows[0];
     } catch(_fe) {}
     if (!j) j = (window._portalJobs || []).find(function(x){ return x.id === jobId; });
@@ -4574,7 +4649,7 @@ window.openPortalJobView = async function(jobId) {
     var bomLabel = '';
     if (j.bom_id) {
       try {
-        var bomRows = await window.db.select('boms', '?id=eq.' + j.bom_id + '&select=id,product_name,volume_cl,abv,additional_info&limit=1');
+        var bomRows = await window.db.select('v_portal_boms', '?id=eq.' + j.bom_id + '&select=id,product_name,volume_cl,abv,additional_info&limit=1');
         if (bomRows && bomRows[0]) {
           if (window._mergeBomMap) window._mergeBomMap([bomRows[0]]);
           bomLabel = (window.bomDisplayName && window.bomDisplayName(bomRows[0])) || bomRows[0].product_name || j.bom_id;
@@ -4585,6 +4660,66 @@ window.openPortalJobView = async function(jobId) {
     if (titleEl) titleEl.textContent = (window.jobLabel && window.jobLabel(j)) || j.product_name || '—';
 
     var notes = j.notes || '';
+    var readyDate = j.job_ready_date
+      ? new Date(j.job_ready_date).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' })
+      : 'Not set yet';
+    var prodDate = (j.scheduled_start || j.scheduled_date)
+      ? new Date(j.scheduled_start || j.scheduled_date).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' })
+      : 'Not set yet';
+
+    var supplyHtml = '';
+    try {
+      var comps = await window.db.select('v_portal_job_supply', '?job_id=eq.' + jobId) || [];
+      var skuOnSite = {};
+      var skuIds = comps.map(function(c){ return c.sku_id; }).filter(Boolean);
+      if (skuIds.length) {
+        var onSiteRows = await window.db.select('v_portal_sku_on_site',
+          '?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,qty_on_site,description') || [];
+        onSiteRows.forEach(function(s){ skuOnSite[s.sku_id] = s; });
+      }
+      if (comps.length) {
+        supplyHtml = '<div style="padding:16px 16px 24px;">'
+          + '<div style="font-size:9px;letter-spacing:0.2em;text-transform:uppercase;font-weight:700;color:var(--gold);margin-bottom:12px;border-bottom:1px solid rgba(201,168,76,0.2);padding-bottom:8px;">Supply chain</div>'
+          + '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>'
+          + '<th style="text-align:left;padding:6px 8px 6px 0;color:var(--muted);font-weight:600;">SKU</th>'
+          + '<th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:600;">Item</th>'
+          + '<th style="text-align:right;padding:6px 8px;color:var(--muted);font-weight:600;">Required</th>'
+          + '<th style="text-align:right;padding:6px 8px;color:var(--muted);font-weight:600;">On site</th>'
+          + '<th style="text-align:center;padding:6px 8px;color:var(--muted);font-weight:600;">On site</th>'
+          + '<th style="text-align:left;padding:6px 0 6px 8px;color:var(--muted);font-weight:600;">Exp. delivery</th>'
+          + '</tr></thead><tbody>'
+          + comps.map(function(c) {
+            var avail = skuOnSite[c.sku_id] ? Number(skuOnSite[c.sku_id].qty_on_site || 0) : 0;
+            var need = Number(c.qty_required || 0);
+            var ok = !!c.is_allocated || (need > 0 && avail >= need);
+            var eta = c.expected_delivery
+              ? new Date(c.expected_delivery).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' })
+              : '—';
+            var item = c.item_name || (skuOnSite[c.sku_id] && skuOnSite[c.sku_id].description) || c.sku_id || '—';
+            return '<tr>'
+              + '<td style="padding:7px 8px 7px 0;font-family:monospace;color:var(--gold);">' + esc(c.sku_id || '—') + '</td>'
+              + '<td style="padding:7px 8px;color:var(--white);">' + esc(item) + '</td>'
+              + '<td style="padding:7px 8px;text-align:right;color:var(--white);">' + (need ? need.toLocaleString() : '—') + '</td>'
+              + '<td style="padding:7px 8px;text-align:right;color:' + (ok ? 'var(--green)' : '#e05757') + ';">' + avail.toLocaleString() + '</td>'
+              + '<td style="padding:7px 8px;text-align:center;color:' + (ok ? 'var(--green)' : 'var(--muted)') + ';">' + (ok ? '\u2713' : '—') + '</td>'
+              + '<td style="padding:7px 0 7px 8px;color:var(--muted);">' + esc(eta) + '</td>'
+              + '</tr>';
+          }).join('')
+          + '</tbody></table></div>';
+      }
+    } catch(_se) {
+      window.logError && window.logError('openPortalJobView:supply', _se);
+    }
+
+    var datesHtml = '<div style="margin:16px 16px 0;padding:14px 16px;border:1px solid rgba(201,168,76,0.28);border-radius:6px;background:rgba(201,168,76,0.06);">'
+      + '<div style="display:flex;gap:24px;flex-wrap:wrap;">'
+      + '<div><div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Expected job ready</div>'
+      + '<div style="font-size:18px;color:var(--white);font-weight:600;">' + esc(readyDate) + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:6px;max-width:360px;line-height:1.45;">This is the job-ready date — when components are expected to be ready — not the production date.</div></div>'
+      + '<div><div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Production date</div>'
+      + '<div style="font-size:18px;color:var(--white);font-weight:600;">' + esc(prodDate) + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:6px;">Scheduled bottling date. Unset until Lighthouse books the run.</div></div>'
+      + '</div></div>';
 
     var html = '<table style="width:100%;border-collapse:collapse;"><tbody>'
       + sec('Job Details')
@@ -4598,7 +4733,9 @@ window.openPortalJobView = async function(jobId) {
       + row('Linked BOM',      esc(bomLabel))
       + row('Job Created',     esc(createdDate))
       + (notes ? sec('Notes') + row('Notes', esc(notes)) : '')
-      + '</tbody></table>';
+      + '</tbody></table>'
+      + datesHtml
+      + supplyHtml;
 
     if (bodyEl) bodyEl.innerHTML = html;
   } catch(e) {
@@ -4627,7 +4764,7 @@ window.openPortalBomView = async function(bomId) {
   if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Loading…</div>';
 
   try {
-    var rows = await window.db.select('boms', '?id=eq.' + bomId + '&limit=1');
+    var rows = await window.db.select('v_portal_boms', '?id=eq.' + bomId + '&limit=1');
     var b = rows && rows[0];
     if (!b) { if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">BOM not found.</div>'; return; }
 
@@ -4642,8 +4779,13 @@ window.openPortalBomView = async function(bomId) {
     var skuMap = {};
     if (skuIds.length) {
       try {
-        var skuRows = await window.db.select('dry_goods_skus', '?id=in.(' + skuIds.join(',') + ')&select=id,description,volume,abv,region');
-        (skuRows || []).forEach(function(s){ skuMap[s.id] = window.skuDisplayName(s); });
+        var skuRows = await window.db.select('v_portal_sku_on_site',
+          '?sku_id=in.(' + skuIds.join(',') + ')&select=sku_id,description,volume,abv,region');
+        (skuRows || []).forEach(function(s){
+          skuMap[s.sku_id] = window.skuDisplayName({
+            id: s.sku_id, description: s.description, volume: s.volume, abv: s.abv, region: s.region
+          });
+        });
       } catch(_e) {}
     }
 
@@ -4747,7 +4889,10 @@ window.openPortalBomView = async function(bomId) {
     (async function() {
       var container = document.getElementById(_pHistId);
       if (!container) return;
-      var hist = await window.loadBomHistory(b.id);
+      var hist = [];
+      try {
+        hist = await window.db.select('v_portal_bom_history', '?bom_id=eq.' + b.id + '&order=created_at.desc') || [];
+      } catch(_he) { hist = []; }
       if (!container.isConnected) return;
       if (!hist.length) {
         container.innerHTML = '<span style="font-size:12px;color:var(--muted);font-style:italic;">No history recorded yet.</span>';
@@ -5305,6 +5450,41 @@ window._portalDgPersistCost = async function(clientId, skuId, value) {
   }
 };
 
+window._portalLhDryGoodsHtml = async function(esc) {
+  var html = '';
+  var groups = [];
+  try {
+    var lhSkus = await window.db.select('v_portal_sku_on_site',
+      '?is_lighthouse_sku=eq.true&order=description.asc') || [];
+    if (!lhSkus.length) return { html: '', groups: [] };
+    html += '<div style="margin-top:28px;">'
+      + '<div class="portal-heading" style="margin-bottom:4px;">Lighthouse-procured components</div>'
+      + '<div class="portal-sub" style="margin-bottom:14px;">Stock Lighthouse holds for specifications they produce for you. Quantities only — no values.</div>'
+      + '<div class="card" style="overflow:auto;"><table class="data-table"><thead><tr>'
+      + '<th>Category</th><th>Description</th><th style="text-align:right;">On site</th><th>Used on</th>'
+      + '</tr></thead><tbody>';
+    var catRows = [];
+    lhSkus.forEach(function(s) {
+      var used = [];
+      try { used = Array.isArray(s.used_on_boms) ? s.used_on_boms : (s.used_on_boms ? JSON.parse(s.used_on_boms) : []); } catch(_e) { used = []; }
+      var usedLabel = used.map(function(b){ return b.product_name || b.id; }).filter(Boolean).join(', ') || '—';
+      var qty = Number(s.qty_on_site || 0);
+      html += '<tr>'
+        + '<td style="color:var(--muted);">' + esc(s.category_name || 'Uncategorised') + '</td>'
+        + '<td style="color:var(--white);font-weight:600;">' + esc(s.description || s.sku_id) + '</td>'
+        + '<td style="text-align:right;color:var(--white);">' + qty.toLocaleString() + '</td>'
+        + '<td style="color:var(--muted);font-size:12px;">' + esc(usedLabel) + '</td>'
+        + '</tr>';
+      catRows.push({ id: s.sku_id, description: s.description || s.sku_id, qty: qty, category: s.category_name || 'Uncategorised' });
+    });
+    html += '</tbody></table></div></div>';
+    groups.push({ name: 'Lighthouse-procured', rows: catRows, noValues: true });
+  } catch(e) {
+    window.logError && window.logError('_portalLhDryGoodsHtml', e);
+  }
+  return { html: html, groups: groups };
+};
+
 window.loadPortalDryGoods = async function(clientId) {
   var body = document.getElementById('portal-dg-body');
   var esc = window.escapeHtml;
@@ -5316,9 +5496,11 @@ window.loadPortalDryGoods = async function(clientId) {
       '?client_id=eq.' + clientId + '&is_active=eq.true'
       + '&select=id,description,volume,region,photo_url,dry_goods_categories(id,name)&order=description.asc');
 
+    var lhSection = await window._portalLhDryGoodsHtml(esc);
     if (!skus || !skus.length) {
-      body.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--muted);">No dry goods on file.</div>';
-      window._portalDgLastLoad = { clientId: clientId, groups: [] };
+      body.innerHTML = lhSection.html
+        || '<div class="card" style="padding:24px;text-align:center;color:var(--muted);">No dry goods on file.</div>';
+      window._portalDgLastLoad = { clientId: clientId, groups: [], lhGroups: lhSection.groups };
       return;
     }
 
@@ -5483,8 +5665,9 @@ window.loadPortalDryGoods = async function(clientId) {
       + '</span>'
       + '</div>';
 
-    body.innerHTML = html;
-    window._portalDgLastLoad = { clientId: clientId, groups: exportGroups };
+    var lhSection2 = lhSection || { html: '', groups: [] };
+    body.innerHTML = html + (lhSection2.html || '');
+    window._portalDgLastLoad = { clientId: clientId, groups: exportGroups, lhGroups: lhSection2.groups };
 
     // Wire up per-SKU history row toggles + SKU photo thumbnails
     body.addEventListener('click', function(e) {
@@ -5590,7 +5773,7 @@ window._portalDgRecalcAll = function() {
 
 window.exportPortalDryGoodsCSV = function() {
   var ctx = window._portalDgLastLoad;
-  if (!ctx || !ctx.groups || !ctx.groups.length) {
+  if (!ctx || ((!ctx.groups || !ctx.groups.length) && (!ctx.lhGroups || !ctx.lhGroups.length))) {
     if (window.toastMsg) window.toastMsg('Nothing to export yet.', 'error');
     return;
   }
@@ -5614,7 +5797,7 @@ window.exportPortalDryGoodsCSV = function() {
   lines.push(['Category','Description','On Site','Cost Price (EUR)','Line Value (EUR)'].join(','));
 
   var grand = 0;
-  ctx.groups.forEach(function(g) {
+  (ctx.groups || []).forEach(function(g) {
     var gTotal = 0;
     g.rows.forEach(function(r) {
       var costStr = window._portalDgGetCost(ctx.clientId, r.id);
@@ -5632,6 +5815,17 @@ window.exportPortalDryGoodsCSV = function() {
     lines.push([csvEsc(g.name + ' subtotal'), '', '', '', gTotal ? gTotal.toFixed(2) : ''].join(','));
     grand += gTotal;
   });
+  if (ctx.lhGroups && ctx.lhGroups.length) {
+    lines.push('');
+    lines.push('Lighthouse-procured components (quantities only — no values)');
+    lines.push(['Category','Description','On Site'].join(','));
+    ctx.lhGroups.forEach(function(g) {
+      (g.rows || []).forEach(function(r) {
+        lines.push([csvEsc(r.category || g.name), csvEsc(r.description), r.qty].join(','));
+      });
+    });
+  }
+
   lines.push('');
   lines.push(['TOTAL','','','', grand ? grand.toFixed(2) : ''].join(','));
 
@@ -7894,6 +8088,12 @@ window.copyInviteLink = function() {
         <span id="bm-client-stock-hint" class="field-hint" style="display:none;">
           Client items shown with a name prefix
         </span>
+      </div>
+      <div id="bm-portal-share-row" class="mfield" style="margin-top:12px;display:none;">
+        <label>Show on portal for</label>
+        <div id="bm-portal-share-list" style="max-height:140px;overflow:auto;border:1px solid var(--navy-border);border-radius:4px;padding:8px 10px;background:rgba(5,12,25,0.4);"></div>
+        <span class="field-hint">Full Lighthouse BOMs with no client stock. Include-client and shared SKUs already appear on that client&rsquo;s portal.</span>
+        <span id="bm-portal-share-warn" class="field-hint" style="display:none;color:#e89c3a;">More than one client selected — they will all see the same jobs on this BOM.</span>
       </div>
     </div>
 
@@ -12188,6 +12388,89 @@ window._bomReadIncludeClientId = function() {
   return id;
 };
 
+window._bomPortalShareIds = [];
+
+window._applyPortalShareUI = function() {
+  var row = el('bm-portal-share-row');
+  var list = el('bm-portal-share-list');
+  var warn = el('bm-portal-share-warn');
+  var clientId = gv('bm-client');
+  if (row) row.style.display = (clientId === 'CLI-000') ? '' : 'none';
+  if (!list) return;
+  var customers = (window._bomCustomers || []).filter(function(c){ return c.id && c.id !== 'CLI-000'; });
+  var selected = window._bomPortalShareIds || [];
+  if (clientId !== 'CLI-000') {
+    list.innerHTML = '';
+    if (warn) warn.style.display = 'none';
+    return;
+  }
+  if (!customers.length) {
+    list.innerHTML = '<div style="color:var(--muted);font-size:12px;">No other clients on file.</div>';
+    if (warn) warn.style.display = 'none';
+    return;
+  }
+  list.innerHTML = customers.map(function(c) {
+    var on = selected.indexOf(c.id) >= 0;
+    return '<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;color:var(--white);cursor:pointer;">'
+      + '<input type="checkbox" data-portal-share="' + c.id + '" ' + (on ? 'checked' : '') + ' onchange="window._onBomPortalShareChange()">'
+      + (c.name || c.id)
+      + '</label>';
+  }).join('');
+  if (warn) warn.style.display = selected.length > 1 ? '' : 'none';
+};
+
+window._onBomPortalShareChange = function() {
+  var list = el('bm-portal-share-list');
+  var warn = el('bm-portal-share-warn');
+  var ids = [];
+  if (list) {
+    list.querySelectorAll('input[data-portal-share]').forEach(function(cb) {
+      if (cb.checked) ids.push(cb.getAttribute('data-portal-share'));
+    });
+  }
+  window._bomPortalShareIds = ids;
+  if (warn) warn.style.display = ids.length > 1 ? '' : 'none';
+};
+
+window._bomLoadPortalShares = async function(bomId) {
+  window._bomPortalShareIds = [];
+  if (!bomId) { if (window._applyPortalShareUI) window._applyPortalShareUI(); return; }
+  try {
+    var rows = await window.db.select('bom_portal_shares', '?bom_id=eq.' + bomId + '&select=client_id') || [];
+    window._bomPortalShareIds = rows.map(function(r){ return r.client_id; }).filter(Boolean);
+  } catch(_e) {
+    window._bomPortalShareIds = [];
+  }
+  if (window._applyPortalShareUI) window._applyPortalShareUI();
+};
+
+window._bomSyncPortalShares = async function(bomId) {
+  if (!bomId) return;
+  var clientId = gv('bm-client');
+  var wanted = (clientId === 'CLI-000') ? (window._bomPortalShareIds || []).slice() : [];
+  var existing = [];
+  try {
+    existing = await window.db.select('bom_portal_shares', '?bom_id=eq.' + bomId + '&select=client_id') || [];
+  } catch(_e) { existing = []; }
+  var have = existing.map(function(r){ return r.client_id; });
+  var toAdd = wanted.filter(function(id){ return have.indexOf(id) < 0; });
+  var toDel = have.filter(function(id){ return wanted.indexOf(id) < 0; });
+  for (var i = 0; i < toDel.length; i++) {
+    try {
+      await window.db.delete('bom_portal_shares', '?bom_id=eq.' + bomId + '&client_id=eq.' + toDel[i]);
+    } catch(_d) {}
+  }
+  if (toAdd.length) {
+    try {
+      await window.db.insert('bom_portal_shares', toAdd.map(function(id){
+        return { bom_id: bomId, client_id: id };
+      }));
+    } catch(_a) {
+      window.logError && window.logError('_bomSyncPortalShares', _a);
+    }
+  }
+};
+
 // Category → dropdown mapping for BOM components
 // Maps exact DB category names (lowercase) → BOM dropdown IDs
 // Supports both old broad names and new specific subcategory names
@@ -12374,6 +12657,8 @@ window.onBomClientChange = async function(preserveSelections) {
     window._bomIncludeClientId = null;
     if (window._applyClientStockUI) window._applyClientStockUI();
   }
+  if (clientId !== 'CLI-000') window._bomPortalShareIds = [];
+  if (window._applyPortalShareUI) window._applyPortalShareUI();
 
   // Snapshot current selections so an inventory reload (e.g. toggling Lighthouse
   // stock) preserves the user's in-progress choices instead of wiping the BOM.
@@ -12566,6 +12851,7 @@ async function openBomModal(editId) {
           .map(function(c){ return '<option value="' + c.id + '">' + c.name + '</option>'; })
           .join('');
     }
+    if (window._applyPortalShareUI) window._applyPortalShareUI();
   }
 
   // Reset all dropdowns
@@ -12599,6 +12885,8 @@ async function openBomModal(editId) {
   if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
   window._bomIncludeClientId = null;
   if (window._applyClientStockUI) window._applyClientStockUI();
+  window._bomPortalShareIds = [];
+  if (window._applyPortalShareUI) window._applyPortalShareUI();
 
   var readyBox = el('bm-dry-goods-ready');
   if (readyBox) readyBox.checked = false;
@@ -12691,6 +12979,11 @@ async function openBomModal(editId) {
       }
       if (window._applyLhStockToggleUI) window._applyLhStockToggleUI();
       if (window._applyClientStockUI) window._applyClientStockUI();
+      if (b.clientId === 'CLI-000' && window._bomLoadPortalShares) {
+        await window._bomLoadPortalShares(b.id);
+      } else if (window._applyPortalShareUI) {
+        window._applyPortalShareUI();
+      }
 
       // Load client inventory, then restore dropdown selections by SKU ID
       window.onBomClientChange().then(function() {
@@ -13464,6 +13757,10 @@ async function saveBomDraft() {
       if (editIdEl) editIdEl.value = newId;
       window.toast && window.toast('Draft saved: ' + product, 'success');
     }
+    var _draftShareId = editId || (el('bm-edit-id') && el('bm-edit-id').value);
+    if (_draftShareId && window._bomSyncPortalShares) {
+      try { await window._bomSyncPortalShares(_draftShareId); } catch(_se) {}
+    }
     renderBoms();
   } catch(e) {
     await window.lpAlert('Error saving draft: ' + e.message, { variant: 'error' });
@@ -13620,6 +13917,9 @@ async function saveBom() {
       _savedBomId = Array.isArray(saved) && saved[0] && saved[0].id ? saved[0].id : dbPayload.id;
       BOMS.unshift(localBom(_savedBomId));
       window.BOMS = BOMS;
+    }
+    if (_savedBomId && window._bomSyncPortalShares) {
+      try { await window._bomSyncPortalShares(_savedBomId); } catch(_se) {}
     }
     closeBomModal(); renderBoms();
     // Request approval immediately — staff used "Submit for Approval"
@@ -24000,9 +24300,19 @@ window.approveJobSubmission = async function(id, opts) {
     var cu = window.CURRENT_USER;
     var acceptedBy = cu ? (cu.display_name || cu.full_name || cu.email || 'Lighthouse') : 'Lighthouse';
 
+    var jobClientId = s.client_id;
+    try {
+      if (s.bom_id) {
+        var _bomOwner = await db.select('boms', '?id=eq.' + s.bom_id + '&select=client_id,bom_status&limit=1');
+        if (_bomOwner && _bomOwner[0] && _bomOwner[0].client_id === 'CLI-000') {
+          jobClientId = 'CLI-000';
+        }
+      }
+    } catch(_be) {}
+
     var jobPayload = {
       id:                 newJobId,
-      client_id:          s.client_id,
+      client_id:          jobClientId,
       bom_id:             s.bom_id             || null,
       product_name:       s.product_name,
       po_number:          s.po_number          || null,
@@ -24046,8 +24356,16 @@ window.approveJobSubmission = async function(id, opts) {
     catch(tErr) { window.logError && window.logError('initJobOnCreate', tErr); }
 
     // Auto-send BOM confirmation to client
-    try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(newJobId); }
-    catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate', bErr); }
+    if (jobClientId !== 'CLI-000') {
+      try { window._bomAutoSendOnCreate && await window._bomAutoSendOnCreate(newJobId); }
+      catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate', bErr); }
+    } else if (s.client_id) {
+      try {
+        var _subCli = await db.select('clients', '?id=eq.' + s.client_id + '&select=email&limit=1');
+        var _subEmail = _subCli && _subCli[0] && _subCli[0].email;
+        if (_subEmail && window._bomSendToClient) await window._bomSendToClient(newJobId, _subEmail);
+      } catch(bErr) { window.logError && window.logError('_bomAutoSendOnCreate:shared', bErr); }
+    }
 
     // ── Email: notify client ──────────────────────────────────────────────────
     try {
@@ -33338,7 +33656,8 @@ window._fetchBomMapFor = async function(bomIds) {
   bomIds.forEach(function(id){ if (id && unique.indexOf(id) < 0) unique.push(id); });
   if (!unique.length) return localMap;
   try {
-    var rows = await window.db.select('boms',
+    var _bomTable = (window.CURRENT_USER && window.CURRENT_USER.role === 'client') ? 'v_portal_boms' : 'boms';
+    var rows = await window.db.select(_bomTable,
       '?id=in.(' + unique.join(',') + ')&select=id,product_name,volume_cl,abv,additional_info,bom_status');
     (rows || []).forEach(function(b){
       if (b && b.id) { localMap[b.id] = b; window._globalBomMap[b.id] = b; }

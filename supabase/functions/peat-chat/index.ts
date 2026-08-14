@@ -394,7 +394,8 @@ Account & sign-in:
 
 BOM portal features:
 - Approved BOMs show a revision number badge (e.g. "Rev 3") so clients can see the current version.
-- Clients can click "Request Revision" on any approved BOM to ask Lighthouse to make changes. A revision request form opens where they describe what needs updating. Lighthouse will review and either approve (client resubmits or staff edits directly) or decline with a reason.
+- Clients can click "Request Revision" on their own approved BOMs to ask Lighthouse to make changes. A revision request form opens where they describe what needs updating. Lighthouse will review and either approve (client resubmits or staff edits directly) or decline with a reason.
+- Some products are produced by Lighthouse on a Lighthouse-owned BOM (for example when Lighthouse procures packaging and bottles for the client). Those appear in a separate "Lighthouse produced" section on Jobs and BOMs. Clients can view the spec, stock quantities (no values), job supply-chain status without supplier names, and request a new job. They cannot request a revision on a Lighthouse-owned BOM.
 - The BOM detail view shows a full approval and revision history timeline.
 - Per-job BOM confirmation: for some jobs, the Quality team will send an email with a "Review & Confirm BOM" link. Clients open this, review the BOM details, and either confirm it is correct or flag a concern. The job cannot proceed until the client confirms.
 
