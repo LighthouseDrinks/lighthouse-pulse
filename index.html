@@ -24124,7 +24124,7 @@ window._approvalsBadgePoll = async function() {
   <!-- Liquid Plan FYI hint — informational only; no writes -->
   <div id="jobs-liquid-plan-hint" style="display:none;margin-bottom:12px;padding:8px 14px;background:rgba(201,168,76,0.07);border:1px solid rgba(201,168,76,0.22);border-radius:4px;font-size:11px;color:var(--muted);align-items:center;gap:8px;">
     <span style="color:var(--gold);font-weight:700;letter-spacing:0.06em;text-transform:uppercase;font-size:9px;">FYI</span>
-    Informational queue — grouped by Planned Prep week (Monday start). Planned Prep is Ready minus 5 working days. Does not change Schedule or Supply Chain.
+    Informational queue — grouped by Planned Prep week (Monday start). Planned Prep is Liquid Ready minus 5 working days. Does not change Schedule or Supply Chain.
   </div>
 
   <!-- Search + Sort -->
@@ -35185,9 +35185,10 @@ window.saveAdjModal = async function() {
       return true;
     }).map(function(j) {
       var readyIso = String(j.job_ready_date).slice(0, 10);
+      var liqIso = j.liquid_ready_date ? String(j.liquid_ready_date).slice(0, 10) : readyIso;
       var prepIso = (typeof window._minusWorkingDays === 'function')
-        ? window._minusWorkingDays(readyIso, 5)
-        : readyIso;
+        ? window._minusWorkingDays(liqIso, 5)
+        : liqIso;
       return {
         job: j,
         readyIso: readyIso,
@@ -39071,8 +39072,12 @@ window.saveAdjModal = async function() {
         tbody.appendChild(tr);
       });
 
-      // Liquid Prep (−5 working days) + Liquid Ready (mirrors Job Ready) — read-only
-      var readyForLiq = (j && j.job_ready_date) || (j_preseed && j_preseed.job_ready_date) || '';
+      // Liquid Prep (−5 working days from Liquid Ready). Liquid Ready defaults to
+      // Job Ready and is independently editable (later override raises Job Ready).
+      var jobForLiq = j || j_preseed;
+      var readyForLiq = (jobForLiq && (jobForLiq.liquid_ready_date || jobForLiq.job_ready_date)) || '';
+      var liqManual = !!(jobForLiq && jobForLiq.liquid_ready_manual);
+      var canEditLiq = !!(canEditSc && !isCompleteJob);
       var prepIso = readyForLiq ? window._minusWorkingDays(String(readyForLiq).slice(0, 10), 5) : null;
       var liqTr = document.createElement('tr');
       liqTr.style.cssText = 'border-top:1px solid var(--navy-border);';
@@ -39089,7 +39094,17 @@ window.saveAdjModal = async function() {
         + '</td>'
         + '<td style="padding:10px 12px;">'
         +   '<div style="font-size:9px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:3px;">Liquid Ready</div>'
-        +   '<div id="sc-liquid-ready-display" style="font-size:12px;font-weight:700;color:var(--white);">' + (readyForLiq ? _fmtIsoDateShort(String(readyForLiq).slice(0, 10)) : '—') + '</div>'
+        +   '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
+        +     '<input type="date" id="sc-liquid-ready-date" value="' + (readyForLiq ? String(readyForLiq).slice(0, 10) : '') + '" '
+        +     (canEditLiq ? '' : 'disabled ')
+        +     'style="background:transparent;border:none;border-bottom:1px solid var(--navy-border);color:var(--white);padding:2px 0 3px;font-size:12px;font-weight:700;font-family:Lato,sans-serif;min-width:132px;'
+        +     (canEditLiq ? 'cursor:pointer;' : 'opacity:0.55;cursor:not-allowed;') + '">'
+        +     '<span id="sc-liquid-ready-manual-badge" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--amber);'
+        +     (liqManual ? '' : 'display:none;') + '">Manual</span>'
+        +     (canEditLiq
+          ? '<button type="button" id="sc-liquid-ready-reset" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:4px 8px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Reset</button>'
+          : '')
+        +   '</div>'
         + '</td>'
         + '<td style="padding:10px 12px;text-align:center;color:var(--muted);font-size:11px;">—</td>';
       tbody.appendChild(liqTr);
@@ -39119,6 +39134,16 @@ window.saveAdjModal = async function() {
       var resetBtn = document.getElementById('sc-job-ready-reset');
       if (resetBtn) {
         resetBtn.onclick = function() { window.resetJobReadyDate(jobId); };
+      }
+      var liqInp = document.getElementById('sc-liquid-ready-date');
+      if (liqInp && canEditSc && !isCompleteJob) {
+        liqInp.onchange = function() {
+          window.setLiquidReadyManual(jobId, this.value || null);
+        };
+      }
+      var liqReset = document.getElementById('sc-liquid-ready-reset');
+      if (liqReset) {
+        liqReset.onclick = function() { window.resetLiquidReadyDate(jobId); };
       }
 
       // Keep Job Ready / Liquid Ready in sync when the SC tab is opened (skip for completed jobs).
@@ -39812,20 +39837,28 @@ window.saveAdjModal = async function() {
   };
 
   // Recompute jobs.job_ready_date from dry-goods ETAs only (on-site lines skipped).
-  // Liquid Ready always mirrors Job Ready. Missing ETA on any outstanding line → null.
-  // Respects job_ready_manual unless opts.clearManual / forceRecompute (still mirrors liquid).
+  // Liquid Ready defaults to Job Ready. A later manual liquid date raises Job Ready
+  // only when a Job Ready already exists (dry-goods complete or previously stored).
+  // Missing ETA on any outstanding line → null. Respects job_ready_manual unless
+  // opts.clearManual / forceRecompute. Respects liquid_ready_manual unless
+  // opts.clearLiquidManual.
   window.recomputeJobReady = async function(jobId, opts) {
     opts = opts || {};
     if (!jobId) return null;
     try {
       var jobRows = await supaGet('jobs?id=eq.' + encodeURIComponent(jobId)
-        + '&select=id,bom_id,job_ready_date,job_ready_manual,liquid_ready_date');
+        + '&select=id,bom_id,job_ready_date,job_ready_manual,liquid_ready_date,liquid_ready_manual');
       var job = jobRows && jobRows[0];
       if (!job) return null;
 
+      var liqManual = !!(job.liquid_ready_manual && !opts.clearLiquidManual);
+      var storedLiq = job.liquid_ready_date ? String(job.liquid_ready_date).slice(0, 10) : null;
+
       var computed = null;
+      var dryComplete = false;
       if (job.job_ready_manual && !opts.clearManual && !opts.forceRecompute) {
         computed = job.job_ready_date || null;
+        dryComplete = !!computed;
       } else {
         var liquidSkuId = null;
         if (job.bom_id) {
@@ -39867,15 +39900,17 @@ window.saveAdjModal = async function() {
         if (!incomplete) {
           // No dry-goods lines yet (BOM not seeded) → leave null; don't invent "today".
           if (!comps.length) computed = null;
-          else if (!dates.length) computed = _todayISODateLocal();
-          else {
+          else if (!dates.length) {
+            computed = _todayISODateLocal();
+            dryComplete = true;
+          } else {
             dates.sort();
             computed = dates[dates.length - 1];
+            dryComplete = true;
           }
         }
       }
 
-      // Liquid Ready always mirrors Job Ready (including null / manual ready).
       var prevReady = job.job_ready_date ? String(job.job_ready_date).slice(0, 10) : null;
       var prevLiq = job.liquid_ready_date ? String(job.liquid_ready_date).slice(0, 10) : null;
       var nextReady = computed ? String(computed).slice(0, 10) : null;
@@ -39885,10 +39920,30 @@ window.saveAdjModal = async function() {
         computed = job.job_ready_date;
         nextReady = prevReady;
       }
-      var changed = (prevReady !== nextReady) || (prevLiq !== nextReady) || !!opts.clearManual;
+
+      var readyBeforeLiq = nextReady;
+      var nextLiq = (liqManual && storedLiq) ? storedLiq : nextReady;
+      var raisedByLiquid = false;
+      if (liqManual && storedLiq) {
+        // Do not invent a Job Ready from liquid while dry goods are still awaiting dates.
+        var canRaise = dryComplete || !!prevReady;
+        if (canRaise && (!readyBeforeLiq || storedLiq > readyBeforeLiq)) {
+          computed = storedLiq;
+          nextReady = storedLiq;
+          raisedByLiquid = true;
+        }
+      }
+
+      var nextJobManual = !!(job.job_ready_manual && !opts.clearManual && !raisedByLiquid);
+      var nextLiqManual = liqManual;
+      var changed = (prevReady !== nextReady) || (prevLiq !== nextLiq)
+        || (!!job.job_ready_manual !== nextJobManual)
+        || (!!job.liquid_ready_manual !== nextLiqManual)
+        || !!opts.clearManual || !!opts.clearLiquidManual;
       if (changed) {
-        var patch = { job_ready_date: computed, liquid_ready_date: computed };
-        if (opts.clearManual) patch.job_ready_manual = false;
+        var patch = { job_ready_date: computed, liquid_ready_date: nextLiq };
+        if (opts.clearManual || raisedByLiquid) patch.job_ready_manual = false;
+        if (opts.clearLiquidManual) patch.liquid_ready_manual = false;
         await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
       }
 
@@ -39897,8 +39952,9 @@ window.saveAdjModal = async function() {
         var cached = arr.find(function(x) { return x.id === jobId; });
         if (cached) {
           cached.job_ready_date = computed;
-          cached.liquid_ready_date = computed;
-          if (opts.clearManual) cached.job_ready_manual = false;
+          cached.liquid_ready_date = nextLiq;
+          cached.job_ready_manual = nextJobManual;
+          cached.liquid_ready_manual = nextLiqManual;
         }
       }
       _bumpCache(typeof _jobs !== 'undefined' ? _jobs : null);
@@ -39957,15 +40013,28 @@ window.saveAdjModal = async function() {
       return;
     }
     var val = dateStr ? String(dateStr).slice(0, 10) : null;
-    await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), {
-      job_ready_date: val,
-      liquid_ready_date: val,
-      job_ready_manual: true
-    });
     var cached = (_jobs || []).find(function(x) { return x.id === jobId; });
+    var liqManual = !!(cached && cached.liquid_ready_manual);
+    var liq = (liqManual && cached && cached.liquid_ready_date)
+      ? String(cached.liquid_ready_date).slice(0, 10) : null;
+    if (!cached) {
+      try {
+        var rows = await supaGet('jobs?id=eq.' + encodeURIComponent(jobId)
+          + '&select=liquid_ready_date,liquid_ready_manual');
+        if (rows && rows[0]) {
+          liqManual = !!rows[0].liquid_ready_manual;
+          liq = (liqManual && rows[0].liquid_ready_date)
+            ? String(rows[0].liquid_ready_date).slice(0, 10) : null;
+        }
+      } catch (_e) { /* non-fatal */ }
+    }
+    if (liq && (!val || liq > val)) val = liq;
+    var patch = { job_ready_date: val, job_ready_manual: true };
+    if (!liqManual) patch.liquid_ready_date = val;
+    await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
     if (cached) {
       cached.job_ready_date = val;
-      cached.liquid_ready_date = val;
+      if (!liqManual) cached.liquid_ready_date = val;
       cached.job_ready_manual = true;
     }
     if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
@@ -39973,6 +40042,56 @@ window.saveAdjModal = async function() {
     if (typeof window.syncScheduleSlotsFromReady === 'function') {
       try { await window.syncScheduleSlotsFromReady({ silent: true }); } catch (_s) {}
     }
+  };
+
+  window.setLiquidReadyManual = async function(jobId, dateStr) {
+    if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) {
+      window.toast && window.toast('You do not have permission to edit supply chain.', 'error');
+      return;
+    }
+    if (!dateStr) {
+      return window.resetLiquidReadyDate(jobId);
+    }
+    var val = String(dateStr).slice(0, 10);
+    var cached = (_jobs || []).find(function(x) { return x.id === jobId; });
+    var curReady = cached && cached.job_ready_date ? String(cached.job_ready_date).slice(0, 10) : null;
+    if (!curReady) {
+      try {
+        var readyRows = await supaGet('jobs?id=eq.' + encodeURIComponent(jobId) + '&select=job_ready_date');
+        if (readyRows && readyRows[0] && readyRows[0].job_ready_date) {
+          curReady = String(readyRows[0].job_ready_date).slice(0, 10);
+        }
+      } catch (_e) { /* non-fatal */ }
+    }
+    var patch = { liquid_ready_date: val, liquid_ready_manual: true };
+    if (curReady && val > curReady) {
+      patch.job_ready_date = val;
+      patch.job_ready_manual = false;
+    }
+    await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
+    if (cached) {
+      cached.liquid_ready_date = val;
+      cached.liquid_ready_manual = true;
+      if (patch.job_ready_date) {
+        cached.job_ready_date = val;
+        cached.job_ready_manual = false;
+      }
+    }
+    if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
+    if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
+    if (typeof window.syncScheduleSlotsFromReady === 'function') {
+      try { await window.syncScheduleSlotsFromReady({ silent: true }); } catch (_s) {}
+    }
+  };
+
+  window.resetLiquidReadyDate = async function(jobId) {
+    if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) {
+      window.toast && window.toast('You do not have permission to edit supply chain.', 'error');
+      return;
+    }
+    await window.recomputeJobReady(jobId, { clearLiquidManual: true });
+    if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
+    window.toast && window.toast('Liquid Ready reset to Job Ready.', 'success');
   };
 
   window.resetJobReadyDate = async function(jobId) {
@@ -40015,10 +40134,15 @@ window.saveAdjModal = async function() {
       return;
     }
     var ready = j && j.job_ready_date ? String(j.job_ready_date).slice(0, 10) : '';
+    var liqReady = (j && j.liquid_ready_date) ? String(j.liquid_ready_date).slice(0, 10) : ready;
     var inp = document.getElementById('sc-job-ready-date');
     var badge = document.getElementById('sc-job-ready-manual-badge');
     if (inp) inp.value = ready;
     if (badge) badge.style.display = (j && j.job_ready_manual) ? '' : 'none';
+    var liqInp = document.getElementById('sc-liquid-ready-date');
+    var liqBadge = document.getElementById('sc-liquid-ready-manual-badge');
+    if (liqInp) liqInp.value = liqReady || '';
+    if (liqBadge) liqBadge.style.display = (j && j.liquid_ready_manual) ? '' : 'none';
 
     var leadEl = document.getElementById('sc-lead-days-display');
     if (leadEl) {
@@ -40045,18 +40169,13 @@ window.saveAdjModal = async function() {
 
     var liqDateStyle = 'font-size:13px;font-weight:700;color:var(--gold);letter-spacing:-0.01em;';
     var liqEmptyStyle = 'font-size:13px;font-weight:600;color:var(--muted);opacity:0.45;';
-    var liqEl = document.getElementById('sc-liquid-ready-display');
-    if (liqEl) {
-      liqEl.textContent = ready ? _fmtIsoDateShort(ready) : 'Awaiting';
-      liqEl.style.cssText = ready ? liqDateStyle : liqEmptyStyle;
-    }
     var prepEl = document.getElementById('sc-liquid-prep-display');
     if (prepEl) {
-      if (!ready) {
+      if (!liqReady) {
         prepEl.textContent = 'Awaiting';
         prepEl.style.cssText = liqEmptyStyle;
       } else {
-        var prep = window._minusWorkingDays(ready, 5);
+        var prep = window._minusWorkingDays(liqReady, 5);
         prepEl.textContent = prep ? _fmtIsoDateShort(prep) : 'Awaiting';
         prepEl.style.cssText = prep ? liqDateStyle : liqEmptyStyle;
       }
