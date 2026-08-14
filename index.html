@@ -2835,7 +2835,26 @@ window.doRegister = async function() {
   if (btn) { btn.disabled=true; btn.textContent='Creating account…'; }
   try {
     var result = await window._sb.auth.signUp({ email: email, password: pw });
-    if (result.error) throw result.error;
+    var alreadyMsg = ((result.error && result.error.message) || '').toLowerCase();
+    var alreadyRegistered = !!(result.error && (
+      alreadyMsg.indexOf('already registered') !== -1 ||
+      alreadyMsg.indexOf('already been registered') !== -1 ||
+      alreadyMsg.indexOf('already exists') !== -1 ||
+      result.error.status === 422
+    ));
+    // Confirm-email quirk: existing emails can return a user with no session and no identities.
+    var fakeNew = !result.error && result.data && result.data.user && !result.data.session
+      && Array.isArray(result.data.user.identities) && result.data.user.identities.length === 0;
+    if (alreadyRegistered || fakeNew) {
+      // Leftover Auth login after a Pulse-only delete — reuse it if the password matches.
+      var signIn = await window._sb.auth.signInWithPassword({ email: email, password: pw });
+      if (signIn.error) {
+        throw new Error('This email already has a login from a previous account. Use that password, or ask an admin to fully delete the leftover login and try again.');
+      }
+      result = signIn;
+    } else if (result.error) {
+      throw result.error;
+    }
     var userId = result.data && result.data.user && result.data.user.id;
     if (!userId) throw new Error('Account creation failed. Please try again.');
 
@@ -55653,8 +55672,8 @@ window.saveAdjModal = async function() {
       ov.style.cssText='position:fixed;inset:0;background:rgba(5,12,20,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
       ov.innerHTML='<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--red);border-radius:8px;padding:28px 28px 22px;max-width:400px;width:100%;">'
         +'<div style="font-size:14px;font-weight:700;color:var(--white);margin-bottom:10px;">Delete User</div>'
-        +'<div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:6px;">Remove <strong style="color:var(--white);">'+(name||'this user')+'</strong> from Pulse?</div>'
-        +'<div style="font-size:11px;color:var(--amber);margin-bottom:22px;">&#9888; This removes their Pulse access. To fully delete their login, also remove them from <a href="https://supabase.com/dashboard/project/anhawgzgxoywophqbmji/auth/users" target="_blank" style="color:var(--gold);">Supabase Auth</a>.</div>'
+        +'<div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:6px;">Remove <strong style="color:var(--white);">'+(name||'this user')+'</strong> from Pulse and delete their login?</div>'
+        +'<div style="font-size:11px;color:var(--amber);margin-bottom:22px;">&#9888; This revokes access completely. They can be invited again afterwards.</div>'
         +'<div style="display:flex;gap:10px;justify-content:flex-end;">'
         +'<button id="_duX" style="padding:8px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">Cancel</button>'
         +'<button id="_duOK" style="padding:8px 18px;background:var(--red);border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">Delete User</button>'
@@ -55668,36 +55687,27 @@ window.saveAdjModal = async function() {
     try {
       var _sess = await window._sb.auth.getSession();
       var t = (_sess.data&&_sess.data.session&&_sess.data.session.access_token) || SUPA_KEY;
+      // Delete the Auth login FIRST. If this fails, leave the Pulse profile in
+      // place so the user stays visible and can be retried — otherwise signup
+      // with the same email gets stuck on "already registered".
+      if (authUid) {
+        var delRes = await fetch(SUPA_URL+'/functions/v1/swift-function', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: SUPA_KEY, Authorization: 'Bearer '+t },
+          body: JSON.stringify({ action: 'delete_user', user_id: authUid })
+        });
+        var delData = await delRes.json().catch(function(){ return {}; });
+        if (!delRes.ok || delData.error) {
+          throw new Error(delData.error || 'Could not delete the login. The Pulse profile was left in place so you can retry.');
+        }
+      }
       var r = await fetch(SUPA_URL+'/rest/v1/app_users?id=eq.'+uid, {
         method: 'DELETE',
         headers: { apikey: SUPA_KEY, Authorization: 'Bearer '+t, Prefer: 'return=minimal' }
       });
       if (!r.ok) { var e=await r.json(); throw new Error(e.message||r.statusText); }
-      // Attempt to remove Supabase Auth login — non-critical, may fail if already removed
-      var authDeleted = false;
-      if (authUid) {
-        try {
-          var _sess2 = await window._sb.auth.getSession();
-          var at = (_sess2.data&&_sess2.data.session&&_sess2.data.session.access_token) || SUPA_KEY;
-          var delRes = await fetch('https://anhawgzgxoywophqbmji.supabase.co/functions/v1/delete-auth-user', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer '+at },
-            body: JSON.stringify({ user_id: authUid })
-          });
-          var delData = await delRes.json().catch(function(){ return {}; });
-          if (delRes.ok && delData && delData.success) { authDeleted = true; }
-          else { console.warn('Auth delete (non-critical):', delData); }
-        } catch(e2) { console.warn('Auth delete failed (non-critical):', e2.message); }
-      }
       renderUsersList();
-      if (authDeleted) {
-        window.toast&&window.toast((name||'User')+' fully removed from Pulse.','success');
-      } else {
-        window.toast&&window.toast(
-          (name||'User')+' removed from Pulse. Also delete from Supabase Auth dashboard to fully revoke login.',
-          'warning'
-        );
-      }
+      window.toast&&window.toast((name||'User')+' fully removed from Pulse.','success');
     } catch(e) { window.toast&&window.toast('Error: '+e.message,'error'); }
   };
 
