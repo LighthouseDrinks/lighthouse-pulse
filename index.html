@@ -39146,12 +39146,10 @@ window.saveAdjModal = async function() {
         liqReset.onclick = function() { window.resetLiquidReadyDate(jobId); };
       }
 
-      // Keep Job Ready / Liquid Ready in sync when the SC tab is opened (skip for completed jobs).
-      if (!isCompleteJob) {
-        try {
-          await window.recomputeJobReady(jobId, { skipSlotSync: true });
-          window._refreshScJobReadyUI(jobId);
-        } catch (_re) { /* non-fatal */ }
+      // Display stored dates only. Do not recompute on open — that races the
+      // Liquid Ready input and was writing the dry-goods date back over a save.
+      if (!isCompleteJob && typeof window._refreshScJobReadyUI === 'function') {
+        window._refreshScJobReadyUI(jobId);
       }
 
       // ── Step 2: bay allocation control ──
@@ -39831,17 +39829,13 @@ window.saveAdjModal = async function() {
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   };
 
-  var _liquidReadySaveGen = {};
   // Recompute jobs.job_ready_date from dry-goods ETAs only (on-site lines skipped).
   // Liquid Ready defaults to Job Ready. A later manual liquid date raises Job Ready
-  // only when a Job Ready already exists (dry-goods complete or previously stored).
-  // Missing ETA on any outstanding line → null. Respects job_ready_manual unless
-  // opts.clearManual / forceRecompute. Respects liquid_ready_manual unless
-  // opts.clearLiquidManual.
+  // only when a Job Ready already exists. A manual liquid date is never overwritten
+  // here — only Reset Liquid remirrors it.
   window.recomputeJobReady = async function(jobId, opts) {
     opts = opts || {};
     if (!jobId) return null;
-    var saveGenAtStart = _liquidReadySaveGen[jobId] || 0;
     try {
       var jobRows = await supaGet('jobs?id=eq.' + encodeURIComponent(jobId)
         + '&select=id,bom_id,job_ready_date,job_ready_manual,liquid_ready_date,liquid_ready_manual');
@@ -39852,10 +39846,8 @@ window.saveAdjModal = async function() {
       var storedLiq = job.liquid_ready_date ? String(job.liquid_ready_date).slice(0, 10) : null;
 
       var computed = null;
-      var dryComplete = false;
       if (job.job_ready_manual && !opts.clearManual && !opts.forceRecompute) {
         computed = job.job_ready_date || null;
-        dryComplete = !!computed;
       } else {
         var liquidSkuId = null;
         if (job.bom_id) {
@@ -39895,15 +39887,11 @@ window.saveAdjModal = async function() {
         });
 
         if (!incomplete) {
-          // No dry-goods lines yet (BOM not seeded) → leave null; don't invent "today".
           if (!comps.length) computed = null;
-          else if (!dates.length) {
-            computed = _todayISODateLocal();
-            dryComplete = true;
-          } else {
+          else if (!dates.length) computed = _todayISODateLocal();
+          else {
             dates.sort();
             computed = dates[dates.length - 1];
-            dryComplete = true;
           }
         }
       }
@@ -39911,97 +39899,38 @@ window.saveAdjModal = async function() {
       var prevReady = job.job_ready_date ? String(job.job_ready_date).slice(0, 10) : null;
       var prevLiq = job.liquid_ready_date ? String(job.liquid_ready_date).slice(0, 10) : null;
       var nextReady = computed ? String(computed).slice(0, 10) : null;
-      // Incomplete / empty calc must not wipe a stored Job Ready (empties Next Jobs).
-      // Reset (clearManual) is the only path that may write null over an existing date.
       if (!opts.clearManual && !nextReady && prevReady) {
         computed = job.job_ready_date;
         nextReady = prevReady;
       }
 
-      // Re-read before applying liquid / writing. Opening the SC tab starts a
-      // dry-goods recompute, then the date input is already live — if the user
-      // saves Liquid Ready while that request is in flight, the stale fetch
-      // would write the old dates back and leave liquid_ready_manual set.
-      if (!opts.clearLiquidManual) {
-        try {
-          var freshRows = await supaGet('jobs?id=eq.' + encodeURIComponent(jobId)
-            + '&select=job_ready_date,job_ready_manual,liquid_ready_date,liquid_ready_manual');
-          var fresh = freshRows && freshRows[0];
-          if (fresh) {
-            if (fresh.liquid_ready_manual) {
-              liqManual = true;
-              if (fresh.liquid_ready_date) storedLiq = String(fresh.liquid_ready_date).slice(0, 10);
-            }
-            if (fresh.job_ready_date) prevReady = String(fresh.job_ready_date).slice(0, 10);
-            if (fresh.liquid_ready_date) prevLiq = String(fresh.liquid_ready_date).slice(0, 10);
-          }
-        } catch (_fe) { /* keep values from the original fetch */ }
-      }
-
-      var nextLiq = (liqManual && storedLiq) ? storedLiq : nextReady;
-      var raisedByLiquid = false;
+      var nextLiq = nextReady;
       if (liqManual && storedLiq) {
-        // Do not invent a Job Ready from liquid while dry goods are still awaiting dates.
-        var canRaise = dryComplete || !!prevReady;
-        if (canRaise && (!nextReady || storedLiq > nextReady)) {
+        nextLiq = storedLiq;
+        if (nextReady && storedLiq > nextReady) {
           computed = storedLiq;
           nextReady = storedLiq;
-          raisedByLiquid = true;
+        } else if (!nextReady && prevReady) {
+          nextReady = prevReady;
+          computed = job.job_ready_date;
+        }
+        if (nextReady && storedLiq > nextReady) {
+          computed = storedLiq;
+          nextReady = storedLiq;
         }
       }
 
-      if (!opts.clearLiquidManual && (_liquidReadySaveGen[jobId] || 0) !== saveGenAtStart) {
-        var cachedNow = (typeof _jobs !== 'undefined' && _jobs)
-          ? _jobs.find(function(x) { return x.id === jobId; }) : null;
-        if (cachedNow && cachedNow.liquid_ready_manual && cachedNow.liquid_ready_date) {
-          liqManual = true;
-          storedLiq = String(cachedNow.liquid_ready_date).slice(0, 10);
-          nextLiq = storedLiq;
-          if (!nextReady || storedLiq > nextReady) {
-            computed = storedLiq;
-            nextReady = storedLiq;
-            raisedByLiquid = true;
-          }
-          if (cachedNow.job_ready_date) prevReady = String(cachedNow.job_ready_date).slice(0, 10);
-          if (cachedNow.liquid_ready_date) prevLiq = String(cachedNow.liquid_ready_date).slice(0, 10);
-        }
-      }
-
-      var nextJobManual = !!(job.job_ready_manual && !opts.clearManual && !raisedByLiquid);
+      var nextJobManual = !!(job.job_ready_manual && !opts.clearManual);
       var nextLiqManual = liqManual;
-      var changed = (prevReady !== nextReady) || (prevLiq !== nextLiq)
+      var changed = (prevReady !== nextReady)
+        || (!liqManual && prevLiq !== nextLiq)
         || (!!job.job_ready_manual !== nextJobManual)
         || (!!job.liquid_ready_manual !== nextLiqManual)
         || !!opts.clearManual || !!opts.clearLiquidManual;
-      if (changed && !opts.clearLiquidManual) {
-        try {
-          var lockRows = await supaGet('jobs?id=eq.' + encodeURIComponent(jobId)
-            + '&select=job_ready_date,liquid_ready_date,liquid_ready_manual');
-          var lock = lockRows && lockRows[0];
-          if (lock && lock.liquid_ready_manual && lock.liquid_ready_date) {
-            var lockLiq = String(lock.liquid_ready_date).slice(0, 10);
-            liqManual = true;
-            storedLiq = lockLiq;
-            nextLiq = lockLiq;
-            nextLiqManual = true;
-            if (!nextReady || lockLiq > nextReady) {
-              computed = lockLiq;
-              nextReady = lockLiq;
-              raisedByLiquid = true;
-              nextJobManual = false;
-            }
-            prevReady = lock.job_ready_date ? String(lock.job_ready_date).slice(0, 10) : prevReady;
-            prevLiq = lockLiq;
-            changed = (prevReady !== nextReady) || (prevLiq !== nextLiq)
-              || (!!job.job_ready_manual !== nextJobManual)
-              || (!!lock.liquid_ready_manual !== nextLiqManual)
-              || !!opts.clearManual;
-          }
-        } catch (_le) { /* write the computed values */ }
-      }
       if (changed) {
-        var patch = { job_ready_date: computed, liquid_ready_date: nextLiq };
-        if (opts.clearManual || raisedByLiquid) patch.job_ready_manual = false;
+        var patch = { job_ready_date: computed };
+        if (!liqManual || opts.clearLiquidManual) patch.liquid_ready_date = nextLiq;
+        if (opts.clearManual) patch.job_ready_manual = false;
         if (opts.clearLiquidManual) patch.liquid_ready_manual = false;
         await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
       }
@@ -40009,12 +39938,17 @@ window.saveAdjModal = async function() {
       function _bumpCache(arr) {
         if (!arr) return;
         var cached = arr.find(function(x) { return x.id === jobId; });
-        if (cached) {
+        if (!cached) return;
+        if (cached.liquid_ready_manual && !opts.clearLiquidManual) {
+          var cacheLiq = cached.liquid_ready_date ? String(cached.liquid_ready_date).slice(0, 10) : null;
+          if (cacheLiq && nextReady && cacheLiq > nextReady) return;
           cached.job_ready_date = computed;
-          cached.liquid_ready_date = nextLiq;
-          cached.job_ready_manual = nextJobManual;
-          cached.liquid_ready_manual = nextLiqManual;
+          return;
         }
+        cached.job_ready_date = computed;
+        cached.liquid_ready_date = nextLiq;
+        cached.job_ready_manual = nextJobManual;
+        cached.liquid_ready_manual = nextLiqManual;
       }
       _bumpCache(typeof _jobs !== 'undefined' ? _jobs : null);
       try { _bumpCache(typeof _schedJobs !== 'undefined' ? _schedJobs : null); } catch (_c) {}
@@ -40113,7 +40047,6 @@ window.saveAdjModal = async function() {
       return window.resetLiquidReadyDate(jobId);
     }
     var val = String(dateStr).slice(0, 10);
-    _liquidReadySaveGen[jobId] = (_liquidReadySaveGen[jobId] || 0) + 1;
     var cached = (_jobs || []).find(function(x) { return x.id === jobId; });
     var curReady = cached && cached.job_ready_date ? String(cached.job_ready_date).slice(0, 10) : null;
     if (!curReady) {
@@ -40127,7 +40060,7 @@ window.saveAdjModal = async function() {
     var patch = { liquid_ready_date: val, liquid_ready_manual: true };
     if (curReady && val > curReady) {
       patch.job_ready_date = val;
-      patch.job_ready_manual = false;
+      patch.job_ready_manual = true;
     }
     await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
     if (cached) {
@@ -40135,7 +40068,7 @@ window.saveAdjModal = async function() {
       cached.liquid_ready_manual = true;
       if (patch.job_ready_date) {
         cached.job_ready_date = val;
-        cached.job_ready_manual = false;
+        cached.job_ready_manual = true;
       }
     }
     if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
@@ -40150,7 +40083,7 @@ window.saveAdjModal = async function() {
       window.toast && window.toast('You do not have permission to edit supply chain.', 'error');
       return;
     }
-    await window.recomputeJobReady(jobId, { clearLiquidManual: true });
+    await window.recomputeJobReady(jobId, { clearLiquidManual: true, clearManual: true, forceRecompute: true });
     if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
     window.toast && window.toast('Liquid Ready reset to Job Ready.', 'success');
   };
