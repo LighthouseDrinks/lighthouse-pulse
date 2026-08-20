@@ -37832,8 +37832,13 @@ window.saveAdjModal = async function() {
       var ok = await window.lpConfirm('All sign-offs are complete. No dry goods components to deduct.\n\nMark this job as Complete?', { title: 'Complete Job', confirmLabel: 'Complete Job' });
       if (!ok) return false;
       try {
-        if (liquidPlan && liquidPlan.lines && liquidPlan.lines.length) {
-          await _executeLiquidDeductionPlan(jobId, liquidPlan, job);
+        var _lqNone = { ok: true };
+        if (liquidPlan && Array.isArray(liquidPlan.lines)) {
+          _lqNone = await _executeLiquidDeductionPlan(jobId, liquidPlan, job) || { ok: true };
+        }
+        if (!_lqNone.ok) {
+          await _alertLiquidCloseFailed(_lqNone.failures);
+          return false;
         }
         await _finaliseJobComplete(jobId, job.stage);
         window.toast && window.toast('Job complete.', 'success');
@@ -37842,6 +37847,40 @@ window.saveAdjModal = async function() {
       } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
       return false; // prevent outer caller from running again
     }
+
+    // Dry goods already posted on a prior attempt — do not open the deduct table.
+    try {
+      var _jobStageNow = await supaGet('jobs?id=eq.' + jobId + '&select=stage');
+      if (_jobStageNow && _jobStageNow[0] && String(_jobStageNow[0].stage || '').toLowerCase() === 'complete') {
+        await window.lpAlert('This job has already been completed and its stock already deducted — no further deduction was made.', { title: 'Already completed', variant: 'warn' });
+        return false;
+      }
+      var _dryAlready = await supaGet('dry_goods_movements?job_id=eq.' + encodeURIComponent(jobId) + '&select=id&limit=1');
+      if (_dryAlready && _dryAlready.length) {
+        var _retryLiq = await window.lpConfirm(
+          'Dry goods have already been closed on an earlier attempt. They will not be deducted again.\n\nRetry liquid deduction and complete the job?',
+          { title: 'Dry goods already closed', confirmLabel: 'Retry liquid', cancelLabel: 'Cancel' }
+        );
+        if (!_retryLiq) return false;
+        try {
+          var _lqResume = { ok: true };
+          if (liquidPlan && Array.isArray(liquidPlan.lines)) {
+            _lqResume = await _executeLiquidDeductionPlan(jobId, liquidPlan, job) || { ok: true };
+          }
+          if (!_lqResume.ok) {
+            await _alertLiquidCloseFailed(_lqResume.failures);
+            return false;
+          }
+          await _finaliseJobComplete(jobId, job.stage);
+          window.toast && window.toast('Job complete — dry goods were already closed.', 'success');
+          await loadJobs();
+          window.closeJobDetail();
+        } catch(_re) {
+          window.toast && window.toast('Could not finalise the job (' + (_re.message || 'unknown error') + '). Dry goods are unchanged — please retry.', 'error');
+        }
+        return false;
+      }
+    } catch(_dryChk) { /* fall through to the deduct modal */ }
 
     // Fetch current stock totals per SKU
     var skuIds = dryComps.map(function(c){ return c.sku_id; });
@@ -38293,8 +38332,16 @@ window.saveAdjModal = async function() {
         if (_resumeSkipDryGoods) {
           deductionsDone = true; // dry goods already irreversibly deducted earlier
           try {
-            if (liquidPlan && liquidPlan.lines && liquidPlan.lines.length) {
-              await _executeLiquidDeductionPlan(jobId, liquidPlan, job);
+            var _lqResR = { ok: true };
+            if (liquidPlan && Array.isArray(liquidPlan.lines)) {
+              _lqResR = await _executeLiquidDeductionPlan(jobId, liquidPlan, job) || { ok: true };
+            }
+            if (!_lqResR.ok) {
+              ov.remove();
+              document.body.style.overflow = '';
+              await _alertLiquidCloseFailed(_lqResR.failures);
+              resolve(false);
+              return;
             }
             await _finaliseJobComplete(jobId, job.stage);
             window.toast && window.toast('Job complete — dry goods stock was already deducted from an earlier attempt.', 'success');
@@ -38488,8 +38535,16 @@ window.saveAdjModal = async function() {
           deductionsDone = true;
 
           // 5. Execute liquid deductions if a plan was collected
-          if (liquidPlan && liquidPlan.lines && liquidPlan.lines.length) {
-            await _executeLiquidDeductionPlan(jobId, liquidPlan, job);
+          var _lqRes = { ok: true };
+          if (liquidPlan && Array.isArray(liquidPlan.lines)) {
+            _lqRes = await _executeLiquidDeductionPlan(jobId, liquidPlan, job) || { ok: true };
+          }
+          if (!_lqRes.ok) {
+            ov.remove();
+            document.body.style.overflow = '';
+            await _alertLiquidCloseFailed(_lqRes.failures);
+            resolve(false);
+            return;
           }
 
           // 6. Mark job complete
@@ -42368,29 +42423,85 @@ window.saveAdjModal = async function() {
   }
   window._lsoEffAbv = _lsoEffAbv;
 
-  // Snapshot-first per-container totals: reflects what was committed to the job at
-  // link time; live liquid_containers values are only a fallback for legacy links
-  // that never captured a snapshot. Keeps the requirement bar from drifting when a
-  // linked vessel is drawn down after linking.
-  window._lsoLinkedTotals = function (linkedConts, allConts) {
+  // Per-container litres/ABV for the sign-off list and requirement bar.
+  // useLive=true (open jobs): what is in the vessel now.
+  // useLive=false (completed): link-time snapshot, so a finished job does not
+  // look empty after a later sibling emptied the tank.
+  window._lsoLinkedRowVol = function (lc, cont, useLive) {
+    var snapL   = (lc && lc.litres != null) ? parseFloat(lc.litres) : null;
+    var snapAbv = (lc && lc.abv    != null) ? parseFloat(lc.abv)    : null;
+    var snapLpa = (lc && lc.lpa    != null) ? parseFloat(lc.lpa)    : null;
+    var liveL   = cont ? parseFloat(cont.current_litres || 0) : 0;
+    var liveLpa = cont ? parseFloat(cont.current_lpa || 0) : 0;
+    var liveAbv = cont ? _lsoEffAbv(cont) : 0;
+    var litres, lpa, abv;
+    if (useLive) {
+      litres = liveL;
+      lpa    = liveLpa > 0 ? liveLpa : (liveL * (liveAbv || snapAbv || 0) / 100);
+      abv    = liveAbv || snapAbv || 0;
+    } else {
+      litres = snapL != null ? snapL : liveL;
+      if (snapLpa != null && snapLpa > 0)        lpa = snapLpa;
+      else if (snapL != null && snapAbv != null) lpa = snapL * snapAbv / 100;
+      else if (liveLpa > 0)                      lpa = liveLpa;
+      else                                       lpa = litres * (snapAbv || liveAbv || 0) / 100;
+      abv = (snapAbv != null && snapAbv > 0) ? snapAbv : liveAbv;
+    }
+    return { litres: litres || 0, lpa: lpa || 0, abv: abv || 0, snapL: snapL, liveL: liveL };
+  };
+
+  window._lsoLinkedTotals = function (linkedConts, allConts, useLive) {
     var litres = 0, lpa = 0;
     (linkedConts || []).forEach(function (lc) {
       var cont = (allConts || []).find(function (c) { return c.id === lc.id; });
-      var snapL   = (lc.litres != null) ? parseFloat(lc.litres) : null;
-      var snapAbv = (lc.abv    != null) ? parseFloat(lc.abv)    : null;
-      var snapLpa = (lc.lpa    != null) ? parseFloat(lc.lpa)    : null;
-      // Litres: snapshot first, else live
-      var l = (snapL != null) ? snapL : (cont ? parseFloat(cont.current_litres || 0) : 0);
-      // LPA: snapshot lpa, else snapshot litres*abv, else live lpa, else live litres*abv
-      var a;
-      if (snapLpa != null && snapLpa > 0)        a = snapLpa;
-      else if (snapL != null && snapAbv != null) a = snapL * snapAbv / 100;
-      else if (cont && parseFloat(cont.current_lpa || 0) > 0) a = parseFloat(cont.current_lpa);
-      else if (cont)                             a = parseFloat(cont.current_litres || 0) * parseFloat(cont.abv || 0) / 100;
-      else                                       a = 0;
-      litres += l; lpa += a;
+      var v = window._lsoLinkedRowVol(lc, cont, !!useLive);
+      litres += v.litres; lpa += v.lpa;
     });
     return { litres: litres, lpa: lpa };
+  };
+
+  // Other new/active/on_hold jobs that still list these container ids.
+  // linked_containers_json is text — parse it; do not ilike.
+  window._lsoFindSharingJobs = async function (containerIds, exceptJobId) {
+    var ids = (containerIds || []).filter(Boolean);
+    var empty = {};
+    ids.forEach(function (id) { empty[id] = []; });
+    if (!ids.length) return empty;
+    var jobs;
+    try {
+      jobs = await supaGet('jobs?stage=in.(new,active,on_hold)&select=id,product_name,stage');
+    } catch (e) { return empty; }
+    var others = (jobs || []).filter(function (j) { return j.id !== exceptJobId; });
+    if (!others.length) return empty;
+    var jobIds = others.map(function (j) { return j.id; });
+    var jobMap = {};
+    others.forEach(function (j) { jobMap[j.id] = j; });
+    var signoffs;
+    try {
+      signoffs = await supaGet('job_liquid_signoff?job_id=in.(' + jobIds.join(',') + ')&select=job_id,linked_containers_json,linked_container_id');
+    } catch (e2) { return empty; }
+    var byCont = empty;
+    (signoffs || []).forEach(function (s) {
+      var linked = [];
+      try { linked = JSON.parse(s.linked_containers_json || '[]'); } catch (e3) {}
+      if (!linked.length && s.linked_container_id) linked = [{ id: s.linked_container_id }];
+      linked.forEach(function (lc) {
+        if (!lc || !lc.id || !byCont[lc.id]) return;
+        var j = jobMap[s.job_id];
+        if (j) byCont[lc.id].push({ id: j.id, product_name: j.product_name || j.id });
+      });
+    });
+    return byCont;
+  };
+  window._lsoSharingLines = function (sharingMap, refById) {
+    var lines = [];
+    Object.keys(sharingMap || {}).forEach(function (cid) {
+      var jobs = sharingMap[cid];
+      if (!jobs || !jobs.length) return;
+      var ref = (refById && refById[cid]) || cid;
+      lines.push(ref + ' is also on ' + jobs.map(function (j) { return j.id; }).join(', '));
+    });
+    return lines;
   };
 
   // Liquid-identity badge: register membership + BOM liquid description match.
@@ -42423,6 +42534,8 @@ window.saveAdjModal = async function() {
     if (!el) return;
     el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px 0;">Loading…</div>';
     var j = _jobs.find(function(x){ return x.id === jobId; });
+    var _jobOpen = !!(j && ['new','active','on_hold'].indexOf(String(j.stage || '').toLowerCase()) >= 0);
+    window._lsoUseLive = _jobOpen;
 
     try {
       var rows = await supaGet('job_liquid_signoff?job_id=eq.' + jobId + '&limit=1');
@@ -42527,12 +42640,10 @@ window.saveAdjModal = async function() {
         } catch(e5) { /* non-critical */ }
       }
 
-      // Snapshot-first totals: litres/LPA committed to the job at link time (falls
-      // back to live liquid_containers only for legacy links). Angel-share decayed
-      // casks reconcile because the snapshot captured their stored LPA. Computed
-      // before _reqMet so the requirement is judged on alcohol, not raw litres (a
-      // cask-strength IBC yields more bottling litres).
-      var _lsoTot = window._lsoLinkedTotals(_linkedConts, _allConts);
+      // Open jobs: live litres (what is in the vessel now). Completed jobs: the
+      // link-time snapshot so a finished job does not look empty after a sibling
+      // drew the tank. Alcohol (LPA) still drives the requirement, not raw litres.
+      var _lsoTot = window._lsoLinkedTotals(_linkedConts, _allConts, _jobOpen);
       var _linkedTotalLitres = _lsoTot.litres;
       var _linkedWeightedLPA = _lsoTot.lpa;
       // Bottling-strength litres the linked liquid will yield once diluted.
@@ -42703,11 +42814,16 @@ window.saveAdjModal = async function() {
           ? Math.min(100, Math.round(_linkedWeightedLPA / _reqLPA * 100))
           : Math.min(100, Math.round(_linkedTotalLitres / _reqLitres * 100));
         var _barCol = _reqMet ? 'var(--green)' : (_reqPct > 50 ? 'var(--amber)' : 'var(--red)');
-        var _linkedLabel = _bottlingAbv > 0 ? 'Linked So Far (yield @ ' + _bottlingAbv.toFixed(1) + '%)' : 'Linked So Far';
+        var _linkedLabel = _bottlingAbv > 0
+          ? (_jobOpen ? 'Available now (yield @ ' + _bottlingAbv.toFixed(1) + '%)' : 'Linked So Far (yield @ ' + _bottlingAbv.toFixed(1) + '%)')
+          : (_jobOpen ? 'Available now' : 'Linked So Far');
         var _linkedSub = '<div class="lso-req-linked-sub" style="font-size:9px;color:var(--muted);margin-top:2px;">' + _linkedTotalLitres.toFixed(1) + ' L raw &#183; ' + _linkedWeightedLPA.toFixed(2) + ' LPA</div>';
         var _reqStatusTxt = _reqMet
           ? '<span style="color:var(--green);font-weight:700;">&#10003; Requirement met</span>'
           : '<span style="color:var(--amber);font-weight:700;">&#9888; ' + _linkedYieldLitres.toFixed(1) + ' L yield of ' + _reqLitres.toFixed(1) + ' L required (' + _linkedWeightedLPA.toFixed(2) + ' of ' + _reqLPA.toFixed(2) + ' LPA)</span>';
+        if (_jobOpen) {
+          _reqStatusTxt += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Available now — other jobs may already have drawn from these vessels. Sign-off is not reopened.</div>';
+        }
         html += '<div style="background:rgba(13,27,42,0.45);border:1px solid var(--navy-border);border-radius:5px;padding:14px 18px;margin-bottom:14px;">'
           + '<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:10px;">Liquid Requirement</div>'
           + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:10px;">'
@@ -42730,10 +42846,12 @@ window.saveAdjModal = async function() {
       html += '<div id="lso-linked-list" style="margin-bottom:10px;">';
       _linkedConts.forEach(function(lc, idx) {
         var cont = _allConts.find(function(c){ return c.id === lc.id; });
-        // Snapshot-first litres/ABV so the row matches the committed requirement bar.
-        var _snapL = (lc.litres != null) ? parseFloat(lc.litres) : (cont ? parseFloat(cont.current_litres||0) : 0);
-        var _ll = _snapL > 0 ? _snapL.toFixed(0) + 'L' : 'no liquid tracked';
-        var _effAbv = (lc.abv != null && parseFloat(lc.abv) > 0) ? parseFloat(lc.abv) : _lsoEffAbv(cont);
+        var _vol = window._lsoLinkedRowVol(lc, cont, _jobOpen);
+        var _ll = _vol.litres > 0.05 ? _vol.litres.toFixed(0) + 'L' : 'empty';
+        var _linkedAt = (_jobOpen && _vol.snapL != null && Math.abs(_vol.snapL - _vol.liveL) > 0.5)
+          ? ' <span style="font-weight:400;color:var(--muted);">(linked at ' + _vol.snapL.toFixed(0) + 'L)</span>'
+          : '';
+        var _effAbv = _vol.abv;
         var label = cont
           ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + _ll + ' @ ' + (_effAbv > 0 ? _effAbv.toFixed(1) : (cont.abv||'?')) + '%'
           : lc.id;
@@ -42751,11 +42869,24 @@ window.saveAdjModal = async function() {
         // Liquid-identity badge (register membership + BOM liquid description)
         if (cont) _badge += _lsoLiquidBadge(cont, _lsoLiquidSkuDesc);
         html += '<div class="lso-linked-row" data-idx="' + idx + '" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
-          + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + _badge + '</span>'
+          + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + _linkedAt + _badge + '</span>'
           + (!isLocked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" title="Delink this container from the job" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:600;">&#10005; Delink</button>' : '')
           + '</div>';
       });
       html += '</div>';
+      if (_jobOpen && _linkedConts.length) {
+        try {
+          var _shareMap = await window._lsoFindSharingJobs(_linkedConts.map(function(lc){ return lc.id; }), jobId);
+          var _refById = {};
+          _linkedConts.forEach(function(lc){ _refById[lc.id] = lc.reference || lc.id; });
+          var _shareLines = window._lsoSharingLines(_shareMap, _refById);
+          if (_shareLines.length) {
+            html += '<div id="lso-share-warn" style="font-size:11px;color:var(--amber);background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);border-radius:4px;padding:8px 12px;margin-bottom:10px;line-height:1.4;">'
+              + '&#9888; ' + _shareLines.map(function(l){ return window.escapeHtml(l); }).join('<br>')
+              + '</div>';
+          }
+        } catch (_se) { /* non-critical */ }
+      }
 
       // ── Build Step 2 content (dilution scope + calculated note) ─────────────
       // Built here so it can sit inside Step 2 (above Print, when editing) or in
@@ -44058,8 +44189,8 @@ window.saveAdjModal = async function() {
     if (window._lsoAllLinkedConts.find(function(lc){ return lc.id === cid; })) {
       window.toast && window.toast('Container already linked.', 'error'); return;
     }
-    // Snapshot current_litres, abv, lpa and reference at link time — used as "Before job"
-    // figures in the completion deduction modal, so stale live values don't corrupt the ledger
+    // Snapshot at link time is audit only ("linked at X L"). Close and the
+    // open-job list read live current_litres, not this freeze.
     var _linkEntry = {
       id:        cid,
       reference: c.reference || '',
@@ -44111,6 +44242,14 @@ window.saveAdjModal = async function() {
     var spWarn = document.getElementById('lso-spirit-warn');
     if (spWarn) spWarn.style.display = 'none';
     window.toast && window.toast('Container saved. Keep adding until the requirement is met.', 'success');
+    window._lsoFindSharingJobs([cid], window._lsoCurrentJobId).then(function(map) {
+      var jobs = (map && map[cid]) || [];
+      if (!jobs.length) return;
+      window.toast && window.toast(
+        (c.reference || 'This vessel') + ' is also on ' + jobs.map(function(j){ return j.id; }).join(', ') + ' (not complete).',
+        'warn'
+      );
+    }).catch(function(){});
   };
 
   window.lsoRemoveContainer = function(idx) {
@@ -44338,11 +44477,16 @@ window.saveAdjModal = async function() {
     var _eff = function(c){ return window._lsoEffAbv ? window._lsoEffAbv(c) : parseFloat((c && c.abv) || 0); };
     list.innerHTML = linked.map(function(lc, idx) {
       var cont = allConts.find(function(c){ return c.id === lc.id; });
-      // Snapshot-first litres/ABV so the row matches the committed requirement bar.
-      var contLitres = (lc.litres != null) ? parseFloat(lc.litres||0) : (cont ? parseFloat(cont.current_litres||0) : 0);
-      var effAbv = (lc.abv != null && parseFloat(lc.abv) > 0) ? parseFloat(lc.abv) : (cont ? _eff(cont) : 0);
+      var _useLive = !!window._lsoUseLive;
+      var _vol = window._lsoLinkedRowVol(lc, cont, _useLive);
+      var contLitres = _vol.litres;
+      var effAbv = _vol.abv || (cont ? _eff(cont) : 0);
+      var _litLabel = contLitres > 0.05 ? contLitres.toFixed(0) + 'L' : 'empty';
+      var _linkedAt = (_useLive && _vol.snapL != null && Math.abs(_vol.snapL - _vol.liveL) > 0.5)
+        ? ' <span style="font-weight:400;color:var(--muted);">(linked at ' + _vol.snapL.toFixed(0) + 'L)</span>'
+        : '';
       var label = cont
-        ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + contLitres.toFixed(0) + 'L @ ' + (effAbv > 0 ? effAbv.toFixed(1) : (cont.abv||'?')) + '%'
+        ? cont.reference + ' — ' + (cont.spirit_type||'') + ' — ' + _litLabel + ' @ ' + (effAbv > 0 ? effAbv.toFixed(1) : (cont.abv||'?')) + '%'
         : (lc.reference || lc.id);
       var _locked = !!window._lsoIsLocked;
       // Per-container badge vs BOM bottling ABV (effective ABV, shared tolerance) —
@@ -44368,7 +44512,7 @@ window.saveAdjModal = async function() {
       }
       return '<div class="lso-linked-row" style="padding:8px 12px;background:rgba(61,186,120,0.1);border:1px solid rgba(61,186,120,0.3);border-radius:4px;margin-bottom:6px;">'
         + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">'
-        + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + abvBadge + '</span>'
+        + '<span style="color:var(--green);font-size:12px;font-weight:700;">&#10003; ' + window.escapeHtml(label) + _linkedAt + abvBadge + '</span>'
         + (!_locked ? '<button onclick="window.lsoRemoveContainer(' + idx + ')" title="Delink this container from the job" style="background:transparent;border:1px solid rgba(220,53,69,0.4);color:var(--red);font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:600;">&#10005; Delink</button>' : '')
         + '</div>' + ovrRow
         + '</div>';
@@ -44378,9 +44522,7 @@ window.saveAdjModal = async function() {
     // bottling-strength litre yield, mirroring the initial render.
     var reqLitres = window._lsoReqLitres || 0;
     var reqLPA    = reqLitres * (_bottAbv / 100);
-    // Snapshot-first totals (shared with the initial render) so the live re-paint
-    // and the first paint never disagree, and the bar reflects committed volumes.
-    var _lsoTotLive = window._lsoLinkedTotals(linked, allConts);
+    var _lsoTotLive = window._lsoLinkedTotals(linked, allConts, !!window._lsoUseLive);
     var totalLinked = _lsoTotLive.litres;
     var linkedLPA   = _lsoTotLive.lpa;
     var yieldLitres = _bottAbv > 0 ? (linkedLPA / (_bottAbv / 100)) : totalLinked;
@@ -44746,42 +44888,52 @@ window.saveAdjModal = async function() {
       });
     } catch(e) { /* non-critical */ }
 
-    // Build rows — prefer snapshotted litres/lpa recorded at link time.
-    // effAbv = stored LPA / litres (alcohol-accurate strength): casks store full
-    // litres + angel-share-decayed LPA, so nominal abv over-states them. Excluded
-    // containers already fully deducted in a previous (partial) attempt.
+    // Before-state is LIVE stock. Snapshot is audit ("linked at X L") only —
+    // writing snapshot remaining onto the vessel is what resurrected TNK-004.
+    var skippedEmpty = [];
     var contRows = linkedConts.map(function(lc) {
       var live   = liveConts.find(function(c){ return c.id === lc.id; });
       var ref    = lc.reference || (live && live.reference) || lc.id.slice(0,8)+'…';
-      // Before-state integrity: prefer the litres/lpa snapshotted when the vessel
-      // was LINKED to the job, but remember the LIVE figure too so we can warn the
-      // operator if the vessel has changed since (e.g. a 540 L value silently
-      // overwriting what should be a frozen history record).
       var snapLitres = lc.litres != null ? parseFloat(lc.litres) : null;
       var liveLitres = parseFloat((live && live.current_litres) || 0);
-      var before = snapLitres != null ? snapLitres : liveLitres;
-      var lpaB   = lc.lpa != null && parseFloat(lc.lpa) > 0 ? parseFloat(lc.lpa) : parseFloat((live && live.current_lpa) || 0);
-      var nomAbv = lc.abv != null ? parseFloat(lc.abv) : parseFloat((live && live.abv) || 0);
-      var effAbv = (before > 0 && lpaB > 0) ? (lpaB / before * 100) : nomAbv;
+      var liveLpa    = parseFloat((live && live.current_lpa) || 0);
+      var before     = liveLitres;
+      var nomAbv     = parseFloat((live && live.abv) || lc.abv || 0);
+      var effAbv     = (before > 0 && liveLpa > 0) ? (liveLpa / before * 100) : nomAbv;
       var ownerBeforeId = (live && (live.liquid_owner_client_id || live.client_id)) || null;
       return { id: lc.id, reference: ref, before: before, abv: effAbv,
-               lpaBefore: lpaB > 0 ? lpaB : (before * effAbv / 100),
+               lpaBefore: liveLpa > 0 ? liveLpa : (before * effAbv / 100),
                snapLitres: snapLitres, liveLitres: liveLitres,
                clientId: (live && live.client_id) || null,
                ownerBeforeId: ownerBeforeId,
-               spiritType: (live && live.spirit_type) || null,
+               spiritType: (live && live.spirit_type) || lc.spirit_type || null,
                fillDate: (live && live.fill_date) || null,
                type: (live && live.type) || null,
                capacity: parseFloat((live && live.capacity_litres) || 0) || 0 };
-    }).filter(function(row){ return alreadyDeductedIds.indexOf(row.id) < 0; });
+    }).filter(function(row){
+      if (alreadyDeductedIds.indexOf(row.id) >= 0) return false;
+      if (row.liveLitres <= 0.05) { skippedEmpty.push(row); return false; }
+      return true;
+    });
+
+    var _shareWarnLines = [];
+    try {
+      var _shareMap = await window._lsoFindSharingJobs(linkedConts.map(function(lc){ return lc.id; }), jobId);
+      var _refById = {};
+      linkedConts.forEach(function(lc){ _refById[lc.id] = lc.reference || lc.id; });
+      _shareWarnLines = window._lsoSharingLines(_shareMap, _refById);
+    } catch (_sw) { _shareWarnLines = []; }
 
     // Clients for the per-vessel "owner after" pickers. Non-critical: if it fails
     // the selects fall back to a name-less list and ownership simply isn't changed.
     var _ownerClients = [];
     try { _ownerClients = await supaGet('clients?select=id,name&order=name.asc') || []; } catch(e) { _ownerClients = []; }
 
-    // If every container was already deducted (clean full run), skip the modal
-    if (!contRows.length && alreadyDeductedIds.length > 0) return [];
+    // If every container was already deducted (clean full run), skip the modal.
+    // Empty linked vessels are skipped (not a hard-stop) so a batch close can
+    // finish after a sibling emptied the tank — that path still shows the modal
+    // when bottles were produced so a 0-draw reason can be recorded.
+    if (!contRows.length && alreadyDeductedIds.length > 0 && !skippedEmpty.length) return [];
 
     // ABV leniency: incoming spirit within ±ABV_TOL of the bottling strength is
     // bottled AS-IS on the floor — no proofing water is added and the ABV is not
@@ -44887,8 +45039,14 @@ window.saveAdjModal = async function() {
       function getRemaining(idx) {
         var inp = document.getElementById('lq-remaining-' + idx);
         if (!inp) return fifoRemaining[idx];
-        // cap at container's starting volume so drawn can never go negative
-        return Math.min(contRows[idx].before, Math.max(0, parseFloat(inp.value) || 0));
+        var cap = contRows[idx].before;
+        var v = Math.min(cap, Math.max(0, parseFloat(inp.value) || 0));
+        if (parseFloat(inp.value) > cap + 1e-9) inp.value = cap.toFixed(1);
+        return v;
+      }
+      function getZeroDrawReason() {
+        var inp = document.getElementById('lq-zerodraw-reason');
+        return inp ? inp.value.trim() : '';
       }
       function getWasteLitres() {
         var inp = document.getElementById('lq-waste-litres');
@@ -45145,7 +45303,14 @@ window.saveAdjModal = async function() {
         var balanced, balanceLabel, col;
         var balancePlain = ''; // plain-text reason when not balanced (for the block banner / alert)
         var wasteLPA = waste * ((bottlingAbv || avgDrawnAbv) / 100);
-        if (reqLPA > 0 && !bottledAsIs) {
+        var bottlesProduced = actualBottles > 0 || reqLitres > 0 || reqLPA > 0;
+        var isZeroDraw = totalDrawn <= 0.05;
+        if (isZeroDraw && bottlesProduced) {
+          balanced = false;
+          col = 'var(--amber)';
+          balanceLabel = 'No liquid drawn';
+          balancePlain = 'No liquid was drawn. Enter a reason below to complete anyway.';
+        } else if (reqLPA > 0 && !bottledAsIs) {
           // Alcohol balance: effective drawn alcohol must equal the alcohol in
           // the finished bottles plus any wasted finished liquid. The variance
           // itself is reported in its own footer cell, so a balanced state is a
@@ -45194,6 +45359,8 @@ window.saveAdjModal = async function() {
         if (wasteWrap) wasteWrap.style.display = waste > 0 ? '' : 'none';
         var varReasonWrap = document.getElementById('lq-variance-reason-wrap');
         if (varReasonWrap) varReasonWrap.style.display = varianceUsed ? '' : 'none';
+        var zdWrap = document.getElementById('lq-zerodraw-wrap');
+        if (zdWrap) zdWrap.style.display = (isZeroDraw && bottlesProduced) ? '' : 'none';
 
         // Autofill closes the alcohol gap by adjusting variance (source litres).
         var autofillBtn = document.getElementById('lq-variance-autofill');
@@ -45244,7 +45411,11 @@ window.saveAdjModal = async function() {
         // sees WHY the job can't be completed yet. leftoverMsg may carry esc()'d
         // HTML for vessel references, so the banner is rendered with innerHTML.
         var reasons = [];
-        if (!balanced)   reasons.push(balancePlain || 'Liquid reconciliation is not balanced yet — see the Balance readout above.');
+        if (isZeroDraw && bottlesProduced) {
+          if (!getZeroDrawReason()) reasons.push('Enter a reason for completing with no liquid drawn.');
+        } else if (!balanced) {
+          reasons.push(balancePlain || 'Liquid reconciliation is not balanced yet — see the Balance readout above.');
+        }
         if (!wasteOk)    reasons.push('Enter a reason for the recorded liquid waste.');
         if (!varianceOk) reasons.push('Enter a reason for the measurement variance.');
         if (!leftoverOk) reasons.push('Leftover allocation: ' + (leftoverMsg || 'check vessel capacities') + '.');
@@ -45311,6 +45482,16 @@ window.saveAdjModal = async function() {
           + '<strong>Partial deduction detected.</strong> ' + alreadyDeductedIds.length + ' container(s) were already updated in a previous attempt and are excluded below. Only the remaining containers are shown.'
           + '</div>'
         : '';
+      var emptyBanner = skippedEmpty.length
+        ? '<div style="margin-bottom:14px;padding:10px 14px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);border-radius:4px;font-size:11px;color:var(--amber);">'
+          + skippedEmpty.map(function(r){ return '<strong>' + esc(r.reference) + '</strong> is empty — skipped'; }).join('. ') + '.'
+          + '</div>'
+        : '';
+      var shareBanner = _shareWarnLines.length
+        ? '<div style="margin-bottom:14px;padding:10px 14px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);border-radius:4px;font-size:11px;color:var(--amber);line-height:1.4;">'
+          + '&#9888; ' + _shareWarnLines.map(function(l){ return esc(l); }).join('<br>')
+          + '</div>'
+        : '';
 
       // ── Leftover handling section (Phase 3 — capacity-aware allocation) ───
       var _destTypeLbl = { ibc:'IBC', blue_drum:'Blue Drum', tank:'Tank', tanker:'Tanker' };
@@ -45361,7 +45542,7 @@ window.saveAdjModal = async function() {
             var driftNote = '';
             if (row.snapLitres != null && Math.abs(row.snapLitres - row.liveLitres) > 0.5) {
               driftNote = '<div style="font-size:10px;color:var(--amber);background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);border-radius:3px;padding:5px 8px;margin-bottom:8px;line-height:1.4;">'
-                + '&#9888; This vessel held <strong>' + row.snapLitres.toFixed(1) + ' L</strong> when linked but now shows <strong>' + row.liveLitres.toFixed(1) + ' L</strong> live. The job uses the linked figure; check it is correct before completing.'
+                + '&#9888; Linked at <strong>' + row.snapLitres.toFixed(1) + ' L</strong>; live is <strong>' + row.liveLitres.toFixed(1) + ' L</strong>. Close uses what is in the vessel now.'
                 + '</div>';
             }
             // Resolve the current owner's display name so the operator can see who
@@ -45411,6 +45592,7 @@ window.saveAdjModal = async function() {
               + '</div>';
           }).join('')
         + '</div>';
+      if (!contRows.length) leftoverHtml = '';
 
       ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:28px 28px 22px;width:min(740px,100%);margin:auto;">'
         + '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;">'
@@ -45418,12 +45600,12 @@ window.saveAdjModal = async function() {
         +     '<div style="font-size:16px;font-weight:800;color:var(--white);">Liquid Stock Deduction</div></div>'
         +   '<button id="lq-dd-close" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0;line-height:1;">&#10005;</button>'
         + '</div>'
-        + partialBanner
+        + partialBanner + emptyBanner + shareBanner
         + '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">' + reqDisp + '</div>'
         + '<table style="width:100%;border-collapse:collapse;">'
         + '<thead><tr style="border-bottom:2px solid var(--navy-border);">'
         +   '<th style="text-align:left;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Container</th>'
-        +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Before Job</th>'
+        +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">In vessel now</th>'
         +   '<th style="text-align:center;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Remaining After</th>'
         +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Drawn</th>'
         +   '<th style="text-align:right;padding:8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);">Drawn LPA</th>'
@@ -45497,6 +45679,14 @@ window.saveAdjModal = async function() {
         + '</div>'
 
         + leftoverHtml
+
+        + '<div id="lq-zerodraw-wrap" style="display:none;margin-top:10px;padding:14px 16px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);border-radius:5px;">'
+        +   '<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--amber);margin-bottom:6px;">No liquid drawn</div>'
+        +   '<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4;">Linked vessels are empty or unused. Bottles were produced — record why this job is completing without a stock draw.</div>'
+        +   '<label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">Reason <span style="color:var(--red);">*</span></label>'
+        +   '<input type="text" id="lq-zerodraw-reason" placeholder="e.g. already used on JOB-59, tank emptied by sibling job…" oninput="window._lqUpdateBalance()" '
+        +   'style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 10px;font-size:12px;border-radius:3px;box-sizing:border-box;">'
+        + '</div>'
 
         + '<div id="lq-balance-display" style="margin-top:14px;padding:14px 16px;background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:5px;"></div>'
 
@@ -45699,6 +45889,15 @@ window.saveAdjModal = async function() {
             var drawn = Math.max(0, row.before - rem);
             return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreRemaining: rem, litreDrawn: drawn, abv: row.abv, lpaBefore: row.lpaBefore, clientId: row.clientId, ownerBefore: row.ownerBeforeId, ownerAfter: getLeftoverOwner(idx), type: row.type };
           }).filter(function(l){ return l.litreDrawn > 0.001 && alreadyDeductedIds.indexOf(l.containerId) < 0; }),
+          skippedEmpty: skippedEmpty.map(function(r){
+            return { containerId: r.id, reference: r.reference, litreBefore: r.liveLitres };
+          }),
+          unusedContainers: contRows.map(function(row, idx) {
+            var rem   = getRemaining(idx);
+            var drawn = Math.max(0, row.before - rem);
+            return { containerId: row.id, reference: row.reference, litreBefore: row.before, litreDrawn: drawn };
+          }).filter(function(l){ return l.litreDrawn <= 0.001; }),
+          zeroDrawReason: getZeroDrawReason(),
           isPartial:          alreadyDeductedIds.length > 0,
           waste:      { litres: getWasteLitres(),    reason: getWasteReason() },
           variance:   { litres: getVarianceLitres(), reason: getVarianceReason(), cap: getVarianceCap() },
@@ -45734,6 +45933,7 @@ window.saveAdjModal = async function() {
               type:        row.type,
               strength:    strength,
               allocations: allocs,
+              modalBefore: row.before,
               _nonDefault: rem > 0.05 && (toBottle || movedOut)
             };
           }).filter(function(lo){ return lo._nonDefault; })
@@ -45746,66 +45946,124 @@ window.saveAdjModal = async function() {
     });
   }
 
+  async function _alertLiquidCloseFailed(failures) {
+    var names = (failures && failures.length) ? failures.join(', ') : 'a linked vessel';
+    await window.lpAlert(
+      'Liquid stock was not updated for: ' + names + '.\n\nThis job is not complete. Click Complete again to retry. Dry goods already closed will not be deducted twice.',
+      { title: 'Liquid deduction failed', variant: 'error' }
+    );
+  }
+
   // ── Execute a liquid deduction plan built by _showLiquidDeductionModal ─────
   async function _executeLiquidDeductionPlan(jobId, plan, job) {
-    if (!plan || !plan.lines || !plan.lines.length) return;
+    if (!plan || !Array.isArray(plan.lines)) return { ok: true, failures: [] };
     var pById   = window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id);
     var pByName = window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email);
     var egid    = crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36));
     var wasteL  = plan.waste ? parseFloat(plan.waste.litres || 0) : 0;
     var wasteR  = plan.waste ? (plan.waste.reason || '') : '';
     var isLastLine = false;
+    var writtenById = {};
 
     var failures = [];
     var histFailures = [];
+
+    // 0-draw: vessels empty or unused. Do not invent stock. Write history so
+    // close is auditable and a retry does not re-prompt the same empties.
+    if (!plan.lines.length) {
+      var zdReason = (plan.zeroDrawReason || '').trim();
+      var audit = [];
+      var seenA = {};
+      (plan.skippedEmpty || []).concat(plan.unusedContainers || []).forEach(function(r){
+        if (!r || !r.containerId || seenA[r.containerId]) return;
+        seenA[r.containerId] = true;
+        audit.push(r);
+      });
+      for (var ai = 0; ai < audit.length; ai++) {
+        var ar = audit[ai];
+        try {
+          var _zdBefore = parseFloat(ar.litreBefore || 0);
+          await window._writeBlendHistory({
+            container_id:      ar.containerId,
+            event_type:        'bottling_deduction',
+            job_id:            jobId,
+            event_group_id:    egid,
+            container_ref:     ar.reference,
+            litres_before:     _zdBefore,
+            litres_after:      _zdBefore,
+            litres_changed:    0,
+            notes:             '0 L drawn for bottling (job ' + jobId + ')' + (zdReason ? ': ' + zdReason : ''),
+            performed_by_id:   pById,
+            performed_by_name: pByName
+          });
+        } catch(zdErr) {
+          histFailures.push(ar.reference || ar.containerId);
+        }
+      }
+    }
+
     for (var li = 0; li < plan.lines.length; li++) {
       var line = plan.lines[li];
       isLastLine = (li === plan.lines.length - 1);
-      // Critical: update the container itself
+      var origABV = parseFloat(line.abv || 0);
+      var liveNow = 0, newLitres = 0, remainLP = 0, beforeLP = 0, drawn = 0;
       try {
-        var origABV  = parseFloat(line.abv || 0);
-        var remainLP = origABV > 0 ? line.litreRemaining * origABV / 100 : 0;
-        var beforeLP = origABV > 0 ? line.litreBefore   * origABV / 100 : 0;
-        var drawnLP  = origABV > 0 ? line.litreDrawn     * origABV / 100 : 0;
-        var newStatus = line.litreRemaining <= 0 ? 'empty'
-          : (line.litreRemaining < line.litreBefore ? 'partially_full' : 'full');
+        var liveRows = await window.db.select('liquid_containers', '?id=eq.' + line.containerId + '&select=id,current_litres,current_lpa,abv,status,type&limit=1');
+        var live = liveRows && liveRows[0];
+        if (!live) {
+          failures.push(line.reference || line.containerId);
+          continue;
+        }
+        liveNow = parseFloat(live.current_litres || 0);
+        drawn = Math.max(0, parseFloat(line.litreDrawn || 0));
+        if (drawn > liveNow + 0.5) {
+          failures.push(line.reference || line.containerId);
+          continue;
+        }
+        newLitres = Math.max(0, Math.round((liveNow - drawn) * 1e4) / 1e4);
+        if (!(origABV > 0)) origABV = parseFloat(live.abv || 0);
+        remainLP = origABV > 0 ? newLitres * origABV / 100 : 0;
+        beforeLP = origABV > 0 ? liveNow * origABV / 100 : parseFloat(live.current_lpa || 0);
+        var newStatus = newLitres <= 0 ? 'empty'
+          : (newLitres < liveNow ? 'partially_full' : 'full');
         var _cUpd = {
-          current_litres: Math.round(line.litreRemaining * 1e4) / 1e4,
+          current_litres: newLitres,
           current_lpa:    Math.round(remainLP * 1e4) / 1e4,
           status:         newStatus
         };
-        // Stamp the chosen owner onto whatever stays in the source. Absolute set
-        // (idempotent on re-completion); only when liquid remains to be owned.
-        // Tanks/tankers are LH-owned vessels, so the owner goes on the liquid owner
-        // field; every other type (ibc, cask, blue_drum) owns via client_id.
-        if (line.ownerAfter && line.litreRemaining > 0.05) {
-          if (window._cmIsLhFleetType(line.type)) _cUpd.liquid_owner_client_id = line.ownerAfter;
+        if (line.ownerAfter && newLitres > 0.05) {
+          if (window._cmIsLhFleetType(line.type || live.type)) _cUpd.liquid_owner_client_id = line.ownerAfter;
           else _cUpd.client_id = line.ownerAfter;
         }
-        await window.db.update('liquid_containers', '?id=eq.' + line.containerId, _cUpd);
+        var liveFilter = (live.current_litres == null)
+          ? '&current_litres=is.null'
+          : '&current_litres=eq.' + live.current_litres;
+        var patched = await window.db.update('liquid_containers', '?id=eq.' + line.containerId + liveFilter, _cUpd);
+        if (!patched || !patched.length) {
+          failures.push(line.reference || line.containerId);
+          continue;
+        }
+        writtenById[line.containerId] = { liveBefore: liveNow, newLitres: newLitres, modalBefore: parseFloat(line.litreBefore || 0) };
       } catch(lineErr) {
         console.error('Liquid container update failed for ' + line.containerId + ':', lineErr.message);
         failures.push(line.reference || line.containerId);
         continue;
       }
-      // Non-critical: write history record (failure here does not affect container state)
       try {
         var wasteNote = (isLastLine && wasteL > 0) ? ' (incl. ' + wasteL.toFixed(1) + 'L waste: ' + wasteR + ')' : '';
-        // job_id is now text (migration liquid_history_job_id_text), so record it
-        // directly. The "(job <id>)" tag also stays in notes for the dedup guard.
         await window._writeBlendHistory({
           container_id:      line.containerId,
           event_type:        'bottling_deduction',
           job_id:            jobId,
           event_group_id:    egid,
           container_ref:     line.reference,
-          litres_before:     line.litreBefore,
-          litres_after:      line.litreRemaining,
-          litres_changed:    -line.litreDrawn,
+          litres_before:     liveNow,
+          litres_after:      newLitres,
+          litres_changed:    -drawn,
           abv_before:        origABV,
           lpa_before:        beforeLP,
           lpa_after:         remainLP,
-          notes:             line.litreDrawn.toFixed(1) + 'L drawn for bottling (job ' + jobId + ')' + wasteNote,
+          notes:             drawn.toFixed(1) + 'L drawn for bottling (job ' + jobId + ')' + wasteNote,
           performed_by_id:   pById,
           performed_by_name: pByName
         });
@@ -45869,9 +46127,35 @@ window.saveAdjModal = async function() {
     // original strength (the safe default). Here we apply any explicit override:
     // bring leftover to bottling strength and/or split it across vessels (the
     // source vessel keeps its share; the rest goes to the added vessels).
-    var leftoverActions = (plan.leftover || []).filter(function(lo){
-      return lo && lo.litres > 0.05 && Array.isArray(lo.allocations) && lo.allocations.length;
+    var leftoverActions = [];
+    var leftoverCandidates = (plan.leftover || []).filter(function(lo){
+      return lo && Array.isArray(lo.allocations) && lo.allocations.length;
     });
+    for (var lci = 0; lci < leftoverCandidates.length; lci++) {
+      var loCand = leftoverCandidates[lci];
+      var w = writtenById[loCand.containerId];
+      if (w) {
+        if (Math.abs(w.liveBefore - (loCand.modalBefore != null ? loCand.modalBefore : w.modalBefore)) > 0.5) continue;
+        loCand.litres = w.newLitres;
+        loCand.lpa = w.newLitres * (parseFloat(loCand.abv || loCand.origAbv || 0) / 100);
+        if (loCand.litres <= 0.05) continue;
+        if (loCand.strength !== 'bottling') {
+          var allocSum = (loCand.allocations || []).reduce(function(s, a){ return s + (parseFloat(a.litres) || 0); }, 0);
+          if (allocSum > loCand.litres + 0.5) continue;
+        }
+        leftoverActions.push(loCand);
+        continue;
+      }
+      var hadDrawLine = (plan.lines || []).some(function(l){ return l.containerId === loCand.containerId; });
+      if (hadDrawLine) continue;
+      try {
+        var loLive = await window.db.select('liquid_containers', '?id=eq.' + loCand.containerId + '&select=current_litres&limit=1');
+        var loNow = parseFloat((loLive && loLive[0] && loLive[0].current_litres) || 0);
+        if (Math.abs(loNow - (loCand.modalBefore != null ? loCand.modalBefore : loCand.litres)) > 0.5) continue;
+        if (loCand.litres <= 0.05) continue;
+        leftoverActions.push(loCand);
+      } catch (_loBind) { /* drop leftover rather than move more than we wrote */ }
+    }
     var leftoverSummary = null;
     if (leftoverActions.length) {
       // Client-owned consent gate: converting strength or relocating client liquid
@@ -45954,9 +46238,14 @@ window.saveAdjModal = async function() {
     // source after the run. Absolute set = idempotent on re-completion. Skipped on
     // partial recovery runs so an incomplete plan can't clobber the real total.
     if (!plan.isPartial) {
-      var computedLeftover = (plan.lines || []).reduce(function(s, l){
-        return s + Math.max(0, parseFloat(l.litreRemaining || 0));
+      var computedLeftover = Object.keys(writtenById).reduce(function(s, id){
+        return s + Math.max(0, writtenById[id].newLitres);
       }, 0);
+      if (!Object.keys(writtenById).length) {
+        computedLeftover = (plan.lines || []).reduce(function(s, l){
+          return s + Math.max(0, parseFloat(l.litreRemaining || 0));
+        }, 0);
+      }
       try {
         await window.db.update('jobs', '?id=eq.' + jobId, { liquid_leftover: Math.round(computedLeftover * 1e4) / 1e4 });
       } catch(llErr) {
@@ -46001,6 +46290,7 @@ window.saveAdjModal = async function() {
         }
       } catch(_se) { /* vessel sync is best-effort */ }
     }
+    return { ok: failures.length === 0, failures: failures };
   }
 
   // Apply one leftover reconciliation action at job close (Phase 3 — capacity-
