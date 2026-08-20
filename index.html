@@ -30768,6 +30768,33 @@ window._cmIsLighthouseClient = function(clientId, selectEl) {
 // be a client vessel. All other types are unaffected by this helper.
 window._cmIsLhFleetType = function(type) { return type === 'tank' || type === 'tanker'; };
 
+// Liquid-content fields that must not linger on a fully emptied vessel.
+// Vessel identity (reference, type, capacity, client_id, vessel_id, fill
+// number / previous contents, notes) is left alone.
+window._emptyContainerContent = function() {
+  return {
+    status: 'empty',
+    current_lpa: 0,
+    spirit_type: null,
+    cbw_rotation: null,
+    abv: null,
+    location: null,
+    lpa_price: null,
+    liquid_owner_client_id: null,
+    fill_date: null,
+    distillation_date: null,
+    blend_id: null,
+    ola: null,
+    supplier_id: null
+  };
+};
+window._applyEmptyIfDrained = function(upd, litres) {
+  if ((parseFloat(litres) || 0) > 0) return upd;
+  var empty = window._emptyContainerContent();
+  Object.keys(empty).forEach(function(k){ upd[k] = empty[k]; });
+  return upd;
+};
+
 window._cmUpdateOwnership = async function() {
   var clientEl = document.getElementById('cm-client');
   var clientId = clientEl ? clientEl.value : '';
@@ -31311,6 +31338,7 @@ window.saveContainer = async function() {
     // Liquid owner only applies to tanks/tankers; cleared (null) for every other type.
     liquid_owner_client_id: _cmIsLhFleet ? (gv('cm-liquid-owner')||null) : null
   };
+  if (cmLitres <= 0 && window._applyEmptyIfDrained) window._applyEmptyIfDrained(payload, 0);
   if (isClientVessel) payload.vessel_id = null;
   else if (gv('cm-vessel-id')) payload.vessel_id = gv('cm-vessel-id'); // link to the registered fleet vessel
   // Pallet Tracker capture — only when first checking in a client's own vessel.
@@ -32226,8 +32254,7 @@ window.saveTransfer = async function() {
         abv:            newL > 0 ? Math.round(newAbvSrc * 100) / 100 : null,
         status:         newL <= 0 ? 'empty' : cont.status
       };
-      // Emptied tank/tanker no longer holds anyone's liquid — clear the liquid owner.
-      if ((cont.type === 'tank' || cont.type === 'tanker') && newL <= 0.01) _srcUpd.liquid_owner_client_id = null;
+      if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(_srcUpd, newL);
       await supaMut('PATCH','liquid_containers','?id=eq.'+s.container_id, _srcUpd);
       if (window._writeBlendHistory) {
         await window._writeBlendHistory({
@@ -46031,6 +46058,7 @@ window.saveAdjModal = async function() {
           current_lpa:    Math.round(remainLP * 1e4) / 1e4,
           status:         newStatus
         };
+        if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(_cUpd, newLitres);
         if (line.ownerAfter && newLitres > 0.05) {
           if (window._cmIsLhFleetType(line.type || live.type)) _cUpd.liquid_owner_client_id = line.ownerAfter;
           else _cUpd.client_id = line.ownerAfter;
@@ -46325,7 +46353,8 @@ window.saveAdjModal = async function() {
       abv:            Math.round(targetAbv * 100) / 100,
       status:         srcLit <= 0 ? 'empty' : 'partially_full'
     };
-    if (srcAlloc.cbw) srcUpd.cbw_rotation = srcAlloc.cbw;
+    if (srcAlloc.cbw && srcLit > 0) srcUpd.cbw_rotation = srcAlloc.cbw;
+    if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(srcUpd, srcLit);
     // Owner chosen at close-out for the liquid that stays in the source. Tanks/tankers
     // are LH-owned vessels (owner on liquid_owner_client_id); every other type owns
     // via client_id.
@@ -46532,8 +46561,10 @@ window.saveAdjModal = async function() {
         var finL   = origL + waterL + dExL;
         var finLPA = origLPA + dExLP;
         var finABV = finL > 0 ? finLPA / finL * 100 : 0;
-        await window.db.update('liquid_containers', '?id=eq.'+srcId, {
-          current_litres: 0, current_lpa: 0, abv: null, spirit_type: null, cbw_rotation: null, status: 'empty' });
+        await window.db.update('liquid_containers', '?id=eq.'+srcId, Object.assign(
+          { current_litres: 0 },
+          window._emptyContainerContent ? window._emptyContainerContent() : { current_lpa: 0, abv: null, spirit_type: null, cbw_rotation: null, status: 'empty' }
+        ));
         if (window._writeBlendHistory) await window._writeBlendHistory({ container_id: srcId, event_type: 'dilution',
           litres_before: origL, litres_after: 0, litres_changed: -origL,
           abv_before: origABV, cbw_rotation_before: srcCont.cbw_rotation,
@@ -46708,7 +46739,7 @@ window.saveAdjModal = async function() {
         var nCap = parseFloat(s.cont.capacity_litres||0);
         var nSt = nL<=0?'empty':(nCap>0&&nL>=nCap?'full':'partially_full');
         var upd = {current_litres:Math.round(nL*1e4)/1e4, current_lpa:Math.round(nLP*1e4)/1e4, status:nSt};
-        if (nL<=0) { upd.spirit_type=null; upd.cbw_rotation=null; }
+        if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(upd, nL);
         await window.db.update('liquid_containers','?id=eq.'+s.cont.id, upd);
         if (window._writeBlendHistory) await window._writeBlendHistory({container_id:s.cont.id, event_type:'blend_input', event_group_id:egid,
           litres_before:parseFloat(s.cont.current_litres||0), litres_after:nL, litres_changed:-s.litres,
@@ -53114,7 +53145,7 @@ window.saveAdjModal = async function() {
           status:         autoStatus(newL, parseFloat(s.cont.capacity_litres||0))
         };
         if (newL <= 0) {
-          upd.spirit_type=null; upd.cbw_rotation=null; upd.ola=null; upd.fill_date=null;
+          if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(upd, 0);
         } else {
           // fill_date is intentionally NOT reset — the original fill date must be preserved
           // for maturation age tracking and Revenue compliance. The disgorge date is
@@ -54157,7 +54188,7 @@ window.saveAdjModal = async function() {
           var newL  = Math.max(0, parseFloat(s.cont.current_litres||0) - s.litres);
           var newLP = Math.max(0, parseFloat(s.cont.current_lpa||0) - s.lpa);
           var upd   = { current_litres: Math.round(newL*1e4)/1e4, current_lpa: Math.round(newLP*1e4)/1e4, status: autoStatus(newL, parseFloat(s.cont.capacity_litres||0)) };
-          if (newL <= 0) { upd.spirit_type = null; upd.cbw_rotation = null; }
+          if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(upd, newL);
           await window.db.update('liquid_containers', '?id=eq.' + s.cont.id, upd);
           await writeHistory({ container_id: s.cont.id, event_type: 'blend_input', event_group_id: egid,
             container_ref: s.cont.reference,
@@ -54252,7 +54283,7 @@ window.saveAdjModal = async function() {
         var newL  = Math.max(0, parseFloat(s.cont.current_litres||0) - s.litres);
         var newLP = Math.max(0, parseFloat(s.cont.current_lpa||0) - s.lpa);
         var upd   = { current_litres: Math.round(newL*1e4)/1e4, current_lpa: Math.round(newLP*1e4)/1e4, status: autoStatus(newL, parseFloat(s.cont.capacity_litres||0)) };
-        if (newL <= 0) { upd.spirit_type = null; upd.cbw_rotation = null; }
+        if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(upd, newL);
         await window.db.update('liquid_containers', '?id=eq.' + s.cont.id, upd);
         await writeHistory({ container_id: s.cont.id, event_type: 'blend_input', event_group_id: egid,
           container_ref: s.cont.reference,
@@ -54988,8 +55019,7 @@ window.saveAdjModal = async function() {
           }
         }
         else if (newL <= 0) {
-          upd.spirit_type = null; upd.cbw_rotation = null;
-          if (_destIsLhFleet) upd.liquid_owner_client_id = null; // emptied tank holds no one's liquid
+          if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(upd, 0);
         }
         await window.db.update('liquid_containers', '?id=eq.' + n.cont.id, upd);
 
@@ -55361,7 +55391,7 @@ window.saveAdjModal = async function() {
         var newL = Math.max(0, parseFloat(s.cont.current_litres||0) - s.litres_actual);
         var newLP = Math.max(0, parseFloat(s.cont.current_lpa||0) - (s.lpa_actual||0));
         var upd = { current_litres: Math.round(newL*1e4)/1e4, current_lpa: Math.round(newLP*1e4)/1e4, status: autoStatus(newL, parseFloat(s.cont.capacity_litres||0)) };
-        if (newL<=0) { upd.spirit_type=null; upd.cbw_rotation=null; }
+        if (window._applyEmptyIfDrained) window._applyEmptyIfDrained(upd, newL);
         await window.db.update('liquid_containers', '?id=eq.'+s.container_id, upd);
         await writeHistory({ container_id: s.container_id, event_type: 'transfer_from', event_group_id: egid,
           container_ref: s.cont.reference,

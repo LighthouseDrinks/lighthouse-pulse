@@ -232,7 +232,8 @@ VESSEL OWNER vs LIQUID OWNER (tanks & tankers only)
 • Tanks and tankers are always Lighthouse-owned, transient vessels. The vessel itself belongs to Lighthouse (client_id), but the liquid inside can belong to a client.
 • That client (the liquid owner) is stored separately in liquid_owner_client_id. Tanks/tankers can NEVER be a "client vessel".
 • In the UI these rows show the liquid owner as the client, with an "LH VESSEL" tag to make clear Lighthouse owns the vessel, not the liquid. The detail view splits this into "Vessel Owner" (Lighthouse) and "Liquid Owner / Client".
-• When liquid moves into a tank/tanker (transfer, blend, dilute, leftover relocation), the liquid owner is carried onto liquid_owner_client_id; emptying the tank clears it.
+• When liquid moves into a tank/tanker (transfer, blend, dilute, leftover relocation), the liquid owner is carried onto liquid_owner_client_id.
+• Fully emptying any vessel (tank, tanker, IBC, cask, drum) clears product metadata: spirit_type, cbw_rotation, current_lpa, abv, location, lpa_price, liquid_owner_client_id, fill_date, distillation_date, blend_id, ola, supplier_id. Vessel identity (reference, type, capacity, client_id, vessel_id, fill number / previous contents, notes) stays. DB trigger liquid_container_clear_when_empty enforces this on every write.
 • All other vessel types (cask, ibc, blue_drum) are unchanged: client_id is the owner, and a client's own vessel is still flagged via is_client_vessel.
 
 ARCHIVE / RESTORE (replaces "decommissioned" for containers)
