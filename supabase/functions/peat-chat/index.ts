@@ -116,7 +116,7 @@ Statuses (in order): draft → pending → approved
 • Clients only ever see approved BOMs — never draft or pending
 • Staff can Request Edit on an approved BOM; this creates a task for the client_coordinator
 • Staff CAN create a Pulse job from a draft or pending BOM so supply chain / ordering can start while the spec is still moving — but only after the BOM checkbox “Dry goods complete — ready to use as a draft job” is ticked (liquid spec required). Approved BOMs ignore that flag and can always create a job. The Jobs Sign-offs column shows an amber Pending QC chip (and the row is highlighted amber) when the linked BOM is still draft or pending QC. Client-signed-off jobs keep the green BOM tick. Client portal job requests still require an approved BOM.
-• Saving a draft BOM soft-syncs new SKUs onto linked jobs (quantities update; ordered / allocated / PO lines are never deleted).
+• Saving a draft BOM (or submitting / approving) syncs linked jobs in new / active / on_hold: new SKUs are inserted, quantities and names update, and a slot swap (cork / bottle / label / etc. changed to a different SKU) replaces the old line even if it was ordered. Ordered / allocated / PO extras that are not replacing a BOM slot are never deleted. Temporary job-only SKUs are never overwritten. Opening the Supply Chain tab re-runs the same sync.
 • Client BOM confirmation email is not sent until the BOM is approved. After Approve & lock, Pulse offers to send confirmation for linked jobs.
 • A job cannot move New → Active, cannot Complete, and cannot Start on the Schedule while the linked BOM is still draft or pending.
 

@@ -13755,7 +13755,9 @@ async function saveBomDraft() {
       await _syncBomNameToLinkedJobs(editId, product);
       try {
         var draftSync = await _propagateBomToActiveJobs(editId, { soft: true });
-        if (draftSync && draftSync.keptOrdered) {
+        if (draftSync && draftSync.swappedOrdered) {
+          window.toast && window.toast('Draft saved: ' + product + '. An ordered supply-chain line was replaced to match the BOM.', 'warn');
+        } else if (draftSync && draftSync.keptOrdered) {
           window.toast && window.toast('Draft saved: ' + product + '. An ordered supply-chain line was kept — the PO was not cancelled.', 'warn');
         } else {
           window.toast && window.toast('Draft saved: ' + product, 'success');
@@ -13931,6 +13933,8 @@ async function saveBom() {
       if (idx>=0) Object.assign(BOMS[idx], localBom(editId));
       window.BOMS = BOMS;
       await _syncBomNameToLinkedJobs(editId, product);
+      try { await _propagateBomToActiveJobs(editId, { soft: true }); }
+      catch (syncErr) { window.logError && window.logError('saveBom soft-sync', syncErr); }
     } else {
       dbPayload.id = 'BOM-'+clientId.replace('CLI-','')+'-'+Date.now().toString(36).toUpperCase();
       var saved = await window.db.insert('boms', dbPayload);
@@ -14054,7 +14058,10 @@ async function _bomCountActiveJobs(bomId) {
 //   - insert rows for new BOM SKUs
 //   - patch qty_required and item_name on existing rows (preserves PO / exclude / supplier fields)
 //   - full mode: remove rows for SKUs dropped from the BOM
-//   - soft mode (draft save): never delete ordered / allocated / PO lines
+//   - soft mode (draft save): never delete ordered / allocated / PO extras
+//   - slot swap: a leftover SKU in the same category as a current BOM SKU is
+//     the old occupant of that slot (cork A→B, bottle A→B, …) and is removed
+//     even when ordered, so the job follows the BOM
 // When the component set changes (insert or remove) the coordinator's Supply Chain
 // sign-off (job_drygoods_prep.signed_by_coordinator) is cleared so they must
 // re-confirm with the new components.
@@ -14062,7 +14069,7 @@ async function _bomCountActiveJobs(bomId) {
 // in its own try/catch so a sync failure can never mask the BOM approval itself.
 async function _propagateBomToActiveJobs(bomId, opts) {
   var soft = !!(opts && opts.soft);
-  var summary = { jobsTouched: 0, inserted: 0, updated: 0, removed: 0, signoffsCleared: 0, keptOrdered: 0 };
+  var summary = { jobsTouched: 0, inserted: 0, updated: 0, removed: 0, signoffsCleared: 0, keptOrdered: 0, swapped: 0, swappedOrdered: 0 };
   var jobs = await window.db.select('jobs',
     '?bom_id=eq.' + bomId +
     '&stage=in.(new,active,on_hold)' +
@@ -14084,13 +14091,16 @@ async function _propagateBomToActiveJobs(bomId, opts) {
   }
   var bomSkuIds = Object.keys(bomSkuMap);
 
-  // Pre-fetch descriptions and latest unit costs for newly-inserted rows
-  var descMap = {}, priceMap = {};
+  // Pre-fetch descriptions, categories (for slot-swap detection), and latest unit costs
+  var descMap = {}, priceMap = {}, bomCategorySet = {};
   if (bomSkuIds.length) {
     try {
       var skuRows = await window.db.select('dry_goods_skus',
-        '?id=in.(' + bomSkuIds.join(',') + ')&select=id,description,volume,abv,region');
-      (skuRows || []).forEach(function(r){ descMap[r.id] = window.skuDisplayName(r); });
+        '?id=in.(' + bomSkuIds.join(',') + ')&select=id,description,volume,abv,region,category_id');
+      (skuRows || []).forEach(function(r){
+        descMap[r.id] = window.skuDisplayName(r);
+        if (r.category_id != null) bomCategorySet[r.category_id] = true;
+      });
     } catch(e) { window.logError && window.logError('propagate: load SKU descriptions', e); }
     try {
       var batchRows = await window.db.select('dry_goods_batches',
@@ -14101,6 +14111,12 @@ async function _propagateBomToActiveJobs(bomId, opts) {
         }
       });
     } catch(e) { window.logError && window.logError('propagate: load SKU batch prices', e); }
+  }
+
+  function _rowProtected(r) {
+    return !!(r.is_ordered || r.is_allocated
+      || (r.po_value != null && String(r.po_value).trim() !== '')
+      || (r.po_number != null && String(r.po_number).trim() !== ''));
   }
 
   for (var ji = 0; ji < jobs.length; ji++) {
@@ -14115,15 +14131,40 @@ async function _propagateBomToActiveJobs(bomId, opts) {
       var existingBySku = {};
       existing.forEach(function(r){ if (r.sku_id) existingBySku[r.sku_id] = r; });
 
+      // Leftover SKUs (on the job, not on the BOM) — look up category so a
+      // cork/bottle/label swap can replace the old occupant even if ordered.
+      var leftoverSkuIds = [];
+      existing.forEach(function(r){
+        if (r.is_temporary) return;
+        if (!r.sku_id || bomSkuMap[r.sku_id]) return;
+        leftoverSkuIds.push(r.sku_id);
+      });
+      var leftoverCat = {};
+      if (leftoverSkuIds.length) {
+        try {
+          var leftoverRows = await window.db.select('dry_goods_skus',
+            '?id=in.(' + leftoverSkuIds.join(',') + ')&select=id,category_id');
+          (leftoverRows || []).forEach(function(r){ leftoverCat[r.id] = r.category_id; });
+        } catch(e) { window.logError && window.logError('propagate: load leftover SKU categories', e); }
+      }
+
       // 1. Remove rows whose sku_id is non-null and not in the BOM.
-      // Soft (draft-save) mode never deletes ordered / allocated / PO lines.
+      // Slot swap (same category as a current BOM SKU) always replaces.
+      // Soft mode otherwise never deletes ordered / allocated / PO extras.
       // Temporary (job-only) SKUs are never on the BOM — leave them alone.
       var removeIds = [];
       existing.forEach(function(r){
         if (r.is_temporary) return;
         if (!r.sku_id || bomSkuMap[r.sku_id]) return;
-        var protectedRow = !!(r.is_ordered || r.is_allocated || (r.po_value != null && String(r.po_value).trim() !== ''));
-        if (soft && protectedRow) {
+        var leftoverCategory = leftoverCat[r.sku_id];
+        var isSlotSwap = leftoverCategory != null && !!bomCategorySet[leftoverCategory];
+        if (isSlotSwap) {
+          summary.swapped += 1;
+          if (_rowProtected(r)) summary.swappedOrdered += 1;
+          removeIds.push(r.id);
+          return;
+        }
+        if (soft && _rowProtected(r)) {
           summary.keptOrdered += 1;
           return;
         }
@@ -14669,6 +14710,7 @@ window._bomRecordHistory   = _bomRecordHistory;
 window._bomPatch           = _bomPatch;
 window._bomGetSignedOffJob = _bomGetSignedOffJob;
 window._propagateSkuNameToJobs = _propagateSkuNameToJobs;
+window._propagateBomToActiveJobs = _propagateBomToActiveJobs;
 window._bomWorkflowUser    = _bomWorkflowUser;
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -39054,11 +39096,16 @@ window.saveAdjModal = async function() {
           + (desc ? '<div style="font-size:12px;color:var(--muted);margin-top:3px;">' + desc + '</div>' : '')
           + '</div></div>';
       };
-      var comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
-
       // Auto-init from BOM if empty, stale, or a liquid-target job with no qty_required values yet.
       // Temporary (job-only) SKUs are never wiped — they are not on the BOM.
       var j_preseed = _jobs.find(function(x){ return x.id === jobId; });
+      var _st = String((j_preseed && j_preseed.stage) || '').toLowerCase();
+      if (j_preseed && j_preseed.bom_id && (_st === 'new' || _st === 'active' || _st === 'on_hold')
+          && typeof window._propagateBomToActiveJobs === 'function') {
+        try { await window._propagateBomToActiveJobs(j_preseed.bom_id, { soft: true }); }
+        catch (_pe) { window.logError && window.logError('loadComponentsTab: BOM sync', _pe); }
+      }
+      var comps = await supaGet('job_components?job_id=eq.' + jobId + '&order=created_at.asc');
       var nonTemp = (comps || []).filter(function(c){ return !c.is_temporary; });
       var allQtyNull = nonTemp.length > 0 && nonTemp.every(function(c){ return c.qty_required == null; });
       var isLiquidMissingQtys = j_preseed && j_preseed.job_target_type === 'liquid' && allQtyNull;
