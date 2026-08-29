@@ -59098,7 +59098,7 @@ window.lvCalRender=async function(yr,mo){
 (function(){
 'use strict';
 // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
-var _wo=0,_roster={},_emps=[],_leaveMap={},_pt=null,_shiftTemplates=[];
+var _wo=0,_roster={},_emps=[],_leaveMap={},_pt=null,_shiftTemplates=[],_usualHours={},_usualHistLoaded=false;
 var DN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 // Deterministic colour per shift name (hash -> hue) so every named shift gets
 // its own stable colour across the grid and the publish summary.
@@ -59113,6 +59113,7 @@ var _ROSTER_GROUP_ORDER = [
   {key:'liquid', label:'Liquid'},
   {key:'warehouse', label:'Warehouse'},
   {key:'office', label:'Office'},
+  {key:'commercial', label:'Commercial'},
   {key:'ecom', label:'E-Commerce'},
   {key:'other', label:'Other'}
 ];
@@ -59121,9 +59122,11 @@ var _ROSTER_GROUP_BY_NAME = {
   'brandon joy':'eve','clare ohalloran':'eve','kelly omahoney':'eve',
   'keith hackett':'liquid','david revenson':'warehouse',
   'apurva srivastava':'office','caroline horgan':'office','kimberly tomarong':'office',
-  'rory oleary':'office','john odonovan':'office','carlos rodriguez':'office',
+  'john odonovan':'office','carlos rodriguez':'office',
+  'rory oleary':'commercial',
   'ryan oconnell':'ecom','karen lambe':'ecom'
 };
+var _ROSTER_USUAL_DEFAULT = {day:8, eve:4.75, liquid:8, warehouse:8.25, office:8, commercial:8, ecom:8, other:8};
 function rosterGroupOf(emp){
   var n=String(emp.display_name||'').toLowerCase().replace(/['’]/g,'').trim();
   if(_ROSTER_GROUP_BY_NAME[n]) return _ROSTER_GROUP_BY_NAME[n];
@@ -59131,9 +59134,55 @@ function rosterGroupOf(emp){
   if(r==='production_manager'||r==='production_cleaning_operator') return 'day';
   if(r==='warehouse_liquid') return 'liquid';
   if(r==='warehouse_lead') return 'warehouse';
-  if(r==='quality_compliance'||r==='business_analyst'||r==='commercial_manager'||r==='managing_director'||r==='operations_director'||r==='financial_controller') return 'office';
+  if(r==='commercial_manager') return 'commercial';
+  if(r==='quality_compliance'||r==='business_analyst'||r==='managing_director'||r==='operations_director'||r==='financial_controller') return 'office';
   if(r==='ecommerce_manager'||r==='order_fulfillment') return 'ecom';
   return 'other';
+}
+function rosterNetHours(st,et,bm){
+  if(!st||!et) return 0;
+  var a=String(st).split(':'), b=String(et).split(':');
+  var s=(+a[0])*60+(+a[1]||0), e=(+b[0])*60+(+b[1]||0);
+  if(e<s) e+=1440;
+  return Math.max(0,(e-s-(bm||0))/60);
+}
+function rosterFmtHrs(n){
+  var x=Math.round((n||0)*10)/10;
+  return (x%1===0?String(x):x.toFixed(1))+'h';
+}
+function tallyUsualHours(rows){
+  (rows||[]).forEach(function(s){
+    var h=rosterNetHours(s.start_time,s.end_time,s.break_minutes);
+    if(h<=0||!s.user_id) return;
+    if(!_usualHours._counts) _usualHours._counts={};
+    if(!_usualHours._counts[s.user_id]) _usualHours._counts[s.user_id]={};
+    var k=h.toFixed(2);
+    _usualHours._counts[s.user_id][k]=(_usualHours._counts[s.user_id][k]||0)+1;
+  });
+  var counts=_usualHours._counts||{};
+  Object.keys(counts).forEach(function(uid){
+    var best=0, hrs=0;
+    Object.keys(counts[uid]).forEach(function(hk){
+      if(counts[uid][hk]>=best){ best=counts[uid][hk]; hrs=parseFloat(hk); }
+    });
+    _usualHours[uid]=hrs;
+  });
+}
+function usualHoursFor(emp, groupKey){
+  var counts={};
+  Object.keys(_roster).forEach(function(k){
+    if(k.indexOf(emp.id+'__')!==0) return;
+    var h=rosterNetHours(_roster[k].st,_roster[k].et,_roster[k].bm);
+    if(h>0){ var hk=h.toFixed(2); counts[hk]=(counts[hk]||0)+1; }
+  });
+  var keys=Object.keys(counts);
+  if(keys.length){
+    var best=0, hrs=0;
+    keys.forEach(function(hk){ if(counts[hk]>=best){ best=counts[hk]; hrs=parseFloat(hk); } });
+    return hrs;
+  }
+  if(_usualHours[emp.id]) return _usualHours[emp.id];
+  return _ROSTER_USUAL_DEFAULT[groupKey]||8;
 }
 // Visual style per leave_category for the Roster grid cells.
 // Short labels keep the cell readable at the ~88px column width.
@@ -59181,6 +59230,14 @@ async function loadRoster(){
   var lv=await get('leave_requests?status=eq.approved&start_date=lte.'+we+'&end_date=gte.'+ws+'&select=user_id,start_date,end_date,leave_category,leave_type');
   _leaveMap={};
   lv.forEach(function(l){var c=new Date(l.start_date),e=new Date(l.end_date),cat=l.leave_category||'annual',half=l.leave_type==='half_day';while(c<=e){var day=c.getDay();if(day!==0&&day!==6){_leaveMap[rk(l.user_id,ds(c))]={cat:cat,half:half};}c.setDate(c.getDate()+1);}});
+  if(!_usualHistLoaded){
+    var from=new Date(); from.setDate(from.getDate()-56);
+    try{
+      var hist=await get('roster_shifts?shift_date=gte.'+ds(from)+'&select=user_id,start_time,end_time,break_minutes');
+      tallyUsualHours(hist);
+    }catch(uhErr){ window.logError&&window.logError('load usual hours',uhErr); }
+    _usualHistLoaded=true;
+  }
   renderRoster();
 }
 
@@ -59224,25 +59281,32 @@ function renderRoster(){
   var h='<table style="width:100%;border-collapse:collapse;min-width:600px;"><thead><tr><th style="padding:10px 14px;text-align:left;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);border-bottom:2px solid var(--navy-border);min-width:140px;">Employee</th>';
   days.forEach(function(d,i){var iT=d.getTime()===today.getTime(),iW=i>=5;h+='<th style="padding:10px 8px;text-align:center;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;border-bottom:2px solid var(--navy-border);min-width:88px;color:'+(iT?'var(--gold)':iW?'rgba(255,255,255,0.3)':'var(--muted)')+'"><div>'+DN[i]+'</div><div style="font-size:14px;font-weight:700;margin-top:2px;">'+(iT?'<span style="background:var(--gold);color:var(--navy-dark);border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;">':'')+d.getDate()+(iT?'</span>':'')+'</div></th>';});
   h+='</tr></thead><tbody>';
-  var grouped={day:[],eve:[],liquid:[],warehouse:[],office:[],ecom:[],other:[]};
+  var grouped={day:[],eve:[],liquid:[],warehouse:[],office:[],commercial:[],ecom:[],other:[]};
   _emps.forEach(function(emp){ var g=rosterGroupOf(emp); (grouped[g]||grouped.other).push(emp); });
   _ROSTER_GROUP_ORDER.forEach(function(grp){
     var list=grouped[grp.key];
     if(!list.length) return;
     h+='<tr class="roster-group-hd"><td colspan="8" style="padding:16px 14px 8px;font-size:15px;letter-spacing:0.08em;text-transform:uppercase;color:var(--gold);font-weight:700;border-bottom:1px solid var(--navy-border);">'+grp.label+'</td></tr>';
+    var rosteredH=0, leaveH=0;
     list.forEach(function(emp,ei){
+      var usual=usualHoursFor(emp, grp.key);
       h+='<tr style="background:'+(ei%2===0?'transparent':'rgba(255,255,255,0.015)')+';">';
       h+='<td style="padding:8px 14px;border-bottom:1px solid var(--navy-border);font-size:12px;font-weight:700;color:var(--white);">'+window.escapeHtml(emp.display_name||'Unknown')+'</td>';
       days.forEach(function(d){
         var d2=ds(d),key=rk(emp.id,d2),isL=_leaveMap[key],sh=_roster[key];
         var cs='padding:6px;border-bottom:1px solid var(--navy-border);border-left:1px solid rgba(36,61,87,0.5);text-align:center;';
         var eId=window.escapeHtml(emp.id), eD2=window.escapeHtml(d2);
-        if(isL){var _lvSt=_ROSTER_LV_STYLE[isL.cat]||_ROSTER_LV_STYLE.other;var _lvLbl=isL.half?_lvSt.lbl+'<br>(\u00bd DAY)':_lvSt.lbl;var _lvFull=isL.half?_lvSt.full+' (Half Day)':_lvSt.full;h+='<td style="'+cs+'"><div title="'+window.escapeHtml(_lvFull)+'" style="background:'+_lvSt.bg+';border:1px solid '+_lvSt.bd+';border-radius:4px;padding:5px 4px;font-size:9px;font-weight:700;color:'+_lvSt.fg+';">'+_lvLbl+'</div></td>';}
-        else if(sh){var bg=shiftBg(sh.sn),bc=shiftBd(sh.sn);var tl=(sh.st||'').slice(0,5)+'\u2013'+(sh.et||'').slice(0,5);var bkl=(sh.bm>0)?' \u00b7 '+sh.bm+'m brk':'';h+='<td style="'+cs+'"><div data-uid="'+eId+'" data-date="'+eD2+'" '+(canEdit?'data-action="openShift"':'')+' title="'+window.escapeHtml((sh.sn||'')+' '+tl+(sh.bm>0?' ('+sh.bm+' min break)':''))+'" style="background:'+bg+';border:1px solid '+bc+';border-radius:4px;padding:5px 4px;cursor:'+(canEdit?'pointer':'default')+'"><div style="font-size:9px;font-weight:700;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+window.escapeHtml(sh.sn.replace(' Shift',''))+'</div><div style="font-size:9px;color:var(--muted);">'+tl+bkl+'</div></div></td>';}
+        if(isL){leaveH+=isL.half?usual/2:usual;var _lvSt=_ROSTER_LV_STYLE[isL.cat]||_ROSTER_LV_STYLE.other;var _lvLbl=isL.half?_lvSt.lbl+'<br>(\u00bd DAY)':_lvSt.lbl;var _lvFull=isL.half?_lvSt.full+' (Half Day)':_lvSt.full;h+='<td style="'+cs+'"><div title="'+window.escapeHtml(_lvFull)+'" style="background:'+_lvSt.bg+';border:1px solid '+_lvSt.bd+';border-radius:4px;padding:5px 4px;font-size:9px;font-weight:700;color:'+_lvSt.fg+';">'+_lvLbl+'</div></td>';}
+        else if(sh){rosteredH+=rosterNetHours(sh.st,sh.et,sh.bm);var bg=shiftBg(sh.sn),bc=shiftBd(sh.sn);var tl=(sh.st||'').slice(0,5)+'\u2013'+(sh.et||'').slice(0,5);var bkl=(sh.bm>0)?' \u00b7 '+sh.bm+'m brk':'';h+='<td style="'+cs+'"><div data-uid="'+eId+'" data-date="'+eD2+'" '+(canEdit?'data-action="openShift"':'')+' title="'+window.escapeHtml((sh.sn||'')+' '+tl+(sh.bm>0?' ('+sh.bm+' min break)':''))+'" style="background:'+bg+';border:1px solid '+bc+';border-radius:4px;padding:5px 4px;cursor:'+(canEdit?'pointer':'default')+'"><div style="font-size:9px;font-weight:700;color:var(--white);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+window.escapeHtml(sh.sn.replace(' Shift',''))+'</div><div style="font-size:9px;color:var(--muted);">'+tl+bkl+'</div></div></td>';}
         else{h+='<td style="'+cs+'">'+(canEdit?'<div data-uid="'+eId+'" data-date="'+eD2+'" data-action="openShift" style="height:36px;border:1px dashed rgba(255,255,255,0.08);border-radius:4px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><span style="font-size:16px;color:rgba(255,255,255,0.15)">+</span></div>':'<div style="height:36px;"></div>')+'</td>';}
       });
       h+='</tr>';
     });
+    var totalH=rosteredH+leaveH;
+    var sumBits=rosterFmtHrs(rosteredH)+' rostered';
+    if(leaveH>0) sumBits+=' <span style="color:var(--gold);">\u00b7 '+rosterFmtHrs(leaveH)+' leave</span>';
+    sumBits+=' \u00b7 <span style="color:var(--white);">'+rosterFmtHrs(totalH)+' total</span>';
+    h+='<tr class="roster-group-sum"><td colspan="8" style="padding:6px 14px 14px;font-size:12px;font-weight:600;color:var(--muted);border-bottom:1px solid var(--navy-border);">'+sumBits+'</td></tr>';
   });
   if(!_emps.length) h+='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--muted);">No employees found.</td></tr>';
   h+='</tbody></table>';
