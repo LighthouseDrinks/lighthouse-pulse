@@ -341,7 +341,7 @@ Roles are stored in the public.roles table (no longer hardcoded). Adding or edit
 Each role row has:
 • key (snake_case primary key, also used as app_users.role)
 • label, short_label, sort_order, is_system
-• Tier flags (booleans): is_pulse_admin, is_exec, is_hr_admin, is_client_editor, is_broadcast_initiator, has_finance_access, has_finance_creds, has_stock_view, notify_on_client_submission, is_manager.
+• Tier flags (booleans): is_pulse_admin, is_exec, is_hr_admin, is_client_editor, is_broadcast_initiator, has_finance_access, has_finance_creds, has_stock_view, notify_on_client_submission, is_manager, is_workforce_only.
 • sb_groups (text array) — staff-broadcast group memberships from {all, management, production, ecom}. "all" is always included.
 • permissions (jsonb) — the 25-key permission matrix:
    Jobs:      jobs_create, jobs_advance, jobs_signoff_liquid, jobs_signoff_quality, jobs_signoff_components, jobs_edit_supply_chain

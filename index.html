@@ -1284,6 +1284,7 @@ window.roleLabel = function(key) {
 //   FINANCE_NAV_ROLES         — Sees the Finance nav button
 //   FIN_CREDS_ROLES           — May save Xero credentials (subset of finance)
 //   LH_NOTIFY_ROLES           — Receives new-submission alerts
+//   WORKFORCE_ONLY_ROLES      — External HR advisor: Workforce + Org Chart only
 window.PULSE_ADMIN_ROLES         = ['managing_director','operations_director','business_analyst'];
 window.CLIENT_EDIT_ROLES         = ['managing_director','operations_director','business_analyst','commercial_manager'];
 window.BROADCAST_INITIATOR_ROLES = ['managing_director','operations_director','quality_compliance'];
@@ -1294,6 +1295,7 @@ window.FINANCE_NAV_ROLES         = ['managing_director','operations_director','f
 window.FIN_CREDS_ROLES           = ['managing_director','operations_director','financial_controller'];
 window.LH_NOTIFY_ROLES           = ['client_coordinator','quality_compliance','managing_director'];
 window.MANAGER_ROLES             = ['managing_director','operations_director','business_analyst','production_manager','ecommerce_manager','commercial_manager','financial_controller','quality_compliance','warehouse_liquid'];
+window.WORKFORCE_ONLY_ROLES      = [];
 // Senior management who may view every task across the business (the "All open"
 // tab on My Tasks). Everyone else only loads/sees their own assigned, created,
 // and watched tasks.
@@ -1317,6 +1319,7 @@ window.DEFAULT_PERMISSIONS = window.DEFAULT_PERMISSIONS || {};
 window.isPulseAdmin   = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.PULSE_ADMIN_ROLES.indexOf(role) >= 0; };
 window.isExec         = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.EXEC_ROLES.indexOf(role) >= 0; };
 window.isHRAdmin      = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.HR_ADMIN_ROLES.indexOf(role) >= 0; };
+window.isWorkforceOnly = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return (window.WORKFORCE_ONLY_ROLES || []).indexOf(role) >= 0; };
 window.canEditClients = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.CLIENT_EDIT_ROLES.indexOf(role) >= 0; };
 window.canViewAllTasks = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.TASKS_VIEW_ALL_ROLES.indexOf(role) >= 0; };
 
@@ -1359,6 +1362,7 @@ window.loadRoles = function loadRoles(force) {
       var finCred = [];
       var notify  = [];
       var manager = [];
+      var wfOnly  = [];
       var sbGroups = { all: [], management: [], production: [], ecom: [] };
       rows.forEach(function(r) {
         byKey[r.key]  = r;
@@ -1377,6 +1381,7 @@ window.loadRoles = function loadRoles(force) {
         if (r.has_finance_creds)           finCred.push(r.key);
         if (r.notify_on_client_submission) notify.push(r.key);
         if (r.is_manager)                  manager.push(r.key);
+        if (r.is_workforce_only)           wfOnly.push(r.key);
         (Array.isArray(r.sb_groups) ? r.sb_groups : []).forEach(function(g) {
           if (!sbGroups[g]) sbGroups[g] = [];
           if (sbGroups[g].indexOf(r.key) < 0) sbGroups[g].push(r.key);
@@ -1397,6 +1402,7 @@ window.loadRoles = function loadRoles(force) {
       window.FIN_CREDS_ROLES           = finCred;
       window.LH_NOTIFY_ROLES           = notify;
       window.MANAGER_ROLES             = manager;
+      window.WORKFORCE_ONLY_ROLES      = wfOnly;
       window.SB_GROUPS                 = sbGroups;
       return rows;
     } catch (e) {
@@ -1405,6 +1411,35 @@ window.loadRoles = function loadRoles(force) {
     }
   })();
   return window._rolesLoadPromise;
+};
+
+// Hide every staff surface except Workforce + Org Chart for is_workforce_only
+// roles (external HR advisor). Safe no-op for everyone else.
+window.applyWorkforceOnlyShell = function() {
+  var only = window.isWorkforceOnly && window.isWorkforceOnly();
+  var staffMob = document.getElementById('mob-nav-staff');
+  var wfMob = document.getElementById('mob-nav-workforce');
+  if (staffMob) staffMob.style.display = only ? 'none' : 'flex';
+  if (wfMob) wfMob.style.display = only ? 'flex' : 'none';
+  if (!only) return;
+
+  var keep = { 'sbnav-people': 1, 'sbnav-orgchart': 1 };
+  document.querySelectorAll('#sidebar .sb-item').forEach(function(el) {
+    if (el.id && keep[el.id]) { el.style.display = ''; return; }
+    if (!el.id && el.getAttribute('onclick') && String(el.getAttribute('onclick')).indexOf('doLogout') >= 0) {
+      el.style.display = '';
+      return;
+    }
+    el.style.display = 'none';
+  });
+  ['sb-sec-overview','sb-sec-operations','sb-sec-sales','sb-sec-supply','sb-sec-ecommerce','sb-sec-hub','sb-sec-insights'].forEach(function(id) {
+    var sec = document.getElementById(id);
+    if (sec) sec.style.display = 'none';
+  });
+  var peopleSec = document.getElementById('sb-sec-people');
+  if (peopleSec) peopleSec.style.display = '';
+  var scanBtn = document.getElementById('scan-btn');
+  if (scanBtn) scanBtn.style.display = 'none';
 };
 
 // ── Email helper: fetch LH staff emails by role ───────────────────────────────
@@ -2519,14 +2554,17 @@ async function showDashboard(user) {
   if (portal)  portal.classList.remove('active');
   if (hdr)     hdr.style.display = 'flex';
   if (sidebar) sidebar.style.display = 'flex';
+  var _wfOnly = window.isWorkforceOnly && window.isWorkforceOnly(user.role);
   // Refresh the approvals badge immediately so the count is visible on first login
   // without needing a page refresh or waiting for the 60-second poll cycle.
   // Retry at 800ms / 2s / 5s to beat any auth-token-not-yet-settled timing race.
-  [800, 2000, 5000].forEach(function(ms) {
-    setTimeout(function() {
-      if (window._approvalsBadgePoll) window._approvalsBadgePoll();
-    }, ms);
-  });
+  if (!_wfOnly) {
+    [800, 2000, 5000].forEach(function(ms) {
+      setTimeout(function() {
+        if (window._approvalsBadgePoll) window._approvalsBadgePoll();
+      }, ms);
+    });
+  }
   document.body.classList.add('app-active');
   document.querySelectorAll('.page').forEach(function(p) { p.style.display=''; });
   document.body.style.overflow = '';
@@ -2579,9 +2617,11 @@ async function showDashboard(user) {
   var hdrSettingsBtn = document.getElementById('header-settings-btn');
   if (hdrSettingsBtn && window.isPulseAdmin(user.role)) hdrSettingsBtn.style.display = 'flex';
   // initHeaderClock drives the dashboard quick-launch clock tile (#ql-clock-in)
-  if (user.role !== 'client') {
+  if (user.role !== 'client' && !_wfOnly) {
     setTimeout(function(){ window.initHeaderClock && window.initHeaderClock(); }, 500);
   }
+
+  if (window.applyWorkforceOnlyShell) window.applyWorkforceOnlyShell();
 
   // Stock value KPI section — MD, Financial Controller, Ops Director, Business Analyst only
   var _stockSection = document.getElementById('kpi-stock-section');
@@ -2600,19 +2640,24 @@ async function showDashboard(user) {
 
   // Restore last page from URL hash on refresh; default to overview on fresh login
   var _hashPage = (window.location.hash || '').replace('#', '').trim();
-  var _validPages = ['overview','jobs','schedule','blending','boms','approvals','pipeline','clients','inventory','drygoods','liquid','finished','pallets','suppliers','my-tasks','people','knowledge','ask-peat','tools','reports','vessels','finance','meetings','ecommerce'];
-  if (_hashPage === 'drygoods' || _hashPage === 'liquid' || _hashPage === 'finished') {
+  var _validPages = _wfOnly
+    ? ['people','orgchart']
+    : ['overview','jobs','schedule','blending','boms','approvals','pipeline','clients','inventory','drygoods','liquid','finished','pallets','suppliers','my-tasks','people','orgchart','knowledge','ask-peat','tools','reports','vessels','finance','meetings','ecommerce'];
+  if (!_wfOnly && (_hashPage === 'drygoods' || _hashPage === 'liquid' || _hashPage === 'finished')) {
     // Inventory sub-tabs: navToInvTab manages page + active sidebar state
     var _invNavEl = document.getElementById('sbnav-' + _hashPage);
     window.navToInvTab(_hashPage, _invNavEl);
   } else {
-    var _startPage = (_validPages.indexOf(_hashPage) >= 0) ? _hashPage : 'overview';
-    var _startNav  = document.getElementById('sbnav-' + _startPage) || document.getElementById('sbnav-overview');
+    var _fallback = _wfOnly ? 'people' : 'overview';
+    var _startPage = (_validPages.indexOf(_hashPage) >= 0) ? _hashPage : _fallback;
+    var _startNav  = document.getElementById('sbnav-' + _startPage) || document.getElementById('sbnav-' + _fallback);
     showPage(_startPage, _startNav);
     if (_startPage === 'approvals' && window.loadApprovalsPage) setTimeout(window.loadApprovalsPage, 100);
   }
   // Lift the session-resume veil AFTER the correct page is active — no flash possible
   document.documentElement.classList.remove('resuming-session');
+
+  if (_wfOnly) return;
 
   // Trigger KPI loads and re-run jobs with the authenticated session — the
   // pre-auth load used the anon key and may have returned empty due to RLS.
@@ -6381,7 +6426,7 @@ window.copyInviteLink = function() {
     </div>
   </div>
   <!-- Sales & CRM -->
-  <div class="sb-section">
+  <div class="sb-section" id="sb-sec-sales">
     <div class="sb-group-label">Sales &amp; CRM</div>
     <div class="sb-item" id="sbnav-clients" onclick="showPage('clients',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7 14s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H7zm4-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM5.216 14A2.238 2.238 0 0 1 5 13c0-1.355.68-2.75 1.936-3.72A6.325 6.325 0 0 0 5 9c-4 0-5 3-5 4s1 1 1 1h4.216z"/></svg>Customers
@@ -6397,7 +6442,7 @@ window.copyInviteLink = function() {
     </div>
   </div>
   <!-- Supply Chain -->
-  <div class="sb-section">
+  <div class="sb-section" id="sb-sec-supply">
     <div class="sb-group-label">Supply Chain</div>
     <div class="sb-item" id="sbnav-inventory" onclick="window.navToInvTab('liquid',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 2.5A.5.5 0 0 1 .5 2H2a.5.5 0 0 1 .485.379L2.89 4H14.5a.5.5 0 0 1 .485.621l-1.5 6A.5.5 0 0 1 13 11H4a.5.5 0 0 1-.485-.379L1.61 3H.5a.5.5 0 0 1-.5-.5z"/></svg>Liquid Inventory
@@ -6416,14 +6461,14 @@ window.copyInviteLink = function() {
     </div>
   </div>
   <!-- Ecommerce -->
-  <div class="sb-section">
+  <div class="sb-section" id="sb-sec-ecommerce">
     <div class="sb-group-label">Ecommerce</div>
     <div class="sb-item" id="sbnav-ecommerce" onclick="showPage('ecommerce',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 1.5A.5.5 0 0 1 .5 1H2a.5.5 0 0 1 .485.379L2.89 3H14.5a.5.5 0 0 1 .491.592l-1.5 8A.5.5 0 0 1 13 12H4a.5.5 0 0 1-.491-.408L2.01 3.607 1.61 2H.5a.5.5 0 0 1-.5-.5zM3.102 4l1.313 7h8.17l1.313-7H3.102zM5 12a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm7 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm-7 1a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm7 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>Ecommerce
     </div>
   </div>
   <!-- People -->
-  <div class="sb-section">
+  <div class="sb-section" id="sb-sec-people">
     <div class="sb-group-label">People</div>
     <div class="sb-item" id="sbnav-my-tasks" onclick="showPage('my-tasks',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 1a.5.5 0 0 1 .5.5v1h1a2 2 0 0 1 2 2V14a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V4.5a2 2 0 0 1 2-2h1v-1a.5.5 0 0 1 1 0v1h4v-1a.5.5 0 0 1 .5-.5zM4 3.5a1 1 0 0 0-1 1V14a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V4.5a1 1 0 0 0-1-1H4zm3.354 4.354-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L4 9.793l2.646-2.647a.5.5 0 0 1 .708.708z"/></svg>My Tasks<span id="sbnav-my-tasks-badge" style="display:none;margin-left:auto;background:var(--gold);color:var(--navy);font-size:9px;font-weight:800;padding:2px 6px;border-radius:8px;font-variant-numeric:tabular-nums;">0</span>
@@ -6436,7 +6481,7 @@ window.copyInviteLink = function() {
     </div>
   </div>
   <!-- Hub -->
-  <div class="sb-section">
+  <div class="sb-section" id="sb-sec-hub">
     <div class="sb-group-label">Operations Hub</div>
     <div class="sb-item" id="sbnav-meetings" onclick="showPage('meetings',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5zM1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4H1z"/><path d="M11 7.5a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-1zm-3 0a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-1zm-5 3a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-1zm3 0a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-1z"/></svg>Meetings
@@ -6452,7 +6497,7 @@ window.copyInviteLink = function() {
     </div>
   </div>
   <!-- Insights -->
-  <div class="sb-section">
+  <div class="sb-section" id="sb-sec-insights">
     <div class="sb-group-label">Insights</div>
     <div class="sb-item" id="sbnav-reports" onclick="showPage('reports',this)">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 0h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm0 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H4zm1 2h6v1H5V3zm0 2h6v1H5V5zm0 2h4v1H5V7z"/></svg>Reports
@@ -6503,7 +6548,7 @@ window.copyInviteLink = function() {
 
 <!-- ══ MOBILE NAV (5 tabs + More) ══════════════════════════════════════════ -->
 <div id="mob-nav" style="position:fixed;bottom:0;left:0;right:0;z-index:200;background:var(--navy-mid);border-top:1px solid var(--navy-border);">
-  <div style="display:flex;justify-content:space-around;align-items:stretch;">
+  <div id="mob-nav-staff" style="display:flex;justify-content:space-around;align-items:stretch;">
 
     <div class="mob-nav-item active" data-page="overview" onclick="showPage('overview', document.getElementById('sbnav-overview'))">
       <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h5v5H2V2zm0 7h5v5H2V9zm7-7h5v5H9V2zm0 7h5v5H9V9z"/></svg>
@@ -6530,6 +6575,16 @@ window.copyInviteLink = function() {
       More
     </div>
 
+  </div>
+  <div id="mob-nav-workforce" style="display:none;justify-content:space-around;align-items:stretch;">
+    <div class="mob-nav-item" data-page="people" onclick="showPage('people', document.getElementById('sbnav-people'))">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M7 14s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H7zm4-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-5.784 6A2.238 2.238 0 0 1 5 13c0-1.355.68-2.75 1.936-3.72A6.325 6.325 0 0 0 5 9c-4 0-5 3-5 4s1 1 1 1h4.216zM4.5 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"/></svg>
+      Workforce
+    </div>
+    <div class="mob-nav-item" data-page="orgchart" onclick="showPage('orgchart', document.getElementById('sbnav-orgchart'))">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6 3.5A1.5 1.5 0 0 1 7.5 2h1A1.5 1.5 0 0 1 10 3.5v1A1.5 1.5 0 0 1 8.5 6v1H14a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-1 0V8h-5v1a.5.5 0 0 1-1 0V8h-5v.5a.5.5 0 0 1-1 0v-1A.5.5 0 0 1 2 7h5.5V6A1.5 1.5 0 0 1 6 4.5v-1zM8.5 5a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1zM0 11.5A1.5 1.5 0 0 1 1.5 10h1A1.5 1.5 0 0 1 4 11.5v1A1.5 1.5 0 0 1 2.5 14h-1A1.5 1.5 0 0 1 0 12.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1zm5 .5A1.5 1.5 0 0 1 7.5 10h1a1.5 1.5 0 0 1 1.5 1.5v1A1.5 1.5 0 0 1 8.5 14h-1A1.5 1.5 0 0 1 6 12.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1zm5 .5a1.5 1.5 0 0 1 1.5-1.5h1a1.5 1.5 0 0 1 1.5 1.5v1a1.5 1.5 0 0 1-1.5 1.5h-1a1.5 1.5 0 0 1-1.5-1.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1z"/></svg>
+      Org Chart
+    </div>
   </div>
 </div>
 
@@ -6720,6 +6775,18 @@ window.copyInviteLink = function() {
             <button type="button" onclick="window.addProductionWindowRow()" class="btn" style="font-size:11px;padding:8px 14px;background:transparent;border:1px solid var(--navy-border);color:var(--text);">+ Add window</button>
             <button type="button" onclick="window.saveProductionWindowsSettings()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save Production Hours</button>
             <span id="prod-save-status" style="font-size:12px;"></span>
+          </div>
+        </div>
+        <div style="max-width:520px;margin-top:32px;padding-top:24px;border-top:1px solid var(--navy-border);">
+          <div style="font-size:13px;font-weight:700;color:var(--white);margin-bottom:6px;">Weekly production budget hours</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.55;margin-bottom:16px;">
+            Shown on the roster under Evening Production as the weekly budget for Day + Evening Production. Actual hours count rostered shifts only, not leave.
+          </div>
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:5px;">Budget hours</label>
+          <input type="number" id="prod-budget-hours" min="0" step="0.5" value="257" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;width:140px;box-sizing:border-box;border-radius:4px;font-family:Lato,sans-serif;">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px;">
+            <button type="button" onclick="window.saveProductionBudgetHoursSettings()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save Budget Hours</button>
+            <span id="prod-budget-save-status" style="font-size:12px;"></span>
           </div>
         </div>
       </div>
@@ -8558,7 +8625,11 @@ window.copyInviteLink = function() {
   function sbPatch(table, query, body) { return window.db.update(table, query, body); }
   function sbDelete(table, query)      { return window.db.delete(table, query); }
 
-  function isAdmin() { return window.isPulseAdmin(); }
+  function isAdmin() {
+    return window.isPulseAdmin()
+        || (window.isWorkforceOnly && window.isWorkforceOnly())
+        || (window.canDo && window.canDo('hr_view_all'));
+  }
   function canViewAll() {
     // isAdmin() check first, then permissions matrix
     if (isAdmin()) return true;
@@ -23557,6 +23628,12 @@ window.loadBoms = async function initBoms() {
 
 <script>
   function showPage(name, navEl) {
+    if (window.isWorkforceOnly && window.isWorkforceOnly()) {
+      if (name !== 'people' && name !== 'orgchart') {
+        name = 'people';
+        navEl = document.getElementById('sbnav-people');
+      }
+    }
     if (name === 'overview' && typeof window.loadMyTasks === 'function') setTimeout(window.loadMyTasks, 200);
     if (name === 'overview' && typeof window.loadPendingBomApprovals === 'function') setTimeout(window.loadPendingBomApprovals, 300);
     if (name === 'overview') {
@@ -23613,7 +23690,7 @@ window.loadBoms = async function initBoms() {
     if (name === 'boms' && window.loadBoms) setTimeout(function(){ window.loadBoms(); }, 100);
     if (name === 'people') setTimeout(function(){
       if(window.applyHRPermissions) window.applyHRPermissions();
-      var tab = window.isPulseAdmin() ? 'mgmt' : 'roster';
+      var tab = (window.isPulseAdmin() || (window.isWorkforceOnly && window.isWorkforceOnly()) || (window.canDo && window.canDo('hr_view_all'))) ? 'mgmt' : 'roster';
       var btn = document.querySelector('.people-tab[onclick*="'+tab+'"]');
       if(window.showPeopleTab&&btn) window.showPeopleTab(tab,btn);
     }, 300);
@@ -23687,6 +23764,9 @@ window.loadBoms = async function initBoms() {
   window.addEventListener('popstate', function(e) {
     if (!window.CURRENT_USER) return;
     var page = (e.state && e.state.page) || 'overview';
+    if (window.isWorkforceOnly && window.isWorkforceOnly() && page !== 'people' && page !== 'orgchart') {
+      page = 'people';
+    }
     // Inventory sub-tabs handled by navToInvTab (it manages sidebar + tab state)
     if (page === 'drygoods' || page === 'liquid' || page === 'finished') {
       if (window.navToInvTab) window.navToInvTab(page, document.getElementById('sbnav-' + page));
@@ -28505,6 +28585,10 @@ window.showInvTab = function(tab, btn) {
 
 // Navigate from sidebar to inventory page and activate the correct sub-tab
 window.navToInvTab = function(tab, navEl) {
+  if (window.isWorkforceOnly && window.isWorkforceOnly()) {
+    showPage('people', document.getElementById('sbnav-people'));
+    return;
+  }
   // Set sidebar active state (clear all, mark this item)
   document.querySelectorAll('.sb-item').forEach(function(n){ n.classList.remove('active'); });
   if (navEl) navEl.classList.add('active');
@@ -57785,7 +57869,63 @@ window.saveAdjModal = async function() {
     _renderProductionWindowRows(windows);
     var status = document.getElementById('prod-save-status');
     if (status) status.textContent = '';
+    await loadProductionBudgetHoursIntoSettings();
   }
+  function parseProductionBudgetHours(val) {
+    if (val == null) return 257;
+    if (typeof val === 'number' && isFinite(val)) return val;
+    if (typeof val === 'string') {
+      var n = parseFloat(val);
+      return isFinite(n) ? n : 257;
+    }
+    if (typeof val === 'object' && val.hours != null) {
+      var n = parseFloat(val.hours);
+      return isFinite(n) ? n : 257;
+    }
+    return 257;
+  }
+  async function loadProductionBudgetHoursIntoSettings() {
+    var input = document.getElementById('prod-budget-hours');
+    var status = document.getElementById('prod-budget-save-status');
+    if (status) status.textContent = '';
+    var hours = 257;
+    try {
+      var rows = await sbGet('app_settings?key=eq.production_budget_hours&limit=1&select=value');
+      if (rows && rows.length) hours = parseProductionBudgetHours(rows[0].value);
+    } catch (e) { window.logError && window.logError('load production budget hours', e); }
+    if (input) input.value = hours;
+    if (window.setRosterProductionBudgetHours) window.setRosterProductionBudgetHours(hours);
+  }
+  window.saveProductionBudgetHoursSettings = async function() {
+    var input = document.getElementById('prod-budget-hours');
+    var statusEl = document.getElementById('prod-budget-save-status');
+    if (!input) return;
+    var hours = parseFloat(input.value);
+    if (!isFinite(hours) || hours < 0) {
+      window.toast && window.toast('Enter a valid weekly budget of 0 or more hours.', 'error');
+      return;
+    }
+    hours = Math.round(hours * 10) / 10;
+    try {
+      var existing = await sbGet('app_settings?key=eq.production_budget_hours&limit=1');
+      if (existing.length) {
+        await sbPatch('app_settings', '?key=eq.production_budget_hours', { value: hours, updated_at: new Date().toISOString() });
+      } else {
+        await sbPost('app_settings', { key: 'production_budget_hours', value: hours });
+      }
+      if (input) input.value = hours;
+      if (window.setRosterProductionBudgetHours) window.setRosterProductionBudgetHours(hours);
+      if (statusEl) {
+        statusEl.textContent = '✓ Saved';
+        statusEl.style.color = 'var(--green)';
+        setTimeout(function() { statusEl.textContent = ''; }, 3000);
+      }
+      window.toast && window.toast('Production budget hours saved.', 'success');
+    } catch (e) {
+      if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = 'var(--red)'; }
+      window.toast && window.toast('Error: ' + e.message, 'error');
+    }
+  };
   window.addProductionWindowRow = function() {
     var box = document.getElementById('prod-windows-list');
     if (!box) return;
@@ -57927,7 +58067,7 @@ window.saveAdjModal = async function() {
   // CRUD for the `roles` table. Reads via the cached window.ROLES_BY_KEY map
   // (populated by loadRoles), writes via the roles-admin edge function.
 
-  // The 10 tier flags shown in the modal, and the 4 sb_groups checkboxes.
+  // The 11 tier flags shown in the modal, and the 4 sb_groups checkboxes.
   // Order is the rendered order — keep grouped logically.
   var ROLE_TIER_FLAGS_DEF = [
     { key:'is_pulse_admin',              label:'Pulse admin',               help:'Settings access, invite users, super-admin gates' },
@@ -57939,7 +58079,8 @@ window.saveAdjModal = async function() {
     { key:'has_finance_access',          label:'Finance access',            help:'See Finance nav + xero-oauth/credit/ecom EFs' },
     { key:'has_finance_creds',           label:'Save Xero credentials',     help:'Subset of finance: connect/refresh Xero' },
     { key:'has_stock_view',              label:'Stock value visibility',    help:'See stock-value and bottle KPIs on Overview' },
-    { key:'notify_on_client_submission', label:'Receive submission alerts', help:'Gets emailed when a client submits a request' }
+    { key:'notify_on_client_submission', label:'Receive submission alerts', help:'Gets emailed when a client submits a request' },
+    { key:'is_workforce_only',           label:'Workforce-only nav',        help:'Hide every section except Workforce and Org Chart' }
   ];
   var ROLE_SB_GROUPS_DEF = [
     { key:'all',        label:'All staff (always on)' },
@@ -57955,7 +58096,7 @@ window.saveAdjModal = async function() {
       is_pulse_admin:'Pulse admin', is_exec:'Exec', is_hr_admin:'HR admin',
       is_manager:'Manager', is_client_editor:'Clients', is_broadcast_initiator:'Broadcast',
       has_finance_access:'Finance', has_finance_creds:'Xero', has_stock_view:'Stock',
-      notify_on_client_submission:'Notify'
+      notify_on_client_submission:'Notify', is_workforce_only:'Workforce only'
     };
     Object.keys(labels).forEach(function(k){
       if (r[k]) {
@@ -59067,6 +59208,7 @@ function patch(p,b){ var i=p.indexOf('?'); return window.db.update(i>=0?p.slice(
 function isLvAdmin(){
   var role=window.CURRENT_USER&&window.CURRENT_USER.role;
   return (window.isPulseAdmin && window.isPulseAdmin(role)) ||
+         (window.isWorkforceOnly && window.isWorkforceOnly(role)) ||
          !!(window.CURRENT_PERMISSIONS&&window.CURRENT_PERMISSIONS[role]&&window.CURRENT_PERMISSIONS[role].hr_view_all);
 }
 
@@ -59078,7 +59220,7 @@ function isLvAdmin(){
 var _lvScope={ ready:false, isManager:false, reportIds:{} };
 window._lvScope=_lvScope;
 
-function lvIsSenior(){ return !!(window.isPulseAdmin && window.isPulseAdmin()); }
+function lvIsSenior(){ return isLvAdmin(); }
 
 window.lvInitScope = async function(){
   var cu=window.CURRENT_USER;
@@ -59115,6 +59257,54 @@ function countWeekdays(from, to, isHalf){
     d.setDate(d.getDate()+1);
   }
   return isHalf ? count*0.5 : count;
+}
+
+// Shared leave-year math. Pro-rata and accrual copy the original employee
+// KPI formulas exactly (including 364-day year and Math.ceil) so the admin
+// overview and the employee strip cannot drift.
+function lvProRateEntitlement(annual, employmentStart){
+  if(annual==null || !employmentStart) return null;
+  var yr=new Date().getFullYear();
+  var joinDate=new Date(employmentStart);
+  if(joinDate.getFullYear() !== yr) return annual;
+  var startOfYear=new Date(yr,0,1);
+  var endOfYear=new Date(yr,11,31);
+  var totalDays=(endOfYear-startOfYear)/(1000*60*60*24);
+  var remainingDays=(endOfYear-joinDate)/(1000*60*60*24);
+  return Math.ceil(annual*(remainingDays/totalDays));
+}
+
+function lvAccruedYtd(entitlement, employmentStart){
+  if(entitlement==null || !employmentStart) return null;
+  var aYr=new Date().getFullYear();
+  var aToday=new Date(); aToday.setHours(0,0,0,0);
+  var aEoy=new Date(aYr,11,31);
+  var aAccrualStart=new Date(aYr,0,1);
+  var asd=new Date(employmentStart);
+  if(asd>aAccrualStart) aAccrualStart=asd;
+  var aElapsed=Math.max(0,(aToday-aAccrualStart)/864e5);
+  var aPeriodDays=Math.max(1,(aEoy-aAccrualStart)/864e5);
+  return Math.round(entitlement*(aElapsed/aPeriodDays)*10)/10;
+}
+
+function lvYearBalance(annual, employmentStart, used, pending){
+  var entitlement=lvProRateEntitlement(annual, employmentStart);
+  if(entitlement===null){
+    return { annual:annual, entitlement:null, remaining:null, accrued:null };
+  }
+  return {
+    annual: annual,
+    entitlement: entitlement,
+    remaining: Math.max(0, entitlement-(used||0)-(pending||0)),
+    accrued: lvAccruedYtd(entitlement, employmentStart)
+  };
+}
+
+function lvRequestDays(r){
+  if(r.start_date){
+    return countWeekdays(r.start_date, r.end_date||r.start_date, r.leave_type==='half_day');
+  }
+  return parseFloat(r.days)||0;
 }
 
 /* ── Format date nicely ── */
@@ -59203,19 +59393,7 @@ function lvRenderKPIs(){
   // If employment_start is missing we refuse to compute — returning the full
   // entitlement here would silently mislead any caller that bypasses the
   // guard above. Caller treats null as "cannot compute".
-  function proRate(ent){
-    if(!p.employment_start) return null;
-    var yr=new Date().getFullYear();
-    var joinDate=new Date(p.employment_start);
-    if(joinDate.getFullYear() !== yr) return ent;
-    var startOfYear=new Date(yr,0,1);
-    var endOfYear=new Date(yr,11,31);
-    var totalDays=(endOfYear-startOfYear)/(1000*60*60*24);
-    var remainingDays=(endOfYear-joinDate)/(1000*60*60*24);
-    return Math.ceil(ent*(remainingDays/totalDays));
-  }
-
-  setKPIs(proRate(rawEntitlement));
+  setKPIs(lvProRateEntitlement(rawEntitlement, p.employment_start));
 }
 
 function setKPIs(entitlement){
@@ -59240,7 +59418,7 @@ function setKPIs(entitlement){
   _lvRequests.forEach(function(r){
     if(r.status==='cancelled') return;
     if((r.leave_category||'annual')!=='annual') return; // only annual leave affects annual balance
-    var days=countWeekdays(r.start_date,r.end_date||r.start_date,r.leave_type==='half_day');
+    var days=lvRequestDays(r);
     if(r.status==='approved') used+=days;
     else if(r.status==='pending') pending+=days;
   });
@@ -59249,19 +59427,7 @@ function setKPIs(entitlement){
   uEl.textContent=used%1===0?used:used.toFixed(1); uEl.title='';
   pEl.textContent=pending%1===0?pending:pending.toFixed(1); pEl.title='';
   rEl.textContent=rem%1===0?rem:rem.toFixed(1); rEl.title='';
-  var accrued=null;
-  if(_lvProfile && _lvProfile.employment_start){
-    var aYr=new Date().getFullYear();
-    var aToday=new Date(); aToday.setHours(0,0,0,0);
-    var aEoy=new Date(aYr,11,31);
-    var aAccrualStart=new Date(aYr,0,1);
-    var asd=new Date(_lvProfile.employment_start);
-    if(asd>aAccrualStart) aAccrualStart=asd;
-    var aElapsed=Math.max(0,(aToday-aAccrualStart)/864e5);
-    // Period spans accrualStart → Dec 31; use entitlement proportional to that window
-    var aPeriodDays=Math.max(1,(aEoy-aAccrualStart)/864e5);
-    accrued=Math.round(entitlement*(aElapsed/aPeriodDays)*10)/10;
-  }
+  var accrued=lvAccruedYtd(entitlement, _lvProfile && _lvProfile.employment_start);
   if(aEl){
     if(accrued===null){ aEl.textContent='—'; aEl.title='Start Date not set in HR profile — accrual cannot be computed.'; }
     else { aEl.textContent=accrued%1===0?accrued:accrued.toFixed(1); aEl.title=''; }
@@ -59547,7 +59713,7 @@ window.mgmtLoadLeaveOverview = async function(){
     var results=await Promise.all([
       get('app_users?status=eq.active&select=id,display_name,email,role&order=display_name.asc&limit=200'),
       get('hr_profiles?select=user_id,leave_entitlement,employment_type,employment_start&limit=200'),
-      get('leave_requests?status=neq.cancelled&start_date=gte.'+yr+'-01-01&select=user_id,days,status,leave_category&limit=500')
+      get('leave_requests?status=neq.cancelled&start_date=gte.'+yr+'-01-01&select=user_id,days,status,leave_category,leave_type,start_date,end_date&limit=500')
     ]);
     var users=results[0], profiles=results[1], requests=results[2];
     // Track which non-annual categories have any data (to hide empty columns)
@@ -59566,7 +59732,7 @@ window.mgmtLoadLeaveOverview = async function(){
       var annUsed=0, annPend=0;
       var catDays={};
       reqs.forEach(function(r){
-        var d=parseFloat(r.days)||0;
+        var d=lvRequestDays(r);
         var cat=r.leave_category||'annual';
         if(cat==='annual'){
           if(r.status==='approved') annUsed+=d;
@@ -59578,60 +59744,63 @@ window.mgmtLoadLeaveOverview = async function(){
           }
         }
       });
-      var ent=parseFloat(p.leave_entitlement)||0;
-      var rem=Math.max(0,ent-annUsed-annPend);
-      // Refuse to compute accrual when employment_start is missing — falling
-      // back to Jan 1 would show a plausible-but-wrong number for anyone who
-      // joined mid-year. null is rendered as "—" below with an explanatory tooltip.
-      var accrued=null;
-      if(p.employment_start){
-        var mEoy=new Date(yr,11,31);
-        var mAs=new Date(p.employment_start);
-        var mSoy=new Date(yr,0,1);
-        if(mAs<mSoy) mAs=mSoy;
-        var mToday=new Date();mToday.setHours(0,0,0,0);
-        var mPeriod=Math.max(1,(mEoy-mAs)/864e5);
-        var mEl=Math.min(mPeriod,Math.max(0,(mToday-mAs)/864e5));
-        accrued=Math.round(ent*(mEl/mPeriod)*10)/10;
-      }
-      return { name:u.display_name||u.email||(p.user_id.slice(0,8)), type:p.employment_type||'full_time', ent:ent, annUsed:annUsed, annPend:annPend, rem:rem, accrued:accrued, hasStart:!!p.employment_start, catDays:catDays };
+      var annual=parseFloat(p.leave_entitlement)||0;
+      var bal=lvYearBalance(annual, p.employment_start, annUsed, annPend);
+      return {
+        name:u.display_name||u.email||(p.user_id.slice(0,8)),
+        type:p.employment_type||'full_time',
+        annual:annual,
+        ent:bal.entitlement,
+        annUsed:annUsed,
+        annPend:annPend,
+        rem:bal.remaining,
+        accrued:bal.accrued,
+        hasStart:!!p.employment_start,
+        catDays:catDays
+      };
     }).filter(Boolean);
     if(!rows.length){ el.innerHTML='<span style="color:var(--muted);">No leave entitlements configured yet.</span>'; return; }
     rows.sort(function(a,b){ return a.name.localeCompare(b.name); });
     var visibleCats=NON_ANNUAL_CATS.filter(function(c){ return activeCats[c]; });
     var fmtType=function(t){ return t==='part_time'?'Part-Time':t==='contractor'?'Contractor':'Full-Time'; };
     var remColor=function(r){ return r<1?'var(--red)':r<=5?'var(--amber)':'var(--green)'; };
-    var fmt=function(n){ return n%1===0?n:n.toFixed(1); };
+    var fmt=function(n){ return n==null?'\u2014':(n%1===0?n:n.toFixed(1)); };
+    var noStartTip='Start date not set in HR \u2014 cannot compute this year\u2019s allowance.';
     var thStyle='font-size:9px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);padding:7px 6px;white-space:nowrap;';
     var html='<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead>'
       +'<tr style="border-bottom:2px solid var(--navy-border);">'
       +'<th style="text-align:left;'+thStyle+'">Employee</th>'
       +'<th style="text-align:left;'+thStyle+'">Type</th>'
-      +'<th colspan="5" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(201,168,76,0.3);color:var(--gold);">Annual Leave</th>'
+      +'<th colspan="5" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(201,168,76,0.3);color:var(--gold);">This year</th>'
+      +'<th colspan="1" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(120,147,168,0.35);color:var(--muted);">Earned</th>'
       +(visibleCats.length?'<th colspan="'+visibleCats.length+'" style="text-align:center;'+thStyle+';border-bottom:1px solid rgba(74,158,221,0.3);color:#4a9edd;">Other Leave (days taken)</th>':'')
       +'</tr>'
       +'<tr style="border-bottom:1px solid var(--navy-border);">'
       +'<th style="'+thStyle+'"></th><th style="'+thStyle+'"></th>'
-      +'<th style="text-align:center;'+thStyle+'">Entitlement</th>'
+      +'<th style="text-align:center;'+thStyle+'" title="Full-year allowance set in HR. Pro-rata applies automatically in the start year only.">Annual</th>'
+      +'<th style="text-align:center;'+thStyle+'" title="Days this year. Pro-rata if they started after 1 January.">Entitlement</th>'
       +'<th style="text-align:center;'+thStyle+'">Used</th>'
       +'<th style="text-align:center;'+thStyle+'">Pending</th>'
-      +'<th style="text-align:center;'+thStyle+'">Remaining</th>'
-      +'<th style="text-align:center;'+thStyle+'">Accrued</th>'
+      +'<th style="text-align:center;'+thStyle+'" title="Entitlement \u2212 Used \u2212 Pending">Remaining</th>'
+      +'<th style="text-align:center;'+thStyle+'" title="Earned so far this year. Not the remaining balance.">Accrued YTD</th>'
       +visibleCats.map(function(c){ return '<th style="text-align:center;'+thStyle+'">'+window.lvCatLabel(c).replace(' Leave','').replace(' / ',' /')+'</th>'; }).join('')
       +'</tr></thead><tbody>';
     rows.forEach(function(r){
+      var computed=r.hasStart && r.ent!=null;
       html+='<tr style="border-bottom:1px solid rgba(36,61,87,0.5);">'
         +'<td style="padding:8px 6px;color:var(--white);font-weight:600;white-space:nowrap;">'+window.escapeHtml(r.name)+'</td>'
         +'<td style="padding:8px 6px;color:var(--muted);white-space:nowrap;">'+fmtType(r.type)+'</td>'
-        +'<td style="text-align:center;padding:8px 6px;color:var(--white);">'+r.ent+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;color:var(--muted);">'+fmt(r.annual)+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;color:'+(computed?'var(--white)':'var(--amber)')+';" title="'+(computed?'':'Start date not set in HR \u2014 cannot compute this year\u2019s allowance.')+'">'+(computed?fmt(r.ent):'\u2014')+'</td>'
         +'<td style="text-align:center;padding:8px 6px;">'+fmt(r.annUsed)+'</td>'
         +'<td style="text-align:center;padding:8px 6px;color:var(--amber);">'+fmt(r.annPend)+'</td>'
-        +'<td style="text-align:center;padding:8px 6px;font-weight:700;color:'+remColor(r.rem)+';">'+fmt(r.rem)+'</td>'
-        +'<td style="text-align:center;padding:8px 6px;color:'+(r.hasStart?'var(--white)':'var(--amber)')+';" title="'+(r.hasStart?'':'Start Date not set in HR profile — accrual cannot be computed')+'">'+(r.hasStart?fmt(r.accrued):'\u2014')+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;font-weight:700;color:'+(computed?remColor(r.rem):'var(--amber)')+';" title="'+(computed?'':'Start date not set in HR \u2014 cannot compute this year\u2019s allowance.')+'">'+(computed?fmt(r.rem):'\u2014')+'</td>'
+        +'<td style="text-align:center;padding:8px 6px;color:'+(computed?'var(--white)':'var(--amber)')+';" title="'+(computed?'Earned so far this year. Not the remaining balance.':noStartTip)+'">'+(computed?fmt(r.accrued):'\u2014')+'</td>'
         +visibleCats.map(function(c){ var d=r.catDays[c]||0; return '<td style="text-align:center;padding:8px 6px;color:'+(d>0?'var(--white)':'rgba(120,147,168,0.4)')+';">'+(d>0?fmt(d):'\u2014')+'</td>'; }).join('')
         +'</tr>';
     });
-    html+='</tbody></table></div>';
+    html+='</tbody></table></div>'
+      +'<p style="font-size:11px;color:var(--muted);margin:12px 0 0;line-height:1.45;">Remaining = Entitlement \u2212 Used \u2212 Pending. Entitlement is this year\u2019s allowance (pro-rata if they started after 1 January). Accrued YTD is how much has been earned so far \u2014 it is not deducted from Remaining.</p>';
     el.innerHTML=html;
   } catch(e){
     el.innerHTML='<span style="color:var(--red);font-size:11px;">Error loading leave overview.</span>';
@@ -60204,7 +60373,7 @@ window.lvCalRender=async function(yr,mo){
 (function(){
 'use strict';
 // Uses window.db (canonical API client defined in SUPABASE CONFIG block)
-var _wo=0,_roster={},_emps=[],_leaveMap={},_pt=null,_shiftTemplates=[],_usualHours={},_usualHistLoaded=false;
+var _wo=0,_roster={},_emps=[],_leaveMap={},_pt=null,_shiftTemplates=[],_usualHours={},_usualHistLoaded=false,_prodBudgetHours=257;
 var DN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 // Deterministic colour per shift name (hash -> hue) so every named shift gets
 // its own stable colour across the grid and the publish summary.
@@ -60275,6 +60444,18 @@ function rosterFmtHrs(n){
   var x=Math.round((n||0)*10)/10;
   return (x%1===0?String(x):x.toFixed(1))+'h';
 }
+function parseRosterBudgetHours(val){
+  if(val==null) return 257;
+  if(typeof val==='number'&&isFinite(val)) return val;
+  if(typeof val==='string'){ var n=parseFloat(val); return isFinite(n)?n:257; }
+  if(typeof val==='object'&&val.hours!=null){ var h=parseFloat(val.hours); return isFinite(h)?h:257; }
+  return 257;
+}
+window.setRosterProductionBudgetHours=function(hours){
+  var n=parseRosterBudgetHours(hours);
+  _prodBudgetHours=n;
+  if(document.getElementById('roster-grid')) renderRoster();
+};
 function tallyUsualHours(rows){
   (rows||[]).forEach(function(s){
     var h=rosterNetHours(s.start_time,s.end_time,s.break_minutes);
@@ -60370,6 +60551,10 @@ async function loadRoster(){
     }catch(uhErr){ window.logError&&window.logError('load usual hours',uhErr); }
     _usualHistLoaded=true;
   }
+  try{
+    var budgetRows=await get('app_settings?key=eq.production_budget_hours&limit=1&select=value');
+    if(budgetRows&&budgetRows.length) _prodBudgetHours=parseRosterBudgetHours(budgetRows[0].value);
+  }catch(bhErr){ window.logError&&window.logError('load production budget hours',bhErr); }
   renderRoster();
 }
 
@@ -60416,10 +60601,25 @@ function renderRoster(){
   var grouped={day:[],eve:[],liquid:[],warehouse:[],office:[],commercial:[],ecom:[],other:[]};
   var deptTotals=[];
   var showHours=canSeeRosterHours();
+  var prodActualH=0, prodBarInserted=false;
+  function insertProductionBudgetBar(){
+    if(prodBarInserted||!showHours) return;
+    prodBarInserted=true;
+    h+='<tr class="roster-prod-budget"><td colspan="8" style="padding:14px 16px 16px;border-bottom:1px solid var(--navy-border);background:rgba(255,255,255,0.02);">';
+    h+='<div style="display:flex;justify-content:space-between;align-items:baseline;gap:24px;flex-wrap:wrap;">';
+    h+='<div><div style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Total production budget hours</div>';
+    h+='<div style="font-size:28px;font-weight:700;color:var(--white);line-height:1.1;">'+rosterFmtHrs(_prodBudgetHours)+'</div></div>';
+    h+='<div style="text-align:right;"><div style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">Actual hours</div>';
+    h+='<div style="font-size:28px;font-weight:700;color:var(--white);line-height:1.1;">'+rosterFmtHrs(prodActualH)+'</div></div>';
+    h+='</div></td></tr>';
+  }
   _emps.forEach(function(emp){ var g=rosterGroupOf(emp); (grouped[g]||grouped.other).push(emp); });
   _ROSTER_GROUP_ORDER.forEach(function(grp){
     var list=rosterSortGroup(grouped[grp.key]);
-    if(!list.length) return;
+    if(!list.length){
+      if(grp.key==='eve') insertProductionBudgetBar();
+      return;
+    }
     h+='<tr class="roster-group-hd"><td colspan="8" style="padding:16px 14px 8px;font-size:15px;letter-spacing:0.08em;text-transform:uppercase;color:var(--gold);font-weight:700;border-bottom:1px solid var(--navy-border);">'+grp.label+'</td></tr>';
     var rosteredH=0, leaveH=0;
     list.forEach(function(emp,ei){
@@ -60438,10 +60638,13 @@ function renderRoster(){
     });
     var totalH=rosteredH+leaveH;
     deptTotals.push({label:grp.label, total:totalH});
+    if(grp.key==='day'||grp.key==='eve') prodActualH+=rosteredH;
     if(showHours){
       h+='<tr class="roster-group-sum"><td colspan="8" style="padding:8px 14px 16px;font-size:15px;letter-spacing:0.06em;text-transform:uppercase;color:var(--white);font-weight:700;text-align:right;border-bottom:1px solid var(--navy-border);">'+rosterFmtHrs(totalH)+' rostered</td></tr>';
     }
+    if(grp.key==='eve') insertProductionBudgetBar();
   });
+  insertProductionBudgetBar();
   if(!_emps.length) h+='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--muted);">No employees found.</td></tr>';
   h+='</tbody></table>';
   if(showHours && deptTotals.length){

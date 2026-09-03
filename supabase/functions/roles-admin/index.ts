@@ -37,6 +37,7 @@ const TIER_FLAGS = new Set([
   'is_pulse_admin', 'is_exec', 'is_hr_admin', 'is_client_editor',
   'is_broadcast_initiator', 'has_finance_access', 'has_finance_creds',
   'has_stock_view', 'notify_on_client_submission', 'is_manager',
+  'is_workforce_only',
 ]);
 
 const SB_GROUP_VALUES = new Set(['all', 'management', 'production', 'ecom']);
