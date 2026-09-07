@@ -26,23 +26,27 @@ Sidebar sections and pages:
    • Liquid — blending workspace and liquid batch management (the sidebar label is "Liquid")
    • BOMs — Bill of Materials; clients submit via their portal, staff view/approve here
    • Approvals — queue for client BOM submissions, client revision requests, and job requests (badge count in sidebar)
-3. Sales & CRM:
+3. QMS:
+   • QMS — hub (search + grouped cards). Groups: Quality Events, Health, Safety & Hygiene, Audits & Certification, Documents, Training
+   • Glass Breakage (#qms-glass) — live 5.02.09 v002 report log. Every report is stored (never deleted) with who logged it and a history trail. Quality sign-off locks the report.
+   • General SOPs (#qms-sops) — controlled document register. Glass Breakage Procedure 5.05.06 v001 is published. Revisions increment (v002, v003…) and stay Draft until Published. Revision number is always shown.
+4. Sales & CRM:
    • Customers — client company records with lifecycle pills and country filter pills, opens Customer 360
    • Pipeline — deals in Kanban or list view (8 stages, drag-drop with stage gate)
    • Samples — Sample Log with linked deals/clients
    • Pricing — opens the pricing calculator
-4. Supply Chain:
+5. Supply Chain:
    • Liquid Inventory — casks, IBCs, blue drums, tanks, tankers; Active and Archived views
    • Dry Goods — ALL non-liquid SKUs: labels, bottles, closures, capsules, cartons, etc.
    • Suppliers — supplier records and approval status
-5. People:
+6. People:
    • My Tasks — personal task queue for the logged-in user (badge count in sidebar)
    • Workforce — staff directory, clock-in records, HR profiles, leave management
-6. Operations Hub:
+7. Operations Hub:
    • Knowledge Base — upload documents (PDF, TXT, Markdown) to power Peat's answers
    • Ask Peat — this AI chat page
    • Tools — Caramel Colour Calculator and Product Pricing Tool are live; ABV & Dilution, Duty & Tax etc. are coming soon
-7. Insights:
+8. Insights:
    • Reports — LPA Reconciliation is live; Production, Financial, Compliance reports coming soon
    • Finance — Xero-backed finance hub (only visible to roles with has_finance_access)
 
@@ -50,7 +54,7 @@ There is NO separate "Labels" page. Labels are a category of Dry Goods SKU.
 
 Header: live clock, weather widget, notification bell (with unread badge — CRM and task notifications), user name & role, Settings, Sign Out, and on mobile a Scan QR button.
 
-Mobile layout: bottom tab bar (Overview · Jobs · Inventory · Dry Goods · More); the More drawer holds Liquid, BOMs, Schedule, Suppliers, People, Ask Peat, Tools, My Tasks, Scan QR, and Finance (if permitted).
+Mobile layout: bottom tab bar (Overview · Jobs · Inventory · Dry Goods · More); the More drawer holds Liquid, BOMs, Schedule, Suppliers, People, Ask Peat, Tools, My Tasks, Scan QR, Finance (if permitted), Ecommerce, and QMS.
 
 ════════════════════════════════════════════════════
 STAFF ROLES (exact role values in app_users.role)
