@@ -16916,15 +16916,21 @@ window.loadBoms = async function initBoms() {
           <label>Body</label>
           <div class="qms-editor">
             <div class="qms-editor-bar" role="toolbar" aria-label="Document formatting">
-              <button type="button" class="qms-editor-btn" data-qms-fmt="h2">Heading</button>
-              <button type="button" class="qms-editor-btn" data-qms-fmt="h3">Subheading</button>
-              <button type="button" class="qms-editor-btn" data-qms-fmt="p">Normal text</button>
+              <label class="qms-editor-style-wrap">
+                <span class="qms-editor-style-lab">Style</span>
+                <select id="qms-se-style" class="qms-editor-style" aria-label="Paragraph style">
+                  <option value="p">Normal text</option>
+                  <option value="h2">Heading</option>
+                  <option value="h3">Subheading</option>
+                  <option value="h4">Minor heading</option>
+                </select>
+              </label>
               <span class="qms-editor-sep" aria-hidden="true"></span>
-              <button type="button" class="qms-editor-btn" data-qms-fmt="bold">Bold</button>
-              <button type="button" class="qms-editor-btn" data-qms-fmt="italic">Italic</button>
+              <button type="button" class="qms-editor-btn" data-qms-fmt="bold" title="Bold" aria-label="Bold"><span aria-hidden="true">B</span></button>
+              <button type="button" class="qms-editor-btn" data-qms-fmt="italic" title="Italic" aria-label="Italic"><span aria-hidden="true">I</span></button>
               <span class="qms-editor-sep" aria-hidden="true"></span>
-              <button type="button" class="qms-editor-btn" data-qms-fmt="ul">Bullet list</button>
-              <button type="button" class="qms-editor-btn" data-qms-fmt="ol">Numbered list</button>
+              <button type="button" class="qms-editor-btn qms-editor-btn-wide" data-qms-fmt="ul" title="Bullet list">Bullets</button>
+              <button type="button" class="qms-editor-btn qms-editor-btn-wide" data-qms-fmt="ol" title="Numbered list">Numbers</button>
             </div>
             <div id="qms-se-body" class="qms-doc-body qms-editor-body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="SOP body"></div>
           </div>
@@ -24209,42 +24215,255 @@ window.loadBoms = async function initBoms() {
       walk(wrap);
       return wrap.innerHTML;
     }
+    function sopEditor() { return document.getElementById('qms-se-body'); }
     function sopBodyHtml() {
-      var el = document.getElementById('qms-se-body');
+      var el = sopEditor();
       return el ? sanitizeSopHtml(el.innerHTML) : '';
     }
     function setSopBody(html) {
-      var el = document.getElementById('qms-se-body');
+      var el = sopEditor();
       if (el) el.innerHTML = sanitizeSopHtml(html);
+      _sopRange = null;
+      syncSopToolbar();
     }
-    function applySopFmt(kind) {
-      var ed = document.getElementById('qms-se-body');
+    var SOP_BLOCK = { H2:1, H3:1, H4:1, P:1, LI:1, DIV:1 };
+    var _sopRange = null;
+    function sopSel() {
+      var sel = window.getSelection();
+      var ed = sopEditor();
+      if (!sel || !sel.rangeCount || !ed) return null;
+      var range = sel.getRangeAt(0);
+      if (!ed.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== ed) return null;
+      return { sel: sel, range: range };
+    }
+    function saveSopRange() {
+      var s = sopSel();
+      _sopRange = s ? s.range.cloneRange() : _sopRange;
+    }
+    function restoreSopRange() {
+      var ed = sopEditor();
       if (!ed) return;
       ed.focus();
-      if (kind === 'h2' || kind === 'h3' || kind === 'h4' || kind === 'p') {
-        if (!document.execCommand('formatBlock', false, kind)) {
-          document.execCommand('formatBlock', false, '<' + kind + '>');
+      if (!_sopRange) return;
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      try { sel.addRange(_sopRange); } catch (e) {}
+    }
+    function closestSopBlock(node, ed) {
+      if (node && node.nodeType === 3) node = node.parentNode;
+      var found = null;
+      while (node && node !== ed) {
+        if (node.nodeType === 1 && SOP_BLOCK[node.tagName]) {
+          if (node.tagName === 'LI') return node;
+          if (!found) found = node;
         }
-      } else if (kind === 'bold') {
-        document.execCommand('bold', false, null);
-      } else if (kind === 'italic') {
-        document.execCommand('italic', false, null);
-      } else if (kind === 'ul') {
-        document.execCommand('insertUnorderedList', false, null);
-      } else if (kind === 'ol') {
-        document.execCommand('insertOrderedList', false, null);
+        node = node.parentNode;
       }
+      return found;
+    }
+    function replaceSopTag(el, tag) {
+      if (!el || el.tagName === tag.toUpperCase()) return el;
+      var next = document.createElement(tag);
+      while (el.firstChild) next.appendChild(el.firstChild);
+      if (!next.firstChild) next.appendChild(document.createElement('br'));
+      el.parentNode.replaceChild(next, el);
+      return next;
+    }
+    function placeSopCaret(el) {
+      var sel = window.getSelection();
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      _sopRange = range.cloneRange();
+    }
+    function unwrapSopListItem(li) {
+      var list = li.parentNode;
+      var parent = list.parentNode;
+      var p = document.createElement('p');
+      while (li.firstChild) p.appendChild(li.firstChild);
+      if (!p.firstChild) p.appendChild(document.createElement('br'));
+      var after = null;
+      if (li.nextSibling) {
+        after = document.createElement(list.tagName);
+        while (li.nextSibling) after.appendChild(li.nextSibling);
+      }
+      list.removeChild(li);
+      if (list.firstChild) {
+        parent.insertBefore(p, list.nextSibling);
+        if (after) parent.insertBefore(after, p.nextSibling);
+      } else {
+        parent.insertBefore(p, list);
+        parent.removeChild(list);
+        if (after) parent.insertBefore(after, p.nextSibling);
+      }
+      return p;
+    }
+    function applySopBlock(tag) {
+      var ed = sopEditor();
+      if (!ed) return;
+      restoreSopRange();
+      var s = sopSel();
+      var block = s ? closestSopBlock(s.range.startContainer, ed) : null;
+      if (!block) {
+        var p = document.createElement(tag);
+        p.appendChild(document.createElement('br'));
+        ed.appendChild(p);
+        placeSopCaret(p);
+        syncSopToolbar();
+        return;
+      }
+      if (block.tagName === 'LI') block = unwrapSopListItem(block);
+      var next = replaceSopTag(block, tag);
+      placeSopCaret(next);
+      syncSopToolbar();
+    }
+    function applySopList(kind) {
+      var ed = sopEditor();
+      if (!ed) return;
+      restoreSopRange();
+      var s = sopSel();
+      var block = s ? closestSopBlock(s.range.startContainer, ed) : null;
+      if (!block) return;
+      var li = block.tagName === 'LI' ? block : null;
+      if (li) {
+        var list = li.parentNode;
+        if (list && list.tagName === kind.toUpperCase()) {
+          placeSopCaret(unwrapSopListItem(li));
+        } else if (list) {
+          replaceSopTag(list, kind);
+          placeSopCaret(li);
+        }
+        syncSopToolbar();
+        return;
+      }
+      var listEl = document.createElement(kind);
+      var newLi = document.createElement('li');
+      while (block.firstChild) newLi.appendChild(block.firstChild);
+      if (!newLi.firstChild) newLi.appendChild(document.createElement('br'));
+      listEl.appendChild(newLi);
+      block.parentNode.replaceChild(listEl, block);
+      placeSopCaret(newLi);
+      syncSopToolbar();
+    }
+    function applySopInline(cmd) {
+      restoreSopRange();
+      document.execCommand(cmd, false, null);
+      saveSopRange();
+      syncSopToolbar();
+    }
+    function currentSopList() {
+      var ed = sopEditor();
+      var s = sopSel();
+      if (!ed || !s) return '';
+      var node = s.range.startContainer;
+      if (node.nodeType === 3) node = node.parentNode;
+      while (node && node !== ed) {
+        if (node.tagName === 'UL' || node.tagName === 'OL') return node.tagName;
+        node = node.parentNode;
+      }
+      return '';
+    }
+    function currentSopStyle() {
+      var ed = sopEditor();
+      var s = sopSel();
+      if (!ed || !s) return 'p';
+      var block = closestSopBlock(s.range.startContainer, ed);
+      if (!block || block.tagName === 'LI' || block.tagName === 'DIV') return 'p';
+      return block.tagName.toLowerCase();
+    }
+    function syncSopToolbar() {
+      var bar = document.querySelector('#qms-sops-edit .qms-editor-bar');
+      if (!bar) return;
+      var styleSel = document.getElementById('qms-se-style');
+      var style = currentSopStyle();
+      if (styleSel && !styleSel.matches(':focus')) styleSel.value = style;
+      var list = currentSopList();
+      var boldOn = false;
+      var italOn = false;
+      try {
+        boldOn = document.queryCommandState('bold');
+        italOn = document.queryCommandState('italic');
+      } catch (e) {}
+      bar.querySelectorAll('[data-qms-fmt]').forEach(function(btn) {
+        var k = btn.getAttribute('data-qms-fmt');
+        var on = (k === 'bold' && boldOn) || (k === 'italic' && italOn) || (k === 'ul' && list === 'UL') || (k === 'ol' && list === 'OL');
+        btn.classList.toggle('is-on', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    }
+    function tidySopDivs(ed) {
+      Array.prototype.slice.call(ed.children).forEach(function(child) {
+        if (child.tagName === 'DIV') replaceSopTag(child, 'p');
+      });
+    }
+    function onSopKeydown(e) {
+      if (e.key !== 'Enter' || e.shiftKey) return;
+      var ed = sopEditor();
+      var s = sopSel();
+      if (!ed || !s) return;
+      var block = closestSopBlock(s.range.startContainer, ed);
+      if (!block) return;
+      if (block.tagName === 'H2' || block.tagName === 'H3' || block.tagName === 'H4') {
+        e.preventDefault();
+        var p = document.createElement('p');
+        p.appendChild(document.createElement('br'));
+        block.parentNode.insertBefore(p, block.nextSibling);
+        placeSopCaret(p);
+      }
+    }
+    function onSopPaste(e) {
+      e.preventDefault();
+      var html = (e.clipboardData && e.clipboardData.getData('text/html')) || '';
+      var text = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+      var clean = sanitizeSopHtml(html);
+      if (!clean) {
+        clean = (text || '').split(/\n+/).map(function(line) {
+          return '<p>' + esc(line) + '</p>';
+        }).join('') || '<p><br></p>';
+      }
+      restoreSopRange();
+      document.execCommand('insertHTML', false, clean);
+      saveSopRange();
     }
     (function bindSopEditor() {
       var bar = document.querySelector('#qms-sops-edit .qms-editor-bar');
+      var ed = sopEditor();
       if (!bar || bar._bound) return;
       bar._bound = true;
       bar.addEventListener('mousedown', function(e) {
-        if (e.target.closest('[data-qms-fmt]')) e.preventDefault();
+        saveSopRange();
+        if (e.target.closest('button')) e.preventDefault();
       });
       bar.addEventListener('click', function(e) {
         var btn = e.target.closest('[data-qms-fmt]');
-        if (btn) applySopFmt(btn.getAttribute('data-qms-fmt'));
+        if (!btn) return;
+        var k = btn.getAttribute('data-qms-fmt');
+        if (k === 'bold' || k === 'italic') applySopInline(k);
+        else if (k === 'ul' || k === 'ol') applySopList(k);
+      });
+      var styleSel = document.getElementById('qms-se-style');
+      if (styleSel) {
+        styleSel.addEventListener('mousedown', saveSopRange);
+        styleSel.addEventListener('change', function() {
+          applySopBlock(styleSel.value);
+        });
+      }
+      if (ed) {
+        ed.addEventListener('keyup', syncSopToolbar);
+        ed.addEventListener('mouseup', syncSopToolbar);
+        ed.addEventListener('focus', syncSopToolbar);
+        ed.addEventListener('input', function() { tidySopDivs(ed); syncSopToolbar(); });
+        ed.addEventListener('keydown', onSopKeydown);
+        ed.addEventListener('paste', onSopPaste);
+      }
+      document.addEventListener('selectionchange', function() {
+        var node = window.getSelection() && window.getSelection().anchorNode;
+        if (ed && node && ed.contains(node)) {
+          saveSopRange();
+          syncSopToolbar();
+        }
       });
     })();
 
