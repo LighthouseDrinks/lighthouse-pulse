@@ -16912,7 +16912,23 @@ window.loadBoms = async function initBoms() {
         <div class="mfield"><label>Approved By</label><input type="text" id="qms-se-approved"></div>
         <div class="mfield"><label>Date of Issue</label><input type="date" id="qms-se-doi"></div>
         <div class="mfield span2"><label>Description of Change</label><input type="text" id="qms-se-change"></div>
-        <div class="mfield span2"><label>Body</label><textarea id="qms-se-body" style="min-height:360px;font-family:ui-monospace,Menlo,monospace;font-size:12px;"></textarea></div>
+        <div class="mfield span2">
+          <label>Body</label>
+          <div class="qms-editor">
+            <div class="qms-editor-bar" role="toolbar" aria-label="Document formatting">
+              <button type="button" class="qms-editor-btn" data-qms-fmt="h2">Heading</button>
+              <button type="button" class="qms-editor-btn" data-qms-fmt="h3">Subheading</button>
+              <button type="button" class="qms-editor-btn" data-qms-fmt="p">Normal text</button>
+              <span class="qms-editor-sep" aria-hidden="true"></span>
+              <button type="button" class="qms-editor-btn" data-qms-fmt="bold">Bold</button>
+              <button type="button" class="qms-editor-btn" data-qms-fmt="italic">Italic</button>
+              <span class="qms-editor-sep" aria-hidden="true"></span>
+              <button type="button" class="qms-editor-btn" data-qms-fmt="ul">Bullet list</button>
+              <button type="button" class="qms-editor-btn" data-qms-fmt="ol">Numbered list</button>
+            </div>
+            <div id="qms-se-body" class="qms-doc-body qms-editor-body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="SOP body"></div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="modal-actions" style="border:0;padding-top:0;margin-top:0;">
@@ -24163,6 +24179,75 @@ window.loadBoms = async function initBoms() {
     function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v == null ? '' : v; }
     function show(id, on) { var el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; }
 
+    var SOP_BODY_TAGS = { H2:1, H3:1, H4:1, P:1, UL:1, OL:1, LI:1, STRONG:1, B:1, EM:1, I:1, BR:1 };
+    function sanitizeSopHtml(html) {
+      var wrap = document.createElement('div');
+      wrap.innerHTML = html || '';
+      function walk(node) {
+        var child = node.firstChild;
+        while (child) {
+          var next = child.nextSibling;
+          if (child.nodeType === 8) {
+            node.removeChild(child);
+          } else if (child.nodeType === 1) {
+            var tag = child.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE') {
+              node.removeChild(child);
+            } else if (!SOP_BODY_TAGS[tag]) {
+              var firstMoved = child.firstChild;
+              while (child.firstChild) node.insertBefore(child.firstChild, child);
+              node.removeChild(child);
+              next = firstMoved || next;
+            } else {
+              while (child.attributes.length) child.removeAttribute(child.attributes[0].name);
+              walk(child);
+            }
+          }
+          child = next;
+        }
+      }
+      walk(wrap);
+      return wrap.innerHTML;
+    }
+    function sopBodyHtml() {
+      var el = document.getElementById('qms-se-body');
+      return el ? sanitizeSopHtml(el.innerHTML) : '';
+    }
+    function setSopBody(html) {
+      var el = document.getElementById('qms-se-body');
+      if (el) el.innerHTML = sanitizeSopHtml(html);
+    }
+    function applySopFmt(kind) {
+      var ed = document.getElementById('qms-se-body');
+      if (!ed) return;
+      ed.focus();
+      if (kind === 'h2' || kind === 'h3' || kind === 'h4' || kind === 'p') {
+        if (!document.execCommand('formatBlock', false, kind)) {
+          document.execCommand('formatBlock', false, '<' + kind + '>');
+        }
+      } else if (kind === 'bold') {
+        document.execCommand('bold', false, null);
+      } else if (kind === 'italic') {
+        document.execCommand('italic', false, null);
+      } else if (kind === 'ul') {
+        document.execCommand('insertUnorderedList', false, null);
+      } else if (kind === 'ol') {
+        document.execCommand('insertOrderedList', false, null);
+      }
+    }
+    (function bindSopEditor() {
+      var bar = document.querySelector('#qms-sops-edit .qms-editor-bar');
+      if (!bar || bar._bound) return;
+      bar._bound = true;
+      bar.addEventListener('mousedown', function(e) {
+        if (e.target.closest('[data-qms-fmt]')) e.preventDefault();
+      });
+      bar.addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-qms-fmt]');
+        if (btn) applySopFmt(btn.getAttribute('data-qms-fmt'));
+      });
+    })();
+
     function renderActions(row) {
       var host = document.getElementById('qms-g-actions');
       if (!host) return;
@@ -24498,7 +24583,7 @@ window.loadBoms = async function initBoms() {
       setVal('qms-se-approved', draft.approved_by || '');
       setVal('qms-se-doi', draft.date_of_issue || '');
       setVal('qms-se-change', draft.change_description || '');
-      setVal('qms-se-body', draft.body || '');
+      setSopBody(draft.body || '');
       document.getElementById('qms-se-heading').textContent = doc.doc_code + ' · Draft v' + padRev(draft.revision_number);
     }
 
@@ -24508,7 +24593,7 @@ window.loadBoms = async function initBoms() {
       if (!revId) return;
       await window.db.update('qms_document_revisions', '?id=eq.' + revId, {
         title: val('qms-se-title'),
-        body: document.getElementById('qms-se-body').value,
+        body: sopBodyHtml(),
         author_name: val('qms-se-author'),
         reviewed_by: val('qms-se-reviewed'),
         approved_by: val('qms-se-approved'),
@@ -24530,7 +24615,7 @@ window.loadBoms = async function initBoms() {
       var w = who();
       await window.db.update('qms_document_revisions', '?id=eq.' + revId, {
         title: val('qms-se-title'),
-        body: document.getElementById('qms-se-body').value,
+        body: sopBodyHtml(),
         author_name: val('qms-se-author'),
         reviewed_by: val('qms-se-reviewed'),
         approved_by: val('qms-se-approved'),
