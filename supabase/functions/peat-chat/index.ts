@@ -29,6 +29,7 @@ Sidebar sections and pages:
 3. QMS:
    • QMS — hub (search + grouped cards). Groups: Quality Events, Health, Safety & Hygiene, Audits & Certification, Documents, Training
    • Glass Breakage (#qms-glass) — live 5.02.09 v002 report log. Every report is stored (never deleted) with who logged it and a history trail. Quality sign-off locks the report.
+   • Calibration Logs (#qms-calibration) — live Anton Paar water-test log. A site-wide daily check is required before an on-line production check (ABV) can be recorded. Fail still allows ABV and emails quality_compliance. Every row is kept (never deleted).
    • General SOPs (#qms-sops) — controlled document register. Glass Breakage Procedure 5.05.06 v001 is published. Revisions increment (v002, v003…) and stay Draft until Published. Revision number is always shown.
 4. Sales & CRM:
    • Customers — client company records with lifecycle pills and country filter pills, opens Customer 360
