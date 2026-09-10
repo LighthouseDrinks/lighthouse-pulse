@@ -1322,6 +1322,17 @@ window.canSeeProbationTab = function(role) {
   if (window.isHRAdmin && window.isHRAdmin(role)) return true;
   return role === 'managing_director' || role === 'operations_director' || role === 'business_analyst' || role === 'human_resources';
 };
+// Shared logins / contractors that must not appear on employee people lists.
+window.isDirectEmployee = function(u) {
+  if (!u) return false;
+  if (u.role === 'client') return false;
+  var name = String(u.display_name || '').trim().toLowerCase();
+  var email = String(u.email || '').trim().toLowerCase();
+  if (name === 'plant display' || name === 'human resources' || name === 'hr profile') return false;
+  if (name === 'kimberly tomarong') return false;
+  if (email === 'hr@lighthousedrinks.com' || email === 'kim@lighthousedrinks.com') return false;
+  return true;
+};
 window.isExec         = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.EXEC_ROLES.indexOf(role) >= 0; };
 window.isHRAdmin      = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.HR_ADMIN_ROLES.indexOf(role) >= 0; };
 window.isWorkforceOnly = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return (window.WORKFORCE_ONLY_ROLES || []).indexOf(role) >= 0; };
@@ -62240,7 +62251,7 @@ window.mgmtPopulateEmps = async function(){
   // Clear and repopulate each time
   sel.innerHTML='<option value="">-- Select --</option>';
   var users = await get('app_users?status=eq.active&order=display_name.asc&select=id,display_name,role&limit=200');
-  users.filter(function(u){return u.role!=='client';}).forEach(function(u){
+  users.filter(function(u){return window.isDirectEmployee ? window.isDirectEmployee(u) : u.role!=='client';}).forEach(function(u){
     var o = document.createElement('option');
     o.value = u.id;
     o.textContent = u.display_name || u.id.slice(0,8);
@@ -62289,7 +62300,7 @@ window.mgmtLoadLeaveOverview = async function(){
       // hr_profile entitlement. Skip them so the overview shows current staff
       // only (and never falls back to rendering a raw UUID fragment as a name).
       if(!u.id) return null;
-      if(u.role==='client') return null;
+      if(window.isDirectEmployee ? !window.isDirectEmployee(u) : u.role==='client') return null;
       if(!canSeeAll && !window.lvCanManage(p.user_id)) return null;
       var reqs=requests.filter(function(r){ return r.user_id===p.user_id; });
       var annUsed=0, annPend=0;
@@ -62378,7 +62389,7 @@ window.mgmtInitHistory = async function(){
   var empSel=document.getElementById('mgmt-hist-emp');
   if(empSel&&empSel.options.length<=1){
     var users=await get('app_users?status=eq.active&order=display_name.asc&select=id,display_name,role&limit=200');
-    users.filter(function(u){return u.role!=='client' && window.lvCanManage(u.id);}).forEach(function(u){
+    users.filter(function(u){return (window.isDirectEmployee ? window.isDirectEmployee(u) : u.role!=='client') && window.lvCanManage(u.id);}).forEach(function(u){
       var o=document.createElement('option'); o.value=u.id;
       o.textContent=u.display_name||u.id.slice(0,8); empSel.appendChild(o);
     });
@@ -62778,7 +62789,7 @@ window.mgmtPopulateApplyEmps = async function(){
   if(!sel||sel.options.length>1) return;
   if(!lvIsSenior()) await ensureScope();
   var users=await get('app_users?status=eq.active&order=display_name.asc&select=id,display_name,role&limit=200');
-  users.filter(function(u){return u.role!=='client' && window.lvCanManage(u.id);}).forEach(function(u){
+  users.filter(function(u){return (window.isDirectEmployee ? window.isDirectEmployee(u) : u.role!=='client') && window.lvCanManage(u.id);}).forEach(function(u){
     var o=document.createElement('option'); o.value=u.id;
     o.textContent=u.display_name||u.id.slice(0,8); sel.appendChild(o);
   });
@@ -62879,7 +62890,7 @@ window.lvCalRender=async function(yr,mo){
       get('app_users?status=eq.active&select=id,display_name,role&order=display_name.asc&limit=200'),
       get('leave_requests?status=neq.cancelled&start_date=lte.'+monthEnd+'&end_date=gte.'+monthStart+'&select=user_id,start_date,end_date,leave_category,status&limit=500')
     ]);
-    var users=results[0].filter(function(u){return u.role!=='client';});
+    var users=results[0].filter(function(u){return window.isDirectEmployee ? window.isDirectEmployee(u) : u.role!=='client';});
     var reqs=results[1];
     // Build per-employee day sets
     var empDays={}; // empId -> {day -> {approved,pending,cat}}
@@ -64655,10 +64666,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     return (m && m.display_name) || '—';
   }
   function excludeUser(u){
-    if(!u) return true;
-    if(u.role === 'client') return true;
-    if((u.display_name||'') === 'Plant Display') return true;
-    return false;
+    return !(window.isDirectEmployee && window.isDirectEmployee(u));
   }
 
   async function upsertReview(userId, milestone, patch){
@@ -64822,14 +64830,18 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       (reviews||[]).forEach(function(r){
         if(!isSavedReview(r) || seenPast[r.user_id]) return;
         var u = (users||[]).find(function(x){ return x.id===r.user_id; }) || { id:r.user_id, display_name:'Unknown', role:'' };
-        if(u.role === 'client' || (u.display_name||'') === 'Plant Display') return;
+        if(excludeUser(u)) return;
         var p = profileByUser[r.user_id] || {};
         var on = u.status === 'active' && isOnProbation(p.employment_start);
         if(on) return;
         seenPast[r.user_id] = true;
         past.push({ user:u, profile:p });
       });
-      var completed = (reviews||[]).filter(function(r){ return r.status==='completed'; }).sort(function(a,b){
+      var completed = (reviews||[]).filter(function(r){
+        if(r.status!=='completed') return false;
+        var u = (users||[]).find(function(x){ return x.id===r.user_id; });
+        return !excludeUser(u || { id:r.user_id, role:'client' });
+      }).sort(function(a,b){
         return String(b.completed_at||'').localeCompare(String(a.completed_at||''));
       });
       current.sort(function(a,b){ return personName(a.user,a.profile).localeCompare(personName(b.user,b.profile)); });
@@ -65132,10 +65144,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     return (m && m.display_name) || '—';
   }
   function excludeUser(u){
-    if(!u) return true;
-    if(u.role === 'client') return true;
-    if((u.display_name||'') === 'Plant Display') return true;
-    return false;
+    return !(window.isDirectEmployee && window.isDirectEmployee(u));
   }
   function rowStatus(row, due){
     if(row && row.status==='completed') return { key:'completed', label:'Completed', color:'var(--green)' };
@@ -65289,7 +65298,11 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         people.push({ user:u, profile: profileByUser[u.id] || { user_id:u.id } });
       });
       people.sort(function(a,b){ return personName(a.user,a.profile).localeCompare(personName(b.user,b.profile)); });
-      var completed = (reviews||[]).filter(function(r){ return r.status==='completed'; }).sort(function(a,b){
+      var completed = (reviews||[]).filter(function(r){
+        if(r.status!=='completed') return false;
+        var u = (users||[]).find(function(x){ return x.id===r.user_id; });
+        return !excludeUser(u || { id:r.user_id, role:'client' });
+      }).sort(function(a,b){
         return String(b.completed_at||'').localeCompare(String(a.completed_at||''));
       });
       list.innerHTML = renderPeopleTable(people, reviewByUser, { users:users, empty:'No active employees found.' });
