@@ -1288,7 +1288,7 @@ window.roleLabel = function(key) {
 window.PULSE_ADMIN_ROLES         = ['managing_director','operations_director','business_analyst'];
 window.CLIENT_EDIT_ROLES         = ['managing_director','operations_director','business_analyst','commercial_manager'];
 window.BROADCAST_INITIATOR_ROLES = ['managing_director','operations_director','quality_compliance'];
-window.HR_ADMIN_ROLES            = ['managing_director','operations_director','production_manager','business_analyst'];
+window.HR_ADMIN_ROLES            = ['managing_director','operations_director','production_manager','business_analyst','human_resources'];
 window.EXEC_ROLES                = ['managing_director','operations_director'];
 window.STOCK_VIEW_ROLES          = ['managing_director','operations_director','financial_controller','business_analyst'];
 window.FINANCE_NAV_ROLES         = ['managing_director','operations_director','financial_controller','business_analyst','ecommerce_manager'];
@@ -8677,6 +8677,13 @@ window.copyInviteLink = function() {
   var _hrCurrentProfile    = null;
   var _hrAllUsers          = [];
   var _hrCompleteProfileIds = null; // Set of user_ids with profile_complete=true; null = not yet loaded
+  var _hrMgmtLoadedFor     = null;
+  var _hrMgmtNotes         = [];
+  var _hrMgmtDocs          = [];
+  var HR_MGMT_BUCKET       = 'hr-management-docs';
+  var HR_MGMT_MAX_BYTES    = 12 * 1024 * 1024;
+  var HR_MGMT_EXTS         = { pdf:1, jpg:1, jpeg:1, png:1 };
+  var HR_MGMT_TYPES        = { 'application/pdf':1, 'image/jpeg':1, 'image/png':1 };
 
   function sbGet(p)                    { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
   function sbPost(table, body)         { return window.db.insert(table, body); }
@@ -8696,6 +8703,9 @@ window.copyInviteLink = function() {
   function canViewDirectory() {
     if (isAdmin()) return true;
     return window.canDo && (window.canDo('hr_view_directory') || window.canDo('hr_view_all'));
+  }
+  function canSeeHRManagement() {
+    return !!(window.isHRAdmin && window.isHRAdmin());
   }
   function gv(id){ var e=document.getElementById(id); return e?(e.value||'').trim():''; }
 
@@ -9254,6 +9264,9 @@ window.copyInviteLink = function() {
     _hrPopulateReportsTo(_hrAllUsers);
     populateHRFields(_hrCurrentProfile, u);
     applyHRPermissions(isTerminated);
+    _hrMgmtLoadedFor = null;
+    _hrMgmtNotes = [];
+    _hrMgmtDocs = [];
     window.showHRTab('personal', document.querySelector('.hr-tab[data-htab="personal"]'));
     if (window.loadHRProbationReviews) window.loadHRProbationReviews(userId);
   };
@@ -9348,6 +9361,18 @@ window.copyInviteLink = function() {
     if (calBtn) calBtn.style.display = admin ? '' : 'none';
     var probBtn = document.getElementById('people-tab-probation');
     if (probBtn) probBtn.style.display = (window.canSeeProbationTab && window.canSeeProbationTab()) ? '' : 'none';
+    // Employee Details → Management sub-tab (confidential notes/docs).
+    // Distinct from Workforce leave tab #people-tab-mgmt. Gate matches
+    // RLS is_hr_admin() via isHRAdmin() — never canViewAll()/isAdmin().
+    var hrMgmtBtn = document.getElementById('hr-tab-btn-management');
+    if (hrMgmtBtn) hrMgmtBtn.style.display = canSeeHRManagement() ? '' : 'none';
+    if (!canSeeHRManagement()) {
+      var hrMgmtPanel = document.getElementById('hr-tab-management');
+      if (hrMgmtPanel) hrMgmtPanel.style.display = 'none';
+      _hrMgmtLoadedFor = null;
+      _hrMgmtNotes = [];
+      _hrMgmtDocs = [];
+    }
     // Legacy search bar is now hidden in the new layout; directory panel visibility
     // is managed by loadHRList() via canViewDirectory()
     // Admin-only fields - readonly for non-admins OR when terminated (read-only for all)
@@ -9465,12 +9490,308 @@ window.copyInviteLink = function() {
   window.showHRTab = function(tab,btn) {
     var view=document.getElementById('hr-profile-view');
     if(!view) return;
+    if (tab === 'management' && !canSeeHRManagement()) {
+      tab = 'personal';
+      btn = document.querySelector('.hr-tab[data-htab="personal"]');
+    }
     view.querySelectorAll('.hr-tab-panel').forEach(function(p){ p.style.display='none'; });
     view.querySelectorAll('.hr-tab').forEach(function(b){ b.style.borderBottomColor='transparent'; b.style.color='var(--muted)'; });
     var panel=document.getElementById('hr-tab-'+tab); if(panel) panel.style.display='';
     if(btn){ btn.style.borderBottomColor='var(--gold)'; btn.style.color='var(--gold)'; }
     if (tab === 'employment' && window.loadHRProbationReviews && _hrCurrentUserId) {
       window.loadHRProbationReviews(_hrCurrentUserId);
+    }
+    if (tab === 'management' && _hrCurrentUserId) {
+      window.loadHRManagement(_hrCurrentUserId);
+    }
+  };
+
+  // ── Management tab (HR admin only) ──────────────────────────────────────────
+  function hrMgmtAuthorName(userId) {
+    if (!userId) return 'Unknown';
+    var all = (_hrAllUsers||[]).concat(_hrAllPending||[]).concat(_hrAllTerminated||[]);
+    var u = all.find(function(x){ return x.id === userId; });
+    if (u) return u.display_name || u.email || 'Unknown';
+    if (window.CURRENT_USER && (window.CURRENT_USER.app_user_id === userId || window.CURRENT_USER.id === userId)) {
+      return window.CURRENT_USER.display_name || window.CURRENT_USER.email || 'You';
+    }
+    return 'Unknown';
+  }
+  function hrMgmtFmtWhen(iso) {
+    if (!iso) return '';
+    try {
+      return new Date(iso).toLocaleString('en-IE', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+    } catch(_) { return iso; }
+  }
+  function hrMgmtEmpty(msg) {
+    var el = document.createElement('div');
+    el.style.cssText = 'font-size:12px;color:var(--muted);padding:8px 0;';
+    el.textContent = msg;
+    return el;
+  }
+  function hrMgmtRenderNotes() {
+    var list = document.getElementById('hr-mgmt-notes-list');
+    if (!list) return;
+    list.textContent = '';
+    if (!_hrMgmtNotes.length) {
+      list.appendChild(hrMgmtEmpty('No management notes yet.'));
+      return;
+    }
+    _hrMgmtNotes.forEach(function(n) {
+      var card = document.createElement('div');
+      card.style.cssText = 'background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:5px;padding:14px 16px;';
+      var meta = document.createElement('div');
+      meta.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;';
+      var who = document.createElement('div');
+      who.style.cssText = 'font-size:11px;color:var(--muted);';
+      who.textContent = hrMgmtAuthorName(n.created_by) + '  ·  ' + hrMgmtFmtWhen(n.created_at);
+      var del = document.createElement('button');
+      del.className = 'btn btn-outline';
+      del.style.cssText = 'font-size:10px;padding:4px 10px;';
+      del.textContent = 'Delete';
+      del.onclick = function(){ window.deleteHRManagementNote(n.id); };
+      meta.appendChild(who);
+      meta.appendChild(del);
+      var body = document.createElement('div');
+      body.style.cssText = 'font-size:13px;color:var(--white);white-space:pre-wrap;line-height:1.45;';
+      body.textContent = n.body || '';
+      card.appendChild(meta);
+      card.appendChild(body);
+      list.appendChild(card);
+    });
+  }
+  function hrMgmtRenderDocs(category, listId, emptyMsg) {
+    var list = document.getElementById(listId);
+    if (!list) return;
+    list.textContent = '';
+    var rows = _hrMgmtDocs.filter(function(d){ return d.category === category; });
+    if (!rows.length) {
+      list.appendChild(hrMgmtEmpty(emptyMsg));
+      return;
+    }
+    rows.forEach(function(d) {
+      var card = document.createElement('div');
+      card.style.cssText = 'background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:5px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;';
+      var left = document.createElement('div');
+      var title = document.createElement('div');
+      title.style.cssText = 'font-size:13px;font-weight:600;color:var(--white);';
+      title.textContent = d.title || d.file_name || 'Untitled';
+      var meta = document.createElement('div');
+      meta.style.cssText = 'font-size:11px;color:var(--muted);margin-top:3px;';
+      var sizeKb = d.file_size ? (Math.round(d.file_size / 1024) + ' KB') : '';
+      meta.textContent = [d.file_name, sizeKb, hrMgmtAuthorName(d.created_by), hrMgmtFmtWhen(d.created_at)].filter(Boolean).join('  ·  ');
+      left.appendChild(title);
+      left.appendChild(meta);
+      var actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;';
+      var dl = document.createElement('button');
+      dl.className = 'btn btn-outline';
+      dl.style.cssText = 'font-size:11px;padding:6px 14px;';
+      dl.textContent = 'Download';
+      dl.onclick = function(){ window.downloadHRManagementDoc(d.id); };
+      var del = document.createElement('button');
+      del.className = 'btn btn-outline';
+      del.style.cssText = 'font-size:11px;padding:6px 14px;';
+      del.textContent = 'Delete';
+      del.onclick = function(){ window.deleteHRManagementDoc(d.id); };
+      actions.appendChild(dl);
+      actions.appendChild(del);
+      card.appendChild(left);
+      card.appendChild(actions);
+      list.appendChild(card);
+    });
+  }
+  function hrMgmtRenderAll() {
+    hrMgmtRenderNotes();
+    hrMgmtRenderDocs('medical', 'hr-mgmt-medical-list', 'No medical records on file.');
+    hrMgmtRenderDocs('private', 'hr-mgmt-private-list', 'No private documents on file.');
+  }
+  async function hrMgmtUploadFile(file, userId, category, docId) {
+    var ext = ((file.name && file.name.split('.').pop()) || 'bin').toLowerCase();
+    if (ext.length > 5 || !HR_MGMT_EXTS[ext]) ext = (file.type === 'application/pdf') ? 'pdf' : 'bin';
+    if (!HR_MGMT_EXTS[ext]) throw new Error('Use a PDF, JPG, or PNG.');
+    var path = userId + '/' + category + '/' + docId + '.' + ext;
+    var token = await window._freshAccessToken();
+    if (!token) { window._handleSessionExpired(); throw new Error('Your session has expired — please sign in again.'); }
+    var res = await fetch(SUPA_URL + '/storage/v1/object/' + HR_MGMT_BUCKET + '/' + path, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'apikey': SUPA_KEY,
+        'Content-Type': file.type || 'application/octet-stream'
+      },
+      body: file
+    });
+    if (!res.ok) {
+      var err = await res.text();
+      throw new Error('Upload failed: ' + (err || res.statusText));
+    }
+    return path;
+  }
+  async function hrMgmtDeleteFile(path) {
+    if (!path) return;
+    try {
+      var token = await window._freshAccessToken();
+      if (!token) return;
+      await fetch(SUPA_URL + '/storage/v1/object/' + HR_MGMT_BUCKET + '/' + path, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token, 'apikey': SUPA_KEY }
+      });
+    } catch (e) {
+      window.logError && window.logError('hrMgmtDeleteFile', e);
+    }
+  }
+  async function hrMgmtSignedUrl(path) {
+    var token = await window._freshAccessToken();
+    if (!token) { window._handleSessionExpired(); throw new Error('Your session has expired — please sign in again.'); }
+    if (window._sb && window._sb.storage) {
+      var r = await window._sb.storage.from(HR_MGMT_BUCKET).createSignedUrl(path, 60);
+      if (r.error) throw r.error;
+      return r.data && r.data.signedUrl;
+    }
+    var res = await fetch(SUPA_URL + '/storage/v1/object/sign/' + HR_MGMT_BUCKET + '/' + path, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'apikey': SUPA_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expiresIn: 60 })
+    });
+    if (!res.ok) throw new Error('Could not create download link');
+    var data = await res.json();
+    var signed = data.signedURL || data.signedUrl;
+    if (signed && signed.indexOf('http') !== 0) {
+      signed = SUPA_URL + '/storage/v1' + (signed.charAt(0) === '/' ? signed : '/' + signed);
+    }
+    return signed;
+  }
+  function hrMgmtMyId() {
+    return (window.CURRENT_USER && (window.CURRENT_USER.app_user_id || window.CURRENT_USER.id)) || null;
+  }
+
+  window.loadHRManagement = async function(userId) {
+    if (!canSeeHRManagement() || !userId) return;
+    if (_hrMgmtLoadedFor === userId) {
+      hrMgmtRenderAll();
+      return;
+    }
+    try {
+      var notes = await sbGet('hr_management_notes?user_id=eq.'+userId+'&order=created_at.desc');
+      var docs  = await sbGet('hr_management_documents?user_id=eq.'+userId+'&order=created_at.desc');
+      _hrMgmtNotes = Array.isArray(notes) ? notes : [];
+      _hrMgmtDocs  = Array.isArray(docs) ? docs : [];
+      _hrMgmtLoadedFor = userId;
+      hrMgmtRenderAll();
+    } catch (e) {
+      window.logError && window.logError('loadHRManagement', e);
+      window.toast && window.toast('Could not load management file.', 'error');
+    }
+  };
+
+  window.addHRManagementNote = async function() {
+    if (!canSeeHRManagement() || !_hrCurrentUserId) return;
+    var ta = document.getElementById('hr-mgmt-note-body');
+    var body = ta ? (ta.value || '').trim() : '';
+    if (!body) { window.toast && window.toast('Write a note first.', 'info'); return; }
+    try {
+      var row = await sbPost('hr_management_notes', {
+        user_id: _hrCurrentUserId,
+        body: body,
+        created_by: hrMgmtMyId()
+      });
+      var saved = Array.isArray(row) ? row[0] : row;
+      if (saved) _hrMgmtNotes.unshift(saved);
+      if (ta) ta.value = '';
+      hrMgmtRenderNotes();
+      window.toast && window.toast('Note added.', 'success');
+    } catch (e) {
+      window.toast && window.toast('Could not save note: ' + e.message, 'error');
+    }
+  };
+
+  window.deleteHRManagementNote = async function(noteId) {
+    if (!canSeeHRManagement() || !noteId) return;
+    if (!(await window.lpConfirm('Delete this management note? This cannot be undone.', { title: 'Delete note', confirmLabel: 'Delete', destructive: true }))) return;
+    try {
+      await sbDelete('hr_management_notes', '?id=eq.'+noteId);
+      _hrMgmtNotes = _hrMgmtNotes.filter(function(n){ return n.id !== noteId; });
+      hrMgmtRenderNotes();
+      window.toast && window.toast('Note deleted.', 'success');
+    } catch (e) {
+      window.toast && window.toast('Could not delete note: ' + e.message, 'error');
+    }
+  };
+
+  window.uploadHRManagementDoc = async function(category) {
+    if (!canSeeHRManagement() || !_hrCurrentUserId) return;
+    if (category !== 'medical' && category !== 'private') return;
+    var input = document.getElementById(category === 'medical' ? 'hr-mgmt-medical-file' : 'hr-mgmt-private-file');
+    var titleEl = document.getElementById(category === 'medical' ? 'hr-mgmt-medical-title' : 'hr-mgmt-private-title');
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    var ext = ((file.name && file.name.split('.').pop()) || '').toLowerCase();
+    if (!HR_MGMT_EXTS[ext] && !HR_MGMT_TYPES[file.type]) {
+      window.toast && window.toast('Use a PDF, JPG, or PNG.', 'error');
+      if (input) input.value = '';
+      return;
+    }
+    if (file.size > HR_MGMT_MAX_BYTES) {
+      window.toast && window.toast('File is too large (max 12 MB).', 'error');
+      if (input) input.value = '';
+      return;
+    }
+    var docId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10));
+    var path = null;
+    try {
+      window.toast && window.toast('Uploading…', 'info');
+      path = await hrMgmtUploadFile(file, _hrCurrentUserId, category, docId);
+      var row = await sbPost('hr_management_documents', {
+        id: docId,
+        user_id: _hrCurrentUserId,
+        category: category,
+        title: titleEl ? (titleEl.value || '').trim() || null : null,
+        file_name: file.name,
+        storage_path: path,
+        content_type: file.type || null,
+        file_size: file.size,
+        created_by: hrMgmtMyId()
+      });
+      var saved = Array.isArray(row) ? row[0] : row;
+      if (saved) _hrMgmtDocs.unshift(saved);
+      if (titleEl) titleEl.value = '';
+      if (input) input.value = '';
+      hrMgmtRenderAll();
+      window.toast && window.toast('File uploaded.', 'success');
+    } catch (e) {
+      if (path) await hrMgmtDeleteFile(path);
+      window.toast && window.toast('Upload failed: ' + e.message, 'error');
+      if (input) input.value = '';
+    }
+  };
+
+  window.downloadHRManagementDoc = async function(docId) {
+    if (!canSeeHRManagement()) return;
+    var doc = _hrMgmtDocs.find(function(d){ return d.id === docId; });
+    if (!doc || !doc.storage_path) return;
+    try {
+      var url = await hrMgmtSignedUrl(doc.storage_path);
+      if (!url) throw new Error('No download URL');
+      window.open(url, '_blank', 'noopener');
+    } catch (e) {
+      window.toast && window.toast('Download failed: ' + e.message, 'error');
+    }
+  };
+
+  window.deleteHRManagementDoc = async function(docId) {
+    if (!canSeeHRManagement() || !docId) return;
+    var doc = _hrMgmtDocs.find(function(d){ return d.id === docId; });
+    if (!doc) return;
+    if (!(await window.lpConfirm('Delete this file? This cannot be undone.', { title: 'Delete file', confirmLabel: 'Delete', destructive: true }))) return;
+    try {
+      await hrMgmtDeleteFile(doc.storage_path);
+      await sbDelete('hr_management_documents', '?id=eq.'+docId);
+      _hrMgmtDocs = _hrMgmtDocs.filter(function(d){ return d.id !== docId; });
+      hrMgmtRenderAll();
+      window.toast && window.toast('File deleted.', 'success');
+    } catch (e) {
+      window.toast && window.toast('Could not delete file: ' + e.message, 'error');
     }
   };
 
@@ -29448,6 +29769,7 @@ window.ccxPrintRecord = function() {
             <button class="hr-tab" data-htab="bank" onclick="window.showHRTab('bank',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:10px 14px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;margin-bottom:-1px;">Bank</button>
             <button class="hr-tab" data-htab="emergency" onclick="window.showHRTab('emergency',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:10px 14px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;margin-bottom:-1px;">Emergency</button>
             <button class="hr-tab" data-htab="docs" onclick="window.showHRTab('docs',this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:10px 14px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;margin-bottom:-1px;">Documents</button>
+            <button class="hr-tab" id="hr-tab-btn-management" data-htab="management" onclick="window.showHRTab('management',this)" style="display:none;font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:10px 14px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap;margin-bottom:-1px;">Management</button>
           </div>
         </div>
         <!-- Hidden admin btns placeholder for JS compat -->
@@ -29585,6 +29907,45 @@ window.ccxPrintRecord = function() {
                 <a id="hr-handbook-link" href="#" target="_blank" style="display:none;" class="btn btn-outline" style="font-size:11px;">Download</a>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- Management (HR admin only — never shown to the employee) -->
+        <div id="hr-tab-management" class="hr-tab-panel" style="display:none;">
+          <div class="card" style="padding:22px;margin-bottom:16px;">
+            <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:8px;font-weight:700;">Management Notes</div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Visible only to HR and senior management. The employee cannot see these notes.</div>
+            <textarea id="hr-mgmt-note-body" rows="4" placeholder="Add a confidential note…" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:10px 12px;font-size:13px;font-family:Lato,sans-serif;border-radius:4px;resize:vertical;box-sizing:border-box;outline:none;"></textarea>
+            <div style="display:flex;justify-content:flex-end;margin-top:12px;">
+              <button onclick="window.addHRManagementNote()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Add note</button>
+            </div>
+            <div id="hr-mgmt-notes-list" style="margin-top:18px;display:grid;gap:10px;"></div>
+          </div>
+          <div class="card" style="padding:22px;margin-bottom:16px;">
+            <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:8px;font-weight:700;">Medical Records</div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Certificates, GP letters, and other medical files. PDF, JPG, or PNG. Max 12 MB.</div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+              <div class="mfield" style="flex:1;min-width:180px;">
+                <label>Description</label>
+                <input type="text" id="hr-mgmt-medical-title" placeholder="Optional description" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;border-radius:4px;box-sizing:border-box;">
+              </div>
+              <input type="file" id="hr-mgmt-medical-file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style="display:none;" onchange="window.uploadHRManagementDoc('medical')">
+              <button onclick="document.getElementById('hr-mgmt-medical-file').click()" class="btn btn-outline" style="font-size:11px;padding:8px 16px;">Upload file</button>
+            </div>
+            <div id="hr-mgmt-medical-list" style="margin-top:18px;display:grid;gap:10px;"></div>
+          </div>
+          <div class="card" style="padding:22px;">
+            <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:8px;font-weight:700;">Private Documents</div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Disciplinary records, references, and other confidential files. Not shown on the employee Documents tab.</div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+              <div class="mfield" style="flex:1;min-width:180px;">
+                <label>Description</label>
+                <input type="text" id="hr-mgmt-private-title" placeholder="Optional description" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;border-radius:4px;box-sizing:border-box;">
+              </div>
+              <input type="file" id="hr-mgmt-private-file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style="display:none;" onchange="window.uploadHRManagementDoc('private')">
+              <button onclick="document.getElementById('hr-mgmt-private-file').click()" class="btn btn-outline" style="font-size:11px;padding:8px 16px;">Upload file</button>
+            </div>
+            <div id="hr-mgmt-private-list" style="margin-top:18px;display:grid;gap:10px;"></div>
           </div>
         </div>
 
