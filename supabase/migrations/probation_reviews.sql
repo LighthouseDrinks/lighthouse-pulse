@@ -24,12 +24,13 @@ CREATE OR REPLACE FUNCTION public.is_probation_admin()
   STABLE SECURITY DEFINER
   SET search_path TO 'public'
 AS $function$
-  SELECT EXISTS (
-    SELECT 1
-    FROM public.app_users au
-    WHERE au.auth_user_id = auth.uid()
-      AND au.role IN ('managing_director', 'operations_director', 'business_analyst')
-  );
+  SELECT public.is_hr_admin()
+      OR EXISTS (
+        SELECT 1
+        FROM public.app_users au
+        WHERE au.auth_user_id = auth.uid()
+          AND au.role IN ('managing_director', 'operations_director', 'business_analyst', 'human_resources')
+      );
 $function$;
 
 REVOKE EXECUTE ON FUNCTION public.current_app_user_id() FROM PUBLIC, anon;
