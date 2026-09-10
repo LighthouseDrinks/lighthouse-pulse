@@ -1317,6 +1317,10 @@ window.DEFAULT_PERMISSIONS = window.DEFAULT_PERMISSIONS || {};
 
 // Helpers — pass user.role (or omit to use window.CURRENT_USER.role).
 window.isPulseAdmin   = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.PULSE_ADMIN_ROLES.indexOf(role) >= 0; };
+window.canSeeProbationTab = function(role) {
+  role = role || (window.CURRENT_USER && window.CURRENT_USER.role);
+  return role === 'managing_director' || role === 'operations_director' || role === 'business_analyst';
+};
 window.isExec         = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.EXEC_ROLES.indexOf(role) >= 0; };
 window.isHRAdmin      = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return window.HR_ADMIN_ROLES.indexOf(role) >= 0; };
 window.isWorkforceOnly = function(role) { role = role || (window.CURRENT_USER && window.CURRENT_USER.role); return (window.WORKFORCE_ONLY_ROLES || []).indexOf(role) >= 0; };
@@ -9251,6 +9255,7 @@ window.copyInviteLink = function() {
     populateHRFields(_hrCurrentProfile, u);
     applyHRPermissions(isTerminated);
     window.showHRTab('personal', document.querySelector('.hr-tab[data-htab="personal"]'));
+    if (window.loadHRProbationReviews) window.loadHRProbationReviews(userId);
   };
 
   function populateHRFields(p, u) {
@@ -9341,6 +9346,8 @@ window.copyInviteLink = function() {
     if (entCard) entCard.style.display = admin ? '' : 'none';
     var calBtn = document.getElementById('people-tab-cal');
     if (calBtn) calBtn.style.display = admin ? '' : 'none';
+    var probBtn = document.getElementById('people-tab-probation');
+    if (probBtn) probBtn.style.display = (window.canSeeProbationTab && window.canSeeProbationTab()) ? '' : 'none';
     // Legacy search bar is now hidden in the new layout; directory panel visibility
     // is managed by loadHRList() via canViewDirectory()
     // Admin-only fields - readonly for non-admins OR when terminated (read-only for all)
@@ -9462,6 +9469,9 @@ window.copyInviteLink = function() {
     view.querySelectorAll('.hr-tab').forEach(function(b){ b.style.borderBottomColor='transparent'; b.style.color='var(--muted)'; });
     var panel=document.getElementById('hr-tab-'+tab); if(panel) panel.style.display='';
     if(btn){ btn.style.borderBottomColor='var(--gold)'; btn.style.color='var(--gold)'; }
+    if (tab === 'employment' && window.loadHRProbationReviews && _hrCurrentUserId) {
+      window.loadHRProbationReviews(_hrCurrentUserId);
+    }
   };
 
   // ── Terminate ─────────────────────────────────────────────────────────────────
@@ -29336,13 +29346,14 @@ window.ccxPrintRecord = function() {
   <div class="page-heading">Workforce</div>
 
   <!-- Sub tabs -->
-  <div style="display:flex;gap:0;margin-bottom:24px;border-bottom:1px solid var(--navy-border);">
+  <div style="display:flex;flex-wrap:wrap;gap:0;margin-bottom:24px;border-bottom:1px solid var(--navy-border);">
     <button id="people-tab-mgmt" class="people-tab" onclick="showPeopleTab('mgmt', this)" style="display:none;font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 18px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Management</button>
     <button class="people-tab active" onclick="showPeopleTab('roster', this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 18px;background:transparent;border:none;border-bottom:2px solid var(--gold);color:var(--gold);cursor:pointer;">Roster</button>
     <button class="people-tab" onclick="showPeopleTab('clockin', this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 18px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Clock In / Out</button>
     <button class="people-tab" onclick="showPeopleTab('hr', this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 18px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Employee Details</button>
     <button class="people-tab" onclick="showPeopleTab('leave', this)" style="font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 18px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Annual Leave</button>
     <button id="people-tab-cal" class="people-tab" onclick="showPeopleTab('cal', this)" style="display:none;font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 18px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Annual Leave calendar</button>
+    <button id="people-tab-probation" class="people-tab" onclick="showPeopleTab('probation', this)" style="display:none;font-family:Lato,sans-serif;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;padding:10px 18px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;">Probation</button>
   </div>
 
   <!-- Roster panel -->
@@ -29481,6 +29492,10 @@ window.ccxPrintRecord = function() {
               <div class="mfield"><label>Probation End *</label><input type="date" id="hr-probation-end" class="hr-input hr-admin-field"></div>
               <div class="mfield"><label>Reports To *</label><select id="hr-reports-to" class="hr-input hr-admin-field" style="color-scheme:dark;"><option value="">-- Select --</option></select></div>
 
+            </div>
+            <div id="hr-probation-reviews" style="margin-top:22px;padding-top:18px;border-top:1px solid var(--navy-border);">
+              <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:12px;font-weight:700;">Probation Reviews</div>
+              <div id="hr-probation-reviews-list" style="font-size:12px;color:var(--muted);">—</div>
             </div>
             <div id="hr-employment-save-row" style="display:flex;justify-content:flex-end;margin-top:20px;width:100%;">
               <button onclick="window.saveHRTab('employment')" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save</button>
@@ -29678,6 +29693,22 @@ window.ccxPrintRecord = function() {
       </div>
       <div id="lv-cal-grid" style="overflow-x:auto;"></div>
       <div id="lv-cal-legend" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:16px;font-size:11px;"></div>
+    </div>
+  </div>
+
+  <div id="people-probation" class="people-panel" style="display:none;">
+    <div class="card" style="padding:22px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;">Currently on probation</div>
+        <button onclick="window.loadProbationTab()" class="btn btn-outline" style="font-size:10px;padding:4px 12px;">Refresh</button>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin:0 0 16px;">Active staff within 6 months of their start date. Schedule a meeting and complete the 1, 3, or 6 month review independently.</p>
+      <div id="probation-current-list" style="font-size:12px;color:var(--muted);">Loading&hellip;</div>
+    </div>
+    <div class="card" style="padding:22px;">
+      <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:16px;">Past probation reviews</div>
+      <p style="font-size:12px;color:var(--muted);margin:0 0 16px;">Reviews stay here after the 6-month window. Delete removes the record for everyone, including the employee.</p>
+      <div id="probation-past-list" style="font-size:12px;color:var(--muted);">Loading&hellip;</div>
     </div>
   </div>
 
@@ -62168,10 +62199,20 @@ window.mgmtLoadReports = async function(){
     allUsers.forEach(function(u){ if(u.email) window._reportEmails[u.id]=u.email; });
     window._reportReviewDates = {};
     profiles.forEach(function(p){ if(p.next_review_date) window._reportReviewDates[p.user_id]=p.next_review_date; });
+    var probationRows=[];
+    try {
+      probationRows=await get('probation_reviews?select=user_id,milestone,status&status=eq.completed&limit=500');
+    } catch(pe){ probationRows=[]; }
+    var probationByUser={};
+    (probationRows||[]).forEach(function(r){
+      if(!probationByUser[r.user_id]) probationByUser[r.user_id]={};
+      probationByUser[r.user_id][String(r.milestone)]=r;
+    });
     var html='<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="border-bottom:1px solid var(--navy-border);">'
       +'<th style="text-align:left;padding:7px 0;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Name</th>'
       +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Role</th>'
       +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Next Review</th>'
+      +'<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Probation</th>'
       +'<th style="text-align:right;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Action</th>'
       +'</tr></thead><tbody>';
     myReports.forEach(function(p){
@@ -62180,12 +62221,20 @@ window.mgmtLoadReports = async function(){
       var role=window.roleLabel(u.role)||'\u2014';
       var ini=name.trim().split(' ').map(function(w){return w[0]||'';}).join('').toUpperCase().slice(0,2);
       var nrd=p.next_review_date?(function(){var d=new Date(p.next_review_date);if(d<new Date())d.setFullYear(d.getFullYear()+1);return d.toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'})+'<br><span style="font-size:9px;font-weight:700;letter-spacing:0.08em;color:var(--green);text-transform:uppercase;">&#10003; Scheduled</span>';})():'<span style="color:var(--muted);">—</span>';
+      var pr=probationByUser[p.user_id]||{};
+      var chips=['1','3','6'].map(function(ms){
+        var done=!!pr[ms];
+        var label=ms+'m';
+        if(!done) return '<span style="font-size:10px;color:var(--muted);padding:2px 6px;">'+label+'</span>';
+        return '<button type="button" class="mgmt-probation-open" data-uid="'+window.escapeHtml(p.user_id)+'" data-ms="'+ms+'" style="font-size:10px;padding:2px 7px;background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.35);color:var(--green);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">'+label+' ✓</button>';
+      }).join(' ');
       html+='<tr style="border-bottom:1px solid rgba(36,61,87,0.5);">'
         +'<td style="padding:10px 0;"><div style="display:flex;align-items:center;gap:9px;">'
         +'<div style="width:28px;height:28px;min-width:28px;border-radius:50%;background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.25);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--gold);">'+window.escapeHtml(ini)+'</div>'
         +'<span style="font-weight:600;color:var(--white);">'+window.escapeHtml(name)+'</span></div></td>'
         +'<td style="padding:10px 0;color:var(--muted);">'+window.escapeHtml(role)+'</td>'
         +'<td style="padding:10px 0;text-align:center;font-size:11px;color:var(--white);">'+nrd+'</td>'
+        +'<td style="padding:10px 0;text-align:center;white-space:nowrap;">'+chips+'</td>'
         +'<td style="padding:10px 0;text-align:right;">'
         +'<button data-uid="'+window.escapeHtml(p.user_id)+'" class="mgmt-review-btn" '
         +'style="font-size:10px;padding:4px 10px;background:transparent;border:1px solid var(--gold-dim);color:var(--gold);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;">&#128197; Schedule Review</button>'
@@ -62197,6 +62246,11 @@ window.mgmtLoadReports = async function(){
       var uid=btn.dataset.uid;
       var nameVal=(allUsers.find(function(x){return x.id===uid;})||{}).display_name||uid.slice(0,8);
       btn.addEventListener('click', function(){ window.mgmtScheduleReview(uid, nameVal); });
+    });
+    el.querySelectorAll('.mgmt-probation-open').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        if(window.probationOpenReview) window.probationOpenReview(btn.dataset.uid, parseInt(btn.dataset.ms,10), { readonly: !(window.canSeeProbationTab&&window.canSeeProbationTab()) });
+      });
     });
   }catch(e){
     el.innerHTML='<span style="color:var(--red);font-size:11px;">Error loading reports.</span>';
@@ -64056,7 +64110,450 @@ window.loadTimesheet=async function(){
 };
 
 var _oSPT=window.showPeopleTab;
-window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);setTimeout(window.mgmtLoadLeaveOverview,800);setTimeout(window.mgmtPopulateEmps,200);setTimeout(window.mgmtPopulateApplyEmps,200);setTimeout(window.mgmtInitHistory,300);}if(tab==='cal')setTimeout(window.lvCalInit,100);};
+window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);setTimeout(window.mgmtLoadLeaveOverview,800);setTimeout(window.mgmtPopulateEmps,200);setTimeout(window.mgmtPopulateApplyEmps,200);setTimeout(window.mgmtInitHistory,300);}if(tab==='cal')setTimeout(window.lvCalInit,100);if(tab==='probation')setTimeout(window.loadProbationTab,100);};
+})();
+</script>
+
+<script>
+/* ── Probation reviews (Workforce tab + Employee Details) ── */
+(function(){
+  var MILESTONES = [1, 3, 6];
+  var QUESTIONS = [
+    { id:'attendance', label:'Attendance & punctuality' },
+    { id:'quality',    label:'Quality of work' },
+    { id:'attitude',   label:'Attitude & teamwork' },
+    { id:'progress',   label:'Progress in role' },
+    { id:'support',    label:'Training / support needed' },
+    { id:'comments',   label:'Overall comments' },
+    { id:'outcome',    label:'Outcome', type:'select', options:[
+      { value:'', label:'— Select —' },
+      { value:'continue', label:'Continue probation' },
+      { value:'concerns', label:'Concerns — support plan' },
+      { value:'confirm',  label:'Confirm in role' }
+    ]}
+  ];
+
+  function esc(s){ return window.escapeHtml ? window.escapeHtml(s) : String(s==null?'':s); }
+  function myAppId(){
+    var cu = window.CURRENT_USER || {};
+    return cu.app_user_id || cu.id || null;
+  }
+  function pad(n){ return n<10 ? '0'+n : ''+n; }
+  function fmtDate(s){
+    if(!s) return '—';
+    var d = new Date(String(s).slice(0,10)+'T00:00:00');
+    if(isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString('en-IE',{ day:'numeric', month:'short', year:'numeric' });
+  }
+  function addMonths(dateStr, n){
+    var d = new Date(String(dateStr).slice(0,10)+'T00:00:00');
+    d.setMonth(d.getMonth()+n);
+    return d;
+  }
+  function toYMD(d){
+    return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+  }
+  function today(){
+    var d = new Date();
+    d.setHours(0,0,0,0);
+    return d;
+  }
+  function isOnProbation(start){
+    if(!start) return false;
+    return addMonths(start, 6) >= today();
+  }
+  function daysLeft(start){
+    var end = addMonths(start, 6);
+    return Math.ceil((end - today()) / 86400000);
+  }
+  function msLabel(ms){ return ms+'-month'; }
+  function hasAnswers(row){
+    var a = row && row.answers;
+    if(!a || typeof a !== 'object') return false;
+    return Object.keys(a).some(function(k){ return String(a[k]||'').trim(); });
+  }
+  function isSavedReview(row){
+    return !!(row && (row.status === 'completed' || hasAnswers(row)));
+  }
+  function outcomeLabel(v){
+    if(v==='continue') return 'Continue probation';
+    if(v==='concerns') return 'Concerns — support plan';
+    if(v==='confirm') return 'Confirm in role';
+    return v || '—';
+  }
+  function statusChip(row){
+    if(!row) return '<span style="font-size:10px;color:var(--muted);">Not started</span>';
+    if(row.status==='completed') return '<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--green);">Completed</span>';
+    if(hasAnswers(row)) return '<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--amber);">Draft</span>';
+    if(row.scheduled_date) return '<span style="font-size:10px;color:var(--gold);">Scheduled '+fmtDate(row.scheduled_date)+'</span>';
+    return '<span style="font-size:10px;color:var(--muted);">Not started</span>';
+  }
+  function btnStyle(kind){
+    if(kind==='ghost') return 'font-size:10px;padding:4px 9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;';
+    if(kind==='danger') return 'font-size:10px;padding:4px 9px;background:transparent;border:1px solid rgba(220,53,69,0.45);color:#e05a6a;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;';
+    return 'font-size:10px;padding:4px 9px;background:transparent;border:1px solid var(--gold-dim);color:var(--gold);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;';
+  }
+
+  async function fetchUsers(){
+    return window.db.select('app_users', '?select=id,display_name,role,email,status&order=display_name.asc&limit=500') || [];
+  }
+  async function fetchProfiles(){
+    return window.db.select('hr_profiles', '?select=user_id,employment_start,reports_to,first_name,last_name&limit=500') || [];
+  }
+  async function fetchReviews(qs){
+    return window.db.select('probation_reviews', qs || '?select=*&limit=500') || [];
+  }
+  function reviewsByUser(rows){
+    var map = {};
+    (rows||[]).forEach(function(r){
+      if(!map[r.user_id]) map[r.user_id] = {};
+      map[r.user_id][String(r.milestone)] = r;
+    });
+    return map;
+  }
+  function personName(u, p){
+    if(u && u.display_name) return u.display_name;
+    if(p && (p.first_name || p.last_name)) return ((p.first_name||'')+' '+(p.last_name||'')).trim();
+    return (u && u.email) || 'Unknown';
+  }
+  function managerName(reportsTo, users){
+    if(!reportsTo) return '—';
+    var m = (users||[]).find(function(u){ return u.id===reportsTo; });
+    return (m && m.display_name) || '—';
+  }
+  function excludeUser(u){
+    if(!u) return true;
+    if(u.role === 'client') return true;
+    if((u.display_name||'') === 'Plant Display') return true;
+    return false;
+  }
+
+  async function upsertReview(userId, milestone, patch){
+    var existing = await window.db.select('probation_reviews', '?user_id=eq.'+userId+'&milestone=eq.'+milestone+'&limit=1');
+    var me = myAppId();
+    var body = Object.assign({ updated_by: me, updated_at: new Date().toISOString() }, patch || {});
+    if(existing && existing.length){
+      var updated = await window.db.update('probation_reviews', '?id=eq.'+existing[0].id, body);
+      return (updated && updated[0]) || Object.assign({}, existing[0], body);
+    }
+    body.user_id = userId;
+    body.milestone = milestone;
+    body.created_by = me;
+    if(!body.status) body.status = 'draft';
+    if(!body.answers) body.answers = {};
+    var inserted = await window.db.insert('probation_reviews', body);
+    return (inserted && inserted[0]) || body;
+  }
+
+  function renderPersonTable(people, reviewMap, opts){
+    opts = opts || {};
+    if(!people.length){
+      return '<span style="color:var(--muted);">'+(opts.empty || 'None.')+'</span>';
+    }
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="border-bottom:1px solid var(--navy-border);">'
+      +'<th style="text-align:left;padding:7px 0;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Name</th>'
+      +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Role</th>'
+      +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Start</th>'
+      +(opts.showDays ? '<th style="text-align:center;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Days left</th>' : '')
+      +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Manager</th>'
+      +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Reviews</th>'
+      +'</tr></thead><tbody>';
+    people.forEach(function(item){
+      var u = item.user, p = item.profile;
+      var name = personName(u, p);
+      var role = window.roleLabel(u.role) || '—';
+      var start = p.employment_start;
+      var days = start ? daysLeft(start) : null;
+      var byMs = reviewMap[u.id] || {};
+      var cells = MILESTONES.map(function(ms){
+        var row = byMs[String(ms)];
+        return '<div style="display:flex;align-items:center;gap:6px;margin:3px 0;flex-wrap:wrap;">'
+          +'<span style="min-width:52px;font-size:10px;font-weight:700;color:var(--white);">'+ms+' mo</span>'
+          +statusChip(row)
+          +'<button type="button" class="pr-open" data-uid="'+esc(u.id)+'" data-ms="'+ms+'" style="'+btnStyle()+'">'+ms+' month</button>'
+          +'<button type="button" class="pr-sched" data-uid="'+esc(u.id)+'" data-ms="'+ms+'" style="'+btnStyle('ghost')+'">Schedule</button>'
+          +(row && row.id ? '<button type="button" class="pr-del" data-id="'+esc(row.id)+'" data-uid="'+esc(u.id)+'" data-ms="'+ms+'" style="'+btnStyle('danger')+'">Delete</button>' : '')
+          +'</div>';
+      }).join('');
+      html += '<tr style="border-bottom:1px solid rgba(36,61,87,0.5);vertical-align:top;">'
+        +'<td style="padding:12px 8px 12px 0;font-weight:600;color:var(--white);white-space:nowrap;">'+esc(name)+'</td>'
+        +'<td style="padding:12px 8px;color:var(--muted);">'+esc(role)+'</td>'
+        +'<td style="padding:12px 8px;color:var(--white);white-space:nowrap;">'+fmtDate(start)+'</td>'
+        +(opts.showDays ? '<td style="padding:12px 8px;text-align:center;color:'+(days!=null && days<=14 ? 'var(--amber)' : 'var(--white)')+';">'+(days==null?'—':days)+'</td>' : '')
+        +'<td style="padding:12px 8px;color:var(--muted);">'+esc(managerName(p.reports_to, opts.users))+'</td>'
+        +'<td style="padding:10px 0;">'+cells+'</td>'
+        +'</tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+  }
+
+  function bindTable(el){
+    if(!el) return;
+    el.querySelectorAll('.pr-open').forEach(function(btn){
+      btn.addEventListener('click', function(){ window.probationOpenReview(btn.dataset.uid, parseInt(btn.dataset.ms,10)); });
+    });
+    el.querySelectorAll('.pr-sched').forEach(function(btn){
+      btn.addEventListener('click', function(){ window.probationSchedule(btn.dataset.uid, parseInt(btn.dataset.ms,10)); });
+    });
+    el.querySelectorAll('.pr-del').forEach(function(btn){
+      btn.addEventListener('click', function(){ window.probationDeleteReview(btn.dataset.id, btn.dataset.uid, parseInt(btn.dataset.ms,10)); });
+    });
+  }
+
+  window.loadProbationTab = async function(){
+    var currentEl = document.getElementById('probation-current-list');
+    var pastEl = document.getElementById('probation-past-list');
+    if(!currentEl || !pastEl) return;
+    if(!(window.canSeeProbationTab && window.canSeeProbationTab())){
+      currentEl.innerHTML = '<span style="color:var(--muted);">You do not have access to probation reviews.</span>';
+      pastEl.innerHTML = '';
+      return;
+    }
+    currentEl.innerHTML = '<span style="color:var(--muted);">Loading\u2026</span>';
+    pastEl.innerHTML = '<span style="color:var(--muted);">Loading\u2026</span>';
+    try {
+      var users = await fetchUsers();
+      var profiles = await fetchProfiles();
+      var reviews = await fetchReviews();
+      var profileByUser = {};
+      (profiles||[]).forEach(function(p){ profileByUser[p.user_id] = p; });
+      var reviewMap = reviewsByUser(reviews);
+      var current = [];
+      var past = [];
+      var seenPast = {};
+      (users||[]).forEach(function(u){
+        if(excludeUser(u)) return;
+        var p = profileByUser[u.id] || {};
+        var on = u.status === 'active' && isOnProbation(p.employment_start);
+        if(on) current.push({ user:u, profile:p });
+      });
+      (reviews||[]).forEach(function(r){
+        if(!isSavedReview(r) || seenPast[r.user_id]) return;
+        var u = (users||[]).find(function(x){ return x.id===r.user_id; }) || { id:r.user_id, display_name:'Unknown', role:'' };
+        if(u.role === 'client' || (u.display_name||'') === 'Plant Display') return;
+        var p = profileByUser[r.user_id] || {};
+        var on = u.status === 'active' && isOnProbation(p.employment_start);
+        if(on) return;
+        seenPast[r.user_id] = true;
+        past.push({ user:u, profile:p });
+      });
+      current.sort(function(a,b){ return personName(a.user,a.profile).localeCompare(personName(b.user,b.profile)); });
+      past.sort(function(a,b){ return personName(a.user,a.profile).localeCompare(personName(b.user,b.profile)); });
+      currentEl.innerHTML = renderPersonTable(current, reviewMap, { showDays:true, users:users, empty:'Nobody is currently within 6 months of their start date.' });
+      pastEl.innerHTML = renderPersonTable(past, reviewMap, { users:users, empty:'No past probation reviews yet.' });
+      bindTable(currentEl);
+      bindTable(pastEl);
+    } catch(e){
+      currentEl.innerHTML = '<span style="color:var(--red);font-size:11px;">Error loading probation list.</span>';
+      pastEl.innerHTML = '';
+      window.logError && window.logError('loadProbationTab', e);
+    }
+  };
+
+  window.probationSchedule = async function(userId, milestone){
+    if(!(window.canSeeProbationTab && window.canSeeProbationTab())) return;
+    try {
+      var users = await window.db.select('app_users', '?id=eq.'+userId+'&select=id,display_name,email&limit=1');
+      var profiles = await window.db.select('hr_profiles', '?user_id=eq.'+userId+'&select=employment_start&limit=1');
+      var existing = await window.db.select('probation_reviews', '?user_id=eq.'+userId+'&milestone=eq.'+milestone+'&limit=1');
+      var u = (users&&users[0]) || {};
+      var name = u.display_name || 'Employee';
+      var start = profiles && profiles[0] && profiles[0].employment_start;
+      var stored = existing && existing[0] && existing[0].scheduled_date;
+      var dt = stored ? new Date(stored+'T00:00:00') : (start ? addMonths(start, milestone) : (function(){ var d=new Date(); d.setMonth(d.getMonth()+milestone); return d; })());
+      var ds = dt.getFullYear()+''+pad(dt.getMonth()+1)+''+pad(dt.getDate());
+      var title = encodeURIComponent(msLabel(milestone)+' Probation Review — '+name);
+      var details = encodeURIComponent('Scheduled via Pulse by Lighthouse Drinks');
+      var dates = ds+'T090000/'+ds+'T100000';
+      var guest = u.email ? '&add='+encodeURIComponent(u.email) : '';
+      window.open('https://calendar.google.com/calendar/render?action=TEMPLATE&text='+title+'&details='+details+'&dates='+dates+guest, '_blank');
+      var defaultDate = stored || toYMD(dt);
+      var confirmed = await window.lpPrompt('Save '+msLabel(milestone)+' review date for '+name+'?\n(Format: YYYY-MM-DD)', defaultDate, { title:'Probation review date', placeholder:'YYYY-MM-DD' });
+      if(confirmed === null || !String(confirmed).trim()) return;
+      confirmed = String(confirmed).trim();
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(confirmed)){
+        window.toast && window.toast('Use YYYY-MM-DD.','error');
+        return;
+      }
+      await upsertReview(userId, milestone, { scheduled_date: confirmed });
+      window.toast && window.toast('Review date saved for '+name, 'success');
+      window.loadProbationTab();
+      if(window.loadHRProbationReviews) window.loadHRProbationReviews(userId);
+    } catch(e){
+      window.logError && window.logError('probationSchedule', e);
+      window.toast && window.toast('Could not schedule review.','error');
+    }
+  };
+
+  window.probationOpenReview = async function(userId, milestone, opts){
+    opts = opts || {};
+    var canEdit = !opts.readonly && window.canSeeProbationTab && window.canSeeProbationTab();
+    var existing = [];
+    try {
+      existing = await window.db.select('probation_reviews', '?user_id=eq.'+userId+'&milestone=eq.'+milestone+'&limit=1');
+    } catch(e){
+      window.logError && window.logError('probationOpenReview load', e);
+    }
+    var row = (existing && existing[0]) || { user_id:userId, milestone:milestone, answers:{}, status:'draft' };
+    if(!canEdit && row.status !== 'completed'){
+      window.toast && window.toast('This review is not available yet.','error');
+      return;
+    }
+    var users = [];
+    var profiles = [];
+    try {
+      users = await window.db.select('app_users', '?id=eq.'+userId+'&select=id,display_name,role,email&limit=1');
+      profiles = await window.db.select('hr_profiles', '?user_id=eq.'+userId+'&select=employment_start,first_name,last_name&limit=1');
+    } catch(e){}
+    var u = (users&&users[0]) || {};
+    var p = (profiles&&profiles[0]) || {};
+    var name = personName(u, p);
+    var answers = row.answers || {};
+    var prev = document.getElementById('probation-review-overlay');
+    if(prev) prev.remove();
+    var ov = document.createElement('div');
+    ov.id = 'probation-review-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9000;background:rgba(5,12,20,0.88);display:flex;align-items:flex-start;justify-content:center;padding:36px 16px;overflow-y:auto;';
+    var fields = QUESTIONS.map(function(q){
+      var val = answers[q.id] || '';
+      if(q.type === 'select'){
+        var optsHtml = (q.options||[]).map(function(o){
+          return '<option value="'+esc(o.value)+'"'+(val===o.value?' selected':'')+'>'+esc(o.label)+'</option>';
+        }).join('');
+        return '<div class="mfield" style="margin-bottom:12px;"><label>'+esc(q.label)+'</label>'
+          +'<select id="pr-q-'+q.id+'" class="hr-input" '+(canEdit?'':'disabled')+' style="color-scheme:dark;">'+optsHtml+'</select></div>';
+      }
+      return '<div class="mfield" style="margin-bottom:12px;"><label>'+esc(q.label)+'</label>'
+        +'<textarea id="pr-q-'+q.id+'" class="hr-input" rows="3" style="resize:vertical;" '+(canEdit?'':'readonly')+'>'+esc(val)+'</textarea></div>';
+    }).join('');
+    var actions = canEdit
+      ? '<button type="button" class="btn btn-outline pr-save-draft" style="font-size:11px;padding:8px 16px;">Save draft</button>'
+        +'<button type="button" class="btn btn-gold pr-save-done" style="font-size:11px;padding:8px 16px;">Mark completed</button>'
+        +(row.id ? '<button type="button" class="btn btn-outline pr-save-del" style="font-size:11px;padding:8px 16px;border-color:rgba(220,53,69,0.45);color:#e05a6a;">Delete</button>' : '')
+      : '';
+    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:26px 28px 22px;width:100%;max-width:640px;box-shadow:0 16px 60px rgba(0,0,0,0.7);">'
+      +'<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:18px;">'
+      +'<div><div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">'+esc(msLabel(milestone))+' probation review</div>'
+      +'<div style="font-size:18px;font-weight:700;color:var(--white);font-family:Merriweather,serif;">'+esc(name)+'</div>'
+      +'<div style="font-size:11px;color:var(--muted);margin-top:4px;">'+esc(window.roleLabel(u.role)||'')+' · Start '+fmtDate(p.employment_start)+(row.scheduled_date?' · Scheduled '+fmtDate(row.scheduled_date):'')+(row.status==='completed'?' · Completed '+fmtDate(row.completed_at):'')+'</div></div>'
+      +'<button type="button" class="btn btn-outline pr-close" style="font-size:11px;padding:6px 12px;">Close</button></div>'
+      +fields
+      +'<div class="mfield" style="margin-bottom:16px;"><label>Notes</label>'
+      +'<textarea id="pr-notes" class="hr-input" rows="2" style="resize:vertical;" '+(canEdit?'':'readonly')+'>'+esc(row.notes||'')+'</textarea></div>'
+      +'<div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">'+actions+'</div>'
+      +'</div>';
+    document.body.appendChild(ov);
+    function close(){ ov.remove(); }
+    ov.addEventListener('click', function(e){ if(e.target===ov) close(); });
+    ov.querySelector('.pr-close').onclick = close;
+    function collectAnswers(){
+      var out = {};
+      QUESTIONS.forEach(function(q){
+        var el = document.getElementById('pr-q-'+q.id);
+        out[q.id] = el ? (el.value||'').trim() : '';
+      });
+      return out;
+    }
+    async function save(status){
+      try {
+        var payload = {
+          answers: collectAnswers(),
+          notes: (document.getElementById('pr-notes').value||'').trim() || null,
+          status: status
+        };
+        if(status==='completed'){
+          payload.completed_at = new Date().toISOString();
+          payload.completed_by = myAppId();
+        }
+        await upsertReview(userId, milestone, payload);
+        window.toast && window.toast(status==='completed' ? 'Review completed.' : 'Draft saved.', 'success');
+        close();
+        window.loadProbationTab();
+        if(window.loadHRProbationReviews) window.loadHRProbationReviews(userId);
+        if(window.mgmtLoadReports) window.mgmtLoadReports();
+      } catch(e){
+        window.logError && window.logError('probationSaveReview', e);
+        window.toast && window.toast('Could not save review.','error');
+      }
+    }
+    var draftBtn = ov.querySelector('.pr-save-draft');
+    var doneBtn = ov.querySelector('.pr-save-done');
+    var delBtn = ov.querySelector('.pr-save-del');
+    if(draftBtn) draftBtn.onclick = function(){ save('draft'); };
+    if(doneBtn) doneBtn.onclick = function(){ save('completed'); };
+    if(delBtn) delBtn.onclick = function(){ close(); window.probationDeleteReview(row.id, userId, milestone); };
+  };
+
+  window.probationDeleteReview = async function(id, userId, milestone){
+    if(!(window.canSeeProbationTab && window.canSeeProbationTab())) return;
+    if(!id) return;
+    var ok = window.lpConfirm
+      ? await window.lpConfirm('Delete the '+msLabel(milestone)+' probation review? This cannot be undone and the employee will no longer see it.', { title:'Delete review', confirmLabel:'Delete', destructive:true })
+      : confirm('Delete this probation review?');
+    if(!ok) return;
+    try {
+      await window.db.delete('probation_reviews', '?id=eq.'+id);
+      window.toast && window.toast('Review deleted.','success');
+      window.loadProbationTab();
+      if(userId && window.loadHRProbationReviews) window.loadHRProbationReviews(userId);
+      if(window.mgmtLoadReports) window.mgmtLoadReports();
+    } catch(e){
+      window.logError && window.logError('probationDeleteReview', e);
+      window.toast && window.toast('Could not delete review.','error');
+    }
+  };
+
+  window.loadHRProbationReviews = async function(userId){
+    var list = document.getElementById('hr-probation-reviews-list');
+    var card = document.getElementById('hr-probation-reviews');
+    if(!list || !card) return;
+    if(!userId){ list.innerHTML = '—'; return; }
+    list.innerHTML = '<span style="color:var(--muted);">Loading\u2026</span>';
+    try {
+      var rows = await window.db.select('probation_reviews', '?user_id=eq.'+userId+'&status=eq.completed&select=*&order=milestone.asc');
+      var completers = {};
+      var ids = (rows||[]).map(function(r){ return r.completed_by; }).filter(Boolean);
+      if(ids.length){
+        try {
+          var people = await window.db.select('app_users', '?id=in.('+ids.join(',')+')&select=id,display_name');
+          (people||[]).forEach(function(u){ completers[u.id] = u.display_name; });
+        } catch(e){}
+      }
+      if(!rows || !rows.length){
+        list.innerHTML = '<span style="color:var(--muted);">No completed probation reviews yet.</span>';
+        return;
+      }
+      var canEdit = window.canSeeProbationTab && window.canSeeProbationTab();
+      var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="border-bottom:1px solid var(--navy-border);">'
+        +'<th style="text-align:left;padding:6px 0;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Review</th>'
+        +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Completed</th>'
+        +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">By</th>'
+        +'<th style="text-align:left;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);">Outcome</th>'
+        +'<th style="text-align:right;font-size:9px;letter-spacing:0.15em;text-transform:uppercase;color:var(--muted);"> </th>'
+        +'</tr></thead><tbody>';
+      rows.forEach(function(r){
+        var answers = r.answers || {};
+        html += '<tr style="border-bottom:1px solid rgba(36,61,87,0.5);">'
+          +'<td style="padding:10px 8px 10px 0;font-weight:600;color:var(--white);">'+esc(msLabel(r.milestone))+'</td>'
+          +'<td style="padding:10px 8px;color:var(--white);">'+fmtDate(r.completed_at)+'</td>'
+          +'<td style="padding:10px 8px;color:var(--muted);">'+esc(completers[r.completed_by]||'—')+'</td>'
+          +'<td style="padding:10px 8px;color:var(--white);">'+esc(outcomeLabel(answers.outcome))+'</td>'
+          +'<td style="padding:10px 0;text-align:right;"><button type="button" class="hr-pr-open" data-uid="'+esc(userId)+'" data-ms="'+esc(r.milestone)+'" style="'+btnStyle()+'">Open</button></td>'
+          +'</tr>';
+      });
+      html += '</tbody></table>';
+      list.innerHTML = html;
+      list.querySelectorAll('.hr-pr-open').forEach(function(btn){
+        btn.addEventListener('click', function(){
+          window.probationOpenReview(btn.dataset.uid, parseInt(btn.dataset.ms,10), { readonly: !canEdit });
+        });
+      });
+    } catch(e){
+      list.innerHTML = '<span style="color:var(--muted);">No completed probation reviews yet.</span>';
+      window.logError && window.logError('loadHRProbationReviews', e);
+    }
+  };
 })();
 </script>
 
