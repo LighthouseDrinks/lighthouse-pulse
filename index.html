@@ -1322,6 +1322,11 @@ window.canSeeProbationTab = function(role) {
   if (window.isHRAdmin && window.isHRAdmin(role)) return true;
   return role === 'managing_director' || role === 'operations_director' || role === 'business_analyst' || role === 'human_resources';
 };
+// Current-employee CSV download: MD, Ops Dir, BA, and HR only.
+window.canDownloadEmployeeList = function(role) {
+  role = role || (window.CURRENT_USER && window.CURRENT_USER.role);
+  return role === 'managing_director' || role === 'operations_director' || role === 'business_analyst' || role === 'human_resources';
+};
 // Shared logins / contractors that must not appear on employee people lists.
 window.isDirectEmployee = function(u) {
   if (!u) return false;
@@ -9376,6 +9381,8 @@ window.copyInviteLink = function() {
     if (probBtn) probBtn.style.display = (window.canSeeProbationTab && window.canSeeProbationTab()) ? '' : 'none';
     var annualBtn = document.getElementById('people-tab-annual');
     if (annualBtn) annualBtn.style.display = (window.canSeeProbationTab && window.canSeeProbationTab()) ? '' : 'none';
+    var empExportCard = document.getElementById('mgmt-employee-export-card');
+    if (empExportCard) empExportCard.style.display = (window.canDownloadEmployeeList && window.canDownloadEmployeeList()) ? '' : 'none';
     // Employee Details → Management sub-tab (confidential notes/docs).
     // Distinct from Workforce leave tab #people-tab-mgmt. Gate matches
     // RLS is_hr_admin() via isHRAdmin() — never canViewAll()/isAdmin().
@@ -30142,6 +30149,17 @@ window.ccxPrintRecord = function() {
   </div>
 
   <div id="people-mgmt" class="people-panel" style="display:none;">
+
+    <!-- Employee list download (MD / OD / BA / HR only) -->
+    <div class="card" id="mgmt-employee-export-card" style="display:none;padding:22px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;">Employee List</div>
+          <p style="font-size:12px;color:var(--muted);margin:0;max-width:540px;">Download a CSV of current employees — name, email, start date, job title and role. Shared logins and client accounts are excluded.</p>
+        </div>
+        <button id="mgmt-employee-export-btn" onclick="window.exportEmployeeListCSV()" class="btn btn-gold" style="font-size:11px;padding:8px 18px;white-space:nowrap;">Download CSV</button>
+      </div>
+    </div>
 
     <!-- Your Reports -->
     <div class="card" style="padding:22px;margin-bottom:16px;">
@@ -62491,7 +62509,87 @@ window.lvLoadManagerView = async function(){
   }
 }
 
-/* ── Populate management employee dropdown ── */
+/* ── Current-employee CSV (MD / OD / BA / HR) ── */
+window.exportEmployeeListCSV = async function(){
+  if (!window.canDownloadEmployeeList || !window.canDownloadEmployeeList()) {
+    window.toast && window.toast('You do not have permission to download the employee list.', 'error');
+    return;
+  }
+  var btn = document.getElementById('mgmt-employee-export-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Preparing\u2026'; }
+  try {
+    var users = await window.fetchAll('app_users', '?status=eq.active&order=display_name.asc&select=id,display_name,email,role');
+    users = (users || []).filter(function(u){
+      return window.isDirectEmployee ? window.isDirectEmployee(u) : u.role !== 'client';
+    });
+    if (!users.length) {
+      window.toast && window.toast('No current employees to export.', 'error');
+      return;
+    }
+    var profiles = [];
+    try {
+      profiles = await window.fetchAll('hr_profiles', '?select=user_id,first_name,last_name,email,job_title,employment_type,employment_start');
+    } catch (pe) { /* name/start-date extras are best-effort */ }
+    var byUser = {};
+    (profiles || []).forEach(function(p){ if (p && p.user_id) byUser[p.user_id] = p; });
+
+    function csvEsc(v) {
+      if (v == null) return '';
+      var s = String(v);
+      if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    }
+    function fmtDate(d) {
+      if (!d) return '';
+      var p = String(d).slice(0, 10).split('-');
+      if (p.length !== 3) return String(d);
+      return p[2] + '/' + p[1] + '/' + p[0];
+    }
+    function fmtType(t) {
+      if (t === 'part_time') return 'Part-Time';
+      if (t === 'contractor') return 'Contractor';
+      if (t === 'full_time') return 'Full-Time';
+      return t || '';
+    }
+
+    var lines = [['Name','Email','Job Title','Role','Employment Type','Start Date'].join(',')];
+    users.forEach(function(u){
+      var p = byUser[u.id] || {};
+      var name = ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || u.display_name || '';
+      var email = u.email || p.email || '';
+      lines.push([
+        csvEsc(name),
+        csvEsc(email),
+        csvEsc(p.job_title || ''),
+        csvEsc(window.roleLabel ? window.roleLabel(u.role) : (u.role || '')),
+        csvEsc(fmtType(p.employment_type)),
+        csvEsc(fmtDate(p.employment_start))
+      ].join(','));
+    });
+
+    var stamp = new Date().toISOString().slice(0, 10);
+    var blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'lighthouse-employees_' + stamp + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 0);
+    window.toast && window.toast('Employee list downloaded (' + users.length + ').', 'success');
+  } catch (e) {
+    window.logError && window.logError('exportEmployeeListCSV', e);
+    window.toast && window.toast('Could not download employee list: ' + (e.message || e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Download CSV'; }
+  }
+};
+
 window.mgmtPopulateEmps = async function(){
   var sel = document.getElementById('mgmt-leave-emp');
   if(!sel) return;
