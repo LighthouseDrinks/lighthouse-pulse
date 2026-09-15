@@ -42994,6 +42994,12 @@ window.saveAdjModal = async function() {
       var compSignoff = null;
       try { var sfRows = await supaGet('job_drygoods_prep?job_id=eq.'+jobId+'&limit=1'); compSignoff = sfRows[0]||null; } catch(e){ window.logError('load components signoff', e); }
 
+      window._scDateAudit = { jobId: jobId, rows: [] };
+      try {
+        var _audRows = await supaGet('audit_log?action=eq.supply_chain_date&record_id=eq.' + encodeURIComponent(jobId) + '&order=created_at.desc&select=id,performer_name,performer_role,created_at,details,table_name');
+        window._scDateAudit.rows = _audRows || [];
+      } catch (_ae) { window.logError && window.logError('load sc date audit', _ae); }
+
       var isSignedOff = !!(compSignoff && compSignoff.signed_by_coordinator);
       var escH = window.escapeHtml || function(s){ return String(s==null?'':s); };
 
@@ -43079,6 +43085,7 @@ window.saveAdjModal = async function() {
           + (canEditSc ? 'cursor:pointer;' : 'opacity:0.55;cursor:not-allowed;') + '">'
           + '<span id="sc-job-ready-manual-badge" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--amber);'
           + (jReadyManual ? '' : 'display:none;') + '">Manual</span>'
+          + '<span id="sc-job-ready-by" style="display:none;"></span>'
           + (canEditSc
             ? '<button type="button" id="sc-job-ready-reset" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:5px 10px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Reset</button>'
             : '')
@@ -43106,6 +43113,7 @@ window.saveAdjModal = async function() {
           + '</div>';
       }
       html += '<div id="sc-tracker-mount"></div>';
+      html += '<div id="sc-date-history" style="display:none;margin:16px 0 8px;"></div>';
 
       // ── Step 2: allocate the bay ──
       html += stepHd(2, 'Allocate the bay',
@@ -43359,7 +43367,14 @@ window.saveAdjModal = async function() {
         dtIn.style.cssText = inpStyle;
         if (isExcluded || sufficient) { dtIn.disabled = true; dtIn.style.opacity = '0.3'; dtIn.style.cursor = 'not-allowed'; }
         dtIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid,'expected_delivery',this.value); };
-        tr.cells[6].appendChild(dtIn);
+        var dtWrap = document.createElement('div');
+        dtWrap.style.cssText = 'display:flex;align-items:center;gap:6px;';
+        dtWrap.appendChild(dtIn);
+        var etaBy = document.createElement('span');
+        etaBy.id = 'sc-eta-by-' + cid;
+        etaBy.style.display = 'none';
+        dtWrap.appendChild(etaBy);
+        tr.cells[6].appendChild(dtWrap);
 
         // col 7: Supplier
         var supplierIn = document.createElement('input');
@@ -43508,6 +43523,7 @@ window.saveAdjModal = async function() {
         +     (canEditLiq ? 'cursor:pointer;' : 'opacity:0.55;cursor:not-allowed;') + '">'
         +     '<span id="sc-liquid-ready-manual-badge" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--amber);'
         +     (liqManual ? '' : 'display:none;') + '">Manual</span>'
+        +     '<span id="sc-liquid-ready-by" style="display:none;"></span>'
         +     (canEditLiq
           ? '<button type="button" id="sc-liquid-ready-reset" style="font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:transparent;border:1px solid var(--navy-border);color:var(--muted);padding:4px 8px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">Reset</button>'
           : '')
@@ -43557,6 +43573,9 @@ window.saveAdjModal = async function() {
       // Liquid Ready input and was writing the dry-goods date back over a save.
       if (!isCompleteJob && typeof window._refreshScJobReadyUI === 'function') {
         window._refreshScJobReadyUI(jobId);
+      }
+      if (typeof window._refreshScDateAuditUI === 'function') {
+        window._refreshScDateAuditUI(jobId);
       }
 
       // ── Step 2: bay allocation control ──
@@ -43952,10 +43971,21 @@ window.saveAdjModal = async function() {
   window.updateComponent = async function(id, field, value) {
     if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) { window.toast && window.toast('You do not have permission to edit supply chain components.', 'error'); return; }
     try {
+      var prevEta = null;
+      var etaJobId = null;
+      var etaName = null;
+      if (field === 'expected_delivery' && window._currentComps) {
+        var etaRow = window._currentComps.find(function(x){ return x.id === id; });
+        if (etaRow) {
+          prevEta = etaRow.expected_delivery || null;
+          etaJobId = etaRow.job_id;
+          etaName = etaRow._displayName || etaRow.item_name || null;
+        }
+      }
       var p={}; p[field]=value; await supaMut('PATCH','job_components','?id=eq.'+id,p);
       // Recompute Job Ready when ETA / exclude changes (and after any SC write that can affect readiness).
       if (field === 'expected_delivery' || field === 'is_excluded') {
-        var jobId = null;
+        var jobId = etaJobId;
         if (window._currentComps) {
           var row = window._currentComps.find(function(x){ return x.id === id; });
           if (row) {
@@ -43965,6 +43995,13 @@ window.saveAdjModal = async function() {
           }
         }
         if (!jobId && typeof _currentJobId !== 'undefined') jobId = _currentJobId;
+        if (field === 'expected_delivery' && jobId) {
+          await window._writeSupplyChainDateAudit({
+            jobId: jobId, tableName: 'job_components', field: 'expected_delivery',
+            from: prevEta, to: value || null, op: 'set',
+            componentId: id, itemName: etaName
+          });
+        }
         if (jobId && typeof window.recomputeJobReady === 'function') {
           await window.recomputeJobReady(jobId);
           if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
@@ -44408,6 +44445,177 @@ window.saveAdjModal = async function() {
     }
   };
 
+  function _scNormDate(v) {
+    if (v == null || v === '') return null;
+    var s = String(v).slice(0, 10);
+    return s || null;
+  }
+
+  function _scDateInitials(name) {
+    var parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+
+  function _scParseAuditDetails(raw) {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+    if (typeof raw === 'string' && raw.trim()) {
+      try {
+        var parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      } catch (_e) {}
+    }
+    return {};
+  }
+
+  function _scLatestDateAudit(field, componentId) {
+    var rows = (window._scDateAudit && window._scDateAudit.rows) || [];
+    for (var i = 0; i < rows.length; i++) {
+      var d = _scParseAuditDetails(rows[i].details);
+      if (d.field !== field) continue;
+      if (field === 'expected_delivery') {
+        if (componentId && d.component_id === componentId) return rows[i];
+        continue;
+      }
+      return rows[i];
+    }
+    return null;
+  }
+
+  var _SC_DATE_BY_CSS = 'font-size:9px;font-weight:800;letter-spacing:0.06em;color:var(--gold);background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.35);border-radius:3px;padding:2px 6px;line-height:1.2;cursor:help;flex-shrink:0;';
+
+  function _scDateByTitle(entry) {
+    if (!entry) return '';
+    var d = _scParseAuditDetails(entry.details);
+    var name = entry.performer_name || 'Unknown';
+    var when = '';
+    if (entry.created_at) {
+      try {
+        when = new Date(entry.created_at).toLocaleString('en-IE', {
+          day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+        });
+      } catch (_e) { when = String(entry.created_at); }
+    }
+    var prev = d.from ? _fmtIsoDateShort(d.from) : '—';
+    var parts = [name];
+    if (when) parts.push(when);
+    if (d.from) parts.push('was ' + prev);
+    return parts.join(' · ');
+  }
+
+  function _scFillDateByEl(id, entry) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (!entry) {
+      el.textContent = '';
+      el.removeAttribute('title');
+      el.style.display = 'none';
+      return;
+    }
+    el.textContent = _scDateInitials(entry.performer_name);
+    el.title = _scDateByTitle(entry);
+    el.style.cssText = _SC_DATE_BY_CSS;
+  }
+
+  function _scRenderDateHistory() {
+    var el = document.getElementById('sc-date-history');
+    if (!el) return;
+    var rows = (window._scDateAudit && window._scDateAudit.rows) || [];
+    if (!rows.length) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+      return;
+    }
+    var esc = window.escapeHtml || function(s) { return String(s == null ? '' : s); };
+    var items = rows.map(function(row) {
+      var d = _scParseAuditDetails(row.details);
+      var init = _scDateInitials(row.performer_name);
+      var fieldLbl = d.field === 'liquid_ready_date' ? 'Liquid Ready'
+        : d.field === 'job_ready_date' ? 'Job Ready'
+        : (d.item_name || 'Exp. Delivery');
+      var opLbl = d.op === 'reset' ? 'reset' : 'set';
+      var fromLbl = d.from ? _fmtIsoDateShort(d.from) : '—';
+      var toLbl = d.to ? _fmtIsoDateShort(d.to) : '—';
+      var when = '';
+      if (row.created_at) {
+        try {
+          when = new Date(row.created_at).toLocaleString('en-IE', {
+            day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+          });
+        } catch (_e2) { when = ''; }
+      }
+      return '<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);align-items:baseline;font-size:12px;color:var(--text);">'
+        + '<span style="font-size:9px;font-weight:800;letter-spacing:0.06em;color:var(--gold);min-width:22px;">' + esc(init) + '</span>'
+        + '<span>' + esc(opLbl) + ' <strong style="color:var(--white);">' + esc(fieldLbl) + '</strong> '
+        + esc(fromLbl) + ' → ' + esc(toLbl)
+        + (when ? ' <span style="color:var(--muted);">· ' + esc(when) + '</span>' : '')
+        + '</span></div>';
+    }).join('');
+    el.style.display = '';
+    el.innerHTML = '<div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Date history</div>' + items;
+  }
+
+  window._refreshScDateAuditUI = function(jobId) {
+    if (window._scDateAudit && jobId && window._scDateAudit.jobId !== jobId) return;
+    _scFillDateByEl('sc-job-ready-by', _scLatestDateAudit('job_ready_date'));
+    _scFillDateByEl('sc-liquid-ready-by', _scLatestDateAudit('liquid_ready_date'));
+    ((window._currentComps) || []).forEach(function(c) {
+      if (!c || !c.id) return;
+      _scFillDateByEl('sc-eta-by-' + c.id, _scLatestDateAudit('expected_delivery', c.id));
+    });
+    _scRenderDateHistory();
+  };
+
+  // Non-blocking. Date saves must succeed even if the audit insert fails.
+  window._writeSupplyChainDateAudit = async function(opts) {
+    opts = opts || {};
+    try {
+      var jobId = opts.jobId;
+      if (!jobId || !opts.field) return null;
+      var from = _scNormDate(opts.from);
+      var to = _scNormDate(opts.to);
+      var op = opts.op || 'set';
+      if (op === 'set' && from === to) return null;
+      var u = window.CURRENT_USER || {};
+      var job = (_jobs || []).find(function(x) { return x.id === jobId; }) || {};
+      var details = { field: opts.field, from: from, to: to, op: op };
+      if (opts.componentId) details.component_id = opts.componentId;
+      if (opts.itemName) details.item_name = opts.itemName;
+      var payload = {
+        action: 'supply_chain_date',
+        table_name: opts.tableName || (opts.componentId ? 'job_components' : 'jobs'),
+        record_id: jobId,
+        performed_by: u.id || u.app_user_id || null,
+        performer_name: u.display_name || u.email || 'Unknown',
+        performer_role: u.role || null,
+        client_id: job.client_id || null,
+        details: details
+      };
+      var inserted = await supaMut('POST', 'audit_log', '', payload);
+      var row = Array.isArray(inserted) ? inserted[0] : inserted;
+      if (!row) {
+        row = {
+          performer_name: payload.performer_name,
+          performer_role: payload.performer_role,
+          created_at: new Date().toISOString(),
+          details: details
+        };
+      }
+      if (window._scDateAudit && window._scDateAudit.jobId === jobId) {
+        window._scDateAudit.rows = window._scDateAudit.rows || [];
+        window._scDateAudit.rows.unshift(row);
+      }
+      if (typeof window._refreshScDateAuditUI === 'function') {
+        window._refreshScDateAuditUI(jobId);
+      }
+      return row;
+    } catch (e) {
+      window.logError && window.logError('supply chain date audit', e);
+      return null;
+    }
+  };
+
   window.setJobReadyManual = async function(jobId, dateStr) {
     if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) {
       window.toast && window.toast('You do not have permission to edit supply chain.', 'error');
@@ -44430,6 +44638,7 @@ window.saveAdjModal = async function() {
       } catch (_e) { /* non-fatal */ }
     }
     if (liq && (!val || liq > val)) val = liq;
+    var prevReady = cached && cached.job_ready_date ? String(cached.job_ready_date).slice(0, 10) : null;
     var patch = { job_ready_date: val, job_ready_manual: true };
     if (!liqManual) patch.liquid_ready_date = val;
     await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(jobId), patch);
@@ -44438,6 +44647,10 @@ window.saveAdjModal = async function() {
       if (!liqManual) cached.liquid_ready_date = val;
       cached.job_ready_manual = true;
     }
+    await window._writeSupplyChainDateAudit({
+      jobId: jobId, tableName: 'jobs', field: 'job_ready_date',
+      from: prevReady, to: val, op: 'set'
+    });
     if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
     if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
     if (typeof window.syncScheduleSlotsFromReady === 'function') {
@@ -44464,6 +44677,7 @@ window.saveAdjModal = async function() {
         }
       } catch (_e) { /* non-fatal */ }
     }
+    var prevLiq = cached && cached.liquid_ready_date ? String(cached.liquid_ready_date).slice(0, 10) : null;
     var patch = { liquid_ready_date: val, liquid_ready_manual: true };
     if (curReady && val > curReady) {
       patch.job_ready_date = val;
@@ -44478,6 +44692,16 @@ window.saveAdjModal = async function() {
         cached.job_ready_manual = true;
       }
     }
+    await window._writeSupplyChainDateAudit({
+      jobId: jobId, tableName: 'jobs', field: 'liquid_ready_date',
+      from: prevLiq, to: val, op: 'set'
+    });
+    if (patch.job_ready_manual) {
+      await window._writeSupplyChainDateAudit({
+        jobId: jobId, tableName: 'jobs', field: 'job_ready_date',
+        from: curReady, to: val, op: 'set'
+      });
+    }
     if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
     if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
     if (typeof window.syncScheduleSlotsFromReady === 'function') {
@@ -44490,7 +44714,21 @@ window.saveAdjModal = async function() {
       window.toast && window.toast('You do not have permission to edit supply chain.', 'error');
       return;
     }
+    var cachedLiq = (_jobs || []).find(function(x) { return x.id === jobId; });
+    var prevLiqReset = cachedLiq && cachedLiq.liquid_ready_date ? String(cachedLiq.liquid_ready_date).slice(0, 10) : null;
+    var prevReadyReset = cachedLiq && cachedLiq.job_ready_date ? String(cachedLiq.job_ready_date).slice(0, 10) : null;
     await window.recomputeJobReady(jobId, { clearLiquidManual: true, clearManual: true, forceRecompute: true });
+    cachedLiq = (_jobs || []).find(function(x) { return x.id === jobId; });
+    var nextLiq = cachedLiq && cachedLiq.liquid_ready_date ? String(cachedLiq.liquid_ready_date).slice(0, 10) : null;
+    var nextReady = cachedLiq && cachedLiq.job_ready_date ? String(cachedLiq.job_ready_date).slice(0, 10) : null;
+    await window._writeSupplyChainDateAudit({
+      jobId: jobId, tableName: 'jobs', field: 'liquid_ready_date',
+      from: prevLiqReset, to: nextLiq, op: 'reset'
+    });
+    await window._writeSupplyChainDateAudit({
+      jobId: jobId, tableName: 'jobs', field: 'job_ready_date',
+      from: prevReadyReset, to: nextReady, op: 'reset'
+    });
     if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
     window.toast && window.toast('Liquid Ready reset to Job Ready.', 'success');
   };
@@ -44500,7 +44738,15 @@ window.saveAdjModal = async function() {
       window.toast && window.toast('You do not have permission to edit supply chain.', 'error');
       return;
     }
+    var cachedReady = (_jobs || []).find(function(x) { return x.id === jobId; });
+    var prevReadyOnly = cachedReady && cachedReady.job_ready_date ? String(cachedReady.job_ready_date).slice(0, 10) : null;
     await window.recomputeJobReady(jobId, { clearManual: true, forceRecompute: true });
+    cachedReady = (_jobs || []).find(function(x) { return x.id === jobId; });
+    var nextReadyOnly = cachedReady && cachedReady.job_ready_date ? String(cachedReady.job_ready_date).slice(0, 10) : null;
+    await window._writeSupplyChainDateAudit({
+      jobId: jobId, tableName: 'jobs', field: 'job_ready_date',
+      from: prevReadyOnly, to: nextReadyOnly, op: 'reset'
+    });
     if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
     window.toast && window.toast('Job Ready reset to calculated date.', 'success');
   };
