@@ -14172,19 +14172,49 @@ window.bmPopulateSpiritTypes = async function(currentValue) {
   }
 };
 
+var _BOM_LOCKED_ALERT = 'This BOM is locked and cannot be edited. Use Request Edit to ask Quality & Compliance to return it to draft.';
+
+async function _bomLiveStatus(bomId) {
+  var rows = await window.db.select('boms', '?id=eq.' + encodeURIComponent(bomId) + '&select=bom_status&limit=1');
+  var live = rows && rows[0] && rows[0].bom_status;
+  if (live) {
+    var cached = (typeof BOMS !== 'undefined' && BOMS) ? BOMS.find(function(b){ return b.id === bomId; }) : null;
+    if (cached) cached.status = live;
+    if (typeof window._refreshBomStatusMaps === 'function') window._refreshBomStatusMaps(bomId, live);
+  }
+  return live || null;
+}
+
+async function _bomAssertEditable(bomId) {
+  var live;
+  try {
+    live = await _bomLiveStatus(bomId);
+  } catch (e) {
+    await window.lpAlert('Could not confirm BOM status. Refresh and try again.', { title: 'BOM locked', variant: 'warn' });
+    return false;
+  }
+  if (!live || live === 'approved' || live === 'pending') {
+    await window.lpAlert(_BOM_LOCKED_ALERT, { title: 'BOM locked', variant: 'warn' });
+    return false;
+  }
+  return true;
+}
+
+async function _bomPatchDraftOnly(bomId, payload) {
+  var updated = await window.db.update('boms', '?id=eq.' + encodeURIComponent(bomId) + '&bom_status=eq.draft', payload);
+  if (!Array.isArray(updated) || !updated.length) {
+    await window.lpAlert(_BOM_LOCKED_ALERT, { title: 'BOM locked', variant: 'warn' });
+    return false;
+  }
+  return true;
+}
+
 async function saveBomDraft() {
   var product  = gv('bm-product');
   var clientId = gv('bm-client');
   var editId   = gv('bm-edit-id');
 
-  // Lock check
-  if (editId) {
-    var _draftCheck = BOMS.find(function(b){ return b.id === editId; });
-    if (_draftCheck && (_draftCheck.status === 'approved' || _draftCheck.status === 'pending')) {
-      await window.lpAlert('This BOM is locked and cannot be edited. Use Request Edit to ask Quality & Compliance to return it to draft.', { title: 'BOM locked', variant: 'warn' });
-      return;
-    }
-  }
+  if (editId && !(await _bomAssertEditable(editId))) return;
   if (!clientId) { await window.lpAlert('Please select a client before saving a draft.', { variant: 'warn' }); return; }
   if (!product)  { await window.lpAlert('Please enter a Product Full Name before saving a draft.', { variant: 'warn' }); return; }
 
@@ -14212,7 +14242,6 @@ async function saveBomDraft() {
   };
 
   var dbPayload = {
-    bom_status:          'draft',
     client_id:           clientId,
     product_name:        product,
     volume_cl:           parseFloat(volume) || null,
@@ -14307,7 +14336,7 @@ async function saveBomDraft() {
   try {
     if (editId) {
       var idx = BOMS.findIndex(function(b){ return b.id === editId; });
-      await window.db.update('boms', '?id=eq.' + editId, dbPayload);
+      if (!(await _bomPatchDraftOnly(editId, dbPayload))) return;
       if (idx >= 0) Object.assign(BOMS[idx], localDraftBom(editId));
       window.BOMS = BOMS;
       await _syncBomNameToLinkedJobs(editId, product);
@@ -14325,6 +14354,7 @@ async function saveBomDraft() {
         window.toast && window.toast('Draft saved: ' + product, 'success');
       }
     } else {
+      dbPayload.bom_status = 'draft';
       dbPayload.id = 'BOM-' + clientId.replace('CLI-','') + '-' + Date.now().toString(36).toUpperCase();
       var saved = await window.db.insert('boms', dbPayload);
       var newId = (Array.isArray(saved) && saved[0] && saved[0].id) ? saved[0].id : dbPayload.id;
@@ -14356,14 +14386,7 @@ async function saveBom() {
   var editId   = gv('bm-edit-id');
   var volume   = gv('bm-volume');
   var abv      = gv('bm-abv');
-  // Prevent saving a locked BOM
-  if (editId) {
-    var _existingBom = BOMS.find(function(b){ return b.id === editId; });
-    if (_existingBom && (_existingBom.status === 'approved' || _existingBom.status === 'pending')) {
-      await window.lpAlert('This BOM is locked and cannot be edited. Use Request Edit to ask Quality & Compliance to return it to draft.', { title: 'BOM locked', variant: 'warn' });
-      return;
-    }
-  }
+  if (editId && !(await _bomAssertEditable(editId))) return;
   if (!clientId){ await window.lpAlert('Please select a client before saving a BOM.', { variant: 'warn' }); return; }
   if (!product) { await window.lpAlert('Please enter a Product Full Name.', { variant: 'warn' }); return; }
   if (!volume)  { await window.lpAlert('Please enter the Volume (cl).', { variant: 'warn' }); return; }
@@ -14393,7 +14416,6 @@ async function saveBom() {
   };
 
   var dbPayload = {
-    bom_status:          'draft',
     client_id: clientId, product_name: product,
     volume_cl: parseFloat(volume)||null, abv: parseFloat(abv)||null,
     liquid_sku_id:       null,  // replaced by liquid_spec text field
@@ -14491,13 +14513,14 @@ async function saveBom() {
     var _savedBomId = editId;
     if (editId) {
       var idx = BOMS.findIndex(function(b){ return b.id===editId; });
-      await window.db.update('boms', '?id=eq.' + editId, dbPayload);
+      if (!(await _bomPatchDraftOnly(editId, dbPayload))) return;
       if (idx>=0) Object.assign(BOMS[idx], localBom(editId));
       window.BOMS = BOMS;
       await _syncBomNameToLinkedJobs(editId, product);
       try { await _propagateBomToActiveJobs(editId, { soft: true }); }
       catch (syncErr) { window.logError && window.logError('saveBom soft-sync', syncErr); }
     } else {
+      dbPayload.bom_status = 'draft';
       dbPayload.id = 'BOM-'+clientId.replace('CLI-','')+'-'+Date.now().toString(36).toUpperCase();
       var saved = await window.db.insert('boms', dbPayload);
       _savedBomId = Array.isArray(saved) && saved[0] && saved[0].id ? saved[0].id : dbPayload.id;
