@@ -25186,6 +25186,7 @@ window.loadBoms = async function initBoms() {
           var row = Array.isArray(created) ? created[0] : created;
           if (row && row.id) await writeHist(row.id, 'created', payload);
           if (window.toast) window.toast('Report ' + payload.report_no + ' saved.', 'success');
+          notifyQualityGlassBreakage(Object.assign({}, payload, row || {}));
         }
         await loadGlass();
       } catch (e) {
@@ -25425,6 +25426,59 @@ window.loadBoms = async function initBoms() {
       setVal('qms-cal-abv', row && row.ref_abv != null ? row.ref_abv : '');
       setVal('qms-cal-result', row && row.result ? row.result : '');
       setVal('qms-cal-liquid', row && row.standard_liquid ? row.standard_liquid : 'Distilled Water');
+    }
+    async function notifyQualityGlassBreakage(row) {
+      try {
+        if (!row || (row.quality_sign_name && row.quality_sign_date)) return;
+        if (!window.sendEmail) {
+          console.warn('No sendEmail; skipping glass-breakage Quality notification.');
+          if (window.toast) window.toast('Report saved. Quality & Compliance email was not sent.', 'error');
+          return;
+        }
+        var qcUsers = await window.db.select('app_users', '?status=eq.active&role=eq.quality_compliance&select=email,display_name');
+        var recipients = (qcUsers || []).map(function(u){ return u.email; }).filter(Boolean);
+        if (!recipients.length) {
+          console.warn('No Quality & Compliance users with email found; skipping glass-breakage notification.');
+          if (window.toast) window.toast('Report saved. No Quality & Compliance email on file.', 'error');
+          return;
+        }
+        var reportNo = row.report_no || '';
+        var rowFn = function(k, v) {
+          return '<tr><td style="padding:6px 14px 6px 0;color:#7a93a8;font-size:12px;white-space:nowrap;vertical-align:top;">'+esc(k)+'</td><td style="padding:6px 0;color:#0d1b2a;font-size:13px;font-weight:600;vertical-align:top;">'+(v?esc(v):'—')+'</td></tr>';
+        };
+        var html = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:28px 24px;background:#f9f9f9;">'
+          + '<div style="background:#0d1b2a;padding:22px;border-radius:8px;text-align:center;margin-bottom:20px;">'
+          +   '<h1 style="color:#c9a84c;font-size:18px;margin:0;">Lighthouse Drinks</h1>'
+          +   '<p style="color:#7a93a8;font-size:11px;margin:4px 0 0;letter-spacing:0.12em;text-transform:uppercase;">Pulse · Glass Breakage Alert</p>'
+          + '</div>'
+          + '<div style="background:#fff;border-left:4px solid #c9a84c;padding:18px 20px;border-radius:4px;margin-bottom:16px;">'
+          +   '<div style="font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:#c9a84c;font-weight:700;margin-bottom:6px;">Review required</div>'
+          +   '<div style="font-size:16px;color:#0d1b2a;font-weight:700;">A glass breakage report needs Quality review and sign-off.</div>'
+          +   '<div style="font-size:12px;color:#555;margin-top:4px;">Please open the report in Pulse, review the incident, and complete the Quality Manager sign-off.</div>'
+          + '</div>'
+          + '<table style="width:100%;border-collapse:collapse;background:#fff;padding:12px;border-radius:4px;">'
+          +   rowFn('Report No', reportNo)
+          +   rowFn('Date', row.breakage_date)
+          +   rowFn('Time', row.breakage_time)
+          +   rowFn('Person Reporting', row.person_reporting)
+          +   rowFn('Products Affected', row.products_affected)
+          +   rowFn('Lot Number', row.lot_number)
+          +   rowFn('Shift', row.shift)
+          +   rowFn('Logged By', row.created_by_name)
+          + '</table>'
+          + '<p style="color:#555;font-size:12px;line-height:1.6;margin-top:18px;">Open <strong>Pulse</strong> → QMS → Glass Breakage and open report <strong>'+esc(reportNo || 'this report')+'</strong> to review and sign off.</p>'
+          + '<p style="color:#888;font-size:11px;margin-top:18px;">This is an automated notification from Pulse by Lighthouse Drinks.</p>'
+          + '</div>';
+        await window.sendEmail({
+          to: recipients,
+          subject: 'Glass Breakage Report ' + reportNo + ' — Quality review and sign-off required',
+          html: html
+        });
+        if (window.toast) window.toast('Quality & Compliance notified to review and sign off.', 'success');
+      } catch (e) {
+        console.warn('Glass-breakage Quality email failed:', e);
+        if (window.toast) window.toast('Report saved. Quality & Compliance email could not be sent.', 'error');
+      }
     }
     async function notifyWaterTestFail(row) {
       try {
