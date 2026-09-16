@@ -43275,6 +43275,7 @@ window.saveAdjModal = async function() {
         + '<th style="text-align:center;padding:8px 12px;white-space:nowrap;">On-Site \u2714</th>'
         + '<th style="text-align:center;padding:8px 12px;white-space:nowrap;">Order</th>'
         + '<th style="padding:8px 12px;min-width:140px;">Exp. Delivery</th>'
+        + '<th style="padding:8px 12px;min-width:140px;">Notes</th>'
         + '<th style="padding:8px 12px;min-width:140px;">Supplier</th>'
         + '<th style="text-align:center;padding:8px 12px;white-space:nowrap;" title="Exclude item — no stock deduction on completion, not printed on picking list">Exclude</th>'
         + '</tr></thead><tbody></tbody>';
@@ -43403,8 +43404,9 @@ window.saveAdjModal = async function() {
           + '<td style="padding:7px 12px;text-align:center;"></td>'   // col 4: on-site ✔
           + '<td style="padding:7px 12px;text-align:center;"></td>'   // col 5: order
           + '<td style="padding:4px 12px;"></td>'                     // col 6: exp. delivery
-          + '<td style="padding:4px 12px;"></td>'                     // col 7: supplier
-          + '<td style="padding:7px 12px;text-align:center;"></td>';  // col 8: exclude
+          + '<td style="padding:4px 12px;"></td>'                     // col 7: notes
+          + '<td style="padding:4px 12px;"></td>'                     // col 8: supplier
+          + '<td style="padding:7px 12px;text-align:center;"></td>';  // col 9: exclude
 
         // Make the SKU (col 0) and Item (col 1) cells open this SKU's Dry Goods
         // detail panel on top of the job. Only rows backed by a real SKU are
@@ -43456,12 +43458,45 @@ window.saveAdjModal = async function() {
         cbOrder.onchange = function(){ if (!this.disabled) window.updateComponent(cid,'is_ordered',this.checked); };
         tr.cells[5].appendChild(cbOrder);
 
-        // col 6: Delivery date
+        // col 6: Delivery date — a real change requires a note (prompted below).
         var dtIn = document.createElement('input');
         dtIn.type = 'date'; dtIn.value = c.expected_delivery||'';
         dtIn.style.cssText = inpStyle;
+        dtIn._savedEta = _scNormDate(c.expected_delivery);
         if (isExcluded || sufficient) { dtIn.disabled = true; dtIn.style.opacity = '0.3'; dtIn.style.cursor = 'not-allowed'; }
-        dtIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid,'expected_delivery',this.value); };
+        dtIn.onblur = async function() {
+          if (this.disabled || dtIn._scEtaPrompting) return;
+          var next = _scNormDate(this.value);
+          var prev = dtIn._savedEta == null ? null : dtIn._savedEta;
+          if (next === prev) return;
+          dtIn._scEtaPrompting = true;
+          try {
+            var reason = null;
+            while (true) {
+              reason = await window.lpPrompt(
+                'Why did the expected delivery date change?',
+                '',
+                { title: 'Delivery date change', placeholder: 'e.g. supplier delay, earlier slot confirmed' }
+              );
+              if (reason == null) {
+                dtIn.value = prev || '';
+                return;
+              }
+              reason = String(reason).trim();
+              if (reason) break;
+              window.toast && window.toast('A reason is required when changing the expected delivery date.', 'error');
+            }
+            var ok = await window.updateComponent(cid, 'expected_delivery', next, { note: reason });
+            if (!ok) {
+              dtIn.value = prev || '';
+              return;
+            }
+            dtIn._savedEta = next;
+            notesIn.value = reason;
+          } finally {
+            dtIn._scEtaPrompting = false;
+          }
+        };
         var dtWrap = document.createElement('div');
         dtWrap.style.cssText = 'display:flex;align-items:center;gap:6px;';
         dtWrap.appendChild(dtIn);
@@ -43471,7 +43506,17 @@ window.saveAdjModal = async function() {
         dtWrap.appendChild(etaBy);
         tr.cells[6].appendChild(dtWrap);
 
-        // col 7: Supplier
+        // col 7: Notes
+        var notesIn = document.createElement('input');
+        notesIn.type = 'text';
+        notesIn.value = c.notes || '';
+        notesIn.placeholder = 'Reason / note';
+        notesIn.style.cssText = inpStyle;
+        if (isExcluded) { notesIn.disabled = true; notesIn.style.opacity = '0.3'; notesIn.style.cursor = 'not-allowed'; }
+        notesIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid, 'notes', this.value || null); };
+        tr.cells[7].appendChild(notesIn);
+
+        // col 8: Supplier
         var supplierIn = document.createElement('input');
         supplierIn.type = 'text';
         supplierIn.value = c.supplier || '';
@@ -43479,9 +43524,9 @@ window.saveAdjModal = async function() {
         supplierIn.style.cssText = inpStyle;
         if (isExcluded) { supplierIn.disabled = true; supplierIn.style.opacity = '0.3'; supplierIn.style.cursor = 'not-allowed'; }
         supplierIn.onblur = function(){ if (!this.disabled) window.updateComponent(cid, 'supplier', this.value || null); };
-        tr.cells[7].appendChild(supplierIn);
+        tr.cells[8].appendChild(supplierIn);
 
-        // col 8: Exclude toggle button — awaits the PATCH then updates the row in-place (no full tab reload)
+        // col 9: Exclude toggle button — awaits the PATCH then updates the row in-place (no full tab reload)
         var cbNA = document.createElement('button');
         cbNA.textContent = isExcluded ? '✕ Excluded' : 'Exclude';
         cbNA.dataset.excl = isExcluded ? '1' : '0';
@@ -43489,7 +43534,7 @@ window.saveAdjModal = async function() {
         cbNA.style.cssText = isExcluded
           ? 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--amber);background:rgba(201,168,76,0.15);color:var(--amber);white-space:nowrap;'
           : 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--navy-border);background:transparent;color:var(--muted);white-space:nowrap;';
-        cbNA.onclick = (function(rowCid, rowTr, rowCbOrder, rowDtIn, rowSupplierIn, rowSufficient, rowOnSiteStr, rowOnSiteColor, btn) {
+        cbNA.onclick = (function(rowCid, rowTr, rowCbOrder, rowDtIn, rowNotesIn, rowSupplierIn, rowSufficient, rowOnSiteStr, rowOnSiteColor, btn) {
           return async function() {
             var excl = btn.dataset.excl !== '1';
             var cb = btn;
@@ -43541,7 +43586,11 @@ window.saveAdjModal = async function() {
             rowDtIn.disabled = excl || rowSufficient;
             rowDtIn.style.opacity = (excl || rowSufficient) ? '0.3' : '';
             rowDtIn.style.cursor  = (excl || rowSufficient) ? 'not-allowed' : '';
-            // Supplier (col 7)
+            // Notes (col 7)
+            rowNotesIn.disabled = excl;
+            rowNotesIn.style.opacity = excl ? '0.3' : '';
+            rowNotesIn.style.cursor  = excl ? 'not-allowed' : '';
+            // Supplier (col 8)
             rowSupplierIn.disabled = excl;
             rowSupplierIn.style.opacity = excl ? '0.3' : '';
             rowSupplierIn.style.cursor  = excl ? 'not-allowed' : '';
@@ -43554,21 +43603,21 @@ window.saveAdjModal = async function() {
             cb.disabled = false;
             cb.style.opacity = '';
           };
-        })(cid, tr, cbOrder, dtIn, supplierIn, sufficient, onSiteStr, onSiteColor, cbNA);
+        })(cid, tr, cbOrder, dtIn, notesIn, supplierIn, sufficient, onSiteStr, onSiteColor, cbNA);
         if (isTemporary) {
-          tr.cells[8].innerHTML = '';
+          tr.cells[9].innerHTML = '';
           if (canEditSc && !isSignedOff && !isCompleteJob) {
             var rmBtn = document.createElement('button');
             rmBtn.textContent = 'Remove';
             rmBtn.title = 'Remove this temporary SKU from the job (does not change the saved BOM)';
             rmBtn.style.cssText = 'cursor:pointer;font-size:10px;font-family:Lato,sans-serif;font-weight:700;padding:3px 9px;border-radius:3px;border:1px solid var(--red);background:transparent;color:var(--red);white-space:nowrap;';
             rmBtn.onclick = function() { window.removeTemporaryComponent(jobId, cid); };
-            tr.cells[8].appendChild(rmBtn);
+            tr.cells[9].appendChild(rmBtn);
           } else {
-            tr.cells[8].innerHTML = '<span style="font-size:10px;color:var(--amber);font-weight:700;">Temp</span>';
+            tr.cells[9].innerHTML = '<span style="font-size:10px;color:var(--amber);font-weight:700;">Temp</span>';
           }
         } else {
-          tr.cells[8].appendChild(cbNA);
+          tr.cells[9].appendChild(cbNA);
         }
 
         if (isTemporary && canEditSc && !isSignedOff && !isCompleteJob && tr.cells[2]) {
@@ -43609,6 +43658,7 @@ window.saveAdjModal = async function() {
         +   '<div style="font-size:9px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:3px;">Liquid Prep <span style="font-weight:500;letter-spacing:0;text-transform:none;">(5 working days before)</span></div>'
         +   '<div id="sc-liquid-prep-display" style="font-size:12px;font-weight:700;color:var(--white);">' + (prepIso ? _fmtIsoDateShort(prepIso) : '—') + '</div>'
         + '</td>'
+        + '<td style="padding:10px 12px;text-align:center;color:var(--muted);font-size:11px;">—</td>'
         + '<td style="padding:10px 12px;">'
         +   '<div style="font-size:9px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:3px;">Liquid Ready</div>'
         +   '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
@@ -44066,12 +44116,14 @@ window.saveAdjModal = async function() {
     return changed;
   };
 
-  window.updateComponent = async function(id, field, value) {
-    if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) { window.toast && window.toast('You do not have permission to edit supply chain components.', 'error'); return; }
+  window.updateComponent = async function(id, field, value, opts) {
+    if (!(window.canDo && window.canDo('jobs_edit_supply_chain'))) { window.toast && window.toast('You do not have permission to edit supply chain components.', 'error'); return false; }
+    opts = opts || {};
     try {
       var prevEta = null;
       var etaJobId = null;
       var etaName = null;
+      var note = opts.note != null ? String(opts.note).trim() : '';
       if (field === 'expected_delivery' && window._currentComps) {
         var etaRow = window._currentComps.find(function(x){ return x.id === id; });
         if (etaRow) {
@@ -44080,16 +44132,30 @@ window.saveAdjModal = async function() {
           etaName = etaRow._displayName || etaRow.item_name || null;
         }
       }
-      var p={}; p[field]=value; await supaMut('PATCH','job_components','?id=eq.'+id,p);
+      if (field === 'expected_delivery') {
+        var nextEta = _scNormDate(value);
+        var prevNorm = _scNormDate(prevEta);
+        if (nextEta !== prevNorm && !note) {
+          window.toast && window.toast('A reason is required when changing the expected delivery date.', 'error');
+          return false;
+        }
+      }
+      var p={}; p[field]=value;
+      if (field === 'expected_delivery' && note) p.notes = note;
+      await supaMut('PATCH','job_components','?id=eq.'+id,p);
       // Recompute Job Ready when ETA / exclude changes (and after any SC write that can affect readiness).
-      if (field === 'expected_delivery' || field === 'is_excluded') {
+      if (field === 'expected_delivery' || field === 'is_excluded' || field === 'notes') {
         var jobId = etaJobId;
         if (window._currentComps) {
           var row = window._currentComps.find(function(x){ return x.id === id; });
           if (row) {
-            jobId = row.job_id;
-            if (field === 'expected_delivery') row.expected_delivery = value || null;
+            jobId = row.job_id || jobId;
+            if (field === 'expected_delivery') {
+              row.expected_delivery = value || null;
+              if (note) row.notes = note;
+            }
             if (field === 'is_excluded') row.is_excluded = !!value;
+            if (field === 'notes') row.notes = value || null;
           }
         }
         if (!jobId && typeof _currentJobId !== 'undefined') jobId = _currentJobId;
@@ -44097,16 +44163,17 @@ window.saveAdjModal = async function() {
           await window._writeSupplyChainDateAudit({
             jobId: jobId, tableName: 'job_components', field: 'expected_delivery',
             from: prevEta, to: value || null, op: 'set',
-            componentId: id, itemName: etaName
+            componentId: id, itemName: etaName, note: note || null
           });
         }
-        if (jobId && typeof window.recomputeJobReady === 'function') {
+        if (field !== 'notes' && jobId && typeof window.recomputeJobReady === 'function') {
           await window.recomputeJobReady(jobId);
           if (typeof window._refreshScJobReadyUI === 'function') window._refreshScJobReadyUI(jobId);
         }
       }
+      return true;
     }
-    catch(e) { console.warn('Component update failed:', e); window.toast && window.toast('Failed to save — ' + (e.message || 'unknown error'), 'error'); }
+    catch(e) { console.warn('Component update failed:', e); window.toast && window.toast('Failed to save — ' + (e.message || 'unknown error'), 'error'); return false; }
   };
 
   window.removeTemporaryComponent = async function(jobId, componentId) {
@@ -44648,6 +44715,7 @@ window.saveAdjModal = async function() {
         + '<span>' + esc(opLbl) + ' <strong style="color:var(--white);">' + esc(fieldLbl) + '</strong> '
         + esc(fromLbl) + ' → ' + esc(toLbl)
         + (when ? ' <span style="color:var(--muted);">· ' + esc(when) + '</span>' : '')
+        + (d.note ? '<div style="color:var(--muted);font-size:11px;margin-top:2px;">' + esc(d.note) + '</div>' : '')
         + '</span></div>';
     }).join('');
     el.style.display = '';
@@ -44680,6 +44748,7 @@ window.saveAdjModal = async function() {
       var details = { field: opts.field, from: from, to: to, op: op };
       if (opts.componentId) details.component_id = opts.componentId;
       if (opts.itemName) details.item_name = opts.itemName;
+      if (opts.note) details.note = String(opts.note).trim();
       var payload = {
         action: 'supply_chain_date',
         table_name: opts.tableName || (opts.componentId ? 'job_components' : 'jobs'),
