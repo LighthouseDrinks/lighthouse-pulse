@@ -65097,10 +65097,243 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 </script>
 
 <script>
+/* ── Shared review signatures + email ── */
+(function(){
+  window.REVIEW_ATTESTATION = 'I have reviewed these notes, and I can confirm that these notes are an accurate reflection of today\'s meeting and that this is my signature';
+
+  function esc(s){ return window.escapeHtml ? window.escapeHtml(s) : String(s==null?'':s); }
+  function canvasIsBlank(canvas){
+    if(!canvas) return true;
+    var ctx = canvas.getContext('2d');
+    var data = ctx.getImageData(0,0,canvas.width,canvas.height).data;
+    for(var i=3;i<data.length;i+=4){ if(data[i] > 8) return false; }
+    return true;
+  }
+  function bindSignCanvas(canvas){
+    if(!canvas) return;
+    var ctx = canvas.getContext('2d');
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    var drawing = false;
+    function pos(e){
+      var r = canvas.getBoundingClientRect();
+      var src = (e.touches && e.touches[0]) || e;
+      return { x:(src.clientX-r.left)*(canvas.width/r.width), y:(src.clientY-r.top)*(canvas.height/r.height) };
+    }
+    function start(e){ e.preventDefault(); drawing = true; var p=pos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y); }
+    function move(e){ if(!drawing) return; e.preventDefault(); var p=pos(e); ctx.lineTo(p.x,p.y); ctx.stroke(); }
+    function end(){ drawing = false; }
+    canvas.addEventListener('mousedown', start);
+    canvas.addEventListener('mousemove', move);
+    canvas.addEventListener('mouseup', end);
+    canvas.addEventListener('mouseleave', end);
+    canvas.addEventListener('touchstart', start, { passive:false });
+    canvas.addEventListener('touchmove', move, { passive:false });
+    canvas.addEventListener('touchend', end);
+  }
+  function dataUrlToPngContent(dataUrl){
+    if(!dataUrl || typeof dataUrl !== 'string') return null;
+    var i = dataUrl.indexOf('base64,');
+    if(i < 0) return null;
+    return dataUrl.slice(i + 7);
+  }
+
+  window.reviewSigBlockHtml = function(opts){
+    opts = opts || {};
+    var kind = opts.kind;
+    var prefix = opts.prefix || 'pr';
+    var stored = opts.stored || {};
+    var canEdit = !!opts.canEdit;
+    var attestation = opts.attestation || window.REVIEW_ATTESTATION;
+    var ro = canEdit ? '' : 'readonly';
+    var dis = canEdit ? '' : 'disabled';
+    var signed = !!(stored.name && stored.confirmed);
+    var nameVal = stored.name || opts.defaultName || '';
+    var img = stored.image ? '<img alt="Signature" src="'+stored.image+'" style="display:block;height:80px;background:#fff;border:1px solid var(--navy-border);margin-top:8px;">' : '';
+    var canvas = canEdit
+      ? '<canvas class="'+prefix+'-sig-canvas" data-kind="'+kind+'" width="320" height="80" style="display:block;width:320px;max-width:100%;height:80px;background:#fff;border:1px solid var(--navy-border);margin-top:8px;touch-action:none;cursor:crosshair;"></canvas>'
+        +'<button type="button" class="'+prefix+'-sig-clear" data-kind="'+kind+'" style="'+(opts.clearStyle||'')+'margin-top:6px;">Clear drawing</button>'
+      : img;
+    var dateStr = stored.at ? new Date(stored.at).toLocaleDateString('en-IE',{ day:'numeric', month:'short', year:'numeric' }) : '—';
+    return '<div class="'+prefix+'-sig" data-kind="'+kind+'" style="margin-bottom:16px;padding:14px;border:1px solid var(--navy-border);border-radius:6px;">'
+      +'<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">Signed ('+esc(opts.label)+')</div>'
+      +'<div class="mfield" style="margin-bottom:8px;"><label>Name</label>'
+      +'<input type="text" id="'+prefix+'-sig-'+kind+'-name" class="hr-input" value="'+esc(nameVal)+'" '+ro+'></div>'
+      +'<label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--white);margin:8px 0;">'
+      +'<input type="checkbox" id="'+prefix+'-sig-'+kind+'-ok" '+(signed?'checked':'')+' '+dis+'> <span>'+esc(attestation)+'</span></label>'
+      +canvas
+      +'<div style="font-size:11px;color:var(--muted);margin-top:8px;">Date: <span class="'+prefix+'-sig-date" data-kind="'+kind+'">'+esc(dateStr)+'</span></div>'
+      +'</div>';
+  };
+
+  window.reviewSigWire = function(ov, opts){
+    opts = opts || {};
+    var prefix = opts.prefix || 'pr';
+    var canEdit = !!opts.canEdit;
+    var sigs = opts.initial || {};
+    var attestation = window.REVIEW_ATTESTATION;
+    var myAppId = opts.myAppId || null;
+    var collectLive = opts.collectLive;
+    var fingerprint = opts.fingerprint;
+    var sigState = {
+      employer: Object.assign({}, sigs.employer||{}),
+      employee: Object.assign({}, sigs.employee||{}),
+      attestation: attestation
+    };
+    var lastFp = (fingerprint && collectLive) ? fingerprint(collectLive()) : '';
+    var voidedOnce = false;
+
+    function inputVal(id){
+      var el = document.getElementById(id);
+      return el ? String(el.value||'').trim() : '';
+    }
+    function captureSig(kind){
+      var nameEl = document.getElementById(prefix+'-sig-'+kind+'-name');
+      var okEl = document.getElementById(prefix+'-sig-'+kind+'-ok');
+      var canvas = ov.querySelector('.'+prefix+'-sig-canvas[data-kind="'+kind+'"]');
+      var nm = nameEl ? String(nameEl.value||'').trim() : '';
+      var ok = !!(okEl && okEl.checked);
+      var image = null;
+      if(canvas && !canvasIsBlank(canvas)) image = canvas.toDataURL('image/png');
+      else if(sigState[kind] && sigState[kind].image) image = (ok ? sigState[kind].image : null);
+      var prevS = sigState[kind] || {};
+      var at = prevS.at;
+      if(ok && nm && !at) at = new Date().toISOString();
+      if(!ok) at = null;
+      var rec = { name:nm, confirmed:ok, image: image, at: at };
+      if(kind==='employer') rec.by_user_id = myAppId;
+      else rec.witnessed_by = myAppId;
+      sigState[kind] = rec;
+      var dateEl = ov.querySelector('.'+prefix+'-sig-date[data-kind="'+kind+'"]');
+      if(dateEl) dateEl.textContent = at ? new Date(at).toLocaleDateString('en-IE',{ day:'numeric', month:'short', year:'numeric' }) : '—';
+      return rec;
+    }
+    function clearSignatures(toastIt){
+      ['employer','employee'].forEach(function(kind){
+        sigState[kind] = { name: inputVal(prefix+'-sig-'+kind+'-name'), confirmed:false, image:null, at:null };
+        var okEl = document.getElementById(prefix+'-sig-'+kind+'-ok');
+        if(okEl) okEl.checked = false;
+        var canvas = ov.querySelector('.'+prefix+'-sig-canvas[data-kind="'+kind+'"]');
+        if(canvas) canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);
+        var dateEl = ov.querySelector('.'+prefix+'-sig-date[data-kind="'+kind+'"]');
+        if(dateEl) dateEl.textContent = '—';
+      });
+      if(toastIt && !voidedOnce){
+        voidedOnce = true;
+        window.toast && window.toast('The form changed. Both signatures were cleared.','error');
+      }
+    }
+    function maybeVoid(){
+      if(!canEdit || !collectLive || !fingerprint) return;
+      var live = collectLive();
+      var fp = fingerprint(live);
+      if(fp !== lastFp && (sigState.employer.confirmed || sigState.employee.confirmed)){
+        clearSignatures(true);
+      }
+      lastFp = fp;
+    }
+
+    if(canEdit){
+      ov.querySelectorAll('.'+prefix+'-sig-canvas').forEach(bindSignCanvas);
+      ov.querySelectorAll('.'+prefix+'-sig-clear').forEach(function(btn){
+        btn.onclick = function(){
+          var canvas = ov.querySelector('.'+prefix+'-sig-canvas[data-kind="'+btn.dataset.kind+'"]');
+          if(canvas) canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);
+          if(sigState[btn.dataset.kind]) sigState[btn.dataset.kind].image = null;
+        };
+      });
+      ov.addEventListener('change', maybeVoid);
+      ov.addEventListener('input', maybeVoid);
+      ['employer','employee'].forEach(function(kind){
+        var okEl = document.getElementById(prefix+'-sig-'+kind+'-ok');
+        if(okEl) okEl.addEventListener('change', function(){ captureSig(kind); });
+      });
+      ['employer','employee'].forEach(function(kind){
+        var stored = sigs[kind];
+        var canvas = ov.querySelector('.'+prefix+'-sig-canvas[data-kind="'+kind+'"]');
+        if(stored && stored.image && canvas){
+          var img = new Image();
+          img.onload = function(){ canvas.getContext('2d').drawImage(img,0,0,canvas.width,canvas.height); };
+          img.src = stored.image;
+        }
+      });
+    }
+
+    return {
+      collect: function(){
+        captureSig('employer');
+        captureSig('employee');
+        return {
+          employer: sigState.employer,
+          employee: sigState.employee,
+          attestation: attestation
+        };
+      }
+    };
+  };
+
+  window.reviewSigAttachments = function(signatures){
+    var out = [];
+    var sg = signatures || {};
+    [['employer','employer-signature.png'],['employee','employee-signature.png']].forEach(function(pair){
+      var content = dataUrlToPngContent((sg[pair[0]]||{}).image);
+      if(content) out.push({ filename: pair[1], content: content, content_type: 'image/png' });
+    });
+    return out;
+  };
+
+  window.reviewEmailReport = async function(opts){
+    opts = opts || {};
+    if(!(window.canSeeProbationTab && window.canSeeProbationTab())){
+      window.toast && window.toast('You cannot email this review.','error');
+      return false;
+    }
+    var email = String(opts.to||'').trim();
+    if(!email || email.indexOf('@')<0){
+      window.toast && window.toast('This employee has no email address on their account.','error');
+      return false;
+    }
+    if(!(window._resendKey||'').trim()){
+      window.toast && window.toast('No Resend API key. Add it in Settings → System.','error');
+      return false;
+    }
+    var name = opts.employeeName || 'the employee';
+    var label = opts.label || 'review';
+    var ok = window.lpConfirm
+      ? await window.lpConfirm('Email the finalized '+label+' to '+name+' ('+email+')?', { title:'Email review', confirmLabel:'Send email', variant:'warn' })
+      : confirm('Email the finalized '+label+' to '+name+'?');
+    if(!ok) return false;
+    if(!window.sendEmail){
+      window.toast && window.toast('Email is not available.','error');
+      return false;
+    }
+    var intro = '<p style="font-family:Georgia,serif;font-size:14px;color:#111;margin:0 0 16px;">Hi '+esc(name)+',</p>'
+      +'<p style="font-family:Georgia,serif;font-size:13px;color:#333;margin:0 0 20px;">Your '+esc(label)+' has been finalized. A copy is below'+(opts.hasDrawings?' — signature drawings are attached.':'')+'.</p>';
+    var html = '<div style="font-family:Georgia,serif;color:#111;max-width:680px;margin:0 auto;padding:24px 8px;background:#fff;">'
+      + intro
+      + (opts.htmlBody || '')
+      + '<p style="font-size:11px;color:#666;margin:24px 0 0;">Pulse · Lighthouse Drinks</p></div>';
+    try {
+      var payload = { to: [email], subject: opts.subject, html: html };
+      if(opts.attachments && opts.attachments.length) payload.attachments = opts.attachments;
+      await window.sendEmail(payload);
+      window.toast && window.toast('Review emailed to '+name+'.','success');
+      return true;
+    } catch(e){
+      window.logError && window.logError('reviewEmailReport', e);
+      window.toast && window.toast((e && e.message) || 'Could not send the review email.','error');
+      return false;
+    }
+  };
+})();
+</script>
+
+<script>
 /* ── Probation reviews (Workforce tab + Employee Details) ── */
 (function(){
   var MILESTONES = [1, 3, 6];
-  var ATTESTATION = 'I have discussed this review and confirm this is my signature.';
+  var ATTESTATION = window.REVIEW_ATTESTATION;
   var SCORE_CRITERIA = [
     { id:'attendance', n:1, title:'Attendance & Timekeeping', prompt:'Please rate the employee’s attendance and timekeeping including timeliness in arriving to/departing from work as well as returning from lunch and breaks.' },
     { id:'flexibility', n:2, title:'Flexibility & Adaptability', prompt:'Please rate the employee’s flexibility in working patterns and their adaptability to unforeseen changes in the work schedule or their daily tasks as business needs may require from time to time.' },
@@ -65300,6 +65533,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     }
     if(canEdit){
       actions += '<button type="button" class="pr-sched" data-uid="'+esc(u.id)+'" data-ms="'+ms+'" style="'+btnStyle('ghost')+'">Sched.</button>';
+      if(state==='completed') actions += '<button type="button" class="pr-email" data-uid="'+esc(u.id)+'" data-ms="'+ms+'" style="'+btnStyle('ghost')+'">Email</button>';
       if(row && row.id) actions += '<button type="button" class="pr-del" data-id="'+esc(row.id)+'" data-uid="'+esc(u.id)+'" data-ms="'+ms+'" style="'+btnStyle('danger')+'">Del</button>';
     }
     return '<div style="font-size:11px;color:'+statusColor+';margin-bottom:6px;">'+esc(status)+'</div>'
@@ -65362,6 +65596,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         +'<div style="display:flex;gap:6px;">'
         +'<button type="button" class="pr-open" data-uid="'+esc(r.user_id)+'" data-ms="'+esc(r.milestone)+'" style="'+btnStyle()+'">View review</button>'
         +'<button type="button" class="pr-pdf" data-uid="'+esc(r.user_id)+'" data-ms="'+esc(r.milestone)+'" style="'+btnStyle('ghost')+'">Save PDF</button>'
+        +(opts.readonly?'':'<button type="button" class="pr-email" data-uid="'+esc(r.user_id)+'" data-ms="'+esc(r.milestone)+'" style="'+btnStyle('ghost')+'">Email report</button>')
         +(opts.readonly?'':'<button type="button" class="pr-del" data-id="'+esc(r.id)+'" data-uid="'+esc(r.user_id)+'" data-ms="'+esc(r.milestone)+'" style="'+btnStyle('danger')+'">Delete</button>')
         +'</div></div>';
     });
@@ -65382,6 +65617,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     });
     el.querySelectorAll('.pr-pdf').forEach(function(btn){
       btn.addEventListener('click', function(){ window.probationPrintReview(btn.dataset.uid, parseInt(btn.dataset.ms,10)); });
+    });
+    el.querySelectorAll('.pr-email').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        btn.disabled = true;
+        try { await window.probationEmailReview(btn.dataset.uid, parseInt(btn.dataset.ms,10)); }
+        finally { btn.disabled = false; }
+      });
     });
   }
 
@@ -65499,36 +65741,6 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     });
     return html+'</div>';
   }
-  function canvasIsBlank(canvas){
-    if(!canvas) return true;
-    var ctx = canvas.getContext('2d');
-    var data = ctx.getImageData(0,0,canvas.width,canvas.height).data;
-    for(var i=3;i<data.length;i+=4){ if(data[i] > 8) return false; }
-    return true;
-  }
-  function bindSignCanvas(canvas){
-    if(!canvas) return;
-    var ctx = canvas.getContext('2d');
-    ctx.strokeStyle = '#1a1a1a';
-    ctx.lineWidth = 2;
-    ctx.lineCap = 'round';
-    var drawing = false;
-    function pos(e){
-      var r = canvas.getBoundingClientRect();
-      var src = (e.touches && e.touches[0]) || e;
-      return { x:(src.clientX-r.left)*(canvas.width/r.width), y:(src.clientY-r.top)*(canvas.height/r.height) };
-    }
-    function start(e){ e.preventDefault(); drawing = true; var p=pos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y); }
-    function move(e){ if(!drawing) return; e.preventDefault(); var p=pos(e); ctx.lineTo(p.x,p.y); ctx.stroke(); }
-    function end(){ drawing = false; }
-    canvas.addEventListener('mousedown', start);
-    canvas.addEventListener('mousemove', move);
-    canvas.addEventListener('mouseup', end);
-    canvas.addEventListener('mouseleave', end);
-    canvas.addEventListener('touchstart', start, { passive:false });
-    canvas.addEventListener('touchmove', move, { passive:false });
-    canvas.addEventListener('touchend', end);
-  }
   function radioVal(name){
     var el = document.querySelector('input[name="'+name+'"]:checked');
     return el ? el.value : '';
@@ -65577,7 +65789,6 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     ov.id = 'probation-review-overlay';
     ov.style.cssText = 'position:fixed;inset:0;z-index:9000;background:rgba(5,12,20,0.88);display:flex;align-items:flex-start;justify-content:center;padding:24px 16px 40px;overflow-y:auto;';
     var ro = canEdit ? '' : 'readonly';
-    var dis = canEdit ? '' : 'disabled';
     var appraisedDefault = answers.appraised_by || (canEdit ? myDisplayName() : '');
     var criteriaHtml = SCORE_CRITERIA.map(function(c){
       return '<div class="pr-block" style="margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid rgba(36,61,87,0.45);">'
@@ -65619,24 +65830,16 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       +'<textarea id="pr-c-other_issues" class="hr-input" rows="4" style="resize:vertical;" '+ro+'>'+esc(comments.other_issues||'')+'</textarea></div>';
 
     function sigBlock(kind, label, stored){
-      stored = stored || {};
-      var signed = !!(stored.name && stored.confirmed);
-      var nameVal = stored.name || (kind==='employee' ? name : (canEdit ? myDisplayName() : ''));
-      var img = stored.image ? '<img alt="Signature" src="'+stored.image+'" style="display:block;height:80px;background:#fff;border:1px solid var(--navy-border);margin-top:8px;">' : '';
-      var canvas = canEdit
-        ? '<canvas class="pr-sig-canvas" data-kind="'+kind+'" width="320" height="80" style="display:block;width:320px;max-width:100%;height:80px;background:#fff;border:1px solid var(--navy-border);margin-top:8px;touch-action:none;cursor:crosshair;"></canvas>'
-          +'<button type="button" class="pr-sig-clear" data-kind="'+kind+'" style="'+btnStyle('ghost')+'margin-top:6px;">Clear drawing</button>'
-        : img;
-      var dateStr = stored.at ? new Date(stored.at).toLocaleDateString('en-IE',{ day:'numeric', month:'short', year:'numeric' }) : '—';
-      return '<div class="pr-sig" data-kind="'+kind+'" style="margin-bottom:16px;padding:14px;border:1px solid var(--navy-border);border-radius:6px;">'
-        +'<div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:10px;">Signed ('+esc(label)+')</div>'
-        +'<div class="mfield" style="margin-bottom:8px;"><label>Name</label>'
-        +'<input type="text" id="pr-sig-'+kind+'-name" class="hr-input" value="'+esc(nameVal)+'" '+ro+'></div>'
-        +'<label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--white);margin:8px 0;">'
-        +'<input type="checkbox" id="pr-sig-'+kind+'-ok" '+(signed?'checked':'')+' '+dis+'> <span>'+esc(ATTESTATION)+'</span></label>'
-        +canvas
-        +'<div style="font-size:11px;color:var(--muted);margin-top:8px;">Date: <span class="pr-sig-date" data-kind="'+kind+'">'+esc(dateStr)+'</span></div>'
-        +'</div>';
+      return window.reviewSigBlockHtml({
+        kind: kind,
+        label: label,
+        stored: stored,
+        prefix: 'pr',
+        canEdit: canEdit,
+        defaultName: kind==='employee' ? name : (canEdit ? myDisplayName() : ''),
+        attestation: canEdit ? ATTESTATION : (sigs.attestation || ATTESTATION),
+        clearStyle: btnStyle('ghost')
+      });
     }
 
     var actions = '';
@@ -65646,6 +65849,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         +(row.id ? '<button type="button" class="btn btn-outline pr-save-del" style="font-size:11px;padding:8px 16px;border-color:rgba(220,53,69,0.45);color:#e05a6a;">Delete</button>' : '');
     } else if(locked){
       actions = '<button type="button" class="btn btn-gold pr-save-pdf" style="font-size:11px;padding:8px 16px;">Save PDF</button>'
+        +(isAdmin ? '<button type="button" class="btn btn-outline pr-save-email" style="font-size:11px;padding:8px 16px;">Email report</button>' : '')
         +(isAdmin && row.id ? '<button type="button" class="btn btn-outline pr-save-del" style="font-size:11px;padding:8px 16px;border-color:rgba(220,53,69,0.45);color:#e05a6a;">Delete</button>' : '');
     }
 
@@ -65677,14 +65881,6 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       +'</div>';
     document.body.appendChild(ov);
 
-    var sigState = {
-      employer: Object.assign({}, sigs.employer||{}),
-      employee: Object.assign({}, sigs.employee||{}),
-      attestation: ATTESTATION
-    };
-    var lastFp = '';
-    var voidedOnce = false;
-
     function collectLive(){
       var sc = {}, cm = {}, yn = {};
       SCORE_CRITERIA.forEach(function(c){
@@ -65706,94 +65902,22 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       }
       return { location: inputVal('pr-location'), appraised_by: inputVal('pr-appraised'), next_review_date: inputVal('pr-next-date') || nextDate || '', scores:sc, comments:cm, yesno:yn };
     }
-    function captureSig(kind){
-      var nameEl = document.getElementById('pr-sig-'+kind+'-name');
-      var okEl = document.getElementById('pr-sig-'+kind+'-ok');
-      var canvas = ov.querySelector('.pr-sig-canvas[data-kind="'+kind+'"]');
-      var nm = nameEl ? String(nameEl.value||'').trim() : '';
-      var ok = !!(okEl && okEl.checked);
-      var image = null;
-      if(canvas && !canvasIsBlank(canvas)) image = canvas.toDataURL('image/png');
-      else if(sigState[kind] && sigState[kind].image && canvasIsBlank(canvas)) image = (ok ? sigState[kind].image : null);
-      if(canvas && !canvasIsBlank(canvas)) image = canvas.toDataURL('image/png');
-      var prevS = sigState[kind] || {};
-      var at = prevS.at;
-      if(ok && nm && !at) at = new Date().toISOString();
-      if(!ok) at = null;
-      var rec = { name:nm, confirmed:ok, image: image, at: at };
-      if(kind==='employer') rec.by_user_id = myAppId();
-      else rec.witnessed_by = myAppId();
-      sigState[kind] = rec;
-      var dateEl = ov.querySelector('.pr-sig-date[data-kind="'+kind+'"]');
-      if(dateEl) dateEl.textContent = at ? new Date(at).toLocaleDateString('en-IE',{ day:'numeric', month:'short', year:'numeric' }) : '—';
-      return rec;
-    }
-    function clearSignatures(toastIt){
-      ['employer','employee'].forEach(function(kind){
-        sigState[kind] = { name: inputVal('pr-sig-'+kind+'-name'), confirmed:false, image:null, at:null };
-        var okEl = document.getElementById('pr-sig-'+kind+'-ok');
-        if(okEl) okEl.checked = false;
-        var canvas = ov.querySelector('.pr-sig-canvas[data-kind="'+kind+'"]');
-        if(canvas) canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);
-        var dateEl = ov.querySelector('.pr-sig-date[data-kind="'+kind+'"]');
-        if(dateEl) dateEl.textContent = '—';
-      });
-      if(toastIt && !voidedOnce){
-        voidedOnce = true;
-        window.toast && window.toast('The form changed. Both signatures were cleared.','error');
-      }
-    }
-    function maybeVoid(){
-      if(!canEdit) return;
-      var live = collectLive();
-      var fp = contentFingerprint(live);
-      if(fp !== lastFp && (sigState.employer.confirmed || sigState.employee.confirmed)){
-        clearSignatures(true);
-      }
-      lastFp = fp;
-    }
-
-    lastFp = contentFingerprint(collectLive());
-    if(canEdit){
-      ov.querySelectorAll('.pr-sig-canvas').forEach(bindSignCanvas);
-      ov.querySelectorAll('.pr-sig-clear').forEach(function(btn){
-        btn.onclick = function(){
-          var canvas = ov.querySelector('.pr-sig-canvas[data-kind="'+btn.dataset.kind+'"]');
-          if(canvas) canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);
-          if(sigState[btn.dataset.kind]) sigState[btn.dataset.kind].image = null;
-        };
-      });
-      ov.addEventListener('change', maybeVoid);
-      ov.addEventListener('input', maybeVoid);
-      ['employer','employee'].forEach(function(kind){
-        var okEl = document.getElementById('pr-sig-'+kind+'-ok');
-        if(okEl) okEl.addEventListener('change', function(){ captureSig(kind); });
-      });
-      // Restore saved drawings
-      ['employer','employee'].forEach(function(kind){
-        var stored = sigs[kind];
-        var canvas = ov.querySelector('.pr-sig-canvas[data-kind="'+kind+'"]');
-        if(stored && stored.image && canvas){
-          var img = new Image();
-          img.onload = function(){ canvas.getContext('2d').drawImage(img,0,0,canvas.width,canvas.height); };
-          img.src = stored.image;
-        }
-      });
-    }
+    var sigCtl = window.reviewSigWire(ov, {
+      prefix: 'pr',
+      canEdit: canEdit,
+      initial: sigs,
+      myAppId: myAppId(),
+      collectLive: collectLive,
+      fingerprint: contentFingerprint
+    });
 
     function close(){ ov.remove(); }
     ov.addEventListener('click', function(e){ if(e.target===ov) close(); });
     ov.querySelector('.pr-close').onclick = close;
 
     function collectAnswers(){
-      captureSig('employer');
-      captureSig('employee');
       var live = collectLive();
-      live.signatures = {
-        employer: sigState.employer,
-        employee: sigState.employee,
-        attestation: ATTESTATION
-      };
+      live.signatures = sigCtl.collect();
       return live;
     }
     function completeError(ans){
@@ -65850,10 +65974,16 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     var doneBtn = ov.querySelector('.pr-save-done');
     var delBtn = ov.querySelector('.pr-save-del');
     var pdfBtn = ov.querySelector('.pr-save-pdf');
+    var emailBtn = ov.querySelector('.pr-save-email');
     if(draftBtn) draftBtn.onclick = function(){ save('draft'); };
     if(doneBtn) doneBtn.onclick = function(){ save('completed'); };
     if(delBtn) delBtn.onclick = function(){ close(); window.probationDeleteReview(row.id, userId, milestone); };
     if(pdfBtn) pdfBtn.onclick = function(){ window.probationPrintReview(userId, milestone, { row:row, user:u, profile:p, name:name, nextDate:nextDate }); };
+    if(emailBtn) emailBtn.onclick = async function(){
+      emailBtn.disabled = true;
+      try { await window.probationEmailReview(userId, milestone, { row:row, user:u, profile:p, name:name, nextDate:nextDate }); }
+      finally { emailBtn.disabled = false; }
+    };
   };
 
   function printScoreLabel(v){
@@ -65947,6 +66077,101 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     w.document.close();
     w.focus();
     setTimeout(function(){ try { w.print(); } catch(e){} }, 300);
+  };
+
+  function probationEmailBody(row, u, p, name, nextDate){
+    var a = row.answers || {};
+    var sc = a.scores || {};
+    var cm = a.comments || {};
+    var yn = a.yesno || {};
+    var sg = a.signatures || {};
+    var milestone = row.milestone;
+    var html = '<h1 style="font-size:18px;margin:0 0 4px;">PROBATIONARY PERIOD REVIEW MEETING</h1>'
+      +'<p style="color:#444;margin:0 0 16px;">To be completed during the probation review meeting by Supervisor/Manager. · '+esc(msLabel(milestone))+'</p>'
+      +'<table style="width:100%;border-collapse:collapse;margin-bottom:16px;font-size:12px;">'
+      +'<tr><td style="padding:4px 12px 4px 0;border-bottom:1px solid #ddd;width:50%;"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#666;">Employee Name</div>'+esc(name)+'</td>'
+      +'<td style="padding:4px 0;border-bottom:1px solid #ddd;"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#666;">Position</div>'+esc(window.roleLabel(u.role)||'')+'</td></tr>'
+      +'<tr><td style="padding:4px 12px 4px 0;border-bottom:1px solid #ddd;"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#666;">Current location/based at</div>'+esc(a.location||'—')+'</td>'
+      +'<td style="padding:4px 0;border-bottom:1px solid #ddd;"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#666;">Start date</div>'+esc(fmtDate(p.employment_start))+'</td></tr>'
+      +'<tr><td style="padding:4px 12px 4px 0;border-bottom:1px solid #ddd;"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#666;">Appraised by (Supervisor/Manager Name)</div>'+esc(a.appraised_by||'—')+'</td>'
+      +'<td style="padding:4px 0;border-bottom:1px solid #ddd;"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#666;">Next Review date</div>'+esc(fmtDate(nextDate))+'</td></tr>'
+      +'</table>';
+    SCORE_CRITERIA.forEach(function(c){
+      html += printBlock(c.n+'. '+c.title+' — '+printScoreLabel(sc[c.id]), (c.prompt+'\n\nComments:\n'+(cm[c.id]||'—')));
+    });
+    html += printBlock('Additional comments', cm.additional||'—');
+    html += printBlock('10. Since starting with the Company, how do you feel you are getting on in the role?', cm.getting_on||'—');
+    if(milestone===1){
+      html += printBlock('11. Objectives', 'The line manager should identify specific objectives for the employee ahead of the next probationary review meeting. These will be statements of what should be achieved during the probationary period, including indicators of success and timescales for achievement.\n\nComments:\n'+(cm.objectives||'—'));
+      html += printBlock('12. Development Plan', cm.development||'—');
+    } else {
+      html += printBlock('11. List any areas for immediate improvement', cm.improvement||'—');
+      html += printBlock('12. Have the training and development objectives identified review meeting one been met?', (yn.training_objectives?yn.training_objectives.toUpperCase():'—')+'\n\nComments:\n'+(cm.training_objectives||'—'));
+      html += printBlock('13. Have the training / development needs identified from review meeting one been addressed?', (yn.training_needs?yn.training_needs.toUpperCase():'—')+'\n\nComments:\n'+(cm.training_needs||'—'));
+      if(milestone===6) html += printBlock('14. Summarise the employee’s performance and progress over the period', cm.summary||'—');
+    }
+    html += printBlock('Any other issues raised during this meeting (to be covered separately outside of this review):', cm.other_issues||'—');
+    function sigText(kind, label){
+      var s = sg[kind] || {};
+      var when = s.at ? new Date(s.at).toLocaleString('en-IE') : '—';
+      return '<div style="margin-top:18px;"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#666;">Signed ('+esc(label)+')</div>'
+        +'<div><strong>'+esc(s.name||'—')+'</strong></div>'
+        +'<div>Date: '+esc(when)+'</div>'
+        +(s.image ? '<div style="font-size:11px;color:#444;margin-top:4px;">Signature drawing attached.</div>' : '')
+        +'<div style="font-size:11px;color:#444;margin-top:4px;">'+esc(sg.attestation||ATTESTATION)+'</div></div>';
+    }
+    html += sigText('employer','Employer Representative')+sigText('employee','Employee');
+    return html;
+  }
+
+  window.probationEmailReview = async function(userId, milestone, pre){
+    pre = pre || {};
+    if(!(window.canSeeProbationTab && window.canSeeProbationTab())) return;
+    var row = pre.row;
+    var u = pre.user;
+    var p = pre.profile;
+    var name = pre.name;
+    var nextDate = pre.nextDate;
+    try {
+      if(!row){
+        var existing = await window.db.select('probation_reviews', '?user_id=eq.'+userId+'&milestone=eq.'+milestone+'&limit=1');
+        row = (existing && existing[0]) || null;
+      }
+      if(!row || row.status!=='completed'){
+        window.toast && window.toast('Only a signed review can be emailed.','error');
+        return;
+      }
+      if(!u || !u.email){
+        var users = await window.db.select('app_users', '?id=eq.'+userId+'&select=id,display_name,role,email&limit=1');
+        u = (users&&users[0]) || u || {};
+      }
+      if(!p){
+        var profiles = await window.db.select('hr_profiles', '?user_id=eq.'+userId+'&select=employment_start,next_review_date,first_name,last_name&limit=1');
+        p = (profiles&&profiles[0]) || {};
+      }
+      name = name || personName(u, p);
+      if(row.answers && row.answers.next_review_date) nextDate = row.answers.next_review_date;
+      if(!nextDate){
+        var sibling = await window.db.select('probation_reviews', '?user_id=eq.'+userId+'&select=milestone,scheduled_date');
+        nextDate = nextReviewDisplay(milestone, p.employment_start, sibling, p);
+      }
+    } catch(e){
+      window.logError && window.logError('probationEmailReview', e);
+      window.toast && window.toast('Could not load the review to email.','error');
+      return;
+    }
+    var sg = (row.answers && row.answers.signatures) || {};
+    var attachments = window.reviewSigAttachments ? window.reviewSigAttachments(sg) : [];
+    var label = msLabel(milestone)+' probation review';
+    await window.reviewEmailReport({
+      to: u.email,
+      employeeName: name,
+      label: label,
+      subject: 'Your '+label+' — '+name,
+      htmlBody: probationEmailBody(row, u, p, name, nextDate),
+      attachments: attachments,
+      hasDrawings: attachments.length > 0
+    });
   };
 
   window.probationDeleteReview = async function(id, userId, milestone){
@@ -66091,7 +66316,20 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   function hasAnswers(row){
     var a = row && row.answers;
     if(!a || typeof a !== 'object') return false;
-    return Object.keys(a).some(function(k){ return String(a[k]||'').trim(); });
+    return Object.keys(a).some(function(k){
+      if(k==='signatures') return false;
+      return String(a[k]==null?'':a[k]).trim() !== '';
+    });
+  }
+  function contentFingerprint(answers){
+    var a = answers || {};
+    var copy = { notes: a.notes || '' };
+    QUESTIONS.forEach(function(q){ copy[q.id] = a[q.id] || ''; });
+    return JSON.stringify(copy);
+  }
+  function myDisplayName(){
+    var cu = window.CURRENT_USER || {};
+    return cu.display_name || '';
   }
   function btnStyle(kind){
     if(kind==='ghost') return 'font-size:10px;padding:4px 9px;background:transparent;border:1px solid var(--navy-border);color:var(--muted);border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;font-weight:700;';
@@ -66164,6 +66402,13 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     el.querySelectorAll('.ar-date').forEach(function(btn){
       btn.addEventListener('click', function(){ window.annualEditDate(btn.dataset.uid, btn.dataset.due || ''); });
     });
+    el.querySelectorAll('.ar-email').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        btn.disabled = true;
+        try { await window.annualEmailReview(btn.dataset.uid, parseInt(btn.dataset.year,10)); }
+        finally { btn.disabled = false; }
+      });
+    });
   }
 
   function renderPeopleTable(people, reviewByUser, opts){
@@ -66193,6 +66438,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       }
       if(canEdit){
         actions += '<button type="button" class="ar-sched" data-uid="'+esc(u.id)+'" style="'+btnStyle('ghost')+'">Sched.</button>';
+        if(row && row.status==='completed') actions += '<button type="button" class="ar-email" data-uid="'+esc(u.id)+'" data-year="'+year+'" style="'+btnStyle('ghost')+'">Email</button>';
         if(row && row.id) actions += '<button type="button" class="ar-del" data-id="'+esc(row.id)+'" data-uid="'+esc(u.id)+'" data-year="'+year+'" style="'+btnStyle('danger')+'">Del</button>';
       }
       var dateBtn = canEdit
@@ -66226,8 +66472,9 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
         +'<td style="padding:12px 16px 12px 0;color:var(--white);">'+esc(r.review_year)+'</td>'
         +'<td style="padding:12px 16px 12px 0;color:var(--white);">'+fmtDate(r.completed_at)+'</td>'
         +'<td style="padding:12px 16px 12px 0;color:var(--muted);">'+esc(outcomeLabel(answers.outcome))+'</td>'
-        +'<td style="padding:12px 0;"><div style="display:flex;gap:4px;">'
+        +'<td style="padding:12px 0;"><div style="display:flex;gap:4px;flex-wrap:wrap;">'
         +'<button type="button" class="ar-open" data-uid="'+esc(r.user_id)+'" data-year="'+esc(r.review_year)+'" style="'+btnStyle()+'">View</button>'
+        +(opts.readonly?'':'<button type="button" class="ar-email" data-uid="'+esc(r.user_id)+'" data-year="'+esc(r.review_year)+'" style="'+btnStyle('ghost')+'">Email report</button>')
         +(opts.readonly?'':'<button type="button" class="ar-del" data-id="'+esc(r.id)+'" data-uid="'+esc(r.user_id)+'" data-year="'+esc(r.review_year)+'" style="'+btnStyle('danger')+'">Del</button>')
         +'</div></td></tr>';
     });
@@ -66328,7 +66575,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   window.annualOpenReview = async function(userId, year, opts){
     opts = opts || {};
     year = year || thisYear();
-    var canEdit = !opts.readonly && window.canSeeProbationTab && window.canSeeProbationTab();
+    var isAdmin = window.canSeeProbationTab && window.canSeeProbationTab();
     var existing = [];
     try {
       existing = await window.db.select('annual_reviews', '?user_id=eq.'+userId+'&review_year=eq.'+year+'&limit=1');
@@ -66336,7 +66583,9 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       window.logError && window.logError('annualOpenReview load', e);
     }
     var row = (existing && existing[0]) || { user_id:userId, review_year:year, answers:{}, status:'draft' };
-    if(!canEdit && row.status !== 'completed'){
+    var locked = row.status === 'completed';
+    var canEdit = !opts.readonly && isAdmin && !locked;
+    if(!isAdmin && !locked){
       window.toast && window.toast('This review is not available yet.','error');
       return;
     }
@@ -66350,11 +66599,12 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     var p = (profiles&&profiles[0]) || {};
     var name = personName(u, p);
     var answers = row.answers || {};
+    var sigs = answers.signatures || {};
     var prev = document.getElementById('annual-review-overlay');
     if(prev) prev.remove();
     var ov = document.createElement('div');
     ov.id = 'annual-review-overlay';
-    ov.style.cssText = 'position:fixed;inset:0;z-index:9000;background:rgba(5,12,20,0.88);display:flex;align-items:flex-start;justify-content:center;padding:36px 16px;overflow-y:auto;';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9000;background:rgba(5,12,20,0.88);display:flex;align-items:flex-start;justify-content:center;padding:24px 16px 40px;overflow-y:auto;';
     var fields = QUESTIONS.map(function(q){
       var val = answers[q.id] || '';
       if(q.type === 'select'){
@@ -66367,39 +66617,87 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
       return '<div class="mfield" style="margin-bottom:12px;"><label>'+esc(q.label)+'</label>'
         +'<textarea id="ar-q-'+q.id+'" class="hr-input" rows="3" style="resize:vertical;" '+(canEdit?'':'readonly')+'>'+esc(val)+'</textarea></div>';
     }).join('');
-    var actions = canEdit
-      ? '<button type="button" class="btn btn-outline ar-save-draft" style="font-size:11px;padding:8px 16px;">Save draft</button>'
+    var attestation = canEdit ? window.REVIEW_ATTESTATION : (sigs.attestation || window.REVIEW_ATTESTATION);
+    var sigHtml = window.reviewSigBlockHtml({
+      kind: 'employer', label: 'Employer Representative', stored: sigs.employer, prefix: 'ar',
+      canEdit: canEdit, defaultName: canEdit ? myDisplayName() : '', attestation: attestation, clearStyle: btnStyle('ghost')
+    }) + window.reviewSigBlockHtml({
+      kind: 'employee', label: 'Employee', stored: sigs.employee, prefix: 'ar',
+      canEdit: canEdit, defaultName: name, attestation: attestation, clearStyle: btnStyle('ghost')
+    });
+    var actions = '';
+    if(canEdit){
+      actions = '<button type="button" class="btn btn-outline ar-save-draft" style="font-size:11px;padding:8px 16px;">Save draft</button>'
         +'<button type="button" class="btn btn-gold ar-save-done" style="font-size:11px;padding:8px 16px;">Mark completed</button>'
-        +(row.id ? '<button type="button" class="btn btn-outline ar-save-del" style="font-size:11px;padding:8px 16px;border-color:rgba(220,53,69,0.45);color:#e05a6a;">Delete</button>' : '')
-      : '';
-    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:26px 28px 22px;width:100%;max-width:640px;box-shadow:0 16px 60px rgba(0,0,0,0.7);">'
-      +'<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:18px;">'
-      +'<div><div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">'+esc(year)+' annual review</div>'
+        +(row.id ? '<button type="button" class="btn btn-outline ar-save-del" style="font-size:11px;padding:8px 16px;border-color:rgba(220,53,69,0.45);color:#e05a6a;">Delete</button>' : '');
+    } else if(locked){
+      actions = (isAdmin ? '<button type="button" class="btn btn-gold ar-save-email" style="font-size:11px;padding:8px 16px;">Email report</button>' : '')
+        +(isAdmin && row.id ? '<button type="button" class="btn btn-outline ar-save-del" style="font-size:11px;padding:8px 16px;border-color:rgba(220,53,69,0.45);color:#e05a6a;">Delete</button>' : '');
+    }
+    ov.innerHTML = '<div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;width:100%;max-width:760px;box-shadow:0 16px 60px rgba(0,0,0,0.7);display:flex;flex-direction:column;max-height:calc(100vh - 48px);">'
+      +'<div style="padding:22px 26px 12px;overflow-y:auto;flex:1;">'
+      +'<div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px;">'+esc(year)+' annual review</div>'
       +'<div style="font-size:18px;font-weight:700;color:var(--white);font-family:Merriweather,serif;">'+esc(name)+'</div>'
-      +'<div style="font-size:11px;color:var(--muted);margin-top:4px;">'+esc(window.roleLabel(u.role)||'')+' · Next review '+fmtDate(window.annualDueDate(p))+(row.status==='completed'?' · Completed '+fmtDate(row.completed_at):'')+'</div></div>'
-      +'<button type="button" class="btn btn-outline ar-close" style="font-size:11px;padding:6px 12px;">Close</button></div>'
+      +'<div style="font-size:11px;color:var(--muted);margin:4px 0 18px;">'+esc(window.roleLabel(u.role)||'')+' · Next review '+fmtDate(window.annualDueDate(p))+(row.status==='completed'?' · Completed '+fmtDate(row.completed_at):'')+'</div>'
       +fields
       +'<div class="mfield" style="margin-bottom:16px;"><label>Notes</label>'
       +'<textarea id="ar-notes" class="hr-input" rows="2" style="resize:vertical;" '+(canEdit?'':'readonly')+'>'+esc(row.notes||'')+'</textarea></div>'
-      +'<div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">'+actions+'</div>'
+      +sigHtml
+      +'</div>'
+      +'<div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding:12px 26px 16px;border-top:1px solid var(--navy-border);background:var(--navy-mid);">'
+      +actions
+      +'<button type="button" class="btn btn-outline ar-close" style="font-size:11px;padding:8px 16px;">Close</button></div>'
       +'</div>';
     document.body.appendChild(ov);
-    function close(){ ov.remove(); }
-    ov.addEventListener('click', function(e){ if(e.target===ov) close(); });
-    ov.querySelector('.ar-close').onclick = close;
-    function collectAnswers(){
+    function collectLive(){
       var out = {};
       QUESTIONS.forEach(function(q){
         var el = document.getElementById('ar-q-'+q.id);
         out[q.id] = el ? (el.value||'').trim() : '';
       });
+      var notesEl = document.getElementById('ar-notes');
+      out.notes = notesEl ? (notesEl.value||'').trim() : '';
       return out;
+    }
+    var sigCtl = window.reviewSigWire(ov, {
+      prefix: 'ar',
+      canEdit: canEdit,
+      initial: sigs,
+      myAppId: myAppId(),
+      collectLive: collectLive,
+      fingerprint: contentFingerprint
+    });
+    function close(){ ov.remove(); }
+    ov.addEventListener('click', function(e){ if(e.target===ov) close(); });
+    ov.querySelector('.ar-close').onclick = close;
+    function collectAnswers(){
+      var live = collectLive();
+      var notes = live.notes || null;
+      delete live.notes;
+      live.signatures = sigCtl.collect();
+      return { answers: live, notes: notes };
+    }
+    function completeError(ans){
+      var missing = [];
+      var em = (ans.signatures && ans.signatures.employer) || {};
+      var ee = (ans.signatures && ans.signatures.employee) || {};
+      if(!em.name || !em.confirmed) missing.push('Employer Representative signature');
+      if(!ee.name || !ee.confirmed) missing.push('Employee signature');
+      return missing;
     }
     async function save(status){
       try {
+        var collected = collectAnswers();
+        if(status==='completed'){
+          var missing = completeError(collected.answers);
+          if(missing.length){
+            window.toast && window.toast('Cannot complete yet: '+missing[0]+(missing.length>1?' (+'+(missing.length-1)+' more)':'')+'. You can still save a draft.','error');
+            return;
+          }
+        }
         var payload = {
-          answers: collectAnswers(),
-          notes: (document.getElementById('ar-notes').value||'').trim() || null,
+          answers: collected.answers,
+          notes: collected.notes,
           status: status
         };
         if(status==='completed'){
@@ -66411,7 +66709,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
           try { await window.annualSaveNextReviewDate(userId, anniversaryOnOrAfterToday(p.employment_start), { skipRow:true }); }
           catch(se){ window.logError && window.logError('annual complete advance date', se); }
         }
-        window.toast && window.toast(status==='completed' ? 'Review completed.' : 'Draft saved.', 'success');
+        window.toast && window.toast(status==='completed' ? 'Review signed and locked.' : 'Draft saved. The employee cannot see it yet.', 'success');
         close();
         window.loadAnnualReviewTab();
         if(window.loadHRAnnualReviews) window.loadHRAnnualReviews(userId);
@@ -66424,9 +66722,85 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
     var draftBtn = ov.querySelector('.ar-save-draft');
     var doneBtn = ov.querySelector('.ar-save-done');
     var delBtn = ov.querySelector('.ar-save-del');
+    var emailBtn = ov.querySelector('.ar-save-email');
     if(draftBtn) draftBtn.onclick = function(){ save('draft'); };
     if(doneBtn) doneBtn.onclick = function(){ save('completed'); };
     if(delBtn) delBtn.onclick = function(){ close(); window.annualDeleteReview(row.id, userId, year); };
+    if(emailBtn) emailBtn.onclick = async function(){
+      emailBtn.disabled = true;
+      try { await window.annualEmailReview(userId, year, { row:row, user:u, profile:p, name:name }); }
+      finally { emailBtn.disabled = false; }
+    };
+  };
+
+  function annualEmailBody(row, u, name){
+    var a = row.answers || {};
+    var sg = a.signatures || {};
+    var html = '<h1 style="font-size:18px;margin:0 0 4px;">'+esc(row.review_year)+' annual review</h1>'
+      +'<p style="color:#444;margin:0 0 16px;">'+esc(name)+' · '+esc(window.roleLabel(u.role)||'')+(row.completed_at?' · Completed '+fmtDate(row.completed_at):'')+'</p>';
+    QUESTIONS.forEach(function(q){
+      var val = a[q.id] || '';
+      if(q.type === 'select') val = outcomeLabel(val);
+      html += '<div style="margin:12px 0;"><h3 style="font-size:13px;margin:0 0 4px;">'+esc(q.label)+'</h3>'
+        +'<div style="white-space:pre-wrap;">'+esc(val||'—').replace(/\n/g,'<br>')+'</div></div>';
+    });
+    html += '<div style="margin:12px 0;"><h3 style="font-size:13px;margin:0 0 4px;">Notes</h3>'
+      +'<div style="white-space:pre-wrap;">'+esc(row.notes||'—').replace(/\n/g,'<br>')+'</div></div>';
+    function sigText(kind, label){
+      var s = sg[kind] || {};
+      var when = s.at ? new Date(s.at).toLocaleString('en-IE') : '—';
+      return '<div style="margin-top:18px;"><div style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#666;">Signed ('+esc(label)+')</div>'
+        +'<div><strong>'+esc(s.name||'—')+'</strong></div>'
+        +'<div>Date: '+esc(when)+'</div>'
+        +(s.image ? '<div style="font-size:11px;color:#444;margin-top:4px;">Signature drawing attached.</div>' : '')
+        +'<div style="font-size:11px;color:#444;margin-top:4px;">'+esc(sg.attestation||window.REVIEW_ATTESTATION)+'</div></div>';
+    }
+    html += sigText('employer','Employer Representative')+sigText('employee','Employee');
+    return html;
+  }
+
+  window.annualEmailReview = async function(userId, year, pre){
+    pre = pre || {};
+    if(!(window.canSeeProbationTab && window.canSeeProbationTab())) return;
+    var row = pre.row;
+    var u = pre.user;
+    var p = pre.profile;
+    var name = pre.name;
+    try {
+      if(!row){
+        var existing = await window.db.select('annual_reviews', '?user_id=eq.'+userId+'&review_year=eq.'+year+'&limit=1');
+        row = (existing && existing[0]) || null;
+      }
+      if(!row || row.status!=='completed'){
+        window.toast && window.toast('Only a completed review can be emailed.','error');
+        return;
+      }
+      if(!u || !u.email){
+        var users = await window.db.select('app_users', '?id=eq.'+userId+'&select=id,display_name,role,email&limit=1');
+        u = (users&&users[0]) || u || {};
+      }
+      if(!p){
+        var profiles = await window.db.select('hr_profiles', '?user_id=eq.'+userId+'&select=employment_start,next_review_date,first_name,last_name&limit=1');
+        p = (profiles&&profiles[0]) || {};
+      }
+      name = name || personName(u, p);
+    } catch(e){
+      window.logError && window.logError('annualEmailReview', e);
+      window.toast && window.toast('Could not load the review to email.','error');
+      return;
+    }
+    var sg = (row.answers && row.answers.signatures) || {};
+    var attachments = window.reviewSigAttachments ? window.reviewSigAttachments(sg) : [];
+    var label = year+' annual review';
+    await window.reviewEmailReport({
+      to: u.email,
+      employeeName: name,
+      label: label,
+      subject: 'Your '+label+' — '+name,
+      htmlBody: annualEmailBody(row, u, name),
+      attachments: attachments,
+      hasDrawings: attachments.length > 0
+    });
   };
 
   window.annualDeleteReview = async function(id, userId, year){
