@@ -8698,9 +8698,11 @@ window.copyInviteLink = function() {
   var _hrMgmtNotes         = [];
   var _hrMgmtDocs          = [];
   var HR_MGMT_BUCKET       = 'hr-management-docs';
+  var HR_EMP_BUCKET        = 'hr-employee-docs';
   var HR_MGMT_MAX_BYTES    = 12 * 1024 * 1024;
   var HR_MGMT_EXTS         = { pdf:1, jpg:1, jpeg:1, png:1 };
   var HR_MGMT_TYPES        = { 'application/pdf':1, 'image/jpeg':1, 'image/png':1 };
+  var _hrHandbook          = null;
 
   function sbGet(p)                    { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
   function sbPost(table, body)         { return window.db.insert(table, body); }
@@ -9352,13 +9354,8 @@ window.copyInviteLink = function() {
       }
     }
 
-    // Contract
-    if (p.contract_url) {
-      var cl=document.getElementById('hr-contract-link'); if(cl){ cl.href=p.contract_url; cl.style.display=''; }
-      var cs=document.getElementById('hr-contract-status'); if(cs) cs.textContent='Contract on file';
-    }
-    var uploadBtn = document.getElementById('hr-contract-upload-btn');
-    if (uploadBtn) uploadBtn.style.display = isAdmin() ? '' : 'none';
+    window.hrRefreshContractUI(p);
+    window.loadHRCompanyHandbook && window.loadHRCompanyHandbook();
 
   }
 
@@ -9383,6 +9380,8 @@ window.copyInviteLink = function() {
     if (annualBtn) annualBtn.style.display = (window.canSeeProbationTab && window.canSeeProbationTab()) ? '' : 'none';
     var empExportCard = document.getElementById('mgmt-employee-export-card');
     if (empExportCard) empExportCard.style.display = (window.canDownloadEmployeeList && window.canDownloadEmployeeList()) ? '' : 'none';
+    var handbookCard = document.getElementById('mgmt-handbook-card');
+    if (handbookCard) handbookCard.style.display = (window.isHRAdmin && window.isHRAdmin()) ? '' : 'none';
     // Employee Details → Management sub-tab (confidential notes/docs).
     // Distinct from Workforce leave tab #people-tab-mgmt. Gate matches
     // RLS is_hr_admin() via isHRAdmin() — never canViewAll()/isAdmin().
@@ -9528,6 +9527,9 @@ window.copyInviteLink = function() {
     }
     if (tab === 'management' && _hrCurrentUserId) {
       window.loadHRManagement(_hrCurrentUserId);
+    }
+    if (tab === 'docs') {
+      window.loadHRCompanyHandbook && window.loadHRCompanyHandbook();
     }
   };
 
@@ -10018,7 +10020,236 @@ window.copyInviteLink = function() {
     } catch(e){ window.toast&&window.toast('Error: '+e.message,'error'); }
   };
 
-  window.hrUploadContract = function(){ window.toast&&window.toast('Contract upload: coming soon.','info'); };
+  async function hrEmpUploadFile(file, path) {
+    var token = await window._freshAccessToken();
+    if (!token) { window._handleSessionExpired(); throw new Error('Your session has expired — please sign in again.'); }
+    var res = await fetch(SUPA_URL + '/storage/v1/object/' + HR_EMP_BUCKET + '/' + path, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'apikey': SUPA_KEY,
+        'Content-Type': file.type || 'application/octet-stream',
+        'x-upsert': 'true'
+      },
+      body: file
+    });
+    if (!res.ok) {
+      var err = await res.text();
+      throw new Error('Upload failed: ' + (err || res.statusText));
+    }
+    return path;
+  }
+  async function hrEmpDeleteFile(path) {
+    if (!path || String(path).indexOf('http') === 0) return;
+    try {
+      var token = await window._freshAccessToken();
+      if (!token) return;
+      await fetch(SUPA_URL + '/storage/v1/object/' + HR_EMP_BUCKET + '/' + path, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token, 'apikey': SUPA_KEY }
+      });
+    } catch (e) {
+      window.logError && window.logError('hrEmpDeleteFile', e);
+    }
+  }
+  async function hrEmpSignedUrl(path) {
+    if (!path) throw new Error('No file path');
+    if (String(path).indexOf('http') === 0) return path;
+    var token = await window._freshAccessToken();
+    if (!token) { window._handleSessionExpired(); throw new Error('Your session has expired — please sign in again.'); }
+    if (window._sb && window._sb.storage) {
+      var r = await window._sb.storage.from(HR_EMP_BUCKET).createSignedUrl(path, 60);
+      if (r.error) throw r.error;
+      return r.data && r.data.signedUrl;
+    }
+    var res = await fetch(SUPA_URL + '/storage/v1/object/sign/' + HR_EMP_BUCKET + '/' + path, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'apikey': SUPA_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expiresIn: 60 })
+    });
+    if (!res.ok) throw new Error('Could not create download link');
+    var data = await res.json();
+    var signed = data.signedURL || data.signedUrl;
+    if (signed && signed.indexOf('http') !== 0) {
+      signed = SUPA_URL + '/storage/v1' + (signed.charAt(0) === '/' ? signed : '/' + signed);
+    }
+    return signed;
+  }
+  function hrEmpValidateFile(file) {
+    if (!file) return null;
+    var ext = ((file.name && file.name.split('.').pop()) || '').toLowerCase();
+    if (!HR_MGMT_EXTS[ext] && !HR_MGMT_TYPES[file.type]) {
+      window.toast && window.toast('Use a PDF, JPG, or PNG.', 'error');
+      return null;
+    }
+    if (file.size > HR_MGMT_MAX_BYTES) {
+      window.toast && window.toast('File is too large (max 12 MB).', 'error');
+      return null;
+    }
+    if (ext.length > 5 || !HR_MGMT_EXTS[ext]) ext = (file.type === 'application/pdf') ? 'pdf' : (file.type === 'image/png' ? 'png' : 'jpg');
+    return ext;
+  }
+  function hrEmpCanUpload() {
+    return !!(window.isHRAdmin && window.isHRAdmin());
+  }
+
+  window.hrRefreshContractUI = function(p) {
+    p = p || _hrCurrentProfile || {};
+    var has = !!(p.contract_url);
+    var status = document.getElementById('hr-contract-status');
+    var uploadBtn = document.getElementById('hr-contract-upload-btn');
+    var dlBtn = document.getElementById('hr-contract-download-btn');
+    if (status) status.textContent = has ? 'Contract on file' : 'No contract on file';
+    if (uploadBtn) {
+      uploadBtn.style.display = hrEmpCanUpload() ? '' : 'none';
+      uploadBtn.textContent = has ? 'Replace' : 'Upload';
+    }
+    if (dlBtn) dlBtn.style.display = has ? '' : 'none';
+  };
+
+  function hrRefreshHandbookUI() {
+    var has = !!( _hrHandbook && _hrHandbook.storage_path );
+    var none = document.getElementById('hr-handbook-none');
+    var dl = document.getElementById('hr-handbook-download-btn');
+    var sub = document.getElementById('hr-handbook-status');
+    if (none) none.style.display = has ? 'none' : '';
+    if (dl) dl.style.display = has ? '' : 'none';
+    if (sub) {
+      if (has) sub.textContent = _hrHandbook.file_name || 'Company handbook';
+      else sub.textContent = hrEmpCanUpload()
+        ? 'Upload once on Workforce → Management — then it appears here for everyone'
+        : 'Company handbook — same file for everyone';
+    }
+    var card = document.getElementById('mgmt-handbook-card');
+    if (card) card.style.display = hrEmpCanUpload() ? '' : 'none';
+    var mgmtStatus = document.getElementById('mgmt-handbook-status');
+    var mgmtDl = document.getElementById('mgmt-handbook-download-btn');
+    var mgmtUp = document.getElementById('mgmt-handbook-upload-btn');
+    if (mgmtStatus) {
+      if (has) {
+        var when = _hrHandbook.uploaded_at ? hrMgmtFmtWhen(_hrHandbook.uploaded_at) : '';
+        mgmtStatus.textContent = (_hrHandbook.file_name || 'Handbook on file') + (when ? '  ·  uploaded ' + when : '') + '. Shown on every employee Documents tab.';
+      } else {
+        mgmtStatus.textContent = 'No handbook uploaded yet. This file appears on every employee Documents tab.';
+      }
+    }
+    if (mgmtDl) mgmtDl.style.display = has ? '' : 'none';
+    if (mgmtUp) mgmtUp.textContent = has ? 'Replace' : 'Upload';
+  }
+
+  window.loadHRCompanyHandbook = async function() {
+    try {
+      var rows = await sbGet('hr_company_documents?kind=eq.handbook&select=kind,storage_path,file_name,content_type,file_size,uploaded_at,uploaded_by&limit=1');
+      _hrHandbook = (rows && rows[0]) || null;
+    } catch (e) {
+      _hrHandbook = null;
+      window.logError && window.logError('loadHRCompanyHandbook', e);
+    }
+    hrRefreshHandbookUI();
+    return _hrHandbook;
+  };
+
+  window.hrUploadContract = function() {
+    if (!hrEmpCanUpload() || !_hrCurrentUserId) return;
+    var input = document.getElementById('hr-contract-file');
+    if (input) input.click();
+  };
+
+  window.hrUploadContractFile = async function() {
+    if (!hrEmpCanUpload() || !_hrCurrentUserId) return;
+    var input = document.getElementById('hr-contract-file');
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    var ext = hrEmpValidateFile(file);
+    if (!ext) { if (input) input.value = ''; return; }
+    var docId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10));
+    var path = _hrCurrentUserId + '/contract/' + docId + '.' + ext;
+    var oldPath = _hrCurrentProfile && _hrCurrentProfile.contract_url;
+    try {
+      window.toast && window.toast('Uploading…', 'info');
+      await hrEmpUploadFile(file, path);
+      if (_hrCurrentProfile && _hrCurrentProfile.id) {
+        await sbPatch('hr_profiles', '?id=eq.' + _hrCurrentProfile.id, { contract_url: path, updated_at: new Date().toISOString() });
+        _hrCurrentProfile.contract_url = path;
+      } else {
+        var created = await sbPost('hr_profiles', { user_id: _hrCurrentUserId, contract_url: path });
+        _hrCurrentProfile = (Array.isArray(created) ? created[0] : created) || { user_id: _hrCurrentUserId, contract_url: path };
+      }
+      if (oldPath && oldPath !== path) await hrEmpDeleteFile(oldPath);
+      window.hrRefreshContractUI(_hrCurrentProfile);
+      window.toast && window.toast('Contract uploaded.', 'success');
+    } catch (e) {
+      await hrEmpDeleteFile(path);
+      window.toast && window.toast('Upload failed: ' + e.message, 'error');
+    }
+    if (input) input.value = '';
+  };
+
+  window.hrDownloadContract = async function() {
+    var path = _hrCurrentProfile && _hrCurrentProfile.contract_url;
+    if (!path) { window.toast && window.toast('No contract on file.', 'info'); return; }
+    try {
+      var url = await hrEmpSignedUrl(path);
+      if (!url) throw new Error('No download URL');
+      window.open(url, '_blank', 'noopener');
+    } catch (e) {
+      window.toast && window.toast('Download failed: ' + e.message, 'error');
+    }
+  };
+
+  window.hrUploadHandbook = function() {
+    if (!hrEmpCanUpload()) return;
+    var input = document.getElementById('mgmt-handbook-file');
+    if (input) input.click();
+  };
+
+  window.hrUploadHandbookFile = async function() {
+    if (!hrEmpCanUpload()) return;
+    var input = document.getElementById('mgmt-handbook-file');
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    var ext = hrEmpValidateFile(file);
+    if (!ext) { if (input) input.value = ''; return; }
+    var path = 'company/handbook.' + ext;
+    var oldPath = _hrHandbook && _hrHandbook.storage_path;
+    try {
+      window.toast && window.toast('Uploading…', 'info');
+      await hrEmpUploadFile(file, path);
+      var row = {
+        kind: 'handbook',
+        storage_path: path,
+        file_name: file.name,
+        content_type: file.type || null,
+        file_size: file.size,
+        uploaded_by: hrMgmtMyId(),
+        uploaded_at: new Date().toISOString()
+      };
+      var saved = await window.db.upsert('hr_company_documents', row);
+      _hrHandbook = (Array.isArray(saved) ? saved[0] : saved) || row;
+      if (oldPath && oldPath !== path) await hrEmpDeleteFile(oldPath);
+      hrRefreshHandbookUI();
+      window.toast && window.toast('Handbook uploaded. It now shows on every employee file.', 'success');
+    } catch (e) {
+      if (!oldPath || oldPath !== path) await hrEmpDeleteFile(path);
+      window.toast && window.toast('Upload failed: ' + e.message, 'error');
+    }
+    if (input) input.value = '';
+  };
+
+  window.hrDownloadHandbook = async function() {
+    if (!_hrHandbook || !_hrHandbook.storage_path) {
+      try { await window.loadHRCompanyHandbook(); } catch (_) {}
+    }
+    var path = _hrHandbook && _hrHandbook.storage_path;
+    if (!path) { window.toast && window.toast('No handbook uploaded yet.', 'info'); return; }
+    try {
+      var url = await hrEmpSignedUrl(path);
+      if (!url) throw new Error('No download URL');
+      window.open(url, '_blank', 'noopener');
+    } catch (e) {
+      window.toast && window.toast('Download failed: ' + e.message, 'error');
+    }
+  };
 
   // ── Hook into showPage / People tab ──────────────────────────────────────────
   // Hook HR tab - use late binding so we always get the real showPeopleTab
@@ -30017,17 +30248,20 @@ window.ccxPrintRecord = function() {
                   <div id="hr-contract-status" style="font-size:11px;color:var(--muted);margin-top:3px;">No contract on file</div>
                 </div>
                 <div style="display:flex;gap:8px;">
+                  <input type="file" id="hr-contract-file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style="display:none;" onchange="window.hrUploadContractFile()">
                   <button id="hr-contract-upload-btn" onclick="window.hrUploadContract()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;display:none;">Upload</button>
-                  <a id="hr-contract-link" href="#" target="_blank" style="display:none;" class="btn btn-outline">Download</a>
+                  <button id="hr-contract-download-btn" onclick="window.hrDownloadContract()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;display:none;">Download</button>
                 </div>
               </div>
               <div style="background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:5px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;">
                 <div>
                   <div style="font-size:13px;font-weight:600;color:var(--white);">Employee Handbook</div>
-                  <div style="font-size:11px;color:var(--muted);margin-top:3px;">Company handbook</div>
+                  <div id="hr-handbook-status" style="font-size:11px;color:var(--muted);margin-top:3px;">Company handbook — same file for everyone</div>
                 </div>
-                <span id="hr-handbook-none" style="font-size:11px;color:var(--muted);">Not uploaded yet</span>
-                <a id="hr-handbook-link" href="#" target="_blank" style="display:none;" class="btn btn-outline" style="font-size:11px;">Download</a>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span id="hr-handbook-none" style="font-size:11px;color:var(--muted);">Not uploaded yet</span>
+                  <button id="hr-handbook-download-btn" onclick="window.hrDownloadHandbook()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;display:none;">Download</button>
+                </div>
               </div>
             </div>
           </div>
@@ -30226,6 +30460,22 @@ window.ccxPrintRecord = function() {
   </div>
 
   <div id="people-mgmt" class="people-panel" style="display:none;">
+
+    <!-- Company handbook — one file, shown on every employee Documents tab -->
+    <div class="card" id="mgmt-handbook-card" style="display:none;padding:22px;margin-bottom:16px;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px;">Company Documents</div>
+          <div style="font-size:13px;font-weight:600;color:var(--white);margin-bottom:4px;">Employee Handbook</div>
+          <p id="mgmt-handbook-status" style="font-size:12px;color:var(--muted);margin:0;max-width:540px;">No handbook uploaded yet. This file appears on every employee Documents tab.</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-shrink:0;">
+          <input type="file" id="mgmt-handbook-file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style="display:none;" onchange="window.hrUploadHandbookFile()">
+          <button id="mgmt-handbook-upload-btn" onclick="window.hrUploadHandbook()" class="btn btn-gold" style="font-size:11px;padding:8px 18px;white-space:nowrap;">Upload</button>
+          <button id="mgmt-handbook-download-btn" onclick="window.hrDownloadHandbook()" class="btn btn-outline" style="font-size:11px;padding:8px 18px;display:none;white-space:nowrap;">Download</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Employee list download (MD / OD / BA / HR only) -->
     <div class="card" id="mgmt-employee-export-card" style="display:none;padding:22px;margin-bottom:16px;">
@@ -65100,7 +65350,7 @@ window.loadTimesheet=async function(){
 };
 
 var _oSPT=window.showPeopleTab;
-window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);setTimeout(window.mgmtLoadLeaveOverview,800);setTimeout(window.mgmtPopulateEmps,200);setTimeout(window.mgmtPopulateApplyEmps,200);setTimeout(window.mgmtInitHistory,300);}if(tab==='cal')setTimeout(window.lvCalInit,100);if(tab==='probation')setTimeout(window.loadProbationTab,100);if(tab==='annual')setTimeout(window.loadAnnualReviewTab,100);};
+window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin')setTimeout(window.loadTimesheet,100);if(tab==='leave')setTimeout(window.lvInit,100);if(tab==='mgmt'){setTimeout(window.lvLoadManagerView,400);setTimeout(window.mgmtLoadReports,600);setTimeout(window.mgmtLoadLeaveOverview,800);setTimeout(window.mgmtPopulateEmps,200);setTimeout(window.mgmtPopulateApplyEmps,200);setTimeout(window.mgmtInitHistory,300);setTimeout(function(){ window.loadHRCompanyHandbook && window.loadHRCompanyHandbook(); },250);}if(tab==='cal')setTimeout(window.lvCalInit,100);if(tab==='probation')setTimeout(window.loadProbationTab,100);if(tab==='annual')setTimeout(window.loadAnnualReviewTab,100);};
 })();
 </script>
 
