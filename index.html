@@ -8703,6 +8703,8 @@ window.copyInviteLink = function() {
   var HR_MGMT_EXTS         = { pdf:1, jpg:1, jpeg:1, png:1 };
   var HR_MGMT_TYPES        = { 'application/pdf':1, 'image/jpeg':1, 'image/png':1 };
   var _hrHandbook          = null;
+  var _hrEmpDocs           = [];
+  var _hrEmpDocsLoadedFor  = null;
 
   function sbGet(p)                    { var i=p.indexOf('?'); return window.db.select(i>=0?p.slice(0,i):p, i>=0?p.slice(i):''); }
   function sbPost(table, body)         { return window.db.insert(table, body); }
@@ -9356,6 +9358,7 @@ window.copyInviteLink = function() {
 
     window.hrRefreshContractUI(p);
     window.loadHRCompanyHandbook && window.loadHRCompanyHandbook();
+    window.loadHREmployeeDocuments && window.loadHREmployeeDocuments(_hrCurrentUserId, true);
 
   }
 
@@ -9530,6 +9533,7 @@ window.copyInviteLink = function() {
     }
     if (tab === 'docs') {
       window.loadHRCompanyHandbook && window.loadHRCompanyHandbook();
+      if (_hrCurrentUserId) window.loadHREmployeeDocuments && window.loadHREmployeeDocuments(_hrCurrentUserId);
     }
   };
 
@@ -10248,6 +10252,231 @@ window.copyInviteLink = function() {
       window.open(url, '_blank', 'noopener');
     } catch (e) {
       window.toast && window.toast('Download failed: ' + e.message, 'error');
+    }
+  };
+
+  function hrEmpDocByKind(kind) {
+    return (_hrEmpDocs || []).find(function(d){ return d.kind === kind; }) || null;
+  }
+  function hrRefreshSignedHandbookUI() {
+    var row = hrEmpDocByKind('signed_handbook');
+    var has = !!(row && row.storage_path);
+    var status = document.getElementById('hr-signed-handbook-status');
+    var uploadBtn = document.getElementById('hr-signed-handbook-upload-btn');
+    var dlBtn = document.getElementById('hr-signed-handbook-download-btn');
+    if (status) status.textContent = has ? (row.file_name || 'Signed copy on file') : 'No signed copy on file';
+    if (uploadBtn) {
+      uploadBtn.style.display = hrEmpCanUpload() ? '' : 'none';
+      uploadBtn.textContent = has ? 'Replace' : 'Upload';
+    }
+    if (dlBtn) dlBtn.style.display = has ? '' : 'none';
+  }
+  function hrRefreshOtherDocsUI() {
+    var upload = document.getElementById('hr-other-docs-upload');
+    if (upload) upload.style.display = hrEmpCanUpload() ? 'flex' : 'none';
+    var list = document.getElementById('hr-other-docs-list');
+    if (!list) return;
+    list.textContent = '';
+    var rows = (_hrEmpDocs || []).filter(function(d){ return d.kind === 'other'; });
+    if (!rows.length) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'font-size:12px;color:var(--muted);padding:8px 0;';
+      empty.textContent = 'No other documents on file.';
+      list.appendChild(empty);
+      return;
+    }
+    rows.forEach(function(d) {
+      var card = document.createElement('div');
+      card.style.cssText = 'background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:5px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;';
+      var left = document.createElement('div');
+      var title = document.createElement('div');
+      title.style.cssText = 'font-size:13px;font-weight:600;color:var(--white);';
+      title.textContent = d.title || d.file_name || 'Untitled';
+      var meta = document.createElement('div');
+      meta.style.cssText = 'font-size:11px;color:var(--muted);margin-top:3px;';
+      var sizeKb = d.file_size ? (Math.round(d.file_size / 1024) + ' KB') : '';
+      meta.textContent = [d.file_name, sizeKb, hrMgmtFmtWhen(d.created_at)].filter(Boolean).join('  ·  ');
+      left.appendChild(title);
+      left.appendChild(meta);
+      var actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;';
+      var dl = document.createElement('button');
+      dl.className = 'btn btn-outline';
+      dl.style.cssText = 'font-size:11px;padding:6px 14px;';
+      dl.textContent = 'Download';
+      dl.onclick = function(){ window.hrDownloadEmployeeDoc(d.id); };
+      actions.appendChild(dl);
+      if (hrEmpCanUpload()) {
+        var del = document.createElement('button');
+        del.className = 'btn btn-outline';
+        del.style.cssText = 'font-size:11px;padding:6px 14px;';
+        del.textContent = 'Delete';
+        del.onclick = function(){ window.hrDeleteEmployeeDoc(d.id); };
+        actions.appendChild(del);
+      }
+      card.appendChild(left);
+      card.appendChild(actions);
+      list.appendChild(card);
+    });
+  }
+
+  window.loadHREmployeeDocuments = async function(userId, force) {
+    if (!userId) return;
+    if (!force && _hrEmpDocsLoadedFor === userId) {
+      hrRefreshSignedHandbookUI();
+      hrRefreshOtherDocsUI();
+      return;
+    }
+    try {
+      var rows = await sbGet('hr_employee_documents?user_id=eq.'+userId+'&select=id,user_id,kind,title,file_name,storage_path,content_type,file_size,created_at,created_by&order=created_at.desc');
+      _hrEmpDocs = Array.isArray(rows) ? rows : [];
+      _hrEmpDocsLoadedFor = userId;
+    } catch (e) {
+      _hrEmpDocs = [];
+      _hrEmpDocsLoadedFor = null;
+      window.logError && window.logError('loadHREmployeeDocuments', e);
+    }
+    hrRefreshSignedHandbookUI();
+    hrRefreshOtherDocsUI();
+  };
+
+  window.hrUploadSignedHandbook = function() {
+    if (!hrEmpCanUpload() || !_hrCurrentUserId) return;
+    var input = document.getElementById('hr-signed-handbook-file');
+    if (input) input.click();
+  };
+
+  window.hrUploadSignedHandbookFile = async function() {
+    if (!hrEmpCanUpload() || !_hrCurrentUserId) return;
+    var input = document.getElementById('hr-signed-handbook-file');
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    var ext = hrEmpValidateFile(file);
+    if (!ext) { if (input) input.value = ''; return; }
+    var docId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10));
+    var path = _hrCurrentUserId + '/signed-handbook/' + docId + '.' + ext;
+    var existing = hrEmpDocByKind('signed_handbook');
+    var oldPath = existing && existing.storage_path;
+    try {
+      window.toast && window.toast('Uploading…', 'info');
+      await hrEmpUploadFile(file, path);
+      var payload = {
+        user_id: _hrCurrentUserId,
+        kind: 'signed_handbook',
+        title: 'Signed handbook',
+        file_name: file.name,
+        storage_path: path,
+        content_type: file.type || null,
+        file_size: file.size,
+        created_by: hrMgmtMyId()
+      };
+      if (existing && existing.id) {
+        await sbPatch('hr_employee_documents', '?id=eq.'+existing.id, payload);
+        existing.file_name = file.name;
+        existing.storage_path = path;
+        existing.content_type = payload.content_type;
+        existing.file_size = file.size;
+      } else {
+        var created = await sbPost('hr_employee_documents', Object.assign({ id: docId }, payload));
+        var saved = Array.isArray(created) ? created[0] : created;
+        if (saved) _hrEmpDocs.unshift(saved);
+        else _hrEmpDocs.unshift(Object.assign({ id: docId }, payload));
+      }
+      if (oldPath && oldPath !== path) await hrEmpDeleteFile(oldPath);
+      hrRefreshSignedHandbookUI();
+      window.toast && window.toast('Signed handbook uploaded.', 'success');
+    } catch (e) {
+      await hrEmpDeleteFile(path);
+      window.toast && window.toast('Upload failed: ' + e.message, 'error');
+    }
+    if (input) input.value = '';
+  };
+
+  window.hrDownloadSignedHandbook = async function() {
+    var row = hrEmpDocByKind('signed_handbook');
+    if (!row || !row.storage_path) { window.toast && window.toast('No signed copy on file.', 'info'); return; }
+    try {
+      var url = await hrEmpSignedUrl(row.storage_path);
+      if (!url) throw new Error('No download URL');
+      window.open(url, '_blank', 'noopener');
+    } catch (e) {
+      window.toast && window.toast('Download failed: ' + e.message, 'error');
+    }
+  };
+
+  window.hrUploadOtherDoc = function() {
+    if (!hrEmpCanUpload() || !_hrCurrentUserId) return;
+    var titleEl = document.getElementById('hr-other-doc-title');
+    var title = titleEl ? (titleEl.value || '').trim() : '';
+    if (!title) { window.toast && window.toast('Add a title first.', 'info'); return; }
+    var input = document.getElementById('hr-other-doc-file');
+    if (input) input.click();
+  };
+
+  window.hrUploadOtherDocFile = async function() {
+    if (!hrEmpCanUpload() || !_hrCurrentUserId) return;
+    var input = document.getElementById('hr-other-doc-file');
+    var titleEl = document.getElementById('hr-other-doc-title');
+    var title = titleEl ? (titleEl.value || '').trim() : '';
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    if (!title) { window.toast && window.toast('Add a title first.', 'info'); if (input) input.value = ''; return; }
+    var ext = hrEmpValidateFile(file);
+    if (!ext) { if (input) input.value = ''; return; }
+    var docId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10));
+    var path = _hrCurrentUserId + '/files/' + docId + '.' + ext;
+    try {
+      window.toast && window.toast('Uploading…', 'info');
+      await hrEmpUploadFile(file, path);
+      var created = await sbPost('hr_employee_documents', {
+        id: docId,
+        user_id: _hrCurrentUserId,
+        kind: 'other',
+        title: title,
+        file_name: file.name,
+        storage_path: path,
+        content_type: file.type || null,
+        file_size: file.size,
+        created_by: hrMgmtMyId()
+      });
+      var saved = Array.isArray(created) ? created[0] : created;
+      if (saved) _hrEmpDocs.unshift(saved);
+      else _hrEmpDocs.unshift({ id: docId, user_id: _hrCurrentUserId, kind: 'other', title: title, file_name: file.name, storage_path: path, file_size: file.size, created_at: new Date().toISOString() });
+      if (titleEl) titleEl.value = '';
+      hrRefreshOtherDocsUI();
+      window.toast && window.toast('Document uploaded.', 'success');
+    } catch (e) {
+      await hrEmpDeleteFile(path);
+      window.toast && window.toast('Upload failed: ' + e.message, 'error');
+    }
+    if (input) input.value = '';
+  };
+
+  window.hrDownloadEmployeeDoc = async function(docId) {
+    var doc = (_hrEmpDocs || []).find(function(d){ return d.id === docId; });
+    if (!doc || !doc.storage_path) return;
+    try {
+      var url = await hrEmpSignedUrl(doc.storage_path);
+      if (!url) throw new Error('No download URL');
+      window.open(url, '_blank', 'noopener');
+    } catch (e) {
+      window.toast && window.toast('Download failed: ' + e.message, 'error');
+    }
+  };
+
+  window.hrDeleteEmployeeDoc = async function(docId) {
+    if (!hrEmpCanUpload() || !docId) return;
+    var doc = (_hrEmpDocs || []).find(function(d){ return d.id === docId; });
+    if (!doc) return;
+    if (!(await window.lpConfirm('Delete this file? The employee will no longer be able to download it.', { title: 'Delete document', confirmLabel: 'Delete', destructive: true }))) return;
+    try {
+      await hrEmpDeleteFile(doc.storage_path);
+      await sbDelete('hr_employee_documents', '?id=eq.'+docId);
+      _hrEmpDocs = _hrEmpDocs.filter(function(d){ return d.id !== docId; });
+      hrRefreshOtherDocsUI();
+      window.toast && window.toast('File deleted.', 'success');
+    } catch (e) {
+      window.toast && window.toast('Could not delete file: ' + e.message, 'error');
     }
   };
 
@@ -30263,6 +30492,30 @@ window.ccxPrintRecord = function() {
                   <button id="hr-handbook-download-btn" onclick="window.hrDownloadHandbook()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;display:none;">Download</button>
                 </div>
               </div>
+              <div style="background:var(--navy-dark);border:1px solid var(--navy-border);border-radius:5px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;">
+                <div>
+                  <div style="font-size:13px;font-weight:600;color:var(--white);">Signed Handbook</div>
+                  <div id="hr-signed-handbook-status" style="font-size:11px;color:var(--muted);margin-top:3px;">No signed copy on file</div>
+                </div>
+                <div style="display:flex;gap:8px;">
+                  <input type="file" id="hr-signed-handbook-file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style="display:none;" onchange="window.hrUploadSignedHandbookFile()">
+                  <button id="hr-signed-handbook-upload-btn" onclick="window.hrUploadSignedHandbook()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;display:none;">Upload</button>
+                  <button id="hr-signed-handbook-download-btn" onclick="window.hrDownloadSignedHandbook()" class="btn btn-outline" style="font-size:11px;padding:6px 14px;display:none;">Download</button>
+                </div>
+              </div>
+            </div>
+            <div style="margin-top:22px;padding-top:18px;border-top:1px solid var(--navy-border);">
+              <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:8px;font-weight:700;">Other Documents</div>
+              <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Files the employee can see and download — acknowledgements, extra forms, signed review copies, and anything else you want on their file.</div>
+              <div id="hr-other-docs-upload" style="display:none;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:14px;">
+                <div class="mfield" style="flex:1;min-width:180px;">
+                  <label>Title</label>
+                  <input type="text" id="hr-other-doc-title" placeholder="e.g. Policy acknowledgement" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;font-family:Lato,sans-serif;border-radius:4px;box-sizing:border-box;">
+                </div>
+                <input type="file" id="hr-other-doc-file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style="display:none;" onchange="window.hrUploadOtherDocFile()">
+                <button onclick="window.hrUploadOtherDoc()" class="btn btn-outline" style="font-size:11px;padding:8px 16px;">Upload file</button>
+              </div>
+              <div id="hr-other-docs-list" style="display:grid;gap:10px;"></div>
             </div>
           </div>
         </div>
