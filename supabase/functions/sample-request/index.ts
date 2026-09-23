@@ -26,7 +26,7 @@ const corsHeaders = {
 };
 
 const RESEND_URL       = 'https://api.resend.com/emails';
-const FROM_IDENTITY     = 'Lighthouse Drinks <noreply@lighthousedrinks.com>';
+const FROM_IDENTITY     = 'Lighthouse Drinks <pulse@lighthousedrinks.com>';
 const COORDINATOR_ROLE  = 'quality_compliance';
 
 function json(data: unknown, status = 200): Response {
