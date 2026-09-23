@@ -2019,6 +2019,23 @@ async function fetchAll(table, qs, pageSize) {
 }
 window.fetchAll = fetchAll;
 
+// Next JOB-n id. Text order is not numeric order (JOB-99 sorts above JOB-100),
+// and a limited id.desc page therefore skips the real maximum and collides
+// with jobs_pkey. Scan every id and take the numeric max.
+window.nextJobId = async function() {
+  try {
+    var rows = await fetchAll('jobs', '?select=id');
+    var maxNum = 0;
+    (rows || []).forEach(function(r) {
+      var m = String(r && r.id || '').match(/JOB-(\d+)/i);
+      if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+    });
+    return 'JOB-' + (maxNum + 1);
+  } catch (e) {
+    return 'JOB-' + Date.now();
+  }
+};
+
 // ── Active-user helpers ──────────────────────────────────────────────────────
 // Terminated employees must not appear in live rosters, assignment dropdowns,
 // or email recipient lists. Use these helpers anywhere a CURRENT staff list is
@@ -27372,17 +27389,7 @@ window.approveJobSubmission = async function(id, opts) {
     var confirmedDate    = (opts && opts.scheduledDate)        ? opts.scheduledDate : (s.desired_bottling_date || null);
     var confirmedNotes   = (opts && opts.notes != null)        ? opts.notes         : (s.notes || null);
 
-    // Generate next job ID matching the JOB-N format used by the new job modal
-    var newJobId = 'JOB-1';
-    try {
-      var existingIds = await db.select('jobs', '?select=id&order=id.desc&limit=50') || [];
-      var maxNum = 0;
-      existingIds.forEach(function(j) {
-        var m = String(j.id || '').match(/JOB-(\d+)/i);
-        if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
-      });
-      newJobId = 'JOB-' + String(maxNum + 1);
-    } catch(_e) { newJobId = 'JOB-' + Date.now(); }
+    var newJobId = await window.nextJobId();
 
     // Look up BOM for chill filtration / colouring / bottling ABV
     var chillFiltration = false, colouring = false, bottlingAbv = null, dilution = false;
@@ -37100,17 +37107,7 @@ window._isAdHocJob = function(j) {
   }
 
   async function _nextJobId() {
-    try {
-      var existingIds = await window.db.select('jobs', '?select=id&order=id.desc&limit=80') || [];
-      var maxNum = 0;
-      existingIds.forEach(function(r) {
-        var m = String(r.id).match(/JOB-(\d+)/i);
-        if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
-      });
-      return 'JOB-' + (maxNum + 1);
-    } catch (e) {
-      return 'JOB-' + Date.now();
-    }
+    return window.nextJobId();
   }
 
   async function _fillClientSelect(selected) {
@@ -41293,19 +41290,8 @@ window.saveAdjModal = async function() {
     btn.disabled = true; btn.textContent = 'Saving…';
 
     try {
-      // Auto-generate next JOB-XXX id
       var nextJobId;
-      if (!editId) {
-        try {
-          var existingIds = await supaGet('jobs?select=id&order=id.desc&limit=50');
-          var maxNum = 0;
-          existingIds.forEach(function(r) {
-            var m = String(r.id).match(/JOB-(\d+)/i);
-            if (m) maxNum = Math.max(maxNum, parseInt(m[1]));
-          });
-          nextJobId = 'JOB-' + String(maxNum + 1);
-        } catch(e) { nextJobId = 'JOB-' + Date.now(); }
-      }
+      if (!editId) nextJobId = await window.nextJobId();
 
       var isLiquidTarget = document.getElementById('njm-target-liquid').checked;
 
