@@ -30,7 +30,7 @@ Sidebar sections and pages:
    • QMS — hub (search + grouped cards). Groups: Quality Events, Health, Safety & Hygiene, Audits & Certification, Documents, Training
    • Glass Breakage (#qms-glass) — live 5.02.09 v002 report log. Every report is stored (never deleted) with who logged it and a history trail. Quality sign-off locks the report.
    • Calibration Logs (#qms-calibration) — index of equipment logs. Open Anton Paar water test to view or add entries. A site-wide daily water test is required before an on-line production check (ABV). Fail still allows ABV and emails quality_compliance. Every row is kept (never deleted).
-   • General SOPs (#qms-sops) — controlled document register. Glass Breakage Procedure 5.05.06 v001 is published. Revisions increment (v002, v003…) and stay Draft until Published. Revision number is always shown.
+   • General SOPs (#qms-sops) — controlled documents in six department folders: 1 Finance, 2 Sales, 3 Compliance, 4 E-commerce, 5 Production, 6 People. A code such as 5.05.06 is the department, then the numbered folder, then the procedure. Glass Breakage Procedure 5.05.06 v001 is Folder 5 → Folder 05. Editors can upload a PDF or Word file as a draft on that page. Revisions increment (v002, v003…) and stay Draft until Published. Revision number is always shown.
 4. Sales & CRM:
    • Customers — client company records with lifecycle pills and country filter pills, opens Customer 360
    • Pipeline — deals in Kanban or list view (8 stages, drag-drop with stage gate)
