@@ -11164,6 +11164,110 @@ const FACTORY_RATE   = 300;  // € per hour
     set('pb-gross-total', money(grossPerBottle * qty));
   }
 
+  // Same number as the yellow Gross Profit bar, from a saved quote's data
+  // (the object _getState writes). Does not read the page, so the Saved
+  // Quotes list can show it without loading the quote into the calculator.
+  function quoteGrossMarginPct(s) {
+    if (typeof s === 'string') {
+      try { s = JSON.parse(s); } catch (e) { return null; }
+    }
+    if (!s || typeof s !== 'object') return null;
+
+    function num(v) {
+      if (v == null || v === '') return null;
+      var n = parseFloat(v);
+      return isNaN(n) ? null : n;
+    }
+    var defaultOn = {
+      bottling: true, liquid: true, bottle: true, cork: true, ropp: true,
+      frontlabel: true, backlabel: true
+    };
+    function included(id) {
+      var flag = s['cb_' + id];
+      if (flag === undefined || flag === null) return !!defaultOn[id];
+      return flag === true || flag === 'true';
+    }
+
+    var qty = parseInt(s.runQty, 10);
+    var bph = parseFloat(s.bottlesPerHour);
+    var tier = null;
+    var tierIdx = -1;
+    if (!isNaN(qty) && qty > 0) {
+      for (var ti = 0; ti < RUN_TIERS.length; ti++) {
+        if (qty >= RUN_TIERS[ti].min && qty < RUN_TIERS[ti].max) {
+          tier = RUN_TIERS[ti];
+          tierIdx = ti;
+          break;
+        }
+      }
+    }
+    var labelKeys = ['0.81', '0.72', '0.66', '0.62'];
+    var labelTier = tierIdx >= 0 ? LABEL_TIERS[labelKeys[tierIdx]] : null;
+
+    var bottling = null;
+    if (!isNaN(qty) && qty > 0 && !isNaN(bph) && bph > 0) {
+      bottling = (FACTORY_RATE / bph) + (SETUP_COST / qty);
+    }
+
+    function labelPrice(field, side) {
+      if (s[field] != null && s[field] !== '') {
+        var v = parseFloat(s[field]);
+        if (!isNaN(v)) return v;
+      }
+      return labelTier ? labelTier[side] : null;
+    }
+    function roppPrice() {
+      if (!s.roppSize) return null;
+      if (s.roppManualPrice != null && s.roppManualPrice !== '') {
+        var manual = num(s.roppManualPrice);
+        if (manual != null) return manual;
+      }
+      if (!s.roppType) return null;
+      return num(s.roppType);
+    }
+    function liquidPrice() {
+      var lpa = num(s.lpaPrice);
+      var abv = num(s.bottleAbv);
+      var vol = num(s.bottleVolume);
+      if (lpa == null || abv == null || vol == null) return null;
+      var lpasPerBottle = (vol * abv) / 100000;
+      var lpaCost = lpa * lpasPerBottle;
+      if (!tier) return lpaCost;
+      var totalLpas = lpasPerBottle * tier.midpoint;
+      var ibcsNeeded = Math.ceil(totalLpas / LPAS_PER_IBC);
+      return lpaCost + (ibcsNeeded * IBC_TRANSPORT) / tier.midpoint;
+    }
+
+    var prices = {
+      bottling: bottling,
+      liquid: liquidPrice(),
+      bottle: (s.bottleType == null || s.bottleType === '') ? null : num(s.bottleType),
+      cork: num(s.corkPrice),
+      ropp: roppPrice(),
+      heatshrink: num(s.heatshrinkPrice),
+      shipper: num(s.shipperPrice),
+      divider: num(s.dividerPrice),
+      frontlabel: labelPrice('frontlabelPrice', 'front'),
+      backlabel: labelPrice('backlabelPrice', 'back'),
+      monocarton: num(s.monocartonPrice),
+      necklabel: num(s.necklabelPrice),
+      outercaselabel: num(s.outercaselabelPrice)
+    };
+
+    var total = 0;
+    Object.keys(prices).forEach(function(id) {
+      if (included(id) && prices[id] != null) total += prices[id];
+    });
+
+    var marginPct = parseFloat(s.marginPct) || 0;
+    if (!(total > 0) || !(marginPct < 100)) return null;
+    var sellPrice = total / (1 - marginPct / 100);
+    if (!(sellPrice > 0)) return null;
+    var bottlingAdd = (included('bottling') && bottling != null && !isNaN(bottling)) ? bottling : 0;
+    var grossPerBottle = (sellPrice - total) + bottlingAdd;
+    return (grossPerBottle / sellPrice) * 100;
+  }
+
   updateSummary();
 
 // Expose all functions to window for inline event handlers
@@ -11187,6 +11291,7 @@ window.onBottleChange = onBottleChange;
 window.onRoppTypeChange = onRoppTypeChange;
 window.updateSummary = updateSummary;
 window.updateProfit = updateProfit;
+window.quoteGrossMarginPct = quoteGrossMarginPct;
 })();
 </script>
 <script>
@@ -12110,6 +12215,13 @@ window.runBomStockCheck = async function() {
       var CLIENTS = window.CLIENTS || [];
       var DEALS   = window.DEALS   || [];
 
+      // Yellow-bar gross profit %, not the Apply Margin figure on the right.
+      function _gmText(data) {
+        var pct = (typeof window.quoteGrossMarginPct === 'function') ? window.quoteGrossMarginPct(data) : null;
+        if (pct == null || isNaN(pct)) return '—';
+        return Number(pct).toFixed(1) + '% GM';
+      }
+
       // ── Apply filters (customer + status) ────────────────────────────
       // Filters are driven by the controls at the top of the modal body.
       var fState = (window._quoteFilterState = window._quoteFilterState || { search:'', customer:'', status:'' });
@@ -12231,6 +12343,7 @@ window.runBomStockCheck = async function() {
                      + '<span style="color:var(--gold);font-weight:700;min-width:32px;">v' + (v.version_num||1) + '</span>'
                      + '<span style="flex:1;color:var(--muted);">' + vd + (v.created_by ? ' &middot; ' + esc(v.created_by) : '') + vSent + '</span>'
                      + '<span style="color:var(--white);font-weight:700;font-variant-numeric:tabular-nums;">' + esc(v.sell_price||'—') + '</span>'
+                     + '<span style="color:var(--gold);font-weight:800;font-variant-numeric:tabular-nums;font-size:11px;min-width:64px;text-align:right;">' + esc(_gmText(v.data)) + '</span>'
                      + '<button onclick="event.stopPropagation();window.loadQuote(\'' + esc(v.id) + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:10px;font-weight:700;padding:3px 9px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;" onmouseover="this.style.borderColor=\'var(--gold)\';this.style.color=\'var(--gold)\'" onmouseout="this.style.borderColor=\'var(--navy-border)\';this.style.color=\'var(--muted)\'">Load</button>'
                      + '</div>';
               }).join('')
@@ -12253,6 +12366,7 @@ window.runBomStockCheck = async function() {
           + '<div style="text-align:right;white-space:nowrap;min-width:70px;">'
           +   '<div style="font-size:1.5em;font-weight:900;color:var(--gold);font-family:Lato,sans-serif;">' + esc(r.sell_price||'—') + '</div>'
           +   '<div style="font-size:9px;color:var(--muted);letter-spacing:0.04em;margin-top:2px;">ex VAT/excise/ship</div>'
+          +   '<div style="font-size:12px;font-weight:800;color:var(--gold);letter-spacing:0.02em;margin-top:4px;font-variant-numeric:tabular-nums;">' + esc(_gmText(r.data)) + '</div>'
           + '</div>'
           + '<div style="display:flex;flex-direction:column;gap:6px;margin-left:8px;">'
           + '<button onclick="window.loadQuote(\'' + esc(r.id) + '\')" style="background:var(--gold);border:none;color:var(--navy);font-size:11px;font-weight:700;padding:5px 12px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;letter-spacing:0.06em;white-space:nowrap;">Load</button>'
