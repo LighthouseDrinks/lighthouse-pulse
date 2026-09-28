@@ -12393,25 +12393,55 @@ window.runBomStockCheck = async function() {
       var rows = await window.db.select('pricing_quotes', '?id=eq.' + id);
       if (!rows || !rows[0] || !rows[0].data) { window.toast('Quote not found.', 'error'); return; }
       var q = rows[0];
+      // Hold the saved customer until the dropdown is rebuilt. Opening the
+      // pricing tool repopulates that list, and without this the picker
+      // comes back empty even though the quote was filed under someone.
+      window._quoteRestoreCustomer = {
+        clientId: q.client_id || '',
+        dealId: q.deal_id || '',
+        customerName: String(q.customer || (q.data && q.data.customerName) || '').trim()
+      };
+      window._suppressQuoteClientPopulate = true;
       window.closeSavedQuotes();
       if (window.showToolCalc) window.showToolCalc('pricing');
       var bottlesReady = window._ensurePricingBottles ? window._ensurePricingBottles() : Promise.resolve();
       bottlesReady.then(function() {
         setTimeout(function(){
-          _setState(q.data);
-          // Mark this quote as the "currently loaded" one so Save knows
-          // it can revise instead of creating a fresh root.
-          window._loadedQuote = {
-            id: q.id,
-            rootId: q.parent_quote_id || q.id,
-            name: q.name || '',
-            versionNum: q.version_num || 1
-          };
-          _updateSaveButtonsForLoaded();
+          var done = Promise.resolve();
+          try {
+            _setState(q.data);
+            // Mark this quote as the "currently loaded" one so Save knows
+            // it can revise instead of creating a fresh root.
+            window._loadedQuote = {
+              id: q.id,
+              rootId: q.parent_quote_id || q.id,
+              name: q.name || '',
+              versionNum: q.version_num || 1
+            };
+            _updateSaveButtonsForLoaded();
+            var restore = window._quoteRestoreCustomer || {};
+            if (typeof window._populateQuoteClientDropdown === 'function') {
+              done = window._populateQuoteClientDropdown(restore.clientId, {
+                dealId: restore.dealId || '',
+                customerName: restore.customerName || '',
+                fromRestore: true
+              });
+            }
+          } catch (err) {
+            console.error('[Quotes] restore customer failed:', err);
+          }
+          Promise.resolve(done).then(function(){}, function(){}).then(function(){
+            window._quoteRestoreCustomer = null;
+            // The pricing-tool opener also refreshes the picker shortly after
+            // show. Keep that refresh from running until this selection is in.
+            setTimeout(function(){ window._suppressQuoteClientPopulate = false; }, 400);
+          });
         }, 60);
       });
       window.toast('Quote "' + (q.name||'') + '" loaded — Save creates v' + ((q.version_num||1) + 1) + '.', 'success');
     } catch(e) {
+      window._suppressQuoteClientPopulate = false;
+      window._quoteRestoreCustomer = null;
       console.error('[Quotes] load error:', e);
       window.toast('Error loading quote: ' + (e.message||''), 'error');
     }
@@ -21246,7 +21276,8 @@ window.loadBoms = async function initBoms() {
   // Populate the pricing "Link to Customer" dropdown whenever the pricing
   // tool is opened. We hook via a setTimeout poll because the tool might
   // be opened multiple times and we want fresh customer data.
-  window._populateQuoteClientDropdown = async function(preselectId) {
+  window._populateQuoteClientDropdown = async function(preselectId, opts) {
+    opts = opts || {};
     var sel = document.getElementById('quoteClientId');
     if (!sel) return;
 
@@ -21276,13 +21307,27 @@ window.loadBoms = async function initBoms() {
     }
 
     clients.sort(function(a,b){ return (a.company||'').localeCompare(b.company||''); });
-    var current = preselectId || sel.value;
+    // A loaded quote must select ITS customer. Falling back to whatever was
+    // already in the picker would keep the previous quote's customer, or blank.
+    var current = opts.fromRestore ? (preselectId || '') : (preselectId || sel.value);
     sel.innerHTML = '<option value="">— Pick a customer —</option>' + clients.map(function(c){
       var label = c.company || c.id;
       return '<option value="' + c.id + '">' + label.replace(/</g,'&lt;') + '</option>';
     }).join('');
     if (current) sel.value = current;
-    if (typeof window._onQuoteClientChange === 'function') window._onQuoteClientChange();
+    // Older quotes may only have the customer name, not a client id.
+    var customerName = String(opts.customerName || '').trim().toLowerCase();
+    if (customerName && (!current || sel.value !== current)) {
+      for (var i = 0; i < sel.options.length; i++) {
+        if ((sel.options[i].text || '').trim().toLowerCase() === customerName) {
+          sel.selectedIndex = i;
+          break;
+        }
+      }
+    }
+    if (typeof window._onQuoteClientChange === 'function') {
+      await window._onQuoteClientChange({ dealId: opts.dealId || '', fromRestore: !!opts.fromRestore });
+    }
   };
 
   // Quick-add a customer from inside the pricing tool without navigating away.
@@ -21324,7 +21369,9 @@ window.loadBoms = async function initBoms() {
     setTimeout(tick, 800);
   };
 
-  window._onQuoteClientChange = async function() {
+  window._onQuoteClientChange = async function(opts) {
+    opts = opts || {};
+    var seq = (window._quoteClientChangeSeq = (window._quoteClientChangeSeq || 0) + 1);
     var sel     = document.getElementById('quoteClientId');
     var dealSel = document.getElementById('quoteDealId');
     var nameInp = document.getElementById('customerName');
@@ -21347,11 +21394,14 @@ window.loadBoms = async function initBoms() {
     dealSel.innerHTML = '<option value="">— No deal —</option><option value="">Loading…</option>';
     try {
       var rows = await window.db.select('deals', '?client_id=eq.' + clientId + '&order=created_at.desc');
-      var opts = '<option value="">— No deal —</option>' + (rows||[]).map(function(d){
+      if (seq !== window._quoteClientChangeSeq) return;
+      var dealOpts = '<option value="">— No deal —</option>' + (rows||[]).map(function(d){
         return '<option value="' + d.id + '">' + d.id + ' · ' + (d.name||'').replace(/</g,'&lt;') + '</option>';
       }).join('');
-      dealSel.innerHTML = opts;
+      dealSel.innerHTML = dealOpts;
+      if (opts.dealId) dealSel.value = opts.dealId;
     } catch(e) {
+      if (seq !== window._quoteClientChangeSeq) return;
       dealSel.innerHTML = '<option value="">— No deal —</option>';
     }
   };
@@ -21377,7 +21427,10 @@ window.loadBoms = async function initBoms() {
       var r = orig.apply(this, arguments);
       if (name === 'pricing') {
         setTimeout(function(){
-          window._populateQuoteClientDropdown();
+          // loadQuote restores the customer itself. A second refresh here
+          // was rebuilding the picker before that selection landed, which
+          // left it on "Pick a customer".
+          if (!window._suppressQuoteClientPopulate) window._populateQuoteClientDropdown();
           if (window._ensurePricingBottles) window._ensurePricingBottles();
         }, 150);
       }
