@@ -22392,7 +22392,7 @@ window.loadBoms = async function initBoms() {
 <div id="task-detail-overlay" style="display:none;position:fixed;top:0;right:0;bottom:0;width:520px;max-width:100vw;background:var(--navy-card);border-left:1px solid var(--navy-border);box-shadow:-16px 0 40px rgba(0,0,0,0.45);z-index:260;flex-direction:column;">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:18px 22px;border-bottom:1px solid var(--navy-border);gap:10px;">
     <div style="min-width:0;flex:1;">
-      <div style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;color:var(--muted);font-weight:700;">Task</div>
+      <div id="td-kicker" style="font-size:10px;letter-spacing:0.09em;text-transform:uppercase;color:var(--muted);font-weight:700;">Task</div>
       <div id="td-title" style="font-size:17px;font-weight:700;color:var(--white);margin-top:4px;word-break:break-word;">&mdash;</div>
       <div id="td-ctx" style="font-size:11px;color:var(--gold);margin-top:4px;"></div>
     </div>
@@ -22994,11 +22994,28 @@ window.loadBoms = async function initBoms() {
   // ── Task quick-complete toggle ────────────────────────────────────────
   window.toggleTaskComplete = async function(taskId, ev){
     if (ev) ev.stopPropagation();
-    var t = TASKS.find(function(x){ return x.id === taskId; }); if (!t) return;
     // Drop concurrent invocations (e.g. rapid double-click/tap) so a single
     // completion can't create duplicate PATCHes / task_completed notifications.
     if (_taskToggleInFlight[taskId]) return;
     _taskToggleInFlight[taskId] = true;
+    var t = TASKS.find(function(x){ return x.id === taskId; });
+    if (!t) {
+      // The side panel can show a task that isn't in the My Tasks cache
+      // (opened from a notification). Without this lookup, Mark complete
+      // returns immediately and the panel never switches to Reopen.
+      try {
+        var fetched = await db.select('job_tasks', '?id=eq.'+encodeURIComponent(taskId)+'&limit=1');
+        if (fetched && fetched[0]) {
+          t = fetched[0];
+          TASKS.unshift(t);
+        }
+      } catch(_) {}
+    }
+    if (!t) {
+      delete _taskToggleInFlight[taskId];
+      window.lpAlert && window.lpAlert('Task not found.');
+      return;
+    }
     var done = !t.completed_at;
     // Reopening a completed task is deliberate + audited: confirm first so an
     // accidental tap on the completion circle can't silently undo completion.
@@ -23016,10 +23033,13 @@ window.loadBoms = async function initBoms() {
     // bypassed re-entry reads the updated state.
     var prevState = { completed_at: t.completed_at, status: t.status, completed_by: t.completed_by };
     Object.assign(t, patch);
+    paintTaskDetailStatus(t);
     try {
       await db.update('job_tasks', '?id=eq.'+encodeURIComponent(taskId), patch);
       updateMyTasksBadge(); renderMyTasks();
+      paintTaskDetailStatus(t);
       if (window._c360CompanyId) window.loadCompanyTasks && window.loadCompanyTasks(window._c360CompanyId);
+      window.toast && window.toast(done ? 'Task completed' : 'Task reopened', 'success');
 
       // Notify creator + watchers on completion
       if (done) {
@@ -23136,6 +23156,7 @@ window.loadBoms = async function initBoms() {
     } catch(e) {
       Object.assign(t, prevState); // roll back optimistic patch
       updateMyTasksBadge(); renderMyTasks();
+      paintTaskDetailStatus(t);
       window.lpAlert && window.lpAlert('Could not update task: ' + (e.message||e));
     } finally {
       delete _taskToggleInFlight[taskId];
@@ -23145,6 +23166,31 @@ window.loadBoms = async function initBoms() {
   // ── Task detail side-panel ────────────────────────────────────────────
   var _tdCurrentId = null;
 
+  function paintTaskDetailStatus(t){
+    if (!t || _tdCurrentId !== t.id) return;
+    var done = !!t.completed_at;
+    var kicker = document.getElementById('td-kicker');
+    if (kicker) {
+      kicker.textContent = done ? 'Task completed' : 'Task';
+      kicker.style.color = done ? 'var(--green)' : 'var(--muted)';
+    }
+    var title = document.getElementById('td-title');
+    if (title) title.style.textDecoration = done ? 'line-through' : 'none';
+    var banner = document.getElementById('td-status-banner');
+    if (banner) {
+      banner.innerHTML = done
+        ? '<div style="margin-bottom:14px;padding:10px 12px;background:rgba(61,186,120,0.12);border:1px solid rgba(61,186,120,0.35);border-radius:4px;color:var(--green);font-size:12px;font-weight:700;">Task completed'
+          + (t.completed_at ? ' <span style="font-weight:500;color:var(--text);">· ' + fmtRelative(t.completed_at) + '</span>' : '')
+          + '</div>'
+        : '';
+    }
+    var btn = document.getElementById('td-complete-btn');
+    if (btn) {
+      btn.className = 'btn ' + (done ? 'btn-outline' : 'btn-gold');
+      btn.innerHTML = done ? '&#8592; Reopen' : '&check; Mark complete';
+    }
+  }
+
   window.openTaskDetail = async function(taskId){
     await loadAppUsers();
     _tdCurrentId = taskId;
@@ -23152,7 +23198,10 @@ window.loadBoms = async function initBoms() {
     if (!t) {
       try {
         var rows = await db.select('job_tasks', '?id=eq.'+encodeURIComponent(taskId)+'&limit=1');
-        if (rows && rows[0]) { t = rows[0]; }
+        if (rows && rows[0]) {
+          t = rows[0];
+          TASKS.unshift(t);
+        }
       } catch(_){}
     }
     if (!t) { window.lpAlert && window.lpAlert('Task not found.'); return; }
@@ -23171,8 +23220,9 @@ window.loadBoms = async function initBoms() {
     var canEdit = t.created_by === meId() || isAssignee;
 
     body.innerHTML = ''
+      + '<div id="td-status-banner"></div>'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">'
-      +   '<button onclick="window.toggleTaskComplete(\'' + t.id + '\')" class="btn ' + (done?'btn-outline':'btn-gold') + '" style="font-size:12px;padding:7px 14px;">' + (done?'&#8592; Reopen':'&check; Mark complete') + '</button>'
+      +   '<button id="td-complete-btn" onclick="window.toggleTaskComplete(\'' + t.id + '\')" class="btn ' + (done?'btn-outline':'btn-gold') + '" style="font-size:12px;padding:7px 14px;">' + (done?'&#8592; Reopen':'&check; Mark complete') + '</button>'
       +   (canEdit ? '<button onclick="window.openTaskModal(\'' + t.id + '\')" class="btn btn-outline" style="font-size:12px;padding:7px 14px;">Edit</button>' : '')
       +   (t.sample_id ? '<button onclick="window.openSampleDetail(\'' + esc(t.sample_id) + '\')" class="btn btn-outline" style="font-size:12px;padding:7px 14px;">Open Sample</button>'
                        + '<button onclick="window.printSamplePrepSheet(\'' + esc(t.sample_id) + '\')" class="btn btn-outline" style="font-size:12px;padding:7px 14px;">&#128424; Prep Sheet</button>' : '')
@@ -23216,6 +23266,7 @@ window.loadBoms = async function initBoms() {
 
     document.getElementById('task-detail-overlay').style.display = 'flex';
     document.getElementById('td-comment-input').value = '';
+    paintTaskDetailStatus(t);
     loadComments(taskId);
   };
 
