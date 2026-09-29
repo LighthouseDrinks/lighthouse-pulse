@@ -8,7 +8,7 @@
 <title>Lighthouse Drinks — Operations Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700;900&family=Merriweather:ital,wght@0,300;0,400;0,700;1,300&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=pricing-bottles-1">
+<link rel="stylesheet" href="style.css?v=dry-goods-pricing-1">
 <link rel="stylesheet" href="mobile.css">
 <script>
 // Synchronous session check — runs before body paints.
@@ -11314,9 +11314,16 @@ window.showToolCalc = function(name) {
   // tools that have their own outputs (e.g. the Shipper & Pallet Planner exports
   // its own PDF and has nothing to save into the quote store).
   var quoteBar = document.getElementById('tools-quote-bar');
-  if (quoteBar) quoteBar.style.display = (name === 'shipper') ? 'none' : 'flex';
+  var ownOutput = (name === 'shipper' || name === 'drygoods');
+  if (quoteBar) quoteBar.style.display = ownOutput ? 'none' : 'flex';
+  var quoteBanner = document.getElementById('quote-loaded-banner');
+  if (quoteBanner) {
+    if (ownOutput) quoteBanner.style.display = 'none';
+    else if (name === 'pricing' && window._updateSaveButtonsForLoaded) window._updateSaveButtonsForLoaded();
+  }
   if (name === 'supplychain' && window._populateBomCheckPicker) window._populateBomCheckPicker();
   if (name === 'shipper' && window._initShipperPlanner) window._initShipperPlanner();
+  if (name === 'drygoods' && window._dgOpen) window._dgOpen();
 };
 
 window.backToToolsGrid = function() {
@@ -11352,6 +11359,673 @@ window._bomCheckComponentFields = [
   ['giftBoxLabelSkuId',   'Gift Box Front Label'],
   ['giftBoxBackLabelSkuId', 'Gift Box Back Label']
 ];
+
+// DG_COMPUTE_START
+window._dgCompute = function(input) {
+  function num(v) {
+    if (v === '' || v === null || v === undefined) return null;
+    var n = typeof v === 'number' ? v : parseFloat(v);
+    return isNaN(n) ? null : n;
+  }
+  function money(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
+  function unit6(n) { return Math.round((n + Number.EPSILON) * 1e6) / 1e6; }
+  function wholeUp(n) {
+    var nearest = Math.round(n);
+    if (Math.abs(n - nearest) < 1e-6) return nearest;
+    return Math.ceil(n);
+  }
+  var price = num(input.supplierPrice);
+  var qty = num(input.quantity);
+  var margin = num(input.marginPct);
+  var overage = num(input.overagePct);
+  var transport = num(input.transport);
+  var tooling = num(input.tooling);
+  var moq = num(input.moq);
+  var bpc = num(input.bottlesPerCase);
+  var unit = input.priceUnit || 'each';
+  var toolingMode = input.toolingMode === 'separate' ? 'separate' : 'included';
+  var transportMode = input.transportMode === 'per_unit' ? 'per_unit' : 'order';
+  if (price === null) return { ok: false, error: 'Enter the supplier price.' };
+  if (price < 0) return { ok: false, error: 'Supplier price cannot be negative.' };
+  if (qty === null) return { ok: false, error: 'Enter the quantity.' };
+  if (!(qty > 0)) return { ok: false, error: 'Quantity must be greater than zero.' };
+  if (margin === null) margin = 30;
+  if (margin < 0 || margin > 80) return { ok: false, error: 'Margin must be between 0 and 80%.' };
+  if (overage === null) overage = 0;
+  if (overage < 0 || overage > 100) return { ok: false, error: 'Overage must be between 0 and 100%.' };
+  if (transport === null) transport = 0;
+  if (transport < 0) return { ok: false, error: 'Transport cannot be negative.' };
+  if (tooling === null) tooling = 0;
+  if (tooling < 0) return { ok: false, error: 'Tooling cannot be negative.' };
+  if (moq !== null && moq <= 0) moq = null;
+  if (unit === 'per_1000') {
+    // price is quoted per thousand pieces
+  } else if (unit === 'per_case') {
+    if (!(bpc > 0)) return { ok: false, error: 'Enter bottles per case.' };
+  } else {
+    unit = 'each';
+  }
+  var perPiece = unit === 'per_1000' ? price / 1000 : (unit === 'per_case' ? price / bpc : price);
+  var unitsPurchased = wholeUp(qty * (1 + overage / 100));
+  if (!(unitsPurchased > 0)) unitsPurchased = wholeUp(qty);
+  var materialTotal = unitsPurchased * perPiece;
+  var transportTotal = transportMode === 'per_unit' ? transport * unitsPurchased : transport;
+  var toolingInCost = toolingMode === 'included' ? tooling : 0;
+  var landedTotal = materialTotal + transportTotal + toolingInCost;
+  var landedPer = landedTotal / qty;
+  var sellPer = landedPer / (1 - margin / 100);
+  var componentTotal = money(sellPer * qty);
+  var toolingOnQuote = (toolingMode === 'separate' && tooling > 0) ? money(tooling) : 0;
+  var customerTotal = money(componentTotal + toolingOnQuote);
+  var profit = money(customerTotal - (materialTotal + transportTotal + tooling));
+  var profitPct = customerTotal > 0 ? (profit / customerTotal) * 100 : 0;
+  return {
+    ok: true,
+    priceUnit: unit,
+    supplierPerPiece: perPiece,
+    unitsPurchased: unitsPurchased,
+    materialTotal: materialTotal,
+    transportTotal: transportTotal,
+    tooling: tooling,
+    toolingMode: toolingMode,
+    transportMode: transportMode,
+    landedPerPiece: landedPer,
+    sellPerRaw: sellPer,
+    sellPerPiece: unit6(sellPer),
+    componentTotal: componentTotal,
+    toolingOnQuote: toolingOnQuote,
+    customerTotal: customerTotal,
+    profit: profit,
+    profitPct: profitPct,
+    marginPct: margin,
+    moqShort: !!(moq && unitsPurchased < moq),
+    moq: moq,
+    moqValue: moq ? moq * perPiece : 0,
+    mentionsTooling: tooling > 0
+  };
+};
+// DG_COMPUTE_END
+
+(function() {
+  var CASE_KEYS = { shipperSkuId: true, dividerSkuId: true };
+  var _dg = {
+    clients: [],
+    quotes: [],
+    componentKey: 'bottleSkuId',
+    toolingMode: 'included',
+    transportMode: 'order',
+    lastSavedId: null,
+    lastFingerprint: '',
+    openedId: null,
+    busy: false,
+    bound: false
+  };
+  window._dgState = _dg;
+
+  function esc(s) { return window.escapeHtml ? window.escapeHtml(s) : String(s == null ? '' : s); }
+  function el(id) { return document.getElementById(id); }
+  function val(id) { var n = el(id); return n ? n.value : ''; }
+  function types() { return window._bomCheckComponentFields || []; }
+  function labelFor(key) {
+    var list = types();
+    for (var i = 0; i < list.length; i++) if (list[i][0] === key) return list[i][1];
+    return key || 'Component';
+  }
+  function isCase(key) { return !!CASE_KEYS[key || _dg.componentKey]; }
+  function money(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
+  function euro(n, dp) {
+    var v = Number(n);
+    if (!isFinite(v)) v = 0;
+    return '€' + v.toLocaleString('en-IE', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  }
+  function roundTo(n, dp) {
+    var f = Math.pow(10, dp);
+    return Math.round((Number(n) + Number.EPSILON) * f) / f;
+  }
+  function euroUnit(n, qty) {
+    var abs = Math.abs(Number(n) || 0);
+    var dp = abs >= 20 ? 2 : (abs < 0.01 ? 6 : 4);
+    if (qty && Math.abs(money(roundTo(n, dp) * qty) - money(n * qty)) > 0.01) dp = Math.min(6, dp + 2);
+    return euro(n, dp);
+  }
+  function qtyText(n) { return Number(n || 0).toLocaleString('en-IE', { maximumFractionDigits: 3 }); }
+  function formatDate(iso) {
+    if (!iso) return '';
+    var p = String(iso).slice(0, 10).split('-');
+    if (p.length !== 3) return String(iso);
+    return p[2] + '/' + p[1] + '/' + p[0];
+  }
+  function shortDate(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-IE');
+  }
+  function blankToNull(s) {
+    var t = String(s || '').trim();
+    return t ? t : null;
+  }
+  function selectedClient() {
+    var id = val('dgp-client');
+    for (var i = 0; i < _dg.clients.length; i++) if (_dg.clients[i].id === id) return _dg.clients[i];
+    return null;
+  }
+  function readInput() {
+    return {
+      supplierPrice: val('dgp-price'),
+      quantity: val('dgp-qty'),
+      marginPct: val('dgp-margin'),
+      overagePct: val('dgp-overage'),
+      transport: val('dgp-transport'),
+      tooling: val('dgp-tooling'),
+      moq: val('dgp-moq'),
+      bottlesPerCase: val('dgp-bpc'),
+      priceUnit: val('dgp-unit'),
+      toolingMode: _dg.toolingMode,
+      transportMode: _dg.transportMode
+    };
+  }
+  function fingerprint() {
+    var c = selectedClient();
+    return JSON.stringify({
+      client: c ? c.id : '',
+      component: _dg.componentKey,
+      desc: val('dgp-desc').trim(),
+      input: readInput(),
+      lead: val('dgp-lead').trim(),
+      valid: val('dgp-valid'),
+      note: val('dgp-note').trim()
+    });
+  }
+  function blockReason(calc) {
+    if (!val('dgp-client')) return 'Pick a customer first.';
+    var desc = val('dgp-desc').trim();
+    if (!desc) return 'Add a description.';
+    if (desc.length > 200) return 'Description must be 200 characters or less.';
+    if (val('dgp-lead').trim().length > 80) return 'Lead time must be 80 characters or less.';
+    if (val('dgp-note').length > 2000) return 'The customer note is too long.';
+    if (!calc || !calc.ok) return (calc && calc.error) || 'Complete the price first.';
+    return '';
+  }
+  function paintSwitch(id, attr, value) {
+    var box = el(id);
+    if (!box) return;
+    box.querySelectorAll('button').forEach(function(b) {
+      b.classList.toggle('is-on', b.getAttribute(attr) === value);
+    });
+  }
+  function toolingNote() {
+    var note = el('dgp-tooling-note');
+    if (!note) return;
+    note.textContent = _dg.toolingMode === 'separate'
+      ? 'The unit price is supplier cost plus transport, then margin. Tooling is passed through at the supplier amount, with no margin.'
+      : 'Tooling is spread across the quantity, added to our cost, then margin is applied. The customer is told tooling is included.';
+  }
+  function syncUnitOptions() {
+    var sel = el('dgp-unit');
+    if (!sel) return;
+    var current = sel.value || 'each';
+    var html = '<option value="each">Per piece</option><option value="per_1000">Per 1,000</option>';
+    if (isCase()) html += '<option value="per_case">Per case</option>';
+    sel.innerHTML = html;
+    if (current === 'per_case' && !isCase()) current = 'each';
+    sel.value = current;
+    var wrap = el('dgp-bpc-wrap');
+    if (wrap) wrap.style.display = sel.value === 'per_case' ? '' : 'none';
+    var priceLabel = el('dgp-price-label');
+    var qtyLabel = el('dgp-qty-label');
+    if (priceLabel) {
+      priceLabel.textContent = sel.value === 'per_1000' ? 'Supplier price (€ per 1,000)'
+        : (sel.value === 'per_case' ? 'Supplier price (€ per case)' : 'Supplier price (€ per piece)');
+    }
+    if (qtyLabel) qtyLabel.textContent = sel.value === 'per_case' ? 'Quantity (bottles)' : 'Quantity (pieces)';
+  }
+  function renderTypes() {
+    var host = el('dgp-types');
+    if (!host) return;
+    host.innerHTML = types().map(function(t) {
+      var n = _dg.quotes.filter(function(q) { return q.component_key === t[0]; }).length;
+      return '<button type="button" class="dgp-type' + (t[0] === _dg.componentKey ? ' is-on' : '') + '" data-component="' + esc(t[0]) + '">'
+        + '<span>' + esc(t[1]) + '</span>'
+        + (n ? '<span class="dgp-count">' + n + '</span>' : '')
+        + '</button>';
+    }).join('');
+  }
+  function renderSaved() {
+    var host = el('dgp-saved');
+    if (!host) return;
+    var label = labelFor(_dg.componentKey);
+    var rows = _dg.quotes.filter(function(q) { return q.component_key === _dg.componentKey; });
+    if (!val('dgp-client')) {
+      host.innerHTML = '<div class="dgp-saved-title">Saved prices</div><p class="dgp-note">Pick a customer to see prices saved for them.</p>';
+      return;
+    }
+    if (!rows.length) {
+      host.innerHTML = '<div class="dgp-saved-title">' + esc(label) + '</div><p class="dgp-note">No saved price for this component yet.</p>';
+      return;
+    }
+    host.innerHTML = '<div class="dgp-saved-title">' + esc(label) + '</div>' + rows.map(function(q) {
+      return '<button type="button" class="dgp-saved-item' + (q.id === _dg.openedId ? ' is-on' : '') + '" data-quote="' + esc(q.id) + '">'
+        + '<strong>' + esc(q.description || 'Price') + '</strong><br>'
+        + esc(shortDate(q.created_at)) + ' · ' + esc(qtyText(q.quantity)) + ' · ' + esc(euro(q.customer_total, 2))
+        + '</button>';
+    }).join('');
+  }
+  function renderResults() {
+    var calc = window._dgCompute(readInput());
+    var host = el('dgp-results');
+    var moq = el('dgp-moq-warn');
+    var reason = blockReason(calc);
+    ['dgp-save', 'dgp-pdf', 'dgp-email-open'].forEach(function(id) {
+      var b = el(id);
+      if (b) b.disabled = _dg.busy || !!reason;
+    });
+    if (!host) return calc;
+    if (!calc.ok) {
+      host.innerHTML = '<p class="dgp-note" style="margin:0;">' + esc(calc.error) + '</p>';
+      if (moq) moq.innerHTML = '';
+      return calc;
+    }
+    var eachWord = calc.priceUnit === 'per_case' ? 'bottle' : 'piece';
+    var lines = [
+      ['Supplier cost / ' + eachWord, euroUnit(calc.supplierPerPiece, calc.unitsPurchased)],
+      ['Units we buy', qtyText(calc.unitsPurchased)],
+      ['Material', euro(calc.materialTotal, 2)],
+      ['Transport', euro(calc.transportTotal, 2)],
+      ['Tooling', euro(calc.tooling, 2) + (calc.toolingMode === 'separate' ? ' · quoted separately' : ' · in the unit price')],
+      ['Landed cost / ' + eachWord, euroUnit(calc.landedPerPiece, Number(val('dgp-qty')))],
+      ['Sell price / ' + eachWord, euroUnit(calc.sellPerRaw, Number(val('dgp-qty')))],
+      ['Component total', euro(calc.componentTotal, 2)]
+    ];
+    if (calc.toolingOnQuote > 0) lines.push(['Tooling on the quote', euro(calc.toolingOnQuote, 2)]);
+    lines.push(['Margin on this price', calc.marginPct + '%']);
+    lines.push(['Customer total', euro(calc.customerTotal, 2)]);
+    lines.push(['Gross profit', euro(calc.profit, 2)]);
+    host.innerHTML = '<h3>' + esc(euro(calc.customerTotal, 2)) + '</h3>' + lines.map(function(row, i) {
+      var cls = row[0] === 'Customer total' ? ' dgp-total' : '';
+      return '<div class="dgp-line' + cls + '"><span>' + esc(row[0]) + '</span><span>' + esc(row[1]) + '</span></div>';
+    }).join('') + (reason ? '<p class="dgp-note">' + esc(reason) + '</p>' : '');
+    if (moq) {
+      moq.innerHTML = calc.moqShort
+        ? '<div class="dgp-warn">Quantity is below the supplier MOQ of ' + esc(qtyText(calc.moq))
+          + '. This unit price may not be available. At the supplier unit cost, before transport and tooling, that minimum is '
+          + esc(euro(calc.moqValue, 2)) + '.</div>'
+        : '';
+    }
+    return calc;
+  }
+  function refreshLabels() {
+    var title = el('dgp-component-title');
+    if (title) title.textContent = labelFor(_dg.componentKey);
+    syncUnitOptions();
+    toolingNote();
+    paintSwitch('dgp-tooling-switch', 'data-tooling', _dg.toolingMode);
+    paintSwitch('dgp-transport-switch', 'data-transport', _dg.transportMode);
+  }
+  function renderAll() {
+    refreshLabels();
+    renderTypes();
+    renderSaved();
+    renderResults();
+  }
+  function quoteMeta(calc) {
+    var client = selectedClient();
+    var qty = Number(val('dgp-qty'));
+    return {
+      clientName: client ? (client.name || client.id) : '',
+      componentLabel: labelFor(_dg.componentKey),
+      description: val('dgp-desc').trim(),
+      qtyText: qtyText(qty) + (calc.priceUnit === 'per_case' ? ' bottles' : ' pieces'),
+      unitText: euroUnit(calc.sellPerRaw, qty),
+      componentText: euro(calc.componentTotal, 2),
+      toolingText: euro(calc.toolingOnQuote, 2),
+      totalText: euro(calc.customerTotal, 2),
+      lead: val('dgp-lead').trim(),
+      valid: val('dgp-valid') ? formatDate(val('dgp-valid')) : '',
+      note: val('dgp-note').trim(),
+      dateText: new Date().toLocaleDateString('en-IE')
+    };
+  }
+  function buildPdf(calc) {
+    var jsPDFns = window.jspdf || window.jsPDF;
+    var Ctor = jsPDFns && (jsPDFns.jsPDF || jsPDFns);
+    if (!Ctor) throw new Error('PDF library is not loaded. Refresh the page and try again.');
+    var doc = new Ctor({ unit: 'mm', format: 'a4' });
+    var meta = quoteMeta(calc);
+    var y = 42;
+    doc.setFillColor(13, 27, 42);
+    doc.rect(0, 0, 210, 32, 'F');
+    doc.setTextColor(201, 168, 76);
+    doc.setFontSize(9);
+    doc.text('LIGHTHOUSE DRINKS', 16, 13);
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(16);
+    doc.text('Dry goods price', 16, 23);
+    function line(label, value) {
+      if (y > 260) { doc.addPage(); y = 20; }
+      doc.setFont(undefined, 'normal');
+      doc.setFontSize(11);
+      doc.setTextColor(90, 90, 90);
+      doc.text(label, 16, y);
+      doc.setFont(undefined, 'bold');
+      doc.setTextColor(20, 20, 20);
+      var lines = doc.splitTextToSize(String(value || '—'), 110);
+      doc.text(lines, 78, y);
+      y += Math.max(8, lines.length * 5 + 2);
+    }
+    line('Customer', meta.clientName);
+    line('Component', meta.componentLabel);
+    line('Description', meta.description);
+    line('Quantity', meta.qtyText);
+    line(calc.priceUnit === 'per_case' ? 'Price per bottle' : 'Price each', meta.unitText);
+    line('Component total', meta.componentText);
+    if (calc.mentionsTooling && calc.toolingMode === 'included') {
+      doc.setFont(undefined, 'normal');
+      doc.setFontSize(11);
+      doc.setTextColor(40, 40, 40);
+      doc.text('Tooling is included in the unit price.', 16, y);
+      y += 8;
+    }
+    if (calc.toolingOnQuote > 0) {
+      line('Tooling', meta.toolingText);
+      line('Total', meta.totalText);
+    }
+    if (meta.lead) line('Lead time', meta.lead);
+    if (meta.valid) line('Valid until', meta.valid);
+    if (meta.note) {
+      if (y > 240) { doc.addPage(); y = 20; }
+      doc.setFont(undefined, 'normal');
+      doc.setFontSize(10);
+      doc.setTextColor(60, 60, 60);
+      var noteLines = doc.splitTextToSize(meta.note, 178);
+      doc.text(noteLines, 16, y);
+      y += noteLines.length * 5 + 6;
+    }
+    if (y > 268) { doc.addPage(); y = 20; }
+    y += 4;
+    doc.setFont(undefined, 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(120, 120, 120);
+    doc.text('Ex VAT. Onward shipping and duty are excluded.', 16, y);
+    doc.text('Lighthouse Drinks  ·  ' + meta.dateText, 16, 287);
+    return doc;
+  }
+  function fileName() {
+    var client = selectedClient();
+    function slug(s) {
+      return String(s || 'price').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 40) || 'price';
+    }
+    return 'Dry-goods-price-' + slug(labelFor(_dg.componentKey)) + '-' + slug(client && client.name) + '.pdf';
+  }
+  function payload(calc) {
+    var client = selectedClient();
+    var unit = calc.priceUnit;
+    var user = window.CURRENT_USER || {};
+    return {
+      client_id: client.id,
+      component_key: _dg.componentKey,
+      component_label: labelFor(_dg.componentKey),
+      description: val('dgp-desc').trim(),
+      supplier_unit_price: parseFloat(val('dgp-price')),
+      price_unit: unit,
+      bottles_per_case: unit === 'per_case' ? parseInt(val('dgp-bpc'), 10) : null,
+      quantity: parseFloat(val('dgp-qty')),
+      transport_amount: parseFloat(val('dgp-transport') || '0') || 0,
+      transport_mode: _dg.transportMode,
+      tooling_cost: parseFloat(val('dgp-tooling') || '0') || 0,
+      tooling_mode: _dg.toolingMode,
+      margin_pct: calc.marginPct,
+      moq: calc.moq,
+      overage_pct: parseFloat(val('dgp-overage') || '0') || 0,
+      lead_time: blankToNull(val('dgp-lead')),
+      valid_until: blankToNull(val('dgp-valid')),
+      note: blankToNull(val('dgp-note')),
+      sell_unit_price: calc.sellPerPiece,
+      sell_component_total: calc.componentTotal,
+      customer_total: calc.customerTotal,
+      created_by: user.display_name || user.email || null
+    };
+  }
+  async function insertQuote(calc) {
+    var inserted = await window.db.insert('dry_goods_price_quotes', payload(calc));
+    var row = Array.isArray(inserted) ? inserted[0] : inserted;
+    if (!row || !row.id) throw new Error('Save did not return a price.');
+    _dg.lastSavedId = row.id;
+    _dg.lastFingerprint = fingerprint();
+    _dg.openedId = row.id;
+    return row;
+  }
+  async function loadClients() {
+    var rows = await window.db.select('clients', '?select=id,name,email&order=name.asc');
+    _dg.clients = rows || [];
+    var sel = el('dgp-client');
+    if (!sel) return;
+    var current = sel.value;
+    sel.innerHTML = '<option value="">— Pick a customer —</option>' + _dg.clients.map(function(c) {
+      return '<option value="' + esc(c.id) + '">' + esc(c.name || c.id) + '</option>';
+    }).join('');
+    if (current) sel.value = current;
+  }
+  var quoteSeq = 0;
+  async function loadQuotes() {
+    var seq = ++quoteSeq;
+    var id = val('dgp-client');
+    var rows = [];
+    if (id) {
+      rows = await window.db.select('dry_goods_price_quotes',
+        '?client_id=eq.' + encodeURIComponent(id) + '&select=id,component_key,description,sell_unit_price,customer_total,quantity,created_at,tooling_mode&order=created_at.desc&limit=100');
+    }
+    if (seq !== quoteSeq) return;
+    _dg.quotes = rows || [];
+    renderTypes();
+    renderSaved();
+  }
+  function showOpened(text) {
+    var banner = el('dgp-opened');
+    if (!banner) return;
+    if (!text) { banner.style.display = 'none'; banner.textContent = ''; return; }
+    banner.style.display = '';
+    banner.textContent = text;
+  }
+  async function openQuote(id) {
+    var rows = await window.db.select('dry_goods_price_quotes', '?id=eq.' + encodeURIComponent(id) + '&limit=1');
+    var row = rows && rows[0];
+    if (!row) { window.toast && window.toast('That price is no longer on file.', 'error'); return; }
+    _dg.componentKey = row.component_key;
+    _dg.toolingMode = row.tooling_mode === 'separate' ? 'separate' : 'included';
+    _dg.transportMode = row.transport_mode === 'per_unit' ? 'per_unit' : 'order';
+    if (el('dgp-client')) el('dgp-client').value = row.client_id;
+    refreshLabels();
+    if (el('dgp-unit')) el('dgp-unit').value = row.price_unit || 'each';
+    syncUnitOptions();
+    if (el('dgp-desc')) el('dgp-desc').value = row.description || '';
+    if (el('dgp-price')) el('dgp-price').value = row.supplier_unit_price;
+    if (el('dgp-qty')) el('dgp-qty').value = row.quantity;
+    if (el('dgp-bpc')) el('dgp-bpc').value = row.bottles_per_case || '';
+    if (el('dgp-transport')) el('dgp-transport').value = row.transport_amount || 0;
+    if (el('dgp-tooling')) el('dgp-tooling').value = row.tooling_cost || 0;
+    if (el('dgp-overage')) el('dgp-overage').value = row.overage_pct || 0;
+    if (el('dgp-moq')) el('dgp-moq').value = row.moq || '';
+    if (el('dgp-lead')) el('dgp-lead').value = row.lead_time || '';
+    if (el('dgp-valid')) el('dgp-valid').value = row.valid_until ? String(row.valid_until).slice(0, 10) : '';
+    if (el('dgp-note')) el('dgp-note').value = row.note || '';
+    if (el('dgp-margin')) el('dgp-margin').value = row.margin_pct;
+    if (el('dgp-margin-range')) el('dgp-margin-range').value = row.margin_pct;
+    _dg.openedId = row.id;
+    _dg.lastSavedId = row.id;
+    _dg.lastFingerprint = fingerprint();
+    refreshLabels();
+    renderTypes();
+    renderSaved();
+    renderResults();
+    showOpened('Opened a saved price from ' + (shortDate(row.created_at) || 'file') + '. Saving writes a new price and leaves this one on file.');
+  }
+  async function onSave() {
+    if (_dg.busy) return;
+    var calc = window._dgCompute(readInput());
+    var reason = blockReason(calc);
+    if (reason) { window.toast && window.toast(reason, 'error'); return; }
+    _dg.busy = true;
+    renderResults();
+    try {
+      await insertQuote(calc);
+      var client = selectedClient();
+      showOpened('Saved for ' + ((client && client.name) || 'this customer') + '. Saving again writes another price.');
+      window.toast && window.toast('Price saved.', 'success');
+      await loadQuotes();
+    } catch (e) {
+      window.logError && window.logError('dry goods price save', e);
+      window.toast && window.toast('Could not save: ' + (e.message || e), 'error');
+    } finally {
+      _dg.busy = false;
+      renderResults();
+    }
+  }
+  function onPdf() {
+    var calc = window._dgCompute(readInput());
+    var reason = blockReason(calc);
+    if (reason) { window.toast && window.toast(reason, 'error'); return; }
+    try {
+      buildPdf(calc).save(fileName());
+    } catch (e) {
+      window.toast && window.toast(e.message || 'Could not build the PDF.', 'error');
+    }
+  }
+  function onEmailOpen() {
+    var calc = window._dgCompute(readInput());
+    var reason = blockReason(calc);
+    if (reason) { window.toast && window.toast(reason, 'error'); return; }
+    var box = el('dgp-email');
+    var client = selectedClient();
+    if (el('dgp-email-to')) el('dgp-email-to').value = (client && client.email) || '';
+    if (box) box.style.display = '';
+    if (el('dgp-email-to')) el('dgp-email-to').focus();
+  }
+  async function onEmailSend() {
+    if (_dg.busy) return;
+    var to = val('dgp-email-to').trim();
+    if (!to || to.indexOf('@') < 1) { window.toast && window.toast('Enter a valid email address.', 'error'); return; }
+    var calc = window._dgCompute(readInput());
+    var reason = blockReason(calc);
+    if (reason) { window.toast && window.toast(reason, 'error'); return; }
+    _dg.busy = true;
+    renderResults();
+    try {
+      var id = _dg.lastSavedId;
+      if (!_dg.lastSavedId || _dg.lastFingerprint !== fingerprint()) {
+        var row = await insertQuote(calc);
+        id = row.id;
+      }
+      var doc = buildPdf(calc);
+      var dataUri = doc.output('datauristring');
+      var b64 = String(dataUri).split(',')[1] || '';
+      var meta = quoteMeta(calc);
+      var html = '<div style="font-family:Arial,sans-serif;color:#1a1a2e;max-width:560px;">'
+        + '<p>Please find attached our price for <strong>' + esc(meta.description) + '</strong> (' + esc(meta.componentLabel) + ').</p>'
+        + '<p style="color:#666;font-size:12px;">Ex VAT. Onward shipping and duty are excluded.</p>'
+        + '<p style="color:#666;font-size:12px;">Lighthouse Drinks</p></div>';
+      await window.sendEmail({
+        to: to,
+        subject: 'Dry goods price — ' + meta.componentLabel + ' — ' + meta.clientName,
+        html: html,
+        attachments: [{ filename: fileName(), content: b64, type: 'application/pdf' }]
+      });
+      await window.db.update('dry_goods_price_quotes', '?id=eq.' + encodeURIComponent(id), {
+        emailed_to: to,
+        emailed_at: new Date().toISOString()
+      });
+      if (el('dgp-email')) el('dgp-email').style.display = 'none';
+      showOpened('Emailed to ' + to + '.');
+      window.toast && window.toast('Price emailed to ' + to + '.', 'success');
+      await loadQuotes();
+    } catch (e) {
+      window.logError && window.logError('dry goods price email', e);
+      window.toast && window.toast('Could not email: ' + (e.message || e), 'error');
+    } finally {
+      _dg.busy = false;
+      renderResults();
+    }
+  }
+  function bindOnce() {
+    var root = el('tools-panel-drygoods');
+    if (!root || _dg.bound) return;
+    _dg.bound = true;
+    root.addEventListener('input', function(e) {
+      var t = e.target;
+      if (!t || !t.id) { renderResults(); return; }
+      if (t.id === 'dgp-margin-range' && el('dgp-margin')) el('dgp-margin').value = t.value;
+      if (t.id === 'dgp-margin' && el('dgp-margin-range')) {
+        var n = parseFloat(t.value);
+        if (!isNaN(n)) el('dgp-margin-range').value = Math.max(0, Math.min(80, n));
+      }
+      if (t.id === 'dgp-unit') syncUnitOptions();
+      renderResults();
+    });
+    root.addEventListener('change', function(e) {
+      if (e.target && e.target.id === 'dgp-client') {
+        _dg.openedId = null;
+        _dg.lastSavedId = null;
+        _dg.lastFingerprint = '';
+        showOpened('');
+        loadQuotes().catch(function(err) {
+          window.toast && window.toast('Could not load saved prices: ' + (err.message || err), 'error');
+        });
+      }
+      if (e.target && e.target.id === 'dgp-unit') syncUnitOptions();
+      renderResults();
+    });
+    root.addEventListener('click', function(e) {
+      var typeBtn = e.target.closest ? e.target.closest('[data-component]') : null;
+      if (typeBtn && root.contains(typeBtn)) {
+        _dg.componentKey = typeBtn.getAttribute('data-component');
+        refreshLabels();
+        renderTypes();
+        renderSaved();
+        renderResults();
+        return;
+      }
+      var quoteBtn = e.target.closest ? e.target.closest('[data-quote]') : null;
+      if (quoteBtn && root.contains(quoteBtn)) {
+        openQuote(quoteBtn.getAttribute('data-quote')).catch(function(err) {
+          window.toast && window.toast('Could not open that price: ' + (err.message || err), 'error');
+        });
+        return;
+      }
+      var transportBtn = e.target.closest ? e.target.closest('[data-transport]') : null;
+      if (transportBtn && root.contains(transportBtn)) {
+        _dg.transportMode = transportBtn.getAttribute('data-transport') === 'per_unit' ? 'per_unit' : 'order';
+        paintSwitch('dgp-transport-switch', 'data-transport', _dg.transportMode);
+        renderResults();
+        return;
+      }
+      var toolingBtn = e.target.closest ? e.target.closest('[data-tooling]') : null;
+      if (toolingBtn && root.contains(toolingBtn)) {
+        _dg.toolingMode = toolingBtn.getAttribute('data-tooling') === 'separate' ? 'separate' : 'included';
+        paintSwitch('dgp-tooling-switch', 'data-tooling', _dg.toolingMode);
+        toolingNote();
+        renderResults();
+      }
+    });
+    if (el('dgp-save')) el('dgp-save').addEventListener('click', onSave);
+    if (el('dgp-pdf')) el('dgp-pdf').addEventListener('click', onPdf);
+    if (el('dgp-email-open')) el('dgp-email-open').addEventListener('click', onEmailOpen);
+    if (el('dgp-email-send')) el('dgp-email-send').addEventListener('click', onEmailSend);
+    if (el('dgp-email-cancel')) el('dgp-email-cancel').addEventListener('click', function() {
+      if (el('dgp-email')) el('dgp-email').style.display = 'none';
+    });
+  }
+
+  window._dgOpen = function() {
+    bindOnce();
+    loadClients().then(function() {
+      renderAll();
+      return loadQuotes();
+    }).catch(function(e) {
+      window.logError && window.logError('dry goods pricing open', e);
+      window.toast && window.toast('Could not open dry goods pricing: ' + (e.message || e), 'error');
+      renderAll();
+    });
+  };
+})();
 
 window._populateBomCheckPicker = async function() {
   var sel = document.getElementById('sc-check-bom');
@@ -16813,6 +17487,15 @@ window.loadBoms = async function initBoms() {
       <div class="tool-tile-status live"><div class="status-pip live"></div>Live</div>
     </a>
 
+    <a href="#" onclick="window.showToolCalc('drygoods'); return false;" class="tool-tile active-tool">
+      <div class="tool-tile-icon">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3zM6 6.5A.5.5 0 0 1 6.5 6h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5zm0 2.5a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 0 1h-1a.5.5 0 0 1-.5-.5z"/></svg>
+      </div>
+      <div class="tool-tile-name">Dry Goods Pricing Tool</div>
+      <div class="tool-tile-desc">Price one dry-goods component for a client. Supplier cost, transport, and tooling, then margin. Save it and email a customer PDF.</div>
+      <div class="tool-tile-status live"><div class="status-pip live"></div>Live</div>
+    </a>
+
     <a href="#" onclick="window.showToolCalc('shipper'); return false;" class="tool-tile active-tool">
       <div class="tool-tile-icon">
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.186 1.113a.5.5 0 0 0-.372 0L1.846 3.5 8 5.961 14.154 3.5 8.186 1.113zM15 4.239l-6.5 2.6v7.922l6.5-2.6V4.24zM7.5 14.762V6.838L1 4.239v7.923l6.5 2.6zM7.443.184a1.5 1.5 0 0 1 1.114 0l7.129 2.852A.5.5 0 0 1 16 3.5v8.662a1 1 0 0 1-.629.928l-7.185 2.874a.5.5 0 0 1-.372 0L.63 13.09a1 1 0 0 1-.63-.928V3.5a.5.5 0 0 1 .314-.464L7.443.184z"/></svg>
@@ -17516,6 +18199,135 @@ window.loadBoms = async function initBoms() {
 </div>
     </div><!-- /calc-pricing -->
   </div><!-- end tools-panel-pricing -->
+
+  <!-- DRY GOODS PRICING PANEL -->
+  <div id="tools-panel-drygoods" class="tools-panel">
+    <div class="dgp-wrap">
+      <a href="#" class="dgp-back" onclick="window.backToToolsGrid(); return false;">&larr; Back to Tools</a>
+      <p class="cc-page-title">Dry Goods</p>
+      <h1 class="cc-page-heading">Dry Goods Pricing Tool</h1>
+      <p style="font-size:13px;color:var(--muted);max-width:720px;margin:-4px 0 18px;line-height:1.5;">Price one component for one client. Supplier cost and inbound transport sit under the unit price. Tooling can be included in that price, or quoted on its own at the supplier amount.</p>
+
+      <div class="dgp-layout">
+        <div class="dgp-side">
+          <div class="card">
+            <div class="card-title"><span class="section-num">1</span> Client</div>
+            <div class="dgp-client">
+              <label for="dgp-client">Customer</label>
+              <select id="dgp-client"><option value="">— Pick a customer —</option></select>
+            </div>
+            <div id="dgp-types" class="dgp-types"></div>
+            <div id="dgp-saved" class="dgp-saved"></div>
+          </div>
+        </div>
+
+        <div class="dgp-main">
+          <div id="dgp-opened" class="dgp-banner" style="display:none;"></div>
+          <div class="card">
+            <div class="card-title"><span class="section-num">2</span> <span id="dgp-component-title">Bottle</span></div>
+            <div class="dgp-grid">
+              <div class="dgp-field dgp-span">
+                <label for="dgp-desc">Description</label>
+                <input type="text" id="dgp-desc" maxlength="200" placeholder="e.g. Loch flint 70cl" autocomplete="off">
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-price" id="dgp-price-label">Supplier price (€ per piece)</label>
+                <input type="number" id="dgp-price" min="0" step="0.0001" placeholder="0.00">
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-unit">Supplier price is</label>
+                <select id="dgp-unit">
+                  <option value="each">Per piece</option>
+                  <option value="per_1000">Per 1,000</option>
+                </select>
+              </div>
+              <div class="dgp-field" id="dgp-bpc-wrap" style="display:none;">
+                <label for="dgp-bpc">Bottles per case</label>
+                <input type="number" id="dgp-bpc" min="1" step="1" placeholder="e.g. 6">
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-qty" id="dgp-qty-label">Quantity (pieces)</label>
+                <input type="number" id="dgp-qty" min="0" step="1" placeholder="e.g. 12000">
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-transport">Transport (€)</label>
+                <input type="number" id="dgp-transport" min="0" step="0.01" value="0">
+              </div>
+              <div class="dgp-field">
+                <label>Transport applies</label>
+                <div class="dgp-switch" id="dgp-transport-switch">
+                  <button type="button" data-transport="order" class="is-on">For this order</button>
+                  <button type="button" data-transport="per_unit">Per unit we buy</button>
+                </div>
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-tooling">Supplier tooling (€)</label>
+                <input type="number" id="dgp-tooling" min="0" step="0.01" value="0">
+              </div>
+              <div class="dgp-field">
+                <label>Tooling on the customer price</label>
+                <div class="dgp-switch" id="dgp-tooling-switch">
+                  <button type="button" data-tooling="included" class="is-on">Include in unit price</button>
+                  <button type="button" data-tooling="separate">Quote separately</button>
+                </div>
+                <p class="dgp-note" id="dgp-tooling-note">Tooling is spread across the quantity, added to our cost, then margin is applied. The customer is told tooling is included.</p>
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-overage">Overage (%)</label>
+                <input type="number" id="dgp-overage" min="0" max="100" step="0.1" value="0">
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-moq">Supplier MOQ (optional)</label>
+                <input type="number" id="dgp-moq" min="0" step="1" placeholder="Units we must buy">
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-lead">Lead time (optional)</label>
+                <input type="text" id="dgp-lead" maxlength="80" placeholder="e.g. 6 weeks">
+              </div>
+              <div class="dgp-field">
+                <label for="dgp-valid">Valid until (optional)</label>
+                <input type="date" id="dgp-valid">
+              </div>
+              <div class="dgp-field dgp-span">
+                <label for="dgp-note">Note for the customer (optional)</label>
+                <textarea id="dgp-note" maxlength="2000" placeholder="Shown on the PDF"></textarea>
+              </div>
+              <div class="dgp-field dgp-span">
+                <label for="dgp-margin">Margin</label>
+                <div class="dgp-margin">
+                  <input type="range" id="dgp-margin-range" min="0" max="80" step="0.5" value="30" aria-label="Margin slider">
+                  <input type="number" id="dgp-margin" min="0" max="80" step="0.5" value="30">
+                </div>
+                <p class="dgp-note">Gross margin, same as the product pricing tool. Sell price = landed cost ÷ (1 − margin).</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title"><span class="section-num">3</span> Internal price</div>
+            <div id="dgp-results" class="dgp-results"></div>
+            <div id="dgp-moq-warn"></div>
+            <div class="dgp-actions">
+              <button type="button" class="dgp-primary" id="dgp-save">Save price</button>
+              <button type="button" class="dgp-ghost" id="dgp-pdf">Download PDF</button>
+              <button type="button" class="dgp-ghost" id="dgp-email-open">Email PDF</button>
+            </div>
+            <div id="dgp-email" class="dgp-email" style="display:none;">
+              <div class="dgp-email-row">
+                <div class="dgp-field">
+                  <label for="dgp-email-to">Send to</label>
+                  <input type="email" id="dgp-email-to" placeholder="customer@example.com" autocomplete="off">
+                </div>
+                <button type="button" class="dgp-primary" id="dgp-email-send">Send</button>
+                <button type="button" class="dgp-ghost" id="dgp-email-cancel">Cancel</button>
+              </div>
+              <p class="dgp-note">The PDF shows the sell price only. Supplier cost, transport, overage, and margin stay off it.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div><!-- end tools-panel-drygoods -->
 
   <!-- SUPPLY CHAIN CHECK PANEL -->
   <div id="tools-panel-supplychain" class="tools-panel">
