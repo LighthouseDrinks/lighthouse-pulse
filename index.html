@@ -8,7 +8,7 @@
 <title>Lighthouse Drinks — Operations Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700;900&family=Merriweather:ital,wght@0,300;0,400;0,700;1,300&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=dry-goods-pricing-4">
+<link rel="stylesheet" href="style.css?v=commission-ledger-1">
 <link rel="stylesheet" href="mobile.css">
 <script>
 // Synchronous session check — runs before body paints.
@@ -11306,6 +11306,10 @@ function openCalc(name) {
 function closeCalc() { /* legacy — no-op */ }
 
 window.showToolCalc = function(name) {
+  if (name === 'commission' && !(window.canUseCommissionLedger && window.canUseCommissionLedger())) {
+    if (window.toast) window.toast('You do not have access to the commission ledger.', 'error');
+    return;
+  }
   var gridView = document.getElementById('tools-grid-view');
   var calcView = document.getElementById('tools-calc-view');
   if (gridView) gridView.style.display = 'none';
@@ -11317,7 +11321,7 @@ window.showToolCalc = function(name) {
   // tools that have their own outputs (e.g. the Shipper & Pallet Planner exports
   // its own PDF and has nothing to save into the quote store).
   var quoteBar = document.getElementById('tools-quote-bar');
-  var ownOutput = (name === 'shipper' || name === 'drygoods');
+  var ownOutput = (name === 'shipper' || name === 'drygoods' || name === 'commission');
   if (quoteBar) quoteBar.style.display = ownOutput ? 'none' : 'flex';
   var quoteBanner = document.getElementById('quote-loaded-banner');
   if (quoteBanner) {
@@ -11327,6 +11331,7 @@ window.showToolCalc = function(name) {
   if (name === 'supplychain' && window._populateBomCheckPicker) window._populateBomCheckPicker();
   if (name === 'shipper' && window._initShipperPlanner) window._initShipperPlanner();
   if (name === 'drygoods' && window._dgOpen) window._dgOpen();
+  if (name === 'commission' && window.openCommissionLedger) window.openCommissionLedger();
 };
 
 window.backToToolsGrid = function() {
@@ -17555,6 +17560,15 @@ window.loadBoms = async function initBoms() {
       <div class="tool-tile-status live"><div class="status-pip live"></div>Live</div>
     </a>
 
+    <a href="#" id="tool-tile-commission" onclick="window.showToolCalc('commission'); return false;" class="tool-tile active-tool" style="display:none;" data-search="commission ledger sales hibernia">
+      <div class="tool-tile-icon">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 2.5A1.5 1.5 0 0 1 1.5 1h13A1.5 1.5 0 0 1 16 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 0 13.5v-11zM1.5 2a.5.5 0 0 0-.5.5V4h14V2.5a.5.5 0 0 0-.5-.5h-13zM15 5H1v8.5a.5.5 0 0 0 .5.5h13a.5.5 0 0 0 .5-.5V5zM3 7.5a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 0 1h-4a.5.5 0 0 1-.5-.5zm0 2.5a.5.5 0 0 1 .5-.5h2a.5.5 0 0 1 0 1h-2a.5.5 0 0 1-.5-.5z"/></svg>
+      </div>
+      <div class="tool-tile-name">Commission Ledger</div>
+      <div class="tool-tile-desc">Log a sale, see the FYI commission, and carry unpaid rows into the next month.</div>
+      <div class="tool-tile-status live"><div class="status-pip live"></div>Live</div>
+    </a>
+
     <!-- COMING SOON -->
     <div class="tool-tile">
       <div class="tool-tile-icon">
@@ -18642,6 +18656,351 @@ window.loadBoms = async function initBoms() {
 
     </div>
   </div><!-- end tools-panel-shipper -->
+
+  <!-- COMMISSION LEDGER -->
+  <div id="tools-panel-commission" class="tools-panel">
+    <div class="cl-wrap">
+      <a href="#" class="dgp-back" onclick="window.backToToolsGrid(); return false;">&larr; Back to Tools</a>
+      <p class="cc-page-title">Sales</p>
+      <h1 class="cc-page-heading">Commission Ledger</h1>
+      <p class="cl-intro">Log a sale against any client. Hibernia Distillers is 1.2% of the invoice value. Lighthouse Drinks is 0.6%. The figure is a guide. It does not wait for Paid or Management approval. An unpaid row stays on later months until Paid is ticked.</p>
+      <div class="cl-monthbar">
+        <button type="button" id="cl-prev" class="cl-monthbtn">&larr;</button>
+        <div id="cl-month-label" class="cl-monthlabel">—</div>
+        <button type="button" id="cl-next" class="cl-monthbtn">&rarr;</button>
+      </div>
+      <div id="cl-add" class="card cl-add"></div>
+      <div id="cl-body"></div>
+    </div>
+  </div><!-- end tools-panel-commission -->
+  <script>
+  (function(){
+    var ROLES = {
+      managing_director: 1,
+      operations_director: 1,
+      commercial_manager: 1,
+      financial_controller: 1,
+      business_analyst: 1
+    };
+    var COMPANIES = [
+      { id: 'hibernia', label: 'Hibernia Distillers' },
+      { id: 'lighthouse', label: 'Lighthouse Drinks' }
+    ];
+    var _rows = [];
+    var _clients = [];
+    var _view = null;
+    var _saving = false;
+
+    function role() {
+      return (window.CURRENT_USER && window.CURRENT_USER.role) || '';
+    }
+    window.canUseCommissionLedger = function() {
+      return !!ROLES[role()];
+    };
+    window.applyCommissionLedgerTile = function() {
+      var tile = document.getElementById('tool-tile-commission');
+      if (tile) tile.style.display = window.canUseCommissionLedger() ? '' : 'none';
+    };
+    function dublinMonth(date) {
+      var parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Dublin', year: 'numeric', month: '2-digit' }).formatToParts(date || new Date());
+      var y = '', m = '';
+      parts.forEach(function(p) {
+        if (p.type === 'year') y = p.value;
+        if (p.type === 'month') m = p.value;
+      });
+      return y + '-' + m;
+    }
+    function shiftMonth(ym, delta) {
+      var bits = String(ym || '').split('-');
+      var d = new Date(Date.UTC(Number(bits[0]), Number(bits[1]) - 1 + delta, 1));
+      return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0');
+    }
+    function monthLabel(ym) {
+      var bits = String(ym || '').split('-');
+      var d = new Date(Date.UTC(Number(bits[0]), Number(bits[1]) - 1, 1));
+      return d.toLocaleDateString('en-IE', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    }
+    function ymOf(period) {
+      return String(period || '').slice(0, 7);
+    }
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function euro(n) {
+      var v = Number(n);
+      if (!isFinite(v)) v = 0;
+      return '\u20ac' + v.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    function commissionOf(invoice, company) {
+      var bps = company === 'hibernia' ? 120 : company === 'lighthouse' ? 60 : 0;
+      var cents = Math.round((Number(invoice) || 0) * 100);
+      return Math.round(cents * bps / 10000) / 100;
+    }
+    function clientName(row) {
+      if (row.clients && row.clients.name) return row.clients.name;
+      var hit = _clients.filter(function(c){ return c.id === row.client_id; })[0];
+      return hit ? hit.name : 'Client';
+    }
+    function companyLabel(id) {
+      var hit = COMPANIES.filter(function(c){ return c.id === id; })[0];
+      return hit ? hit.label : '';
+    }
+    function clientOptions(selected) {
+      var html = '<option value="">\u2014 Pick a client \u2014</option>';
+      var seen = {};
+      _clients.forEach(function(c) {
+        seen[c.id] = 1;
+        html += '<option value="' + esc(c.id) + '"' + (c.id === selected ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+      });
+      if (selected && !seen[selected]) {
+        var row = _rows.filter(function(r){ return r.client_id === selected; })[0];
+        html += '<option value="' + esc(selected) + '" selected>' + esc(row ? clientName(row) : 'Client') + '</option>';
+      }
+      return html;
+    }
+    function companyOptions(selected) {
+      return COMPANIES.map(function(c) {
+        return '<option value="' + c.id + '"' + (c.id === selected ? ' selected' : '') + '>' + esc(c.label) + '</option>';
+      }).join('');
+    }
+    function toast(msg, kind) {
+      if (window.toast) window.toast(msg, kind || 'error');
+    }
+    function rowHtml(row, carried) {
+      var comm = commissionOf(row.invoice_value, row.company);
+      var from = carried ? '<span class="cl-from">Logged ' + esc(monthLabel(ymOf(row.period_month))) + '</span>' : '';
+      return '<tr data-id="' + esc(row.id) + '">'
+        + '<td><select class="cl-sel" data-field="client_id">' + clientOptions(row.client_id) + '</select>' + from + '</td>'
+        + '<td><input class="cl-in" data-field="product_name" type="text" maxlength="200" value="' + esc(row.product_name) + '"></td>'
+        + '<td><input class="cl-in cl-money" data-field="invoice_value" type="number" min="0" step="0.01" value="' + esc(row.invoice_value) + '"></td>'
+        + '<td class="cl-money cl-commission">' + euro(comm) + '</td>'
+        + '<td><select class="cl-sel" data-field="company">' + companyOptions(row.company) + '</select></td>'
+        + '<td style="text-align:center;"><input class="cl-check" data-field="paid" type="checkbox"' + (row.paid ? ' checked' : '') + ' aria-label="Paid"></td>'
+        + '<td style="text-align:center;"><input class="cl-check" data-field="management_approved" type="checkbox"' + (row.management_approved ? ' checked' : '') + ' aria-label="Management approval"></td>'
+        + '<td><button type="button" class="cl-remove" data-remove="' + esc(row.id) + '">Remove</button></td>'
+        + '</tr>';
+    }
+    function tableHtml(rows, carried) {
+      if (!rows.length) return '';
+      return '<div class="cl-table-wrap"><table class="cl-table"><thead><tr>'
+        + '<th>Client</th><th>Product</th><th>Invoice value</th><th>Commission</th><th>Company</th><th>Paid</th><th>Management approval</th><th></th>'
+        + '</tr></thead><tbody>'
+        + rows.map(function(r){ return rowHtml(r, carried); }).join('')
+        + '</tbody></table></div>';
+    }
+    function sumInvoice(rows) {
+      return rows.reduce(function(n, r){ return n + (Number(r.invoice_value) || 0); }, 0);
+    }
+    function sumCommission(rows) {
+      return rows.reduce(function(n, r){ return n + commissionOf(r.invoice_value, r.company); }, 0);
+    }
+    function totalsHtml(invoice, commission) {
+      return '<div class="cl-totals">'
+        + '<div><div class="cl-total-label">Total invoice value</div><div class="cl-total-val">' + euro(invoice) + '</div></div>'
+        + '<div><div class="cl-total-label">FYI commission</div><div class="cl-total-val gold">' + euro(commission) + '</div></div>'
+        + '</div>';
+    }
+    function render() {
+      var current = dublinMonth();
+      var viewingCurrent = _view === current;
+      var label = document.getElementById('cl-month-label');
+      if (label) label.textContent = monthLabel(_view);
+      var prev = document.getElementById('cl-prev');
+      var next = document.getElementById('cl-next');
+      if (next) next.disabled = viewingCurrent;
+      if (prev) prev.disabled = false;
+      var add = document.getElementById('cl-add');
+      if (add) {
+        if (!viewingCurrent) {
+          add.innerHTML = '<div class="cl-note" style="margin:0;">New rows are added in ' + esc(monthLabel(current)) + '. Rows already in this month can still be corrected.</div>';
+        } else if (!add.querySelector('#cl-add-product')) {
+          add.innerHTML = '<div class="card-title"><span class="section-num">1</span> Add a sale</div>'
+            + '<div class="cl-add-grid">'
+            + '<div class="cl-field"><label for="cl-add-client">Client</label><select id="cl-add-client">' + clientOptions('') + '</select></div>'
+            + '<div class="cl-field"><label for="cl-add-product">Product name</label><input id="cl-add-product" type="text" maxlength="200" autocomplete="off"></div>'
+            + '<div class="cl-field"><label for="cl-add-value">Invoice value (\u20ac)</label><input id="cl-add-value" type="number" min="0" step="0.01" placeholder="0.00"></div>'
+            + '<div class="cl-field"><label for="cl-add-company">Company</label><select id="cl-add-company">' + companyOptions('hibernia') + '</select></div>'
+            + '<button type="button" class="cl-add-btn" id="cl-add-btn">Add row</button>'
+            + '</div>';
+          var btn = document.getElementById('cl-add-btn');
+          if (btn) btn.addEventListener('click', addRow);
+        } else {
+          var sel = document.getElementById('cl-add-client');
+          if (sel && sel.options.length <= 1 && _clients.length) {
+            var keep = sel.value;
+            sel.innerHTML = clientOptions(keep);
+          }
+        }
+      }
+      var logged = _rows.filter(function(r){ return ymOf(r.period_month) === _view; })
+        .sort(function(a, b){ return String(a.created_at).localeCompare(String(b.created_at)); });
+      var carried = [];
+      if (viewingCurrent) {
+        carried = _rows.filter(function(r){ return !r.paid && ymOf(r.period_month) < _view; })
+          .sort(function(a, b){
+            var p = String(a.period_month).localeCompare(String(b.period_month));
+            return p || String(a.created_at).localeCompare(String(b.created_at));
+          });
+      }
+      var body = document.getElementById('cl-body');
+      if (!body) return;
+      var html = '<div class="cl-section">Logged in ' + esc(monthLabel(_view)) + '</div>';
+      if (!logged.length) html += '<div class="cl-empty">No sales logged in this month.</div>';
+      else html += tableHtml(logged, false);
+      html += totalsHtml(sumInvoice(logged), sumCommission(logged));
+      if (viewingCurrent) {
+        html += '<div class="cl-section">Carried forward</div>';
+        html += '<p class="cl-note">Unpaid sales from earlier months. Ticking Paid leaves the row on the month it was logged and takes it off this list. These amounts are not added to this month\u2019s sales total.</p>';
+        if (!carried.length) html += '<div class="cl-empty">Nothing unpaid to carry forward.</div>';
+        else {
+          html += tableHtml(carried, true);
+          html += '<div class="cl-totals"><div><div class="cl-total-label">Outstanding invoice value</div><div class="cl-total-val">' + euro(sumInvoice(carried)) + '</div></div></div>';
+        }
+      }
+      body.innerHTML = html;
+    }
+    function payloadFromRow(tr, field) {
+      var input = tr.querySelector('[data-field="' + field + '"]');
+      if (!input) return null;
+      if (field === 'paid' || field === 'management_approved') return !!input.checked;
+      if (field === 'invoice_value') {
+        var raw = String(input.value == null ? '' : input.value).trim();
+        if (!raw) return null;
+        var n = Number(raw);
+        if (!isFinite(n) || n < 0) return null;
+        return Math.round(n * 100) / 100;
+      }
+      if (field === 'product_name') {
+        var name = String(input.value || '').trim();
+        if (!name || name.length > 200) return null;
+        return name;
+      }
+      if (field === 'client_id') return input.value || null;
+      if (field === 'company') return input.value === 'lighthouse' ? 'lighthouse' : 'hibernia';
+      return null;
+    }
+    async function saveField(id, field, value) {
+      var body = {};
+      body[field] = value;
+      await window.db.update('commission_ledger', '?id=eq.' + encodeURIComponent(id), body);
+    }
+    async function reload() {
+      var clientQs = '?select=id,name&order=name.asc&limit=1000';
+      if (window.ACTIVE_CLIENTS_QS) clientQs += '&' + window.ACTIVE_CLIENTS_QS;
+      var clientsP = window.db.select('clients', clientQs);
+      var rowsP = window.db.select('commission_ledger', '?select=id,client_id,product_name,invoice_value,paid,management_approved,company,period_month,created_at,clients(name)&order=created_at.asc&limit=1000');
+      var both = await Promise.all([clientsP, rowsP]);
+      _clients = Array.isArray(both[0]) ? both[0] : [];
+      _rows = Array.isArray(both[1]) ? both[1] : [];
+      render();
+    }
+    async function addRow() {
+      if (_saving) return;
+      var clientId = (document.getElementById('cl-add-client') || {}).value || '';
+      var product = String((document.getElementById('cl-add-product') || {}).value || '').trim();
+      var raw = (document.getElementById('cl-add-value') || {}).value;
+      var company = (document.getElementById('cl-add-company') || {}).value || '';
+      var invoice = Number(raw);
+      if (!clientId) { toast('Pick a client.'); return; }
+      if (!product) { toast('Enter a product name.'); return; }
+      if (raw === '' || !isFinite(invoice) || invoice < 0) { toast('Enter an invoice value.'); return; }
+      if (company !== 'hibernia' && company !== 'lighthouse') { toast('Pick Hibernia Distillers or Lighthouse Drinks.'); return; }
+      _saving = true;
+      var btn = document.getElementById('cl-add-btn');
+      if (btn) btn.disabled = true;
+      try {
+        await window.db.insert('commission_ledger', {
+          client_id: clientId,
+          product_name: product,
+          invoice_value: Math.round(invoice * 100) / 100,
+          company: company,
+          period_month: dublinMonth() + '-01',
+          paid: false,
+          management_approved: false
+        });
+        var productEl = document.getElementById('cl-add-product');
+        var valueEl = document.getElementById('cl-add-value');
+        if (productEl) productEl.value = '';
+        if (valueEl) valueEl.value = '';
+        await reload();
+      } catch (e) {
+        toast('Could not add that row.');
+        window.logError && window.logError('commission add', e);
+      }
+      _saving = false;
+      if (btn) btn.disabled = false;
+    }
+    async function onBodyChange(ev) {
+      var t = ev.target;
+      if (!t || !t.getAttribute) return;
+      var tr = t.closest ? t.closest('tr') : null;
+      if (!tr) return;
+      var id = tr.getAttribute('data-id');
+      var field = t.getAttribute('data-field');
+      if (!id || !field) return;
+      if (field === 'product_name' || field === 'invoice_value') {
+        if (ev.type !== 'change') return;
+      }
+      var value = payloadFromRow(tr, field);
+      if (value == null || value === '') {
+        toast(field === 'client_id' ? 'Pick a client.' : field === 'product_name' ? 'Enter a product name.' : 'Enter an invoice value.');
+        render();
+        return;
+      }
+      try {
+        await saveField(id, field, value);
+        await reload();
+      } catch (e) {
+        toast('Could not save that change.');
+        window.logError && window.logError('commission save', e);
+        render();
+      }
+    }
+    async function onBodyClick(ev) {
+      var t = ev.target;
+      if (!t || !t.getAttribute) return;
+      var id = t.getAttribute('data-remove');
+      if (!id) return;
+      var ok = window.lpConfirm
+        ? await window.lpConfirm('Remove this row from the ledger?', { title: 'Remove row', confirmLabel: 'Remove', destructive: true })
+        : false;
+      if (!ok) return;
+      try {
+        await window.db.delete('commission_ledger', '?id=eq.' + encodeURIComponent(id));
+        await reload();
+      } catch (e) {
+        toast('Could not remove that row.');
+        window.logError && window.logError('commission delete', e);
+      }
+    }
+    window.openCommissionLedger = function() {
+      if (!window.canUseCommissionLedger()) {
+        if (window.backToToolsGrid) window.backToToolsGrid();
+        return;
+      }
+      _view = dublinMonth();
+      var add = document.getElementById('cl-add');
+      if (add) add.innerHTML = '';
+      reload().catch(function(e) {
+        toast('Could not load the commission ledger.');
+        window.logError && window.logError('commission load', e);
+      });
+    };
+    document.getElementById('cl-prev').addEventListener('click', function() {
+      _view = shiftMonth(_view, -1);
+      render();
+    });
+    document.getElementById('cl-next').addEventListener('click', function() {
+      var next = shiftMonth(_view, 1);
+      if (next > dublinMonth()) return;
+      _view = next;
+      render();
+    });
+    document.getElementById('cl-body').addEventListener('change', onBodyChange);
+    document.getElementById('cl-body').addEventListener('click', onBodyClick);
+    window.applyCommissionLedgerTile();
+  })();
+  </script>
   </div><!-- end tools-calc-view -->
 
 </div><!-- end page-tools -->
@@ -26680,6 +27039,7 @@ window.loadBoms = async function initBoms() {
       var tc = document.getElementById('tools-calc-view');
       if (tg) tg.style.display = 'block';
       if (tc) tc.style.display = 'none';
+      if (window.applyCommissionLedgerTile) window.applyCommissionLedgerTile();
     }
     if (name === 'blending' && window._initBlendingPage) setTimeout(window._initBlendingPage, 100);
     if (name === 'schedule' && window.loadSchedule) setTimeout(function(){ window.loadSchedule(); }, 100);
@@ -64757,6 +65117,7 @@ window.saveAdjModal = async function() {
     // Now that the permission matrix is loaded, re-evaluate the Attendance
     // report tab (it was hidden for non-exec roles when showDashboard first ran).
     if (typeof window.applyAttendanceTabVisibility === 'function') window.applyAttendanceTabVisibility();
+    if (typeof window.applyCommissionLedgerTile === 'function') window.applyCommissionLedgerTile();
     // Apply Quick Launch permission state using the freshly-loaded permissions
     (function() {
       var role = user && user.role;
