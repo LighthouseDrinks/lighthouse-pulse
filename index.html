@@ -19466,16 +19466,22 @@ window.loadBoms = async function initBoms() {
     </div>
     <div class="card qms-form-card">
       <div class="qms-form-title">Trainees <span class="qms-tr-badge" id="qms-tr-count"></span></div>
-      <input type="search" id="qms-tr-staff-search" class="qms-tr-search" placeholder="Find someone on the staff list" oninput="window.QMS&&window.QMS.filterTrainingStaff()" autocomplete="off">
-      <div class="qms-training-people" id="qms-tr-people" onchange="window.QMS&&window.QMS.refreshTrainingCount()"></div>
-      <div class="qms-tr-add">
-        <label>Someone not on the staff list</label>
-        <div class="qms-tr-add-row">
-          <input type="text" id="qms-tr-add-name" autocomplete="off" placeholder="Visitor, agency, or contractor" onkeydown="if(event.key==='Enter'){event.preventDefault();window.QMS&&window.QMS.addTrainingExternal();}">
-          <button type="button" class="btn" onclick="window.QMS&&window.QMS.addTrainingExternal()">Add</button>
+      <div class="modal-grid">
+        <div class="mfield span2">
+          <label>Add a person</label>
+          <select id="qms-tr-trainee" onchange="window.QMS&&window.QMS.onTrainingTrainee()">
+            <option value="">— Select —</option>
+          </select>
         </div>
-        <div class="qms-training-chips" id="qms-tr-external-list"></div>
+        <div class="mfield span2" id="qms-tr-visitor-wrap" style="display:none;">
+          <label>Their name</label>
+          <input type="text" id="qms-tr-add-name" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();window.QMS&&window.QMS.addTrainingExternal();}">
+        </div>
       </div>
+      <div id="qms-tr-visitor-add" style="display:none;margin-top:12px;">
+        <button type="button" class="btn" onclick="window.QMS&&window.QMS.addTrainingExternal()">Add name</button>
+      </div>
+      <div id="qms-tr-picked" class="qms-tr-picked"></div>
     </div>
     <div class="qms-form-actions" style="display:flex;gap:8px;justify-content:flex-end;">
       <button type="button" class="btn" onclick="window.QMS&&window.QMS.showTrainingList()">Cancel</button>
@@ -29154,6 +29160,7 @@ window.loadBoms = async function initBoms() {
 
     var _trainingRows = [];
     var _trainingStaff = [];
+    var _trainingPicked = [];
     var _trainingExternal = [];
     var _trainingOpenId = null;
     var _trainingSaving = false;
@@ -29190,18 +29197,52 @@ window.loadBoms = async function initBoms() {
       show('qms-training-form', which === 'form');
       show('qms-training-detail', which === 'detail');
     }
-    function renderTrainingExternal() {
-      var host = document.getElementById('qms-tr-external-list');
+    function fillTraineeSelect() {
+      var sel = document.getElementById('qms-tr-trainee');
+      if (!sel) return;
+      var picked = {};
+      _trainingPicked.forEach(function(p) { picked[p.id] = true; });
+      var html = '<option value="">— Select —</option>';
+      _trainingStaff.forEach(function(u) {
+        if (picked[u.id]) return;
+        html += '<option value="' + esc(u.id) + '">' + esc(staffLabel(u)) + '</option>';
+      });
+      html += '<option value="__external__">Someone not on the staff list</option>';
+      sel.innerHTML = html;
+    }
+    function renderTrainingPicked() {
+      var host = document.getElementById('qms-tr-picked');
+      var badge = document.getElementById('qms-tr-count');
+      var n = _trainingPicked.length + _trainingExternal.length;
+      if (badge) badge.textContent = n ? String(n) : '';
       if (!host) return;
-      host.innerHTML = _trainingExternal.map(function(name, i) {
-        return '<span class="qms-training-chip">' + esc(name)
-          + '<button type="button" aria-label="Remove" onclick="window.QMS.removeTrainingExternal(' + i + ')">&times;</button></span>';
-      }).join('');
-      refreshTrainingCount();
+      var rows = _trainingPicked.map(function(p, i) {
+        return '<div class="qms-tr-picked-row"><span>' + esc(p.name) + '</span><button type="button" class="btn" onclick="window.QMS.removeTrainingStaff(' + i + ')">Remove</button></div>';
+      }).concat(_trainingExternal.map(function(name, i) {
+        return '<div class="qms-tr-picked-row"><span>' + esc(name) + '</span><button type="button" class="btn" onclick="window.QMS.removeTrainingExternal(' + i + ')">Remove</button></div>';
+      }));
+      host.innerHTML = rows.join('');
+    }
+    function onTrainingTrainee() {
+      var chosen = val('qms-tr-trainee');
+      if (chosen === '__external__') {
+        show('qms-tr-visitor-wrap', true);
+        show('qms-tr-visitor-add', true);
+        return;
+      }
+      show('qms-tr-visitor-wrap', false);
+      show('qms-tr-visitor-add', false);
+      setVal('qms-tr-add-name', '');
+      if (!chosen) return;
+      var person = _trainingStaff.filter(function(u) { return u.id === chosen; })[0];
+      if (person && !_trainingPicked.some(function(p) { return p.id === person.id; })) {
+        _trainingPicked.push({ id: person.id, name: staffLabel(person) });
+      }
+      fillTraineeSelect();
+      renderTrainingPicked();
     }
     async function loadTrainingStaff() {
       var sel = document.getElementById('qms-tr-trainer');
-      var host = document.getElementById('qms-tr-people');
       try {
         var rows = await window.db.activeUsers('&select=id,display_name,email,role&order=display_name.asc') || [];
         _trainingStaff = rows.filter(function(u) { return u.role !== 'client'; });
@@ -29218,28 +29259,8 @@ window.loadBoms = async function initBoms() {
         html += '<option value="__external__">Someone not on the staff list</option>';
         sel.innerHTML = html;
       }
-      if (host) {
-        if (!_trainingStaff.length) {
-          host.innerHTML = '<div class="qms-tr-empty">No active staff found. Add a name below.</div>';
-        } else {
-          host.innerHTML = _trainingStaff.map(function(u) {
-            return '<label class="qms-check"><input type="checkbox" value="' + esc(u.id) + '"><span>' + esc(staffLabel(u)) + '</span></label>';
-          }).join('');
-        }
-      }
-      refreshTrainingCount();
-    }
-    function filterTrainingStaff() {
-      var q = val('qms-tr-staff-search').toLowerCase();
-      document.querySelectorAll('#qms-tr-people .qms-check').forEach(function(label) {
-        var text = (label.textContent || '').toLowerCase();
-        label.style.display = !q || text.indexOf(q) !== -1 ? '' : 'none';
-      });
-    }
-    function refreshTrainingCount() {
-      var n = document.querySelectorAll('#qms-tr-people input[type="checkbox"]:checked').length + _trainingExternal.length;
-      var el = document.getElementById('qms-tr-count');
-      if (el) el.textContent = n ? String(n) : '';
+      fillTraineeSelect();
+      renderTrainingPicked();
     }
     function onTrainingTrainer() {
       var external = val('qms-tr-trainer') === '__external__';
@@ -29256,17 +29277,26 @@ window.loadBoms = async function initBoms() {
       }
       var staffHit = _trainingStaff.filter(function(u) { return staffLabel(u).toLowerCase() === key; })[0];
       if (staffHit) {
-        if (window.toast) window.toast('Tick ' + staffLabel(staffHit) + ' on the staff list.', 'error');
+        if (window.toast) window.toast('Choose ' + staffLabel(staffHit) + ' from the list.', 'error');
         return;
       }
       _trainingExternal.push(name);
       setVal('qms-tr-add-name', '');
-      renderTrainingExternal();
+      show('qms-tr-visitor-wrap', false);
+      show('qms-tr-visitor-add', false);
+      fillTraineeSelect();
+      renderTrainingPicked();
+    }
+    function removeTrainingStaff(i) {
+      if (i < 0 || i >= _trainingPicked.length) return;
+      _trainingPicked.splice(i, 1);
+      fillTraineeSelect();
+      renderTrainingPicked();
     }
     function removeTrainingExternal(i) {
       if (i < 0 || i >= _trainingExternal.length) return;
       _trainingExternal.splice(i, 1);
-      renderTrainingExternal();
+      renderTrainingPicked();
     }
     async function loadTraining() {
       showTraining('list');
@@ -29308,13 +29338,16 @@ window.loadBoms = async function initBoms() {
         if (window.toast) window.toast('You do not have permission to log a session.', 'error');
         return;
       }
+      _trainingPicked = [];
       _trainingExternal = [];
       setVal('qms-tr-topic', '');
       setVal('qms-tr-date', localToday());
       setVal('qms-tr-ext-name', '');
       setVal('qms-tr-add-name', '');
+      show('qms-tr-visitor-wrap', false);
+      show('qms-tr-visitor-add', false);
       showTraining('form');
-      renderTrainingExternal();
+      renderTrainingPicked();
       await loadTrainingStaff();
       onTrainingTrainer();
     }
@@ -29438,13 +29471,8 @@ window.loadBoms = async function initBoms() {
         trainerId = trainer.id;
         trainerName = staffLabel(trainer);
       }
-      var trainees = [];
-      var seenIds = {};
-      document.querySelectorAll('#qms-tr-people input[type="checkbox"]:checked').forEach(function(box) {
-        var person = _trainingStaff.filter(function(u) { return u.id === box.value; })[0];
-        if (!person || seenIds[person.id]) return;
-        seenIds[person.id] = true;
-        trainees.push({ user_id: person.id, name: staffLabel(person), external: false });
+      var trainees = _trainingPicked.map(function(p) {
+        return { user_id: p.id, name: p.name, external: false };
       });
       _trainingExternal.forEach(function(name) {
         trainees.push({ user_id: null, name: name, external: true });
@@ -29556,9 +29584,9 @@ window.loadBoms = async function initBoms() {
       newTraining: newTraining,
       showTrainingList: showTrainingList,
       onTrainingTrainer: onTrainingTrainer,
-      filterTrainingStaff: filterTrainingStaff,
-      refreshTrainingCount: refreshTrainingCount,
+      onTrainingTrainee: onTrainingTrainee,
       addTrainingExternal: addTrainingExternal,
+      removeTrainingStaff: removeTrainingStaff,
       removeTrainingExternal: removeTrainingExternal,
       openTraining: openTraining,
       printTraining: printTraining,
