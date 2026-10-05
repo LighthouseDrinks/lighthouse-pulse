@@ -20044,11 +20044,18 @@ window.loadBoms = async function initBoms() {
 <div class="wrapper">
   <div class="page-label">Sales &amp; CRM</div>
   <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:18px;">
-    <div class="page-heading" style="margin-bottom:0;">Forecast</div>
+    <div>
+      <div class="page-heading" style="margin-bottom:0;">Forecast</div>
+      <div style="color:var(--muted);font-size:12px;margin-top:4px;">Same orders, shown by month or by quarter.</div>
+    </div>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
       <button type="button" class="btn btn-outline" id="fc-year-prev" onclick="window._fcSetYear(-1)" style="font-size:16px;padding:6px 12px;line-height:1;" aria-label="Previous year">&#8249;</button>
       <div id="fc-year" style="font-family:Merriweather,serif;font-size:22px;font-weight:700;color:var(--white);min-width:72px;text-align:center;font-variant-numeric:tabular-nums;">2027</div>
       <button type="button" class="btn btn-outline" id="fc-year-next" onclick="window._fcSetYear(1)" style="font-size:16px;padding:6px 12px;line-height:1;" aria-label="Next year">&#8250;</button>
+      <div style="display:inline-flex;border:1px solid var(--navy-border);border-radius:3px;overflow:hidden;margin-left:4px;">
+        <button type="button" id="fc-view-year" onclick="window._fcSetView('year')" style="background:var(--gold);color:var(--navy);border:none;font-size:11px;font-weight:700;letter-spacing:0.04em;padding:7px 12px;cursor:pointer;font-family:Lato,sans-serif;">Annual</button>
+        <button type="button" id="fc-view-quarter" onclick="window._fcSetView('quarter')" style="background:transparent;color:var(--muted);border:none;font-size:11px;font-weight:700;letter-spacing:0.04em;padding:7px 12px;cursor:pointer;font-family:Lato,sans-serif;">Quarterly</button>
+      </div>
       <button type="button" class="btn btn-gold" onclick="window._fcOpenAdd()" style="font-size:12px;margin-left:4px;">+ Add order</button>
     </div>
   </div>
@@ -20099,8 +20106,15 @@ window.loadBoms = async function initBoms() {
 (function() {
   var MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   var SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var QUARTERS = [
+    { id: 1, label: 'Q1', range: 'Jan–Mar' },
+    { id: 2, label: 'Q2', range: 'Apr–Jun' },
+    { id: 3, label: 'Q3', range: 'Jul–Sep' },
+    { id: 4, label: 'Q4', range: 'Oct–Dec' }
+  ];
   var FC = {
     year: new Date().getFullYear() + 1,
+    view: 'year',
     filter: 'all',
     lines: [],
     allClients: [],
@@ -20169,13 +20183,23 @@ window.loadBoms = async function initBoms() {
     FC.lines.forEach(function(l) { if (pred(l)) n++; });
     return n;
   }
+  function quarterOf(month) {
+    if (month == null || month === '') return null;
+    var n = Number(month);
+    if (!isFinite(n) || n < 1 || n > 12) return null;
+    return Math.floor((n - 1) / 3) + 1;
+  }
   function monthOptions(selected, shortNames) {
     var names = shortNames ? SHORT : MONTHS;
     var blank = selected == null || selected === '';
     var html = '<option value=""' + (blank ? ' selected' : '') + '>Unassigned</option>';
-    for (var i = 0; i < 12; i++) {
-      var v = i + 1;
-      html += '<option value="' + v + '"' + (!blank && Number(selected) === v ? ' selected' : '') + '>' + names[i] + '</option>';
+    for (var q = 0; q < 4; q++) {
+      html += '<optgroup label="' + QUARTERS[q].label + ' · ' + QUARTERS[q].range + '">';
+      for (var i = q * 3; i < q * 3 + 3; i++) {
+        var v = i + 1;
+        html += '<option value="' + v + '"' + (!blank && Number(selected) === v ? ' selected' : '') + '>' + names[i] + '</option>';
+      }
+      html += '</optgroup>';
     }
     return html;
   }
@@ -20205,8 +20229,8 @@ window.loadBoms = async function initBoms() {
     sel.setAttribute('data-ready', '1');
   }
   function defaultMonthValue() {
-    if (FC.filter === 'all' || FC.filter === 'unassigned') return '';
-    return String(FC.filter);
+    if (typeof FC.filter === 'number' && FC.filter >= 1 && FC.filter <= 12) return String(FC.filter);
+    return '';
   }
   function setAddError(msg) {
     var box = el('fc-add-error');
@@ -20252,12 +20276,16 @@ window.loadBoms = async function initBoms() {
     if (!isFinite(n) || n < 1 || n > 12) return NaN;
     return n;
   }
+  function lineInFilter(l) {
+    if (FC.filter === 'all') return true;
+    if (FC.filter === 'unassigned') return l.month == null;
+    if (typeof FC.filter === 'string' && FC.filter.charAt(0) === 'q') {
+      return quarterOf(l.month) === Number(FC.filter.slice(1));
+    }
+    return Number(l.month) === Number(FC.filter);
+  }
   function visibleLines() {
-    return FC.lines.filter(function(l) {
-      if (FC.filter === 'all') return true;
-      if (FC.filter === 'unassigned') return l.month == null;
-      return Number(l.month) === Number(FC.filter);
-    }).sort(function(a, b) {
+    return FC.lines.filter(lineInFilter).sort(function(a, b) {
       var am = a.month == null ? 0 : Number(a.month);
       var bm = b.month == null ? 0 : Number(b.month);
       if (am !== bm) return am - bm;
@@ -20275,6 +20303,13 @@ window.loadBoms = async function initBoms() {
     var next = el('fc-year-next');
     if (prev) prev.disabled = FC.year <= 2020;
     if (next) next.disabled = FC.year >= 2040;
+    function paintView(btn, on) {
+      if (!btn) return;
+      btn.style.background = on ? 'var(--gold)' : 'transparent';
+      btn.style.color = on ? 'var(--navy)' : 'var(--muted)';
+    }
+    paintView(el('fc-view-year'), FC.view !== 'quarter');
+    paintView(el('fc-view-quarter'), FC.view === 'quarter');
   }
   function renderKpis() {
     var host = el('fc-kpis');
@@ -20314,8 +20349,14 @@ window.loadBoms = async function initBoms() {
     var html = '';
     html += pill('all', 'All', 0, FC.filter === 'all');
     html += pill('unassigned', 'Unassigned', countWhere(function(l) { return l.month == null; }), FC.filter === 'unassigned');
-    for (var m = 1; m <= 12; m++) {
-      html += pill(String(m), SHORT[m - 1], countWhere(function(l) { return Number(l.month) === m; }), Number(FC.filter) === m);
+    if (FC.view === 'quarter') {
+      QUARTERS.forEach(function(q) {
+        html += pill('q' + q.id, q.label, countWhere(function(l) { return quarterOf(l.month) === q.id; }), FC.filter === 'q' + q.id);
+      });
+    } else {
+      for (var m = 1; m <= 12; m++) {
+        html += pill(String(m), SHORT[m - 1], countWhere(function(l) { return Number(l.month) === m; }), Number(FC.filter) === m);
+      }
     }
     host.innerHTML = html;
   }
@@ -20323,8 +20364,16 @@ window.loadBoms = async function initBoms() {
     var badge = count > 0 ? '<span class="fc-count">' + count + '</span>' : '';
     return '<button type="button" class="fc-pill' + (active ? ' active' : '') + '" onclick="window._fcFilter(\'' + key + '\')">' + label + badge + '</button>';
   }
+  function groupLabel(key) {
+    if (key === 'unassigned') return 'Unassigned';
+    if (String(key).charAt(0) === 'q') {
+      var q = QUARTERS[Number(String(key).slice(1)) - 1];
+      return q ? (q.label + ' · ' + q.range) : String(key);
+    }
+    return MONTHS[Number(key) - 1];
+  }
   function groupHead(key, lines) {
-    var label = key === 'unassigned' ? 'Unassigned' : MONTHS[Number(key) - 1];
+    var label = groupLabel(key);
     return '<tr class="fc-month-row"><td colspan="2">' + label + '</td>'
       + '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtBtls(sumField(lines, 'bottles')) + '</td>'
       + '<td style="text-align:right;font-variant-numeric:tabular-nums;">' + fmtEur(sumField(lines, 'value_eur')) + '</td>'
@@ -20370,14 +20419,13 @@ window.loadBoms = async function initBoms() {
     }
     var list = visibleLines();
     if (!list.length) {
-      var label = FC.filter === 'unassigned' ? 'Unassigned' : MONTHS[Number(FC.filter) - 1];
-      host.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:28px 0;text-align:center;">Nothing in ' + esc(label) + ' yet.</div>';
+      host.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:28px 0;text-align:center;">Nothing in ' + esc(groupLabel(FC.filter)) + ' yet.</div>';
       return;
     }
     var groups = [];
     var current = null;
     list.forEach(function(l) {
-      var key = l.month == null ? 'unassigned' : Number(l.month);
+      var key = l.month == null ? 'unassigned' : (FC.view === 'quarter' ? ('q' + quarterOf(l.month)) : Number(l.month));
       if (!current || current.key !== key) {
         current = { key: key, lines: [] };
         groups.push(current);
@@ -20462,8 +20510,21 @@ window.loadBoms = async function initBoms() {
     FC.editId = null;
     reload();
   };
+  window._fcSetView = function(view) {
+    if (view !== 'year' && view !== 'quarter') return;
+    if (FC.view === view) return;
+    if (view === 'quarter' && typeof FC.filter === 'number') {
+      FC.filter = 'q' + quarterOf(FC.filter);
+    } else if (view === 'year' && typeof FC.filter === 'string' && FC.filter.charAt(0) === 'q') {
+      FC.filter = 'all';
+    }
+    FC.view = view;
+    FC.editId = null;
+    render();
+  };
   window._fcFilter = function(f) {
-    FC.filter = (f === 'all' || f === 'unassigned') ? f : Number(f);
+    if (f === 'all' || f === 'unassigned' || (typeof f === 'string' && f.charAt(0) === 'q')) FC.filter = f;
+    else FC.filter = Number(f);
     FC.editId = null;
     if (FC.addOpen) {
       var month = el('fc-add-month');
