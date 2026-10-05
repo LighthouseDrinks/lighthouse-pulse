@@ -81988,51 +81988,158 @@ window.attendanceReject=async function(reqId,btn){
   function svgRect(x,y,w,h,fill,stroke,sw){
     return '<rect x="'+r1(x)+'" y="'+r1(y)+'" width="'+r1(w)+'" height="'+r1(h)+'" fill="'+fill+'" stroke="'+(stroke||'none')+'" stroke-width="'+(sw||0)+'" />';
   }
+  function svgLabel(x,y,txt,fill,size,rotate){
+    var tr = rotate ? ' transform="rotate('+rotate+' '+r1(x)+' '+r1(y)+')"' : '';
+    return '<text x="'+r1(x)+'" y="'+r1(y)+'" fill="'+(fill||C.text)+'" font-size="'+r1(size)+'" font-family="ui-monospace,Consolas,monospace" text-anchor="middle" dominant-baseline="central"'+tr+'>'+esc(txt)+'</text>';
+  }
+
+  // Flat-blank geometry shared by the preview and the PDF keyline.
+  // horiz/vert segments are in blank millimetres: glue, W, L, W, L across;
+  // top flap, body (external H), bottom flap down.
+  function keylineLayout(cc){
+    var glue = cc.glueLap, flap = cc.extW / 2;
+    var widths = [glue, cc.extW, cc.extL, cc.extW, cc.extL];
+    var kinds = ['glue', 'W', 'L', 'W', 'L'];
+    var xs = [0];
+    for (var i = 0; i < widths.length; i++) xs.push(xs[i] + widths[i]);
+    var yTop = flap, yBot = flap + cc.extH;
+    var horiz = [];
+    for (i = 0; i < widths.length; i++){
+      horiz.push({
+        a: xs[i], b: xs[i + 1], kind: kinds[i],
+        // The glue lap is 35 mm wide. The number fits that flap; the word does not.
+        label: kinds[i] === 'glue' ? String(r0(widths[i])) : (kinds[i] + ' ' + r0(widths[i]))
+      });
+    }
+    var vert = [
+      { a: 0, b: yTop, label: String(r0(flap)) },
+      { a: yTop, b: yBot, label: 'H ' + r0(cc.extH) },
+      { a: yBot, b: cc.blankH, label: String(r0(flap)) }
+    ];
+    return {
+      bw: cc.blankW, bh: cc.blankH,
+      widths: widths, kinds: kinds, xs: xs,
+      yTop: yTop, yBot: yBot,
+      horiz: horiz, vert: vert,
+      lIndex: 2,
+      overallW: r0(cc.blankW) + ' mm',
+      overallH: r0(cc.blankH) + ' mm',
+      intNote: r0(cc.intL) + '\u00d7' + r0(cc.intW) + '\u00d7' + r0(cc.intH)
+    };
+  }
+
+  // Preview type is sized off the viewBox so it lands near 12px in a ~420px column.
+  function keylinePreviewMetrics(bw, bh){
+    var col = 420, k = 5.7;
+    var font = (bw * 12 / col) / (1 - k * 12 / col);
+    var chain1 = font * 1.9;
+    var chain2 = font * 3.6;
+    var padL = chain2 + font * 1.5;
+    var padR = font * 0.6;
+    var padT = font * 0.55;
+    var padB = chain2 + font * 0.55;
+    var vbW = bw + padL + padR;
+    return {
+      font: font, sw: vbW / col,
+      chain1: chain1, chain2: chain2,
+      gap: font * 0.28, tick: font * 0.34, overrun: font * 0.16,
+      padL: padL, padR: padR, padT: padT, padB: padB,
+      vbW: vbW, vbH: bh + padT + padB
+    };
+  }
+
+  // One line if it fits the panel; otherwise "Int" over the figures.
+  function keylineNoteLines(panelW, font, dims){
+    var full = 'Int ' + dims;
+    var one = Math.min(font * 0.78, (panelW * 0.88) / (full.length * 0.56));
+    if (one >= font * 0.48) return { size: one, lines: [full] };
+    var two = Math.min(font * 0.72, (panelW * 0.88) / (Math.max(dims.length, 3) * 0.56));
+    return { size: Math.max(two, font * 0.42), lines: ['Int', dims] };
+  }
 
   // Phase 6: FEFCO 0201 RSC keyline blank. Returns SVG markup string.
-  function keylineSVG(cc, forPdf){
-    var bw = cc.blankW, bh = cc.blankH, flap = cc.extW/2, glue = cc.glueLap;
-    var pad = 46;
-    var vbW = bw + pad*2, vbH = bh + pad*2;
-    // Panel x-boundaries across: glue, W, L, W, L
-    var widths = [glue, cc.extW, cc.extL, cc.extW, cc.extL];
-    var xs = [0]; for (var i=0;i<widths.length;i++) xs.push(xs[i] + widths[i]);
-    var yTop = flap, yBot = flap + cc.extH;
+  function keylineSVG(cc){
+    var lay = keylineLayout(cc);
+    var m = keylinePreviewMetrics(lay.bw, lay.bh);
+    var bw = lay.bw, bh = lay.bh;
+    var sw = m.sw, font = m.font;
+    var dash = r1(sw * 4) + ' ' + r1(sw * 2.6);
     var s = '';
-    s += '<svg viewBox="0 0 '+r1(vbW)+' '+r1(vbH)+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="FEFCO 0201 RSC keyline">';
-    s += '<g transform="translate('+pad+','+pad+')">';
-    // Panel fills
-    for (i=0;i<widths.length;i++){
-      s += svgRect(xs[i], 0, widths[i], bh, (i===0?'rgba(122,147,168,0.10)':C.fill), 'none', 0);
+    s += '<svg viewBox="'+r1(-m.padL)+' '+r1(-m.padT)+' '+r1(m.vbW)+' '+r1(m.vbH)+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="FEFCO 0201 RSC keyline">';
+    for (var i = 0; i < lay.widths.length; i++){
+      s += svgRect(lay.xs[i], 0, lay.widths[i], bh, (i === 0 ? 'rgba(122,147,168,0.10)' : C.fill), 'none', 0);
     }
-    // Outer cut outline
-    s += svgRect(0, 0, bw, bh, 'none', C.cut, 2);
-    // Horizontal creases (fold lines) across the body panels
-    s += svgLine(0, yTop, bw, yTop, C.crease, '6 4', 1.2);
-    s += svgLine(0, yBot, bw, yBot, C.crease, '6 4', 1.2);
-    // Vertical panel divisions
-    for (i=1;i<xs.length-1;i++){
-      // crease in body band
-      s += svgLine(xs[i], yTop, xs[i], yBot, C.crease, '6 4', 1.2);
-      // cut in flap bands (slots separating flaps)
-      s += svgLine(xs[i], 0, xs[i], yTop, C.cut, null, 1.6);
-      s += svgLine(xs[i], yBot, xs[i], bh, C.cut, null, 1.6);
+    s += svgRect(0, 0, bw, bh, 'none', C.cut, sw * 1.7);
+    s += svgLine(0, lay.yTop, bw, lay.yTop, C.crease, dash, sw);
+    s += svgLine(0, lay.yBot, bw, lay.yBot, C.crease, dash, sw);
+    for (i = 1; i < lay.xs.length - 1; i++){
+      s += svgLine(lay.xs[i], lay.yTop, lay.xs[i], lay.yBot, C.crease, dash, sw);
+      s += svgLine(lay.xs[i], 0, lay.xs[i], lay.yTop, C.cut, null, sw * 1.35);
+      s += svgLine(lay.xs[i], lay.yBot, lay.xs[i], bh, C.cut, null, sw * 1.35);
     }
-    // Panel labels
-    var labels = ['GLUE','W','L','W','L'];
-    for (i=0;i<widths.length;i++){
-      var cx = xs[i] + widths[i]/2;
-      s += svgText(cx, yTop + cc.extH/2 - 4, labels[i], C.gold, 13);
-      s += svgText(cx, yTop + cc.extH/2 + 14, r0(widths[i])+'mm', C.dim, 10);
+
+    var bodyH = lay.yBot - lay.yTop;
+    for (i = 0; i < lay.widths.length; i++){
+      if (lay.kinds[i] !== 'W' && lay.kinds[i] !== 'L') continue;
+      var cx = lay.xs[i] + lay.widths[i] / 2;
+      var letter = Math.min(font * 0.9, lay.widths[i] * 0.38);
+      if (i === lay.lIndex){
+        s += svgLabel(cx, lay.yTop + bodyH * 0.40, 'L', C.gold, letter);
+        var note = keylineNoteLines(lay.widths[i], font, lay.intNote);
+        var ny = lay.yTop + bodyH * 0.60;
+        for (var li = 0; li < note.lines.length; li++){
+          s += svgLabel(cx, ny + li * note.size * 1.2, note.lines[li], C.dim, note.size);
+        }
+      } else {
+        s += svgLabel(cx, lay.yTop + bodyH * 0.5, lay.kinds[i], C.gold, letter);
+      }
     }
-    // Overall dimensions
-    s += svgText(bw/2, bh + 26, 'Blank width '+r0(bw)+' mm', C.text, 11);
-    s += '<text x="-10" y="'+r1(bh/2)+'" fill="'+C.text+'" font-size="11" font-family="ui-monospace,Consolas,monospace" text-anchor="middle" transform="rotate(-90 -10 '+r1(bh/2)+')">Blank height '+r0(bh)+' mm</text>';
-    // Flap / body band notes
-    s += svgText(bw + 20, yTop/2, r0(flap), C.dim, 9, 'start');
-    s += svgText(bw + 20, yTop + cc.extH/2, r0(cc.extH), C.dim, 9, 'start');
-    s += svgText(bw + 20, yBot + flap/2, r0(flap), C.dim, 9, 'start');
-    s += '</g></svg>';
+
+    // Shrink a chain label until it fits its own segment. A 35 mm glue flap on a
+    // wide blank is only a few pixels wide in the preview, so a fixed size collides.
+    function fitChain(text, segLen, maxSize){
+      var fit = (segLen * 0.78) / (Math.max(String(text).length, 1) * 0.64);
+      return Math.min(maxSize, fit);
+    }
+    function hChain(y, ticks, labels){
+      s += svgLine(ticks[0], y, ticks[ticks.length - 1], y, C.dim, null, sw * 0.9);
+      for (var t = 0; t < ticks.length; t++){
+        s += svgLine(ticks[t], y - m.tick, ticks[t], y + m.tick, C.text, null, sw * 0.9);
+      }
+      for (var n = 0; n < labels.length; n++){
+        s += svgLabel(labels[n].x, y - labels[n].size * 0.72, labels[n].text, C.text, labels[n].size);
+      }
+    }
+    function vChain(x, ticks, labels){
+      s += svgLine(x, ticks[0], x, ticks[ticks.length - 1], C.dim, null, sw * 0.9);
+      for (var t = 0; t < ticks.length; t++){
+        s += svgLine(x - m.tick, ticks[t], x + m.tick, ticks[t], C.text, null, sw * 0.9);
+      }
+      for (var n = 0; n < labels.length; n++){
+        s += svgLabel(x - labels[n].size * 0.72, labels[n].y, labels[n].text, C.text, labels[n].size, -90);
+      }
+    }
+
+    var y1 = bh + m.chain1, y2 = bh + m.chain2;
+    var x1 = -m.chain1, x2 = -m.chain2;
+    lay.xs.forEach(function(x, idx){
+      var yFar = (idx === 0 || idx === lay.xs.length - 1) ? y2 + m.overrun : y1 + m.overrun;
+      s += svgLine(x, bh + m.gap, x, yFar, C.dim, null, sw * 0.75);
+    });
+    var ys = [0, lay.yTop, lay.yBot, bh];
+    ys.forEach(function(y, idx){
+      var xFar = (idx === 0 || idx === ys.length - 1) ? x2 - m.overrun : x1 - m.overrun;
+      s += svgLine(-m.gap, y, xFar, y, C.dim, null, sw * 0.75);
+    });
+    hChain(y1, lay.xs, lay.horiz.map(function(seg){
+      return { x: (seg.a + seg.b) / 2, text: seg.label, size: fitChain(seg.label, seg.b - seg.a, font * 0.92) };
+    }));
+    hChain(y2, [0, bw], [{ x: bw / 2, text: lay.overallW, size: font }]);
+    vChain(x1, ys, lay.vert.map(function(seg){
+      return { y: (seg.a + seg.b) / 2, text: seg.label, size: fitChain(seg.label, seg.b - seg.a, font * 0.92) };
+    }));
+    vChain(x2, [0, bh], [{ y: bh / 2, text: lay.overallH, size: font }]);
+    s += '</svg>';
     return s;
   }
 
@@ -82643,41 +82750,112 @@ window.attendanceReject=async function(reqId,btn){
     if (dashed && doc.setLineDashPattern) doc.setLineDashPattern([], 0);
   }
 
+  function pdfSolid(doc){
+    if (doc.setLineDashPattern) doc.setLineDashPattern([], 0);
+  }
+
+  // Fit "Int L×W×H" inside a panel. Two lines when one line would be unreadably small.
+  function pdfNoteLines(doc, panelW, dims){
+    var full = 'Int ' + dims;
+    doc.setFontSize(8);
+    if (doc.getTextWidth(full) <= panelW * 0.9) return { size: 8, lines: [full] };
+    doc.setFontSize(7);
+    var w = Math.max(doc.getTextWidth('Int'), doc.getTextWidth(dims));
+    if (w <= panelW * 0.9) return { size: 7, lines: ['Int', dims] };
+    var size = 6.5;
+    doc.setFontSize(size);
+    return { size: size, lines: ['Int', dims] };
+  }
+
   function drawKeylinePdf(doc, cc, ox, oy, scale){
-    var glue = cc.glueLap, flap = cc.extW/2;
-    var widths = [glue, cc.extW, cc.extL, cc.extW, cc.extL];
-    var xs = [0]; for (var i=0;i<widths.length;i++) xs.push(xs[i]+widths[i]);
-    var bw = cc.blankW, bh = cc.blankH;
-    var yTop = flap*scale, yBot = (flap+cc.extH)*scale;
-    function X(v){ return ox + v*scale; }
-    function Y(v){ return oy + v*scale; }
-    // Outer cut
-    doc.setDrawColor(60,45,20); doc.setLineWidth(0.6);
-    doc.rect(ox, oy, bw*scale, bh*scale);
-    // Horizontal creases
-    doc.setDrawColor(120,120,120); doc.setLineWidth(0.3);
-    pdfLine(doc, ox, oy+yTop, ox+bw*scale, oy+yTop, true);
-    pdfLine(doc, ox, oy+yBot, ox+bw*scale, oy+yBot, true);
-    // Vertical divisions
-    for (i=1;i<xs.length-1;i++){
-      pdfLine(doc, X(xs[i]), oy+yTop, X(xs[i]), oy+yBot, true); // body crease dashed
-      doc.setDrawColor(60,45,20); doc.setLineWidth(0.5);
-      doc.line(X(xs[i]), oy, X(xs[i]), oy+yTop);               // flap cuts solid
-      doc.line(X(xs[i]), oy+yBot, X(xs[i]), oy+bh*scale);
-      doc.setDrawColor(120,120,120); doc.setLineWidth(0.3);
+    var lay = keylineLayout(cc);
+    var bw = lay.bw, bh = lay.bh;
+    function X(v){ return ox + v * scale; }
+    function Y(v){ return oy + v * scale; }
+    pdfSolid(doc);
+    doc.setDrawColor(60, 45, 20); doc.setLineWidth(0.6);
+    doc.rect(ox, oy, bw * scale, bh * scale);
+    doc.setDrawColor(120, 120, 120); doc.setLineWidth(0.3);
+    pdfLine(doc, ox, Y(lay.yTop), ox + bw * scale, Y(lay.yTop), true);
+    pdfLine(doc, ox, Y(lay.yBot), ox + bw * scale, Y(lay.yBot), true);
+    for (var i = 1; i < lay.xs.length - 1; i++){
+      pdfLine(doc, X(lay.xs[i]), Y(lay.yTop), X(lay.xs[i]), Y(lay.yBot), true);
+      pdfSolid(doc);
+      doc.setDrawColor(60, 45, 20); doc.setLineWidth(0.5);
+      doc.line(X(lay.xs[i]), oy, X(lay.xs[i]), Y(lay.yTop));
+      doc.line(X(lay.xs[i]), Y(lay.yBot), X(lay.xs[i]), oy + bh * scale);
+      doc.setDrawColor(120, 120, 120); doc.setLineWidth(0.3);
     }
-    // Labels
-    var labels = ['GLUE','W','L','W','L'];
-    doc.setFontSize(8); doc.setTextColor(90,70,20);
-    for (i=0;i<widths.length;i++){
-      var cx = X(xs[i]+widths[i]/2);
-      doc.text(labels[i], cx, oy+yTop + (cc.extH*scale)/2, { align:'center' });
-      doc.setTextColor(110,110,110); doc.setFontSize(7);
-      doc.text(r0(widths[i])+'mm', cx, oy+yTop + (cc.extH*scale)/2 + 5, { align:'center' });
-      doc.setTextColor(90,70,20); doc.setFontSize(8);
+    pdfSolid(doc);
+
+    var bodyMid = Y(lay.yTop + (lay.yBot - lay.yTop) / 2);
+    doc.setFontSize(9); doc.setTextColor(90, 70, 20);
+    for (i = 0; i < lay.widths.length; i++){
+      if (lay.kinds[i] !== 'W' && lay.kinds[i] !== 'L') continue;
+      var panelPg = lay.widths[i] * scale;
+      if (panelPg < 8) continue;
+      var cx = X(lay.xs[i] + lay.widths[i] / 2);
+      if (i === lay.lIndex){
+        doc.setFontSize(9); doc.setTextColor(90, 70, 20);
+        doc.text('L', cx, bodyMid - 4, { align: 'center' });
+        var note = pdfNoteLines(doc, panelPg, lay.intNote);
+        doc.setFontSize(note.size); doc.setTextColor(80, 80, 80);
+        var ny = bodyMid + 1.5;
+        for (var li = 0; li < note.lines.length; li++){
+          doc.text(note.lines[li], cx, ny, { align: 'center' });
+          ny += note.size * 0.45;
+        }
+      } else {
+        doc.setFontSize(9); doc.setTextColor(90, 70, 20);
+        doc.text(lay.kinds[i], cx, bodyMid, { align: 'center' });
+      }
     }
-    doc.setTextColor(70,70,70); doc.setFontSize(8);
-    doc.text('Blank width '+r0(bw)+' mm', ox+bw*scale/2, oy+bh*scale + 8, { align:'center' });
+
+    // Dimension chains in page millimetres, outside the cut.
+    var gap = 1.5, c1 = 7, c2 = 15, tick = 1.6, overrun = 1.1;
+    var blankBot = oy + bh * scale;
+    var blankRight = ox + bw * scale;
+    pdfSolid(doc);
+    doc.setDrawColor(110, 110, 110); doc.setLineWidth(0.2);
+    lay.xs.forEach(function(xmm, idx){
+      var x = X(xmm);
+      var yFar = (idx === 0 || idx === lay.xs.length - 1) ? blankBot + c2 + overrun : blankBot + c1 + overrun;
+      doc.line(x, blankBot + gap, x, yFar);
+    });
+    var ys = [0, lay.yTop, lay.yBot, bh];
+    ys.forEach(function(ymm, idx){
+      var y = Y(ymm);
+      var xFar = (idx === 0 || idx === ys.length - 1) ? ox - c2 - overrun : ox - c1 - overrun;
+      doc.line(ox - gap, y, xFar, y);
+    });
+
+    function hChain(y, ticks, labels, fontSize){
+      doc.setDrawColor(90, 90, 90); doc.setLineWidth(0.25);
+      doc.line(ticks[0], y, ticks[ticks.length - 1], y);
+      for (var t = 0; t < ticks.length; t++) doc.line(ticks[t], y - tick, ticks[t], y + tick);
+      doc.setFontSize(fontSize); doc.setTextColor(60, 60, 60);
+      for (var n = 0; n < labels.length; n++){
+        doc.text(labels[n].text, labels[n].x, y - 1.35, { align: 'center' });
+      }
+    }
+    function vChain(x, ticks, labels, fontSize){
+      doc.setDrawColor(90, 90, 90); doc.setLineWidth(0.25);
+      doc.line(x, ticks[0], x, ticks[ticks.length - 1]);
+      for (var t = 0; t < ticks.length; t++) doc.line(x - tick, ticks[t], x + tick, ticks[t]);
+      doc.setFontSize(fontSize); doc.setTextColor(60, 60, 60);
+      for (var n = 0; n < labels.length; n++){
+        doc.text(labels[n].text, x - 1.5, labels[n].y, { align: 'center', angle: 90, baseline: 'middle' });
+      }
+    }
+    hChain(blankBot + c1, lay.xs.map(X), lay.horiz.map(function(seg){
+      return { x: X((seg.a + seg.b) / 2), text: seg.label };
+    }), 8);
+    hChain(blankBot + c2, [ox, blankRight], [{ x: ox + bw * scale / 2, text: lay.overallW }], 9);
+    vChain(ox - c1, ys.map(Y), lay.vert.map(function(seg){
+      return { y: Y((seg.a + seg.b) / 2), text: seg.label };
+    }), 8);
+    vChain(ox - c2, [oy, oy + bh * scale], [{ y: oy + bh * scale / 2, text: lay.overallH }], 9);
+    pdfSolid(doc);
   }
 
   // Top-down layer plan into a page region (rx,ry,rw,rh) in mm.
@@ -82760,10 +82938,12 @@ window.attendanceReject=async function(reqId,btn){
     var summary = 'External ' + r0(cc.extL)+'\u00d7'+r0(cc.extW)+'\u00d7'+r0(cc.extH)+' mm  |  Internal '+r0(cc.intL)+'\u00d7'+r0(cc.intW)+'\u00d7'+r0(cc.intH)+' mm  |  Blank '+r0(cc.blankW)+'\u00d7'+r0(cc.blankH)+' mm  |  Grid '+cc.cols+'\u00d7'+cc.rows+'  |  Case gross '+r2(cc.caseKg)+' kg';
     doc.text(summary, 15, 24);
 
-    var availW = pageW - 40, availH = pageH - 55;
-    var scale = Math.min(availW / cc.blankW, availH / cc.blankH);
-    var ox = (pageW - cc.blankW*scale)/2;
-    var oy = 40;
+    // Content box leaves the header clear and room for the dimension chains.
+    var mL = 32, mR = 12, mT = 34, mB = 26;
+    var boxW = pageW - mL - mR, boxH = pageH - mT - mB;
+    var scale = Math.min(boxW / cc.blankW, boxH / cc.blankH);
+    var ox = mL + (boxW - cc.blankW * scale) / 2;
+    var oy = mT + (boxH - cc.blankH * scale) / 2;
     drawKeylinePdf(doc, cc, ox, oy, scale);
 
     // ── Page 2: divider spec ──
