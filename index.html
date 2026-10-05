@@ -31685,11 +31685,11 @@ window._approvalsBadgePoll = async function() {
     </div>
   </div>
 
-  <!-- Production Log & Forward Plan — informational only -->
+  <!-- Production Log History — what the line did, day by day -->
   <div class="card" style="padding:0;overflow:hidden;margin-top:16px;">
     <div style="padding:13px 18px 10px;border-bottom:1px solid var(--navy-border);">
-      <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);font-weight:700;">Production Log &amp; Forward Plan</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px;">Actual run/changeover history plus projected next jobs. Projections are informational.</div>
+      <div style="font-size:18px;letter-spacing:0.04em;color:var(--gold);font-weight:800;">Production Log History</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:4px;">Each open day from 7:00. Idle, changeover, run, and pause.</div>
     </div>
     <div id="sched-event-list" style="padding:12px 18px;min-height:80px;">
       <div style="color:var(--muted);font-size:11px;">Loading production log...</div>
@@ -49481,6 +49481,11 @@ window.saveAdjModal = async function() {
     if (!j) j = _jobs.find(function(x){ return x.id === jobId; });
     if (!j) { el.innerHTML = '<div style="color:var(--red);">Job not found.</div>'; return; }
 
+    var _pauseLog = [];
+    try {
+      _pauseLog = await supaGet('job_pause_log?job_id=eq.' + j.id + '&order=paused_at.asc&select=paused_at,resumed_at') || [];
+    } catch (e) { _pauseLog = []; }
+
     // Pull BOM for case/pallet info
     var bom = null;
     try {
@@ -49548,16 +49553,21 @@ window.saveAdjModal = async function() {
       [7*60,       10*60+30],
       [10*60+45,   13*60+30],
       [14*60,      15*60+45],
-      [17*60,      21*60]
+      [16*60,      20*60],
+      [20*60+15,   21*60]
     ];
+    function _resultsDayClosed(d) {
+      if (window._isNonWorkingDayFn) return window._isNonWorkingDayFn(d);
+      var dow = d.getDay();
+      return dow === 0 || dow === 6;
+    }
     function calcProductionHours(startDt, endDt) {
       if (!startDt || !endDt || endDt <= startDt) return 0;
       var totalMin = 0;
       var d = new Date(startDt); d.setHours(0,0,0,0);
       var sMs = startDt.getTime(), eMs = endDt.getTime();
       while (d.getTime() <= eMs) {
-        var dow = d.getDay();
-        if (dow !== 0 && dow !== 6) {
+        if (!_resultsDayClosed(d)) {
           var base = d.getTime();
           for (var pi = 0; pi < _PROD_PERIODS.length; pi++) {
             var ps = base + _PROD_PERIODS[pi][0]*60000;
@@ -49570,6 +49580,18 @@ window.saveAdjModal = async function() {
       }
       return Math.round(totalMin / 60 * 100) / 100;
     }
+    function fmtDurFromHours(h) {
+      if (h == null || isNaN(h)) return '—';
+      var mins = Math.max(0, Math.round(h * 60));
+      var hh = Math.floor(mins / 60), mm = mins % 60;
+      return hh ? (hh + ' hrs' + (mm ? ' ' + mm + ' mins' : '')) : (mm + ' mins');
+    }
+    function fmtPauseWhen(iso) {
+      if (!iso) return 'Still paused';
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleString('en-IE', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    }
     function pauseHoursTotal() {
       var h = (j.total_paused_secs || 0) / 3600;
       if (j.paused_at) h += calcProductionHours(new Date(j.paused_at), new Date());
@@ -49580,14 +49602,21 @@ window.saveAdjModal = async function() {
       return Math.max(0, Math.round((spanHours - pauseHoursTotal()) * 100) / 100);
     }
     var _pauseHours = pauseHoursTotal();
+    // Run hours start at production start, not changeover. Jobs with no
+    // actual_start (early date-only records) keep the hours already saved.
+    var _runStartIso = j.actual_start || null;
+    var _runEndIso = j.date_completed || j.actual_end || null;
     var autoHours = null;
-    var _hoursStart = j.date_commenced || j.actual_start;
-    var _hoursEnd = j.date_completed || j.actual_end;
-    if (_hoursStart && _hoursEnd) {
-      autoHours = netJobHours(calcProductionHours(new Date(_hoursStart), new Date(_hoursEnd)));
+    if (_runStartIso && _runEndIso) {
+      autoHours = netJobHours(calcProductionHours(new Date(_runStartIso), new Date(_runEndIso)));
     }
-    var actualHours = (j.actual_job_hours != null && j.actual_job_hours !== '') ? j.actual_job_hours : autoHours;
+    var actualHours = autoHours != null
+      ? autoHours
+      : ((j.actual_job_hours != null && j.actual_job_hours !== '') ? j.actual_job_hours : null);
     var autoRate = (j.actual_bottles_produced && actualHours > 0) ? Math.round(j.actual_bottles_produced / actualHours) : null;
+    var _coStartIso = j.changeover_start || null;
+    var _hasSeparateCo = !!(_coStartIso && _runStartIso && new Date(_coStartIso) < new Date(_runStartIso));
+    var _coHours = _hasSeparateCo ? calcProductionHours(new Date(_coStartIso), new Date(_runStartIso)) : null;
 
     var html = '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">Fields marked <span style="color:var(--red);">*</span> must be completed before the job can be moved to Complete.</div>';
 
@@ -49606,9 +49635,31 @@ window.saveAdjModal = async function() {
     var autoFilledNote = '<div style="font-size:10px;color:#22c55e;margin-top:4px;display:flex;align-items:center;gap:4px;">&#10003; Auto-filled from Schedule — edit only if incorrect</div>';
     html += frow('Date / Time Job Commenced', inp('commenced', localDateTimeValue(j.date_commenced || j.actual_start), '', 'datetime-local') + ((j.date_commenced || j.actual_start) ? autoFilledNote : ''), true);
     html += frow('Date / Time Job Ended', inp('completed', localDateTimeValue(j.date_completed || j.actual_end), '', 'datetime-local') + ((j.date_completed || j.actual_end) ? autoFilledNote : ''), true);
-    html += frow('Job Paused', inp('paused', _pauseHours, '', 'number', true) + sub('Total time the job was paused. Informational only — not counted in Actual Job Hours.'));
-    html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub('Production hours between Commenced and Ended, minus pause (breaks and weekends excluded)'));
-    html += frow('Actual Bottling Rate Achieved', inp('bottling-rate', autoRate, 'Auto-calculated', 'number', true) + sub('Bottles ÷ actual job hours (pauses excluded)'));
+    if (_runStartIso) {
+      html += frow('Production Started', inp('prod-start', localDateTimeValue(_runStartIso), '', 'datetime-local', true) + sub('When the line started bottling. Not edited here.'));
+    }
+    if (_hasSeparateCo) {
+      html += frow('Changeover Hours', inp('changeover', _coHours, '', 'number', true) + sub(fmtDurFromHours(_coHours) + '. Opening hours from job commenced to production start. Not included in the bottling rate.'));
+    }
+    var _pauseBody = '';
+    if (_pauseLog.length) {
+      _pauseBody = _pauseLog.map(function(p, idx) {
+        var endDt = p.resumed_at ? new Date(p.resumed_at) : new Date();
+        var len = calcProductionHours(new Date(p.paused_at), endDt);
+        return '<div style="font-size:13px;color:var(--white);padding:3px 0;">'
+          + 'Pause ' + (idx + 1) + ': ' + fmtPauseWhen(p.paused_at)
+          + ' → ' + (p.resumed_at ? fmtPauseWhen(p.resumed_at) : 'Still paused')
+          + ' · ' + fmtDurFromHours(len) + '</div>';
+      }).join('');
+      _pauseBody += '<div style="font-size:13px;font-weight:700;color:var(--white);padding-top:4px;">Total ' + fmtDurFromHours(_pauseHours) + '</div>';
+      _pauseBody += sub('Each pause is taken out of Actual Job Hours.');
+    } else {
+      _pauseBody = inp('paused', _pauseHours, '', 'number', true)
+        + sub('Total time the job was paused. Start and resume were not recorded. Not counted in Actual Job Hours.');
+    }
+    html += frow('Job Paused', _pauseBody);
+    html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub((actualHours != null ? fmtDurFromHours(actualHours) + '. ' : '') + 'Bottling time from production start to job ended, minus pause. Changeover is not included.'));
+    html += frow('Actual Bottling Rate Achieved', inp('bottling-rate', autoRate, 'Auto-calculated', 'number', true) + sub('Bottles ÷ actual job hours. Changeover and pauses are excluded.'));
     html += frow('Line Clearance Checklist Complete', cb('line-clearance', !!j.line_clearance_complete, 'Confirmed complete'), true);
     html += frow('Bottles Reworked', inp('bottles-reworked', j.bottles_reworked||0, '0 if none', 'number') + sub('Number of bottles sent back for rework'));
     html += frow('Cost per Unit (€)', inp('cost-per-unit', j.cost_per_unit, 'e.g. 4.85', 'number') + sub('Used in CBW bottling report'));
@@ -49674,10 +49725,16 @@ window.saveAdjModal = async function() {
       recalcRate();
     }
     function recalcHours() {
-      var s = commEl && commEl.value ? new Date(commEl.value) : null;
-      var e = compEl && compEl.value ? new Date(compEl.value) : null;
-      if (s && e && !isNaN(s) && !isNaN(e) && e > s && hoursEl) {
-        hoursEl.value = netJobHours(calcProductionHours(s, e));
+      var end = compEl && compEl.value ? new Date(compEl.value) : null;
+      var start = j.actual_start ? new Date(j.actual_start) : (commEl && commEl.value ? new Date(commEl.value) : null);
+      var coEl = document.getElementById('res-changeover');
+      if (coEl && j.actual_start && commEl && commEl.value) {
+        var co = new Date(commEl.value);
+        var runS = new Date(j.actual_start);
+        coEl.value = (runS > co) ? calcProductionHours(co, runS) : '';
+      }
+      if (start && end && !isNaN(start) && !isNaN(end) && end > start && hoursEl) {
+        hoursEl.value = netJobHours(calcProductionHours(start, end));
       }
       recalcRate();
     }
@@ -57704,7 +57761,8 @@ window.saveAdjModal = async function() {
     [7*60,       10*60+30],   // 07:00 – 10:30
     [10*60+45,   13*60+30],   // 10:45 – 13:30
     [14*60,      15*60+45],   // 14:00 – 15:45
-    [17*60,      21*60]       // 17:00 – 21:00
+    [16*60,      20*60],      // 16:00 – 20:00
+    [20*60+15,   21*60]       // 20:15 – 21:00
   ];
   var PROD_WINDOWS = DEFAULT_PROD_WINDOWS.map(function(w) { return w.slice(); });
   var BREAK_BANDS = [];
@@ -57779,6 +57837,7 @@ window.saveAdjModal = async function() {
   ];
 
   var _schedJobs          = [];
+  var _schedPauseLog      = [];   // job_pause_log rows: paused_at / resumed_at
   var _schedBomMap        = {};   // bom_id -> { product_name, volume_cl, abv, additional_info } for extended job labels
   var _schedDowntime      = [];   // downtime_logs rows for calendar rendering
   var _schedTimerInterval = null;
@@ -57799,6 +57858,7 @@ window.saveAdjModal = async function() {
     return window.db.select(i >= 0 ? path.slice(0, i) : path, i >= 0 ? path.slice(i) : '');
   }
   function sbPatch(table, query, body) { return window.db.update(table, query, body); }
+  function sbPost(table, body) { return window.db.insert(table, body); }
 
   // ── Republic of Ireland bank holidays ───────────────────────────────────────
   // Meeus/Jones/Butcher Easter algorithm — returns Easter Sunday as a Date
@@ -58062,6 +58122,9 @@ window.saveAdjModal = async function() {
           total_paused_secs: j.total_paused_secs || 0
         });
       });
+      try {
+        _schedPauseLog = await sbGet('job_pause_log?select=job_id,paused_at,resumed_at&order=paused_at.asc') || [];
+      } catch (ePause) { _schedPauseLog = []; }
       // Fetch sign-off gate state for the Next Jobs card (parallel, non-blocking)
       var soSettled = await Promise.allSettled([
         sbGet('job_drygoods_prep?select=job_id&signed_by_coordinator=not.is.null'),
@@ -58767,6 +58830,208 @@ window.saveAdjModal = async function() {
   // Track whether the "Show all projections" expander is open across re-renders.
   var _schedShowAllProjections = false;
 
+  function _schedJobName(j) {
+    if (!j) return '—';
+    return window.jobLabel ? (window.jobLabel(j, _schedBomMap) || j.id || '—') : (j.product_name || j.id || '—');
+  }
+
+  function _pausesForJob(jobId) {
+    return (_schedPauseLog || []).filter(function(p) { return p.job_id === jobId && p.paused_at; })
+      .sort(function(a, b) { return new Date(a.paused_at) - new Date(b.paused_at); });
+  }
+
+  function _hm(d) { return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+
+  function _diaryActivities(now) {
+    var acts = [];
+    (_schedJobs || []).forEach(function(j) {
+      var pauses = _pausesForJob(j.id);
+      var runEndIso = j.actual_end || j.date_completed;
+      var live = !!(j.actual_start && !runEndIso);
+      var runEnd = runEndIso ? new Date(runEndIso) : (live ? now : null);
+      if (j.changeover_start && j.actual_start && new Date(j.changeover_start) < new Date(j.actual_start)) {
+        acts.push({ type: 'changeover', job: j, start: new Date(j.changeover_start), end: new Date(j.actual_start) });
+      } else if (j.changeover_start && !j.actual_start) {
+        acts.push({ type: 'changeover', job: j, start: new Date(j.changeover_start), end: now });
+      }
+      if (!j.actual_start || !runEnd || !(runEnd > new Date(j.actual_start))) return;
+      var start = new Date(j.actual_start);
+      if (pauses.length) {
+        var cursor = start;
+        pauses.forEach(function(p) {
+          var ps = new Date(p.paused_at);
+          var pe = p.resumed_at ? new Date(p.resumed_at) : now;
+          if (ps < start) ps = start;
+          if (ps > runEnd) ps = runEnd;
+          if (pe > runEnd) pe = runEnd;
+          if (ps > cursor) acts.push({ type: 'run', job: j, start: new Date(cursor.getTime()), end: new Date(ps.getTime()) });
+          if (pe > ps) acts.push({ type: 'pause', job: j, start: new Date(ps.getTime()), end: new Date(pe.getTime()) });
+          if (pe > cursor) cursor = pe;
+        });
+        if (cursor < runEnd) acts.push({ type: 'run', job: j, start: new Date(cursor.getTime()), end: new Date(runEnd.getTime()) });
+      } else {
+        var openPause = (j.paused_at && live) ? Math.round(_calcProdSecs(new Date(j.paused_at), now)) : 0;
+        acts.push({
+          type: 'run', job: j, start: start, end: runEnd,
+          unloggedPauseSecs: (j.total_paused_secs || 0) + openPause
+        });
+      }
+    });
+    return acts;
+  }
+
+  function _visibleOnDay(act, dayStart, dayLimit) {
+    var clipS = new Date(Math.max(act.start.getTime(), dayStart.getTime()));
+    var clipE = new Date(Math.min(act.end.getTime(), dayLimit.getTime()));
+    if (!(clipE > clipS)) return null;
+    var visS = null, visE = null;
+    for (var wi = 0; wi < PROD_WINDOWS.length; wi++) {
+      var ws = new Date(dayStart.getTime() + PROD_WINDOWS[wi][0] * 60000);
+      var we = new Date(dayStart.getTime() + PROD_WINDOWS[wi][1] * 60000);
+      if (we > dayLimit) we = new Date(dayLimit.getTime());
+      var s = new Date(Math.max(clipS.getTime(), ws.getTime()));
+      var e = new Date(Math.min(clipE.getTime(), we.getTime()));
+      if (e > s) {
+        if (!visS) visS = s;
+        visE = e;
+      }
+    }
+    if (!visS || !visE || !(visE > visS)) return null;
+    return { start: visS, end: visE, lenMins: Math.round(_calcProdSecs(visS, visE) / 60) };
+  }
+
+  function _renderProductionDiary() {
+    var now = new Date();
+    var acts = _diaryActivities(now);
+    var thisWeek = _weekStart(now);
+    var weekNames = ['This week', 'Last week', '2 weeks ago', '3 weeks ago'];
+    var totals = { bottles: 0, changeoverMins: 0, idleMins: 0 };
+    var bottled = {};
+    var pauseNoteJobs = {};
+    var html = '';
+
+    function mo(d) { return d.toLocaleDateString('en-GB', { month: 'short' }); }
+    function weekLabel(idx, ws) {
+      var we = new Date(ws); we.setDate(we.getDate() + 6);
+      var range = ws.getMonth() === we.getMonth()
+        ? ws.getDate() + ' \u2013 ' + we.getDate() + ' ' + mo(we)
+        : ws.getDate() + ' ' + mo(ws) + ' \u2013 ' + we.getDate() + ' ' + mo(we);
+      return weekNames[idx] + ' \u00b7 ' + range;
+    }
+    function line(time, text, color, extra) {
+      return '<div style="display:flex;gap:16px;align-items:baseline;padding:7px 14px 7px 22px;">'
+        + '<div style="width:132px;flex:none;font-size:13px;font-weight:700;color:var(--white);">' + time + '</div>'
+        + '<div style="flex:1;min-width:0;font-size:13px;color:' + color + ';">' + text + '</div>'
+        + '<div style="flex:none;font-size:13px;font-weight:700;color:var(--white);white-space:nowrap;">' + (extra || '') + '</div>'
+        + '</div>';
+    }
+
+    for (var wk = 0; wk <= 3; wk++) {
+      var ws = new Date(thisWeek); ws.setDate(ws.getDate() - wk * 7);
+      var weekHtml = '';
+      for (var di = 0; di < 5; di++) {
+        var day = new Date(ws); day.setDate(ws.getDate() + di); day.setHours(0, 0, 0, 0);
+        if (_isNonWorkingDay(day)) continue;
+        var today0 = new Date(now); today0.setHours(0, 0, 0, 0);
+        if (day > today0) continue;
+        var dayLimit = (day.getTime() === today0.getTime()) ? now : new Date(day.getTime() + 86400000);
+        var shown = [];
+        acts.forEach(function(act) {
+          var vis = _visibleOnDay(act, day, dayLimit);
+          if (!vis || vis.lenMins <= 0) return;
+          shown.push({
+            type: act.type, job: act.job, start: vis.start, end: vis.end, lenMins: vis.lenMins,
+            unloggedPauseSecs: act.unloggedPauseSecs || 0,
+            actEnd: act.end
+          });
+        });
+        shown.sort(function(a, b) { return a.start - b.start || (a.type === 'pause' ? 1 : -1); });
+
+        var gaps = [];
+        for (var wi = 0; wi < PROD_WINDOWS.length; wi++) {
+          var wS = new Date(day.getTime() + PROD_WINDOWS[wi][0] * 60000);
+          var wE = new Date(day.getTime() + PROD_WINDOWS[wi][1] * 60000);
+          if (wS >= dayLimit) continue;
+          if (wE > dayLimit) wE = new Date(dayLimit.getTime());
+          if (!(wE > wS)) continue;
+          var cursor = wS.getTime();
+          shown.forEach(function(s) {
+            var bs = Math.max(s.start.getTime(), wS.getTime());
+            var be = Math.min(s.end.getTime(), wE.getTime());
+            if (be <= bs) return;
+            if (bs - cursor >= 60000) gaps.push({ start: new Date(cursor), end: new Date(bs) });
+            if (be > cursor) cursor = be;
+          });
+          if (wE.getTime() - cursor >= 60000) gaps.push({ start: new Date(cursor), end: wE });
+        }
+
+        var rows = shown.map(function(s) { return { kind: 'act', start: s.start, end: s.end, act: s }; })
+          .concat(gaps.map(function(g) { return { kind: 'idle', start: g.start, end: g.end }; }));
+        rows.sort(function(a, b) { return a.start - b.start; });
+
+        var dayHtml = '';
+        if (!rows.length && day.getTime() === today0.getTime() && now < new Date(day.getTime() + PROD_WINDOWS[0][0] * 60000)) {
+          dayHtml += line(_hm(new Date(day.getTime() + PROD_WINDOWS[0][0] * 60000)), 'Opens', 'var(--muted)', '');
+        }
+        rows.forEach(function(r, idx) {
+          if (r.kind === 'idle') {
+            var next = null;
+            for (var k = idx + 1; k < rows.length; k++) { if (rows[k].kind === 'act') { next = rows[k].act; break; } }
+            var idleText = 'Line idle';
+            if (next) {
+              var nm = _schedJobName(next.job);
+              idleText = next.type === 'changeover' ? ('Line idle until changeover to ' + nm)
+                : next.type === 'pause' ? ('Line idle until pause on ' + nm)
+                : ('Line idle until ' + nm);
+            }
+            var idleMins = Math.round((r.end - r.start) / 60000);
+            totals.idleMins += idleMins;
+            dayHtml += line(_hm(r.start) + ' \u2013 ' + _hm(r.end), esc(idleText), 'var(--muted)', _fmtSchedMins(idleMins));
+            return;
+          }
+          var s = r.act;
+          var name = _schedJobName(s.job);
+          var label = s.type === 'changeover' ? 'Changeover' : s.type === 'pause' ? 'Paused' : 'Run';
+          var color = s.type === 'run' ? 'var(--green)' : s.type === 'changeover' ? 'var(--amber)' : 'var(--muted)';
+          var extra = _fmtSchedMins(s.lenMins);
+          if (s.type === 'run' && s.job.actual_bottles_produced && s.job.actual_job_hours > 0) {
+            extra += ' \u00b7 ' + Math.round(s.job.actual_bottles_produced / s.job.actual_job_hours) + ' BPH';
+            if (!bottled[s.job.id]) { bottled[s.job.id] = true; totals.bottles += Number(s.job.actual_bottles_produced) || 0; }
+          }
+          if (s.type === 'changeover') totals.changeoverMins += s.lenMins;
+          dayHtml += line(_hm(s.start) + ' \u2013 ' + _hm(s.end), esc(label + ' \u00b7 ' + name), color, esc(extra));
+          var endsHere = s.actEnd && s.actEnd.getTime() >= day.getTime() && s.actEnd.getTime() <= dayLimit.getTime();
+          if (s.type === 'run' && s.unloggedPauseSecs > 0 && endsHere && !pauseNoteJobs[s.job.id]) {
+            pauseNoteJobs[s.job.id] = true;
+            dayHtml += line('', esc('Paused ' + _fmtSchedMins(Math.round(s.unloggedPauseSecs / 60)) + ' \u2014 start and resume not recorded'), 'var(--muted)', '');
+          }
+        });
+        if (!dayHtml) continue;
+        var dayTitle = day.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+        weekHtml += '<div style="padding:16px 14px 6px;font-size:20px;font-weight:800;color:var(--white);">' + esc(dayTitle) + '</div>' + dayHtml;
+      }
+      if (!weekHtml) continue;
+      html += '<div style="margin:18px 0 8px;padding:8px 14px;font-size:15px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:var(--gold);border-bottom:1px solid rgba(201,168,76,0.35);">' + esc(weekLabel(wk, ws)) + '</div>' + weekHtml;
+    }
+
+    function totCell(lbl, val) {
+      return '<div style="display:flex;align-items:baseline;gap:8px;">'
+        + '<span style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);">' + lbl + '</span>'
+        + '<span style="font-size:14px;font-weight:800;color:var(--white);">' + val + '</span></div>';
+    }
+    var totalsBar = '<div style="display:flex;flex-wrap:wrap;gap:10px 28px;padding:14px;margin-top:8px;background:rgba(255,255,255,0.04);border-top:1px solid var(--navy-border);">'
+      + totCell('Totals \u2014 4 weeks', '')
+      + totCell('Bottles produced', (totals.bottles || 0).toLocaleString())
+      + totCell('Changeover', totals.changeoverMins ? _fmtSchedMins(totals.changeoverMins) : '0 mins')
+      + totCell('Line idle', totals.idleMins ? _fmtSchedMins(totals.idleMins) : '0 mins')
+      + '</div>';
+
+    if (!html) {
+      return '<div style="color:var(--muted);font-size:13px;padding:12px;">No open days in the last 4 weeks.</div>';
+    }
+    return html + totalsBar;
+  }
+
   function renderScheduleEvents() {
     var el = document.getElementById('sched-event-list');
     if (!el) return;
@@ -58815,8 +59080,8 @@ window.saveAdjModal = async function() {
       var h = '<div style="margin-bottom:14px;">'
         + '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 7px;">'
         + '<div style="display:flex;align-items:baseline;gap:10px;">'
-        +   '<div style="font-size:9px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:var(--gold);">' + title + '</div>'
-        +   '<div style="font-size:10px;color:var(--muted);">' + subtitle + '</div>'
+        +   '<div style="font-size:18px;font-weight:800;color:var(--white);">' + title + '</div>'
+        +   '<div style="font-size:12px;color:var(--muted);">' + subtitle + '</div>'
         + '</div>'
         + (extraHeaderHtml || '')
         + '</div>';
@@ -58829,72 +59094,12 @@ window.saveAdjModal = async function() {
       h += '</div>' + list.map(rowHtml).join('') + '</div></div>';
       return h;
     }
-    // "Recent actual events" — same shell as section(), but rows are blocked into
-    // week groups (This week / Last week / …) with a totals strip at the bottom.
-    function actualSection(title, subtitle, list, totals, empty) {
-      var h = '<div style="margin-bottom:14px;">'
-        + '<div style="display:flex;align-items:baseline;gap:10px;margin:0 0 7px;">'
-        +   '<div style="font-size:9px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:var(--gold);">' + title + '</div>'
-        +   '<div style="font-size:10px;color:var(--muted);">' + subtitle + '</div>'
-        + '</div>';
-      if (!list.length) return h + '<div style="color:var(--muted);font-size:12px;padding:10px 12px;border:1px solid var(--navy-border);border-radius:4px;">' + empty + '</div></div>';
-      var weekNames = ['This week', 'Last week', '2 weeks ago', '3 weeks ago'];
-      function weekLabel(idx) {
-        var ws = _weekStart(new Date());
-        ws.setDate(ws.getDate() - idx * 7);
-        var we = new Date(ws); we.setDate(we.getDate() + 6);
-        function mo(d) { return d.toLocaleDateString('en-GB', { month: 'short' }); }
-        var range = ws.getMonth() === we.getMonth()
-          ? ws.getDate() + ' \u2013 ' + we.getDate() + ' ' + mo(we)
-          : ws.getDate() + ' ' + mo(ws) + ' \u2013 ' + we.getDate() + ' ' + mo(we);
-        return weekNames[idx] + ' \u00b7 ' + range;
-      }
-      h += '<div style="border:1px solid var(--navy-border);border-radius:4px;overflow:hidden;">';
-      h += '<div style="display:grid;grid-template-columns:' + cols + ';gap:8px;padding:6px 12px;background:rgba(255,255,255,0.025);border-bottom:1px solid var(--navy-border);">';
-      ['Job','Client','Event','Start','Finish','Length','BPH / Assumption'].forEach(function(lbl) {
-        h += '<div style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">' + lbl + '</div>';
-      });
-      h += '</div>';
-      for (var wk = 0; wk <= 3; wk++) {
-        var group = list.filter(function(r) { return r.weekIdx === wk; });
-        if (!group.length) continue;
-        h += '<div style="padding:5px 12px;background:rgba(200,168,106,0.07);border-bottom:1px solid var(--navy-border);font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);">' + weekLabel(wk) + '</div>';
-        h += group.map(rowHtml).join('');
-      }
-      function totCell(lbl, val) {
-        return '<div style="display:flex;align-items:baseline;gap:6px;">'
-          + '<span style="font-size:8px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);">' + lbl + '</span>'
-          + '<span style="font-size:11px;font-weight:700;color:var(--white);">' + val + '</span></div>';
-      }
-      h += '<div style="display:flex;flex-wrap:wrap;gap:8px 24px;padding:8px 12px;background:rgba(255,255,255,0.04);border-top:1px solid var(--navy-border);">'
-        + totCell('Totals \u2014 4 weeks', '')
-        + totCell('Bottles produced', (totals.bottles || 0).toLocaleString())
-        + totCell('Changeover', totals.changeoverMins ? _fmtSchedMins(totals.changeoverMins) : '0 mins')
-        + totCell('Line idle', totals.idleMins ? _fmtSchedMins(totals.idleMins) : '0 mins')
-        + '</div>';
-      h += '</div></div>';
-      return h;
-    }
-    var PROJ_DEFAULT_CAP = 10;
-    var totalProjected = rows.projected.length;
-    var capped = !_schedShowAllProjections && totalProjected > PROJ_DEFAULT_CAP;
-    var projVisible = capped ? rows.projected.slice(0, PROJ_DEFAULT_CAP) : rows.projected;
-    var projHeader = '';
-    if (totalProjected > PROJ_DEFAULT_CAP) {
-      projHeader = '<button type="button" onclick="window._schedToggleAllProjections&&window._schedToggleAllProjections()" style="background:transparent;border:1px solid var(--navy-border);color:var(--gold);font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:3px 9px;border-radius:3px;cursor:pointer;font-family:Lato,sans-serif;">'
-        + (capped ? 'Show all (' + totalProjected + ')' : 'Show first ' + PROJ_DEFAULT_CAP)
-        + '</button>';
-    }
     el.innerHTML =
       section('Now', 'current line state', rows.now, 'Line is idle — see banner above.') +
-      actualSection('Recent actual events', 'last 4 weeks — newest first', rows.actual, rows.actualTotals || {}, 'No actual run/changeover events recorded in the last 4 weeks.') +
-      section('Projected next jobs', 'projections use last actual BPH and changeover when available; falls back to 400 BPH / 2h', projVisible, 'No queued jobs to project.', projHeader);
+      _renderProductionDiary();
   }
 
-  window._schedToggleAllProjections = function() {
-    _schedShowAllProjections = !_schedShowAllProjections;
-    renderScheduleEvents();
-  };
+  window._schedToggleAllProjections = function() {};
 
   // ── Recent corrections drawer ────────────────────────────────────────────────
   // Parses schedule_notes from every cached job for bracketed audit entries
@@ -59040,8 +59245,11 @@ window.saveAdjModal = async function() {
   window.schedPauseJob = async function(jobId) {
     if (!window.canDo || !window.canDo('production_control')) { window.toast && window.toast('Permission denied.', 'error'); return; }
     if (!_isWithinShift()) { window.toast && window.toast('Cannot pause outside production hours.', 'error'); return; }
+    var nowIso = new Date().toISOString();
     try {
-      await sbPatch('jobs', '?id=eq.' + jobId, { paused_at: new Date().toISOString() });
+      try { await sbPost('job_pause_log', { job_id: jobId, paused_at: nowIso }); }
+      catch (eLog) { window.toast && window.toast('Paused, but the pause time was not logged.', 'error'); }
+      await sbPatch('jobs', '?id=eq.' + jobId, { paused_at: nowIso });
       window.toast && window.toast('Job paused.', 'success');
       await loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
@@ -59051,9 +59259,12 @@ window.saveAdjModal = async function() {
     if (!window.canDo || !window.canDo('production_control')) { window.toast && window.toast('Permission denied.', 'error'); return; }
     var j = _schedJobs.find(function(x) { return x.id === jobId; });
     if (!j || !j.paused_at) { window.toast && window.toast('Job is not paused.', 'error'); return; }
+    var nowIso = new Date().toISOString();
     var extraSecs = Math.round(_calcProdSecs(new Date(j.paused_at), new Date()));
     try {
       await sbPatch('jobs', '?id=eq.' + jobId, { paused_at: null, total_paused_secs: (j.total_paused_secs || 0) + extraSecs });
+      try { await sbPatch('job_pause_log', '?job_id=eq.' + jobId + '&resumed_at=is.null', { resumed_at: nowIso }); }
+      catch (eLog) { /* total is already saved */ }
       window.toast && window.toast('Job resumed.', 'success');
       await loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
@@ -59064,11 +59275,18 @@ window.saveAdjModal = async function() {
     if (!confirm('Mark this production run as finished? Results/sign-off can still be completed later.')) return;
     try {
       var endIso = new Date().toISOString();
-      await sbPatch('jobs', '?id=eq.' + jobId, {
+      var j = _schedJobs.find(function(x) { return x.id === jobId; });
+      var patch = {
         actual_end:     endIso,
         date_completed: endIso,   // auto-fills Results tab "Date/Time Job Ended"
         paused_at:      null
-      });
+      };
+      if (j && j.paused_at) {
+        patch.total_paused_secs = (j.total_paused_secs || 0) + Math.round(_calcProdSecs(new Date(j.paused_at), new Date()));
+        try { await sbPatch('job_pause_log', '?job_id=eq.' + jobId + '&resumed_at=is.null', { resumed_at: endIso }); }
+        catch (eLog) { /* total is kept on the job */ }
+      }
+      await sbPatch('jobs', '?id=eq.' + jobId, patch);
       window.toast && window.toast('Job finished.', 'success');
       await loadSchedule();
       window.schedChooseNextJob(jobId, 'finish');
@@ -59126,8 +59344,8 @@ window.saveAdjModal = async function() {
   };
 
   // ── Stop — works for changeover OR running/paused ────────────────────────────
-  // Quick-pick reason chips, optional bay release, classifies misclick (<60s) vs
-  // abandoned. Returns the job to the queue ordered by Job Ready.
+  // Quick-pick reason chips, optional bay release, classifies misclick
+  // (<60s of opening hours) vs abandoned. Returns the job to the queue ordered by Job Ready.
   window.schedStop = function(jobId) {
     if (!window.canDo || !window.canDo('production_control')) {
       window.toast && window.toast('Permission denied.', 'error'); return;
@@ -59140,7 +59358,8 @@ window.saveAdjModal = async function() {
       window.toast && window.toast('Nothing to stop — this job isn\'t active.', 'error'); return;
     }
     var startedIso = isCo ? j.changeover_start : j.actual_start;
-    var elapsedMs  = Date.now() - new Date(startedIso).getTime();
+    // Opening hours only, so a stop that crosses a break does not count the gap.
+    var elapsedMs  = Math.round(_calcProdSecs(new Date(startedIso), new Date()) * 1000);
     var heldBay = !!(j.job_bay && !j.bay_released_at);
 
     var existing = document.getElementById('sched-stop-dialog-overlay');
@@ -59394,21 +59613,26 @@ window.saveAdjModal = async function() {
     if (endDt   && endDt   > now)            { if (errEl) errEl.textContent = 'Actual End cannot be in the future.';   return; }
     if (startDt && endDt && endDt <= startDt){ if (errEl) errEl.textContent = 'Actual End must be after Actual Start.'; return; }
 
-    var warnParts = [];
-    function outsideShift(dt) {
-      if (!dt) return false;
-      var mins = dt.getHours() * 60 + dt.getMinutes();
-      var bounds = (window.getProductionDayBounds && window.getProductionDayBounds()) || { start: 7 * 60, end: 21 * 60 };
-      return mins < bounds.start || mins > bounds.end;
-    }
-    if (outsideShift(startDt)) warnParts.push('start');
-    if (outsideShift(endDt))   warnParts.push('end');
+    var coDt = coVal ? new Date(coVal) : null;
     var bounds = (window.getProductionDayBounds && window.getProductionDayBounds()) || { start: 7 * 60, end: 21 * 60 };
     function _fmtBound(m) {
       var h = Math.floor(m / 60), mm = m % 60;
       return (h < 10 ? '0' : '') + h + ':' + (mm < 10 ? '0' : '') + mm;
     }
-    if (warnParts.length && !confirm('Warning: the ' + warnParts.join(' and ') + ' time(s) fall outside production hours (' + _fmtBound(bounds.start) + '–' + _fmtBound(bounds.end) + '). Save anyway?')) return;
+    var warnParts = [];
+    function noteShift(label, dt) {
+      if (!dt || isNaN(dt.getTime())) return;
+      var mins = dt.getHours() * 60 + dt.getMinutes();
+      if (mins < bounds.start || mins > bounds.end) {
+        warnParts.push(label + ' is outside production hours (' + _fmtBound(bounds.start) + '–' + _fmtBound(bounds.end) + ')');
+      } else if (_safeIsBreak(mins)) {
+        warnParts.push(label + ' falls in a break');
+      }
+    }
+    noteShift('changeover start', coDt);
+    noteShift('start', startDt);
+    noteShift('end', endDt);
+    if (warnParts.length && !confirm('Warning: ' + warnParts.join('; ') + '. Save anyway?')) return;
 
     var saveBtn = document.getElementById('_et_save');
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving\u2026'; }
@@ -64867,7 +65091,7 @@ window.saveAdjModal = async function() {
   }
   function _defaultProdWindows() {
     return (window.getDefaultProductionWindows && window.getDefaultProductionWindows()) || [
-      [7*60, 10*60+30], [10*60+45, 13*60+30], [14*60, 15*60+45], [17*60, 21*60]
+      [7*60, 10*60+30], [10*60+45, 13*60+30], [14*60, 15*60+45], [16*60, 20*60], [20*60+15, 21*60]
     ];
   }
   function _renderProductionWindowRows(windows) {
