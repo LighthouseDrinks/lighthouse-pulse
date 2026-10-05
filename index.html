@@ -59525,6 +59525,20 @@ window.saveAdjModal = async function() {
         + '<div style="flex:none;font-size:13px;font-weight:700;color:var(--white);white-space:nowrap;">' + (extra || '') + '</div>'
         + '</div>';
     }
+    function dayBoxes(stats) {
+      function box(title, mins, color) {
+        return '<div style="background:rgba(255,255,255,0.03);border:1px solid var(--navy-border);border-top:3px solid ' + color + ';border-radius:4px;padding:8px 10px;">'
+          + '<div style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:' + color + ';">' + title + '</div>'
+          + '<div style="font-size:15px;font-weight:800;color:var(--white);margin-top:3px;">' + _fmtSchedMins(mins || 0) + '</div>'
+          + '</div>';
+      }
+      return '<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:4px 14px 8px;">'
+        + box('Line idle', stats.idle, 'var(--red)')
+        + box('Changeover', stats.changeover, 'var(--amber)')
+        + box('Running', stats.run, 'var(--green)')
+        + box('Paused', stats.pause, 'var(--blue)')
+        + '</div>';
+    }
 
     for (var wk = 0; wk <= 3; wk++) {
       var ws = new Date(thisWeek); ws.setDate(ws.getDate() - wk * 7);
@@ -59569,9 +59583,10 @@ window.saveAdjModal = async function() {
           .concat(gaps.map(function(g) { return { kind: 'idle', start: g.start, end: g.end }; }));
         rows.sort(function(a, b) { return a.start - b.start; });
 
-        var dayHtml = '';
+        var dayStats = { idle: 0, changeover: 0, run: 0, pause: 0 };
+        var chunks = [];
         if (!rows.length && day.getTime() === today0.getTime() && now < new Date(day.getTime() + PROD_WINDOWS[0][0] * 60000)) {
-          dayHtml += line(_hm(new Date(day.getTime() + PROD_WINDOWS[0][0] * 60000)), 'Opens', 'var(--muted)', '');
+          chunks.push(line(_hm(new Date(day.getTime() + PROD_WINDOWS[0][0] * 60000)), 'Opens', 'var(--muted)', ''));
         }
         rows.forEach(function(r, idx) {
           if (r.kind === 'idle') {
@@ -59586,29 +59601,35 @@ window.saveAdjModal = async function() {
             }
             var idleMins = Math.round((r.end - r.start) / 60000);
             totals.idleMins += idleMins;
-            dayHtml += line(_hm(r.start) + ' \u2013 ' + _hm(r.end), esc(idleText), 'var(--muted)', _fmtSchedMins(idleMins));
+            dayStats.idle += idleMins;
+            chunks.push(line(_hm(r.start) + ' \u2013 ' + _hm(r.end), esc(idleText), 'var(--red)', _fmtSchedMins(idleMins)));
             return;
           }
           var s = r.act;
           var name = _schedJobName(s.job);
           var label = s.type === 'changeover' ? 'Changeover' : s.type === 'pause' ? 'Paused' : 'Run';
-          var color = s.type === 'run' ? 'var(--green)' : s.type === 'changeover' ? 'var(--amber)' : 'var(--muted)';
+          var color = s.type === 'run' ? 'var(--green)' : s.type === 'changeover' ? 'var(--amber)' : 'var(--blue)';
           var extra = _fmtSchedMins(s.lenMins);
           if (s.type === 'run' && s.job.actual_bottles_produced && s.job.actual_job_hours > 0) {
             extra += ' \u00b7 ' + Math.round(s.job.actual_bottles_produced / s.job.actual_job_hours) + ' BPH';
             if (!bottled[s.job.id]) { bottled[s.job.id] = true; totals.bottles += Number(s.job.actual_bottles_produced) || 0; }
           }
-          if (s.type === 'changeover') totals.changeoverMins += s.lenMins;
-          dayHtml += line(_hm(s.start) + ' \u2013 ' + _hm(s.end), esc(label + ' \u00b7 ' + name), color, esc(extra));
+          if (s.type === 'changeover') { totals.changeoverMins += s.lenMins; dayStats.changeover += s.lenMins; }
+          else if (s.type === 'pause') dayStats.pause += s.lenMins;
+          else dayStats.run += s.lenMins;
+          var chunk = line(_hm(s.start) + ' \u2013 ' + _hm(s.end), esc(label + ' \u00b7 ' + name), color, esc(extra));
           var endsHere = s.actEnd && s.actEnd.getTime() >= day.getTime() && s.actEnd.getTime() <= dayLimit.getTime();
           if (s.type === 'run' && s.unloggedPauseSecs > 0 && endsHere && !pauseNoteJobs[s.job.id]) {
             pauseNoteJobs[s.job.id] = true;
-            dayHtml += line('', esc('Paused ' + _fmtSchedMins(Math.round(s.unloggedPauseSecs / 60)) + ' \u2014 start and resume not recorded'), 'var(--muted)', '');
+            chunk += line('', esc('Paused ' + _fmtSchedMins(Math.round(s.unloggedPauseSecs / 60)) + ' \u2014 start and resume not recorded'), 'var(--blue)', '');
           }
+          chunks.push(chunk);
         });
-        if (!dayHtml) continue;
+        if (!chunks.length) continue;
+        chunks.reverse();
         var dayTitle = day.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
-        weekHtml += '<div style="padding:16px 14px 6px;font-size:20px;font-weight:800;color:var(--white);">' + esc(dayTitle) + '</div>' + dayHtml;
+        weekHtml += '<div style="padding:16px 14px 6px;font-size:20px;font-weight:800;color:var(--white);">' + esc(dayTitle) + '</div>'
+          + dayBoxes(dayStats) + chunks.join('');
       }
       if (!weekHtml) continue;
       html += '<div style="margin:18px 0 8px;padding:8px 14px;font-size:15px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:var(--gold);border-bottom:1px solid rgba(201,168,76,0.35);">' + esc(weekLabel(wk, ws)) + '</div>' + weekHtml;
