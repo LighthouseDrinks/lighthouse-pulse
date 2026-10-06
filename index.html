@@ -11375,10 +11375,10 @@ window.backToToolsGrid = function() {
 };
 
 // ── BOM Stock Check tool ──────────────────────────────────────────────────────
-// A pure read-only enquiry: pick a saved BOM and see the live dry-goods position
-// for each component (on-hand qty, reorder status, and stock committed to other
-// active jobs). It NEVER writes — no allocation, no job_components, no jobs — so
-// running it has zero effect on any real job's stock reservation or sign-off.
+// A pure read-only enquiry: pick a saved BOM and a bottle count, then see whether
+// each dry-goods component covers that run (on-hand qty, needed qty, shortfall,
+// and stock committed to other active jobs). It NEVER writes — no allocation,
+// no job_components, no jobs — so running it has zero effect on any real job.
 // The dry-goods component fields on a BOM (the liquid is deliberately excluded).
 window._bomCheckComponentFields = [
   ['bottleSkuId',         'Bottle'],
@@ -12074,20 +12074,33 @@ window._populateBomCheckPicker = async function() {
 window.runBomStockCheck = async function() {
   var mount = document.getElementById('sc-check-results');
   var sel   = document.getElementById('sc-check-bom');
+  var bottlesEl = document.getElementById('sc-check-bottles');
   if (!mount || !sel) return;
   var esc = window.escapeHtml || function(s){ return String(s == null ? '' : s); };
   var muted = function(msg){ return '<div style="color:var(--muted);font-size:13px;padding:18px 0;">' + msg + '</div>'; };
 
   var bomId = sel.value;
+  var bottles = bottlesEl ? parseInt(bottlesEl.value, 10) : NaN;
   if (!bomId) { mount.innerHTML = muted('Choose a BOM first, then press Check Stock.'); return; }
+  if (!(bottles > 0)) { mount.innerHTML = muted('Enter how many bottles the job would be, then press Check Stock.'); return; }
   var bom = (window.BOMS || []).find(function(b){ return b.id === bomId; });
   if (!bom) { mount.innerHTML = muted('That BOM could not be found — try reloading.'); return; }
+
+  // Shippers, dividers and outer case labels are one per case. Everything else
+  // is one per bottle. Same rule as _bomQtyFor: if bottles per shipper is
+  // missing, case lines fall back to the bottle count.
+  var CASE_FIELDS = { shipperSkuId: true, dividerSkuId: true, outerCaseLabelSkuId: true };
+  var bps = parseInt(bom.bottlesPerShipper, 10) || 0;
+  function neededFor(field) {
+    if (CASE_FIELDS[field] && bps > 0) return Math.ceil(bottles / bps);
+    return bottles;
+  }
 
   // Gather the dry-goods component SKU ids from the BOM (liquid excluded).
   var comps = [];
   window._bomCheckComponentFields.forEach(function(pair){
     var skuId = bom[pair[0]];
-    if (skuId) comps.push({ label: pair[1], sku_id: skuId });
+    if (skuId) comps.push({ label: pair[1], sku_id: skuId, field: pair[0] });
   });
   if (!comps.length) { mount.innerHTML = muted('No dry-goods components are set on this BOM.'); return; }
 
@@ -12103,9 +12116,9 @@ window.runBomStockCheck = async function() {
       stockMap[r.sku_id] = (stockMap[r.sku_id] || 0) + Number(r.quantity_remaining || 0);
     });
 
-    // SKU meta: display name parts, location, reorder point.
+    // SKU meta: display name parts and location. Coverage, not the reorder point, sets the colour.
     var skuRows = await window.db.select('dry_goods_skus',
-      '?id=in.(' + skuIds.join(',') + ')&select=id,description,volume,abv,region,location,reorder_point');
+      '?id=in.(' + skuIds.join(',') + ')&select=id,description,volume,abv,region,location');
     (skuRows || []).forEach(function(r){ metaMap[r.id] = r; });
 
     // Shared / committed demand from OTHER active jobs — same source the live
@@ -12151,8 +12164,12 @@ window.runBomStockCheck = async function() {
   wrap.appendChild(head);
 
   var sub = document.createElement('div');
-  sub.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:14px;';
-  sub.textContent = comps.length + ' dry-goods component' + (comps.length === 1 ? '' : 's') + ' on this BOM. Read-only check — no stock is allocated or changed.';
+  sub.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:14px;line-height:1.45;';
+  var caseFallback = comps.some(function(c){ return CASE_FIELDS[c.field]; }) && !(bps > 0);
+  sub.textContent = comps.length + ' dry-goods component' + (comps.length === 1 ? '' : 's')
+    + ' for ' + bottles.toLocaleString() + ' bottles.'
+    + (caseFallback ? ' Bottles per shipper is not set, so shippers, dividers, and case labels are checked at one per bottle.' : '')
+    + ' Read-only check — no stock is allocated or changed.';
   wrap.appendChild(sub);
 
   var tbl = document.createElement('table');
@@ -12164,6 +12181,8 @@ window.runBomStockCheck = async function() {
     + '<th style="text-align:left;padding:8px 14px 8px 0;color:var(--muted);font-size:11px;">Item</th>'
     + '<th style="text-align:left;padding:8px 12px;color:var(--muted);font-size:11px;">Location</th>'
     + '<th style="text-align:right;padding:8px 12px;white-space:nowrap;color:var(--muted);font-size:11px;">In Stock</th>'
+    + '<th style="text-align:right;padding:8px 12px;white-space:nowrap;color:var(--muted);font-size:11px;">Needed</th>'
+    + '<th style="text-align:right;padding:8px 12px;white-space:nowrap;color:var(--muted);font-size:11px;">Shortfall</th>'
     + '<th style="text-align:left;padding:8px 12px;color:var(--muted);font-size:11px;">Status</th>'
     + '</tr></thead><tbody></tbody>';
   var tbody = tbl.querySelector('tbody');
@@ -12171,18 +12190,18 @@ window.runBomStockCheck = async function() {
   comps.forEach(function(c){
     var meta    = metaMap[c.sku_id] || {};
     var onSite  = stockMap[c.sku_id] || 0;
-    var reorder = (meta.reorder_point == null || meta.reorder_point === '') ? null : Number(meta.reorder_point);
     var name    = (metaMap[c.sku_id] && window.skuDisplayName) ? window.skuDisplayName(meta) : (meta.description || c.sku_id);
     var loc     = meta.location || '—';
 
     var committed  = committedMap[c.sku_id] || 0;
     var sharedJobs = sharedJobsMap[c.sku_id] || [];
     var net        = onSite - committed;
+    var needed     = neededFor(c.field);
+    var shortfall  = Math.max(0, needed - net);
+    var covered    = shortfall <= 0;
 
-    var stockColor = onSite === 0 ? outColor.red
-      : (reorder != null && onSite <= reorder) ? outColor.amber : outColor.green;
-    var statusTxt  = onSite === 0 ? 'Out of stock'
-      : (reorder != null && onSite <= reorder) ? 'Low' : 'In stock';
+    var stockColor = covered ? outColor.green : outColor.red;
+    var statusTxt  = covered ? 'Covered' : 'Short';
 
     // Shared-SKU marker — identical wording/behaviour to the live job table.
     var shared = sharedJobs.length > 0;
@@ -12213,6 +12232,8 @@ window.runBomStockCheck = async function() {
       + '<td style="padding:8px 14px 8px 0;font-size:12px;color:var(--white);">' + esc(name || '—') + '</td>'
       + '<td style="padding:8px 12px;font-size:12px;color:var(--muted);">' + esc(loc) + '</td>'
       + '<td style="padding:8px 12px;text-align:right;font-size:14px;font-weight:700;color:' + stockColor + ';white-space:nowrap;"></td>'
+      + '<td style="padding:8px 12px;text-align:right;font-size:14px;font-weight:700;color:var(--white);white-space:nowrap;"></td>'
+      + '<td style="padding:8px 12px;text-align:right;font-size:14px;font-weight:700;white-space:nowrap;"></td>'
       + '<td style="padding:8px 12px;font-size:12px;"></td>';
 
     // In Stock cell: number + optional shared marker with hover tooltip.
@@ -12245,8 +12266,13 @@ window.runBomStockCheck = async function() {
       stockCell.appendChild(warnDiv);
     }
 
-    // Status pill.
-    var statusCell = tr.cells[5];
+    tr.cells[5].textContent = needed.toLocaleString();
+    var shortCell = tr.cells[6];
+    shortCell.textContent = shortfall.toLocaleString();
+    shortCell.style.color = shortfall > 0 ? outColor.red : 'var(--muted)';
+
+    // Status pill. Green only when available stock covers this check.
+    var statusCell = tr.cells[7];
     var pill = document.createElement('span');
     pill.textContent = statusTxt;
     pill.style.cssText = 'display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;padding:2px 8px;border-radius:10px;border:1px solid ' + stockColor + ';color:' + stockColor + ';';
@@ -18439,16 +18465,24 @@ window.loadBoms = async function initBoms() {
       <a href="#" onclick="window.backToToolsGrid(); return false;" style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);text-decoration:none;margin-bottom:14px;">&larr; Back to Tools</a>
       <p class="cc-page-title">Supply Chain</p>
       <h1 class="cc-page-heading">BOM Stock Check</h1>
-      <p style="font-size:13px;color:var(--muted);max-width:720px;margin:-4px 0 20px;line-height:1.5;">Pick any BOM and press <strong style="color:var(--white);">Check Stock</strong> to see the live dry-goods position for each component &mdash; on-hand quantity, reorder status, and any stock already committed to other active jobs. This is a read-only enquiry: it never allocates or changes stock and never appears against real jobs.</p>
+      <p style="font-size:13px;color:var(--muted);max-width:720px;margin:-4px 0 20px;line-height:1.5;">Pick a BOM, enter how many bottles the job would be, and press <strong style="color:var(--white);">Check Stock</strong>. Each component is checked against that run: on-hand quantity, what the job needs, any shortfall, and stock already committed to other active jobs. Green means the available stock covers this check. This is a read-only enquiry: it never allocates or changes stock and never appears against real jobs.</p>
 
       <div class="card">
         <div class="card-title"><span class="section-num">1</span> Choose a BOM</div>
+        <div style="max-width:640px;">
+          <label style="display:block;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">BOM</label>
+          <select id="sc-check-bom" onchange="var m=document.getElementById('sc-check-results'); if(m) m.innerHTML='';" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:9px 10px;font-size:13px;border-radius:4px;box-sizing:border-box;font-family:Lato,sans-serif;">
+            <option value="">Loading BOMs&hellip;</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span class="section-num">2</span> Job size</div>
         <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
-          <div style="flex:1;min-width:300px;">
-            <label style="display:block;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">BOM</label>
-            <select id="sc-check-bom" onchange="var m=document.getElementById('sc-check-results'); if(m) m.innerHTML='';" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:9px 10px;font-size:13px;border-radius:4px;box-sizing:border-box;font-family:Lato,sans-serif;">
-              <option value="">Loading BOMs&hellip;</option>
-            </select>
+          <div style="min-width:200px;">
+            <label for="sc-check-bottles" style="display:block;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px;">Bottles</label>
+            <input type="number" id="sc-check-bottles" min="1" step="1" inputmode="numeric" placeholder="e.g. 1200" oninput="var m=document.getElementById('sc-check-results'); if(m) m.innerHTML='';" style="width:100%;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:9px 10px;font-size:13px;border-radius:4px;box-sizing:border-box;font-family:Lato,sans-serif;">
           </div>
           <button type="button" onclick="window.runBomStockCheck()" style="background:var(--gold);color:var(--navy);font-weight:700;border:none;border-radius:6px;box-shadow:0 2px 8px rgba(201,168,76,0.35);font-size:12px;letter-spacing:0.06em;text-transform:uppercase;padding:11px 22px;cursor:pointer;font-family:Lato,sans-serif;">Check Stock</button>
         </div>
