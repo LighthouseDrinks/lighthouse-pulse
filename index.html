@@ -2181,11 +2181,12 @@ window.loadOverviewValues = async function loadOverviewValues() {
 
   try {
     var fsProducts = await db.select('finished_stock_products', '?is_active=eq.true&select=id,bottles_per_case');
-    var fsLots = await db.select('finished_stock_lots', '?quantity_bottles=gt.0&select=product_id,quantity_bottles,unit_cost');
+    var fsLots = await db.select('finished_stock_lots', '?quantity_bottles=gt.0&select=product_id,quantity_bottles,unit_cost,owner');
     var fsBpc = {};
     (fsProducts || []).forEach(function(p){ fsBpc[p.id] = parseInt(p.bottles_per_case, 10) || 1; });
     var fsVal = 0, fsLotCount = 0;
     (fsLots || []).forEach(function(lot) {
+      if (lot.owner === 'hibernia') return;
       var bpc = fsBpc[lot.product_id] || 1;
       var qty = parseInt(lot.quantity_bottles, 10) || 0;
       var cost = parseFloat(lot.unit_cost) || 0;
@@ -2193,7 +2194,7 @@ window.loadOverviewValues = async function loadOverviewValues() {
       fsLotCount += 1;
     });
     setText('ov-lh-fs-value', fsVal > 0 ? '€' + fsVal.toLocaleString('en-IE', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—');
-    setText('ov-lh-fs-sub', fsLotCount ? (fsLotCount + (fsLotCount !== 1 ? ' lots' : ' lot') + ' in stock') : 'LH-owned bottled stock at cost');
+    setText('ov-lh-fs-sub', fsLotCount ? (fsLotCount + (fsLotCount !== 1 ? ' Lighthouse lots' : ' Lighthouse lot') + ' at cost') : 'LH-owned bottled stock at cost');
   } catch(e) { window.logError('loadOverviewValues:finishedStock', e); }
 };
 
@@ -26956,7 +26957,7 @@ window.loadBoms = async function initBoms() {
       <div class="kpi-card">
         <div class="kpi-label">Stock Value</div>
         <div class="kpi-value" id="fs-kpi-value">—</div>
-        <div class="kpi-sub">At recorded cost per case</div>
+        <div class="kpi-sub">Lighthouse Drinks at cost</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Locations</div>
@@ -26994,6 +26995,7 @@ window.loadBoms = async function initBoms() {
         <span style="color:var(--white);font-weight:600;">In:</span> <span style="background:rgba(61,186,120,0.15);color:var(--green);padding:1px 6px;border-radius:3px;font-size:11px;font-weight:700;">+ Add stock</span> when cases arrive.
         <span style="color:var(--white);font-weight:600;"> Out:</span> <span style="background:rgba(232,79,79,0.15);color:var(--red);padding:1px 6px;border-radius:3px;font-size:11px;font-weight:700;">Sold</span> when cases leave — that takes them off the stock value.
         <span style="display:block;margin-top:4px;"><span style="color:var(--white);font-weight:600;">Location:</span> Choose it on <span style="background:rgba(61,186,120,0.15);color:var(--green);padding:1px 6px;border-radius:3px;font-size:11px;font-weight:700;">+ Add stock</span>. The same SKU can sit in more than one place. To move one lot, open the row and use Edit on that stock line.</span>
+        <span style="display:block;margin-top:4px;"><span style="color:var(--white);font-weight:600;">Owner:</span> Lighthouse Drinks stock needs a cost per case and is included in stock value. Hibernia Distillers stock is counted in cases only.</span>
       </div>
     </div>
 
@@ -27006,12 +27008,13 @@ window.loadBoms = async function initBoms() {
             <th class="mob-hide">Case</th>
             <th>On hand</th>
             <th class="mob-hide">Locations</th>
+            <th class="mob-hide">Owner</th>
             <th class="mob-hide">Value</th>
             <th></th>
           </tr>
         </thead>
         <tbody id="fs-tbody">
-          <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px;">Loading finished stock…</td></tr>
+          <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:32px;">Loading finished stock…</td></tr>
         </tbody>
       </table>
     </div>
@@ -27067,6 +27070,14 @@ window.loadBoms = async function initBoms() {
         <select id="fs-lot-product" onchange="window._fsLotPreview()"></select>
       </div>
       <div class="mfield" style="margin-bottom:14px;">
+        <label>Owner *</label>
+        <select id="fs-lot-owner" onchange="window._fsLotOwnerChanged()">
+          <option value="">— Select owner —</option>
+          <option value="lighthouse">Lighthouse Drinks</option>
+          <option value="hibernia">Hibernia Distillers</option>
+        </select>
+      </div>
+      <div class="mfield" style="margin-bottom:14px;">
         <label>Location *</label>
         <input type="text" id="fs-lot-location" list="fs-lot-loc-list" placeholder="e.g. Warehouse 4, Bond, Cage A">
         <datalist id="fs-lot-loc-list"></datalist>
@@ -27081,9 +27092,10 @@ window.loadBoms = async function initBoms() {
           <input type="number" id="fs-lot-loose" min="0" step="1" value="0" oninput="window._fsLotPreview()">
         </div>
       </div>
-      <div class="mfield" style="margin-bottom:14px;">
-        <label>Cost per case (€)</label>
+      <div id="fs-lot-cost-wrap" class="mfield" style="margin-bottom:14px;">
+        <label>Cost per case (€) *</label>
         <input type="number" id="fs-lot-cost" min="0" step="0.01" placeholder="0.00" oninput="window._fsLotPreview()">
+        <div class="field-hint">Required for Lighthouse Drinks. This is what counts in stock value.</div>
       </div>
       <div class="mfield" style="margin-bottom:12px;">
         <label>Notes</label>
@@ -27131,7 +27143,7 @@ window.loadBoms = async function initBoms() {
     <div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:6px;padding:28px 32px;width:500px;max-width:94vw;">
       <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;font-weight:700;">Finished Stock</div>
       <div style="font-size:17px;font-weight:800;color:var(--white);margin-bottom:8px;">Record sale</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:18px;">Takes cases off hand and off the stock value. Use this when stock is sold or leaves site.</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:18px;">Takes cases off hand. Lighthouse Drinks stock also comes off the stock value. Hibernia Distillers stock does not.</div>
       <div class="mfield" style="margin-bottom:14px;">
         <label>SKU *</label>
         <select id="fs-sale-product" onchange="window._fsSaleFillLots()"></select>
@@ -42413,6 +42425,14 @@ window.saveAdjModal = async function() {
     bpc = parseInt(bpc, 10) >= 1 ? parseInt(bpc, 10) : 1;
     return (parseInt(qtyBottles, 10) || 0) / bpc * (parseFloat(unitCost) || 0);
   }
+  function isLhOwner(owner) {
+    return owner !== 'hibernia';
+  }
+  function ownerLabel(owner) {
+    if (owner === 'lighthouse') return 'Lighthouse Drinks';
+    if (owner === 'hibernia') return 'Hibernia Distillers';
+    return '—';
+  }
   function fmtEuro(n) {
     if (!(n > 0)) return '—';
     return '€' + n.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -42454,7 +42474,7 @@ window.saveAdjModal = async function() {
 
   window.loadFinishedStock = async function() {
     var tbody = document.getElementById('fs-tbody');
-    if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">Loading…</td></tr>';
     try {
       _fsProducts = await window.fetchAll('finished_stock_products', '?is_active=eq.true&order=name.asc');
       _fsLots = await window.fetchAll('finished_stock_lots', '?order=location.asc');
@@ -42473,7 +42493,7 @@ window.saveAdjModal = async function() {
         var bpc = bpcOf(p);
         var qty = parseInt(l.quantity_bottles, 10) || 0;
         totalBottles += qty;
-        totalVal += lotValue(qty, l.unit_cost, bpc);
+        if (isLhOwner(l.owner)) totalVal += lotValue(qty, l.unit_cost, bpc);
         if ((l.location || '').trim()) locSet[l.location.trim()] = true;
       });
       // Combined cases.bottles across mixed case sizes is not meaningful —
@@ -42499,7 +42519,7 @@ window.saveAdjModal = async function() {
       }
       window.renderFinishedStock();
     } catch (e) {
-      if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="color:var(--red);padding:24px;text-align:center;">⚠ ' + esc(e.message) + '</td></tr>';
+      if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="color:var(--red);padding:24px;text-align:center;">⚠ ' + esc(e.message) + '</td></tr>';
     }
   };
 
@@ -42524,7 +42544,7 @@ window.saveAdjModal = async function() {
       return true;
     });
     if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px;">No SKUs found. Click <strong style="color:var(--gold)">+ New SKU</strong> to add one.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:32px;">No SKUs found. Click <strong style="color:var(--gold)">+ New SKU</strong> to add one.</td></tr>';
       return;
     }
     var rows = [];
@@ -42533,7 +42553,16 @@ window.saveAdjModal = async function() {
       var lots = lotsForProduct(p.id, locf);
       var active = lots.filter(function(l) { return (parseInt(l.quantity_bottles, 10) || 0) > 0; });
       var qty = lots.reduce(function(s, l) { return s + (parseInt(l.quantity_bottles, 10) || 0); }, 0);
-      var val = lots.reduce(function(s, l) { return s + lotValue(l.quantity_bottles, l.unit_cost, bpc); }, 0);
+      var val = lots.reduce(function(s, l) {
+        if (!isLhOwner(l.owner)) return s;
+        return s + lotValue(l.quantity_bottles, l.unit_cost, bpc);
+      }, 0);
+      var ownerSeen = {};
+      active.forEach(function(l) {
+        if (l.owner === 'lighthouse' || l.owner === 'hibernia') ownerSeen[ownerLabel(l.owner)] = true;
+      });
+      var ownerKeys = Object.keys(ownerSeen);
+      var ownerCell = !ownerKeys.length ? '—' : ownerKeys.join(' · ');
       var locMap = {};
       active.forEach(function(l) {
         var k = (l.location || '').trim() || 'No location set';
@@ -42552,6 +42581,7 @@ window.saveAdjModal = async function() {
         + '<td class="mob-hide" style="font-size:12px;color:var(--muted);">' + bpc + 's</td>'
         + '<td style="font-weight:700;color:' + stockCol + ';font-variant-numeric:tabular-nums;">' + formatCasesBottles(qty, bpc) + '</td>'
         + '<td class="mob-hide" style="font-size:11px;"><span title="' + esc(locTip) + '" style="background:rgba(74,158,221,0.12);color:var(--blue);padding:2px 7px;border-radius:3px;font-size:10px;">' + esc(locLabel) + '</span></td>'
+        + '<td class="mob-hide" style="font-size:11px;color:var(--text);">' + esc(ownerCell) + '</td>'
         + '<td class="mob-hide" style="color:var(--gold-light);">' + (showVal ? fmtEuro(val) : '—') + '</td>'
         + '<td onclick="event.stopPropagation();" style="white-space:nowrap;">'
         + (edit ? '<button onclick="window.openFinishedLotModal(\'' + pid + '\')" style="background:transparent;border:1px solid var(--green);color:var(--green);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">+ Add stock</button>' : '')
@@ -42567,6 +42597,7 @@ window.saveAdjModal = async function() {
         lotHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
           + '<tr style="color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">'
           + '<th style="text-align:left;padding:4px 8px 8px 0;">Location</th>'
+          + '<th style="text-align:left;padding:4px 8px 8px;">Owner</th>'
           + '<th style="text-align:left;padding:4px 8px 8px;">On hand</th>'
           + '<th class="mob-hide" style="text-align:left;padding:4px 8px 8px;">Cost / case</th>'
           + '<th class="mob-hide" style="text-align:left;padding:4px 8px 8px;">Value</th>'
@@ -42574,11 +42605,13 @@ window.saveAdjModal = async function() {
         lots.forEach(function(l) {
           var lqty = parseInt(l.quantity_bottles, 10) || 0;
           var lid = esc(l.id);
+          var lhLot = isLhOwner(l.owner);
           lotHtml += '<tr>'
             + '<td style="padding:6px 8px 6px 0;color:var(--white);">' + esc(l.location || '—') + '</td>'
+            + '<td style="padding:6px 8px;color:var(--text);">' + esc(ownerLabel(l.owner)) + '</td>'
             + '<td style="padding:6px 8px;font-weight:700;color:' + (lqty ? 'var(--green)' : 'var(--muted)') + ';">' + formatCasesBottles(lqty, bpc) + '</td>'
-            + '<td class="mob-hide" style="padding:6px 8px;color:var(--muted);">' + (showVal && l.unit_cost != null ? '€' + parseFloat(l.unit_cost).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—') + '</td>'
-            + '<td class="mob-hide" style="padding:6px 8px;color:var(--gold-light);">' + (showVal ? fmtEuro(lotValue(lqty, l.unit_cost, bpc)) : '—') + '</td>'
+            + '<td class="mob-hide" style="padding:6px 8px;color:var(--muted);">' + (showVal && lhLot && l.unit_cost != null ? '€' + parseFloat(l.unit_cost).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—') + '</td>'
+            + '<td class="mob-hide" style="padding:6px 8px;color:var(--gold-light);">' + (showVal && lhLot ? fmtEuro(lotValue(lqty, l.unit_cost, bpc)) : '—') + '</td>'
             + '<td style="padding:6px 0;white-space:nowrap;">'
             + (edit ? '<button onclick="event.stopPropagation();window.openFinishedSaleModal(\'' + pid + '\',\'' + lid + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Sold</button>' : '')
             + (edit ? '<button onclick="event.stopPropagation();window.openFinishedAdjModal(\'' + lid + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Adjust</button>' : '')
@@ -42609,15 +42642,17 @@ window.saveAdjModal = async function() {
             + '<td style="padding:5px 8px;color:var(--white);">' + esc(movementLabel(m.movement_type))
             + (m.notes ? ' <span style="color:var(--muted);">· ' + esc(m.notes) + '</span>' : '') + '</td>'
             + '<td style="padding:5px 8px;font-weight:700;color:' + qtyCol + ';">' + qtyTxt + '</td>'
-            + '<td class="mob-hide" style="padding:5px 8px;color:var(--muted);">' + esc(m.location || '—') + '</td>'
+            + '<td class="mob-hide" style="padding:5px 8px;color:var(--muted);">' + esc(m.location || '—')
+            + (m.owner ? ' · ' + esc(ownerLabel(m.owner)) : '') + '</td>'
             + '<td class="mob-hide" style="padding:5px 8px;color:var(--muted);">' + esc(m.performed_by || '—') + '</td>'
             + '</tr>';
         });
         histHtml += '</table>';
       }
-      rows.push('<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="7">'
+      rows.push('<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="8">'
         + '<div class="mob-detail-inner" style="display:block;padding:12px 4px 8px;">'
         + '<div class="mob-d-item" style="margin-bottom:8px;"><span class="mob-d-label">SKU</span><span class="mob-d-value" style="font-family:monospace;color:var(--gold);">' + pid + '</span></div>'
+        + '<div class="mob-d-item" style="margin-bottom:8px;"><span class="mob-d-label">Owner</span><span class="mob-d-value">' + esc(ownerCell) + '</span></div>'
         + '<div class="mob-d-item" style="margin-bottom:8px;"><span class="mob-d-label">Case size</span><span class="mob-d-value">' + bpc + ' bottles</span></div>'
         + (showVal && val > 0 ? '<div class="mob-d-item" style="margin-bottom:8px;"><span class="mob-d-label">Value</span><span class="mob-d-value">' + fmtEuro(val) + '</span></div>' : '')
         + lotHtml
@@ -42687,12 +42722,25 @@ window.saveAdjModal = async function() {
     }
   };
 
+  function skuWithName(name, exceptId) {
+    var key = String(name || '').trim().toLowerCase();
+    return _fsProducts.find(function(p) {
+      return p.id !== exceptId && String(p.name || '').trim().toLowerCase() === key;
+    });
+  }
+
   window.saveFinishedSku = async function() {
     if (!canEditFs()) { window.toast && window.toast('You do not have permission to edit finished stock.', 'error'); return; }
     var name = gv('fs-sku-name');
     var bpc = parseInt(gv('fs-sku-bpc'), 10);
     if (!name) { await window.lpAlert('Name is required.', { variant: 'warn' }); return; }
     if (!(bpc >= 1)) { await window.lpAlert('Bottles per case must be 1 or more.', { variant: 'warn' }); return; }
+    var editId = gv('fs-sku-edit-id');
+    var taken = skuWithName(name, editId);
+    if (taken) {
+      await window.lpAlert('A SKU named "' + name + '" already exists (' + (taken.sku || taken.id) + '). Use a different name, or edit that SKU.', { variant: 'warn' });
+      return;
+    }
     var costRaw = gv('fs-sku-cost');
     var payload = {
       name: name,
@@ -42704,7 +42752,6 @@ window.saveAdjModal = async function() {
     var btn = document.getElementById('fs-sku-save-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     try {
-      var editId = gv('fs-sku-edit-id');
       if (editId) {
         await window.db.update('finished_stock_products', '?id=eq.' + encodeURIComponent(editId), payload);
       } else {
@@ -42724,7 +42771,12 @@ window.saveAdjModal = async function() {
       window.toast && window.toast(editId ? 'SKU updated.' : 'SKU created.', 'success');
       await window.loadFinishedStock();
     } catch (e) {
-      window.toast && window.toast('Error: ' + (e.message || e), 'error');
+      var msg = (e && e.message) || String(e);
+      if (/23505|duplicate key|name_active/.test(msg)) {
+        await window.lpAlert('A SKU named "' + name + '" already exists. Use a different name, or edit that SKU.', { variant: 'warn' });
+      } else {
+        window.toast && window.toast('Error: ' + msg, 'error');
+      }
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = 'Save SKU'; }
     }
@@ -42760,12 +42812,34 @@ window.saveAdjModal = async function() {
     }
     preview.style.color = '';
     var bottles = cases * bpc + loose;
+    var owner = gv('fs-lot-owner');
     var cost = parseFloat(gv('fs-lot-cost')) || 0;
     var val = lotValue(bottles, cost, bpc);
+    var money = owner === 'lighthouse' && canSeeFsValue();
     preview.innerHTML = 'Records as <strong style="color:var(--gold);">' + formatCasesBottles(bottles, bpc)
       + '</strong> (' + bottles + ' bottles of ' + bpc + 's)'
-      + (canSeeFsValue() ? ' · value <strong style="color:var(--gold);">' + fmtEuro(val) + '</strong>' : '')
+      + (owner === 'hibernia' ? ' · Hibernia Distillers, not included in stock value' : '')
+      + (money ? ' · value <strong style="color:var(--gold);">' + fmtEuro(val) + '</strong>' : '')
       + '.';
+  };
+
+  window._fsLotOwnerChanged = function() {
+    var wrap = document.getElementById('fs-lot-cost-wrap');
+    var lh = gv('fs-lot-owner') === 'lighthouse';
+    if (wrap) wrap.style.display = lh ? '' : 'none';
+    var costEl = document.getElementById('fs-lot-cost');
+    if (!lh) {
+      if (costEl) costEl.value = '';
+    } else if (costEl && costEl.value === '') {
+      var editId = gv('fs-lot-edit-id');
+      var lot = editId ? _fsLots.find(function(l) { return l.id === editId; }) : null;
+      if (lot && lot.unit_cost != null) costEl.value = lot.unit_cost;
+      else if (!editId) {
+        var p = productById(gv('fs-lot-product'));
+        if (p && p.default_unit_cost != null) costEl.value = p.default_unit_cost;
+      }
+    }
+    window._fsLotPreview();
   };
 
   window.openFinishedLotModal = function(productId, lotId) {
@@ -42780,16 +42854,17 @@ window.saveAdjModal = async function() {
     var p = productById(pid);
     var bpc = bpcOf(p);
     var qty = lot ? (parseInt(lot.quantity_bottles, 10) || 0) : 0;
+    document.getElementById('fs-lot-owner').value = lot ? (lot.owner || 'lighthouse') : '';
     document.getElementById('fs-lot-location').value = lot ? (lot.location || '') : '';
     document.getElementById('fs-lot-cases').value = lot ? Math.floor(qty / bpc) : 0;
     document.getElementById('fs-lot-loose').value = lot ? (qty % bpc) : 0;
-    var cost = lot && lot.unit_cost != null ? lot.unit_cost : (p && p.default_unit_cost != null ? p.default_unit_cost : '');
+    var cost = lot && lot.owner !== 'hibernia' && lot.unit_cost != null ? lot.unit_cost : '';
     document.getElementById('fs-lot-cost').value = cost;
     document.getElementById('fs-lot-notes').value = lot ? (lot.notes || '') : '';
     var prodSel = document.getElementById('fs-lot-product');
     if (prodSel) prodSel.disabled = !!lot;
     showOverlay('fs-lot-overlay', true);
-    window._fsLotPreview();
+    window._fsLotOwnerChanged();
   };
   window.closeFinishedLotModal = function() {
     var prodSel = document.getElementById('fs-lot-product');
@@ -42803,6 +42878,8 @@ window.saveAdjModal = async function() {
     var location = gv('fs-lot-location');
     var p = productById(productId);
     if (!productId || !p) { await window.lpAlert('Please select a SKU.', { variant: 'warn' }); return; }
+    var owner = gv('fs-lot-owner');
+    if (owner !== 'lighthouse' && owner !== 'hibernia') { await window.lpAlert('Select an owner.', { variant: 'warn' }); return; }
     if (!location) { await window.lpAlert('Location is required.', { variant: 'warn' }); return; }
     var bpc = bpcOf(p);
     var cases = parseInt(gv('fs-lot-cases'), 10) || 0;
@@ -42811,7 +42888,15 @@ window.saveAdjModal = async function() {
     if (loose >= bpc) { await window.lpAlert('Loose bottles must be fewer than the case size (' + bpc + '). Put complete cases in Full cases.', { variant: 'warn' }); return; }
     var bottles = cases * bpc + loose;
     var costRaw = gv('fs-lot-cost');
-    var unitCost = costRaw === '' ? null : parseFloat(costRaw);
+    var unitCost = null;
+    if (owner === 'lighthouse') {
+      var costNum = parseFloat(costRaw);
+      if (costRaw === '' || isNaN(costNum) || costNum < 0) {
+        await window.lpAlert('Cost per case is required for Lighthouse Drinks.', { variant: 'warn' });
+        return;
+      }
+      unitCost = costNum;
+    }
     var notes = gv('fs-lot-notes') || null;
     var editId = gv('fs-lot-edit-id');
     var btn = document.getElementById('fs-lot-save-btn');
@@ -42823,6 +42908,7 @@ window.saveAdjModal = async function() {
         var prevLoc = prev ? (prev.location || '').trim() : '';
         await window.db.update('finished_stock_lots', '?id=eq.' + encodeURIComponent(editId), {
           location: location,
+          owner: owner,
           quantity_bottles: bottles,
           unit_cost: unitCost,
           notes: notes,
@@ -42836,6 +42922,7 @@ window.saveAdjModal = async function() {
             movement_type: 'transfer',
             quantity_bottles: 0,
             location: location,
+            owner: owner,
             unit_cost: unitCost,
             notes: prevLoc + ' → ' + location,
             performed_by: actor()
@@ -42849,6 +42936,7 @@ window.saveAdjModal = async function() {
             movement_type: bottles === 0 ? 'zero_out' : 'adjust',
             quantity_bottles: delta,
             location: location,
+            owner: owner,
             unit_cost: unitCost,
             notes: notes || 'Lot edited',
             performed_by: actor()
@@ -42858,6 +42946,7 @@ window.saveAdjModal = async function() {
         var inserted = await window.db.insert('finished_stock_lots', {
           product_id: productId,
           location: location,
+          owner: owner,
           quantity_bottles: bottles,
           unit_cost: unitCost,
           notes: notes,
@@ -42870,6 +42959,7 @@ window.saveAdjModal = async function() {
           movement_type: bottles === 0 ? 'adjust' : 'goods_in',
           quantity_bottles: bottles,
           location: location,
+          owner: owner,
           unit_cost: unitCost,
           notes: notes,
           performed_by: actor()
@@ -42916,7 +43006,7 @@ window.saveAdjModal = async function() {
     var qty = parseInt(lot.quantity_bottles, 10) || 0;
     document.getElementById('fs-adj-lot-id').value = lotId;
     var label = document.getElementById('fs-adj-sku-label');
-    if (label) label.textContent = (p ? p.name : lot.product_id) + ' · ' + (lot.location || 'No location');
+    if (label) label.textContent = (p ? p.name : lot.product_id) + ' · ' + (lot.location || 'No location') + ' · ' + ownerLabel(lot.owner);
     document.getElementById('fs-adj-cases').value = Math.floor(qty / bpc);
     document.getElementById('fs-adj-loose').value = qty % bpc;
     document.getElementById('fs-adj-note').value = '';
@@ -42955,7 +43045,8 @@ window.saveAdjModal = async function() {
         movement_type: bottles === 0 ? 'zero_out' : 'adjust',
         quantity_bottles: delta,
         location: lot.location,
-        unit_cost: lot.unit_cost,
+        owner: lot.owner || 'lighthouse',
+        unit_cost: isLhOwner(lot.owner) ? lot.unit_cost : null,
         notes: note,
         performed_by: actor()
       });
@@ -42988,7 +43079,7 @@ window.saveAdjModal = async function() {
       var bpc = bpcOf(p);
       var qty = parseInt(l.quantity_bottles, 10) || 0;
       return '<option value="' + esc(l.id) + '"' + (l.id === pick ? ' selected' : '') + '>'
-        + esc(l.location || 'No location') + ' · ' + formatCasesBottles(qty, bpc) + ' on hand</option>';
+        + esc(l.location || 'No location') + ' · ' + esc(ownerLabel(l.owner)) + ' · ' + formatCasesBottles(qty, bpc) + ' on hand</option>';
     }).join('');
     window._fsSalePreview();
   };
@@ -43020,11 +43111,13 @@ window.saveAdjModal = async function() {
       return;
     }
     var left = onHand - sold;
-    var val = lotValue(sold, lot.unit_cost, bpc);
+    var lhSale = isLhOwner(lot.owner);
+    var val = lhSale ? lotValue(sold, lot.unit_cost, bpc) : 0;
     preview.innerHTML = 'Removes <strong style="color:var(--red);">' + formatCasesBottles(sold, bpc)
-      + '</strong> from ' + esc(lot.location || 'this location')
+      + '</strong> from ' + esc(lot.location || 'this location') + ' · ' + esc(ownerLabel(lot.owner))
       + '. Remaining <strong style="color:var(--gold);">' + formatCasesBottles(left, bpc) + '</strong>'
-      + (canSeeFsValue() && val > 0 ? ' · value leaving <strong style="color:var(--gold);">' + fmtEuro(val) + '</strong>' : '')
+      + (canSeeFsValue() && lhSale && val > 0 ? ' · value leaving <strong style="color:var(--gold);">' + fmtEuro(val) + '</strong>' : '')
+      + (!lhSale ? ' · not included in stock value' : '')
       + '.';
   };
 
@@ -43078,7 +43171,8 @@ window.saveAdjModal = async function() {
         movement_type: 'sale',
         quantity_bottles: -sold,
         location: lot.location,
-        unit_cost: lot.unit_cost,
+        owner: lot.owner || 'lighthouse',
+        unit_cost: isLhOwner(lot.owner) ? lot.unit_cost : null,
         notes: gv('fs-sale-note') || null,
         performed_by: actor()
       });
@@ -43095,22 +43189,23 @@ window.saveAdjModal = async function() {
 
   window.exportFinishedStock = function() {
     var showVal = canSeeFsValue();
-    var lines = [['SKU ID', 'Name', 'SKU code', 'Bottles per case', 'Location', 'On hand', 'Bottles', 'Cost per case', 'Value']];
+    var lines = [['SKU ID', 'Name', 'SKU code', 'Bottles per case', 'Owner', 'Location', 'On hand', 'Bottles', 'Cost per case', 'Value']];
     _fsProducts.forEach(function(p) {
       var bpc = bpcOf(p);
       var lots = lotsForProduct(p.id, '');
       if (!lots.length) {
-        lines.push([p.id, p.name, p.sku || '', bpc, '', '0.00', 0, p.default_unit_cost || '', '']);
+        lines.push([p.id, p.name, p.sku || '', bpc, '', '', '0.00', 0, '', '']);
         return;
       }
       lots.forEach(function(l) {
         var qty = parseInt(l.quantity_bottles, 10) || 0;
-        var val = lotValue(qty, l.unit_cost, bpc);
+        var lh = isLhOwner(l.owner);
+        var val = lh ? lotValue(qty, l.unit_cost, bpc) : 0;
         lines.push([
-          p.id, p.name, p.sku || '', bpc, l.location || '',
+          p.id, p.name, p.sku || '', bpc, l.owner ? ownerLabel(l.owner) : '', l.location || '',
           formatCasesBottles(qty, bpc), qty,
-          showVal && l.unit_cost != null ? l.unit_cost : '',
-          showVal && val > 0 ? val.toFixed(2) : ''
+          showVal && lh && l.unit_cost != null ? l.unit_cost : '',
+          showVal && lh && val > 0 ? val.toFixed(2) : ''
         ]);
       });
     });
@@ -43131,10 +43226,9 @@ window.saveAdjModal = async function() {
   // Prefill cost when SKU changes on the add-stock modal
   document.addEventListener('change', function(e) {
     if (e.target && e.target.id === 'fs-lot-product' && !gv('fs-lot-edit-id')) {
-      var p = productById(gv('fs-lot-product'));
       var costEl = document.getElementById('fs-lot-cost');
-      if (p && costEl && !costEl.value && p.default_unit_cost != null) costEl.value = p.default_unit_cost;
-      window._fsLotPreview();
+      if (costEl && gv('fs-lot-owner') === 'lighthouse') costEl.value = '';
+      window._fsLotOwnerChanged();
     }
   });
 })();
