@@ -815,6 +815,24 @@ function isRunCounting() {
   return !!(!_activeJob?.actual_end && _activeJob?.actual_start && !_activeJob?.paused_at);
 }
 
+let _coClosedPauseSecs = 0;
+
+async function loadChangeoverPauses() {
+  _coClosedPauseSecs = 0;
+  const j = _activeJob;
+  if (!j || j.actual_start || !j.changeover_start) return;
+  try {
+    const rows = await dbGet('job_pause_log?job_id=eq.' + encodeURIComponent(j.id) + '&select=paused_at,resumed_at');
+    const co = new Date(j.changeover_start);
+    (rows || []).forEach(p => {
+      if (!p.resumed_at) return;
+      const ps = new Date(p.paused_at);
+      if (ps < co) return;
+      _coClosedPauseSecs += calcProdSecs(ps, new Date(p.resumed_at));
+    });
+  } catch (e) { _coClosedPauseSecs = 0; }
+}
+
 function resetProgressBar() {
   const bf  = document.getElementById('bar-fill');
   const bp  = document.getElementById('bar-pct');
@@ -893,10 +911,11 @@ function renderLeft() {
   }
 
   if (!j.actual_start && j.changeover_start) {
+    const coPaused = !!j.paused_at;
     content.dataset.state = 'changeover';
-    dot.className = 'dot amber';
-    lbl.className = 'amber';
-    lbl.textContent = 'Changeover';
+    dot.className = coPaused ? 'dot grey' : 'dot amber';
+    lbl.className = coPaused ? 'grey' : 'amber';
+    lbl.textContent = coPaused ? 'Paused' : 'Changeover';
     document.getElementById('co-job-name').textContent = j.product_name || j.id;
     document.getElementById('co-job-meta').textContent =
       j.bottle_target ? j.bottle_target.toLocaleString() + ' btls' : '';
@@ -955,8 +974,9 @@ function renderBays() {
       continue;
     }
     const isRun  = !!(job.actual_start && !job.actual_end && !job.paused_at);
-    const isCo   = !job.actual_start && !!job.changeover_start;
-    const isPau  = !!(job.actual_start && job.paused_at && !job.actual_end);
+    const isCoPaused = !job.actual_start && !!job.changeover_start && !!job.paused_at;
+    const isCo   = !job.actual_start && !!job.changeover_start && !job.paused_at;
+    const isPau  = !!(job.actual_start && job.paused_at && !job.actual_end) || isCoPaused;
     const hasAny = !!(job.actual_start || job.changeover_start);
     const cls    = 'bay-card' + (isRun ? ' running' : isCo ? ' changeover' : hasAny ? ' occupied' : ' staged');
     const sc     = isRun ? 'running' : isCo ? 'changeover' : isPau ? 'paused' : 'staged';
@@ -1066,7 +1086,8 @@ function tick() {
         resetProgressBar();
       }
     } else if (_activeJob.changeover_start && !_activeJob.actual_start) {
-      const coS = Math.max(0, calcProdSecs(new Date(_activeJob.changeover_start), now));
+      const endDt = _activeJob.paused_at ? new Date(_activeJob.paused_at) : now;
+      const coS = Math.max(0, calcProdSecs(new Date(_activeJob.changeover_start), endDt) - _coClosedPauseSecs);
       const ce  = document.getElementById('co-elapsed');
       if (ce) {
         ce.textContent = fmtSecs(coS);
@@ -1127,6 +1148,7 @@ async function reloadJobs() {
       '&order=schedule_slot.asc.nullslast,created_at.asc'
     );
     await syncActiveJob(jobs);
+    await loadChangeoverPauses();
     renderLeft(); renderNextJobs(); renderBays();
   } catch(e) { console.warn('[PD] reloadJobs error:', e); }
 }

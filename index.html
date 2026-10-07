@@ -50423,8 +50423,29 @@ window.saveAdjModal = async function() {
     }
     function pauseHoursTotal() {
       var h = (j.total_paused_secs || 0) / 3600;
-      if (j.paused_at) h += calcProductionHours(new Date(j.paused_at), new Date());
+      // An open pause counts here only once bottling has started. A changeover
+      // pause stays out of Actual Job Hours.
+      if (j.paused_at && j.actual_start && new Date(j.paused_at) >= new Date(j.actual_start)) {
+        h += calcProductionHours(new Date(j.paused_at), new Date());
+      }
       return Math.round(h * 100) / 100;
+    }
+    function changeoverPauseHours(coStart, runStart) {
+      var h = 0;
+      (_pauseLog || []).forEach(function(p) {
+        var ps = new Date(p.paused_at);
+        if (!(ps >= coStart) || !(ps < runStart)) return;
+        var pe = p.resumed_at ? new Date(p.resumed_at) : new Date();
+        if (pe > runStart) pe = runStart;
+        if (pe > ps) h += calcProductionHours(ps, pe);
+      });
+      return h;
+    }
+    function netChangeoverHours(coStart, runStart) {
+      var gross = calcProductionHours(coStart, runStart);
+      var pauseH = changeoverPauseHours(coStart, runStart);
+      if (!pauseH) return gross;
+      return Math.max(0, Math.round((gross - pauseH) * 100) / 100);
     }
     function netJobHours(spanHours) {
       if (spanHours == null || isNaN(spanHours)) return spanHours;
@@ -50445,7 +50466,8 @@ window.saveAdjModal = async function() {
     var autoRate = (j.actual_bottles_produced && actualHours > 0) ? Math.round(j.actual_bottles_produced / actualHours) : null;
     var _coStartIso = j.changeover_start || null;
     var _hasSeparateCo = !!(_coStartIso && _runStartIso && new Date(_coStartIso) < new Date(_runStartIso));
-    var _coHours = _hasSeparateCo ? calcProductionHours(new Date(_coStartIso), new Date(_runStartIso)) : null;
+    var _coHours = _hasSeparateCo ? netChangeoverHours(new Date(_coStartIso), new Date(_runStartIso)) : null;
+    var _coPaused = _hasSeparateCo && changeoverPauseHours(new Date(_coStartIso), new Date(_runStartIso)) > 0;
 
     var html = '<div style="font-size:12px;color:var(--muted);margin-bottom:20px;">Fields marked <span style="color:var(--red);">*</span> must be completed before the job can be moved to Complete.</div>';
 
@@ -50468,11 +50490,14 @@ window.saveAdjModal = async function() {
       html += frow('Production Started', inp('prod-start', localDateTimeValue(_runStartIso), '', 'datetime-local', true) + sub('When the line started bottling. Not edited here.'));
     }
     if (_hasSeparateCo) {
-      html += frow('Changeover Hours', inp('changeover', _coHours, '', 'number', true) + sub(fmtDurFromHours(_coHours) + '. Opening hours from job commenced to production start. Not included in the bottling rate.'));
+      html += frow('Changeover Hours', inp('changeover', _coHours, '', 'number', true) + sub(fmtDurFromHours(_coHours) + '. Opening hours from job commenced to production start' + (_coPaused ? ', minus pause' : '') + '. Not included in the bottling rate.'));
     }
+    var _runPauseLog = (_pauseLog || []).filter(function(p) {
+      return j.actual_start && new Date(p.paused_at) >= new Date(j.actual_start);
+    });
     var _pauseBody = '';
-    if (_pauseLog.length) {
-      _pauseBody = _pauseLog.map(function(p, idx) {
+    if (_runPauseLog.length) {
+      _pauseBody = _runPauseLog.map(function(p, idx) {
         var endDt = p.resumed_at ? new Date(p.resumed_at) : new Date();
         var len = calcProductionHours(new Date(p.paused_at), endDt);
         return '<div style="font-size:13px;color:var(--white);padding:3px 0;">'
@@ -50482,9 +50507,12 @@ window.saveAdjModal = async function() {
       }).join('');
       _pauseBody += '<div style="font-size:13px;font-weight:700;color:var(--white);padding-top:4px;">Total ' + fmtDurFromHours(_pauseHours) + '</div>';
       _pauseBody += sub('Each pause is taken out of Actual Job Hours.');
-    } else {
+    } else if (!_pauseLog.length) {
       _pauseBody = inp('paused', _pauseHours, '', 'number', true)
         + sub('Total time the job was paused. Start and resume were not recorded. Not counted in Actual Job Hours.');
+    } else {
+      _pauseBody = inp('paused', _pauseHours, '', 'number', true)
+        + sub('Run pause only. A changeover pause is taken out of Changeover Hours.');
     }
     html += frow('Job Paused', _pauseBody);
     html += frow('Actual Job Hours', inp('hours', actualHours, 'Auto-calculated', 'number') + sub((actualHours != null ? fmtDurFromHours(actualHours) + '. ' : '') + 'Bottling time from production start to job ended, minus pause. Changeover is not included.'));
@@ -50560,7 +50588,7 @@ window.saveAdjModal = async function() {
       if (coEl && j.actual_start && commEl && commEl.value) {
         var co = new Date(commEl.value);
         var runS = new Date(j.actual_start);
-        coEl.value = (runS > co) ? calcProductionHours(co, runS) : '';
+        coEl.value = (runS > co) ? netChangeoverHours(co, runS) : '';
       }
       if (start && end && !isNaN(start) && !isNaN(end) && end > start && hoursEl) {
         hoursEl.value = netJobHours(calcProductionHours(start, end));
@@ -59175,10 +59203,11 @@ window.saveAdjModal = async function() {
       if (acts) acts.innerHTML = '';
       return;
     }
-    var isCo     = !!(active.changeover_start && !active.actual_start);
-    var isPaused = !!(active.actual_start && active.paused_at && !active.actual_end);
-    var col   = isCo ? 'var(--amber)' : isPaused ? 'var(--muted)' : 'var(--green)';
-    var state = isCo ? 'CHANGEOVER' : isPaused ? 'PAUSED' : 'RUNNING';
+    var isCo       = !!(active.changeover_start && !active.actual_start);
+    var isCoPaused = !!(isCo && active.paused_at);
+    var isPaused   = !!(active.actual_start && active.paused_at && !active.actual_end);
+    var col   = (isCoPaused || isPaused) ? 'var(--muted)' : isCo ? 'var(--amber)' : 'var(--green)';
+    var state = isCoPaused ? 'CHANGEOVER PAUSED' : isCo ? 'CHANGEOVER' : isPaused ? 'PAUSED' : 'RUNNING';
     var label = window.jobDisplayName ? window.jobDisplayName(active, _schedBomMap) : (active.product_name || active.id);
     card.style.borderLeftColor = col;
     card.style.cursor = 'default';
@@ -59190,9 +59219,9 @@ window.saveAdjModal = async function() {
       tmr.style.display = 'block';
       tmr.style.color = col;
       tmr.setAttribute('data-banner-job', active.id);
-      tmr.setAttribute('data-banner-type', isCo ? 'co' : (isPaused ? 'paused' : 'run'));
+      tmr.setAttribute('data-banner-type', (isCoPaused || isPaused) ? 'paused' : (isCo ? 'co' : 'run'));
       var secs = isCo
-        ? _safeProdSecs(active.changeover_start, null, 0)
+        ? _netChangeoverSecs(active)
         : _safeProdSecs(active.actual_start, active.paused_at, active.total_paused_secs);
       tmr.textContent = fmtSecs(secs);
     }
@@ -59203,8 +59232,13 @@ window.saveAdjModal = async function() {
       var jid = esc(active.id);
       var btnBase = 'font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;padding:7px 12px;border-radius:4px;cursor:pointer;font-family:Lato,sans-serif;';
       var html = '';
-      if (isCo) {
+      if (isCoPaused) {
+        html += '<button onclick="window.schedResumeJob(\'' + jid + '\')" style="' + btnBase + 'background:var(--green);border:none;color:#0d1b2a;">&#9654; Resume</button>';
+        html += '<button onclick="window.schedStartProduction(\'' + jid + '\')" title="Changeover finished — start running product" style="' + btnBase + 'background:transparent;border:1px solid var(--green);color:var(--green);">&#9654; Start Production</button>';
+        html += '<button onclick="window.schedStop(\'' + jid + '\')" title="Stop and return to queue (logs downtime + reason)" style="' + btnBase + 'background:transparent;border:1px solid var(--red);color:var(--red);">&#9632; Stop</button>';
+      } else if (isCo) {
         html += '<button onclick="window.schedStartProduction(\'' + jid + '\')" title="Changeover finished — start running product" style="' + btnBase + 'background:var(--green);border:none;color:#0d1b2a;">&#9654; Start Production</button>';
+        html += '<button class="sched-pause-btn" onclick="window.schedPauseJob(\'' + jid + '\')" ' + (!inShift ? 'disabled ' : '') + 'style="' + btnBase + 'background:transparent;border:1px solid var(--navy-border);color:var(--muted);opacity:' + (!inShift ? '0.4' : '1') + ';" title="' + (!inShift ? 'Cannot pause outside production hours' : '') + '">&#9646;&#9646; Pause</button>';
         html += '<button onclick="window.schedStop(\'' + jid + '\')" title="Stop and return to queue (logs downtime + reason)" style="' + btnBase + 'background:transparent;border:1px solid var(--red);color:var(--red);">&#9632; Stop</button>';
       } else if (isPaused) {
         html += '<button onclick="window.schedResumeJob(\'' + jid + '\')" style="' + btnBase + 'background:var(--green);border:none;color:#0d1b2a;">&#9654; Resume</button>';
@@ -59228,7 +59262,7 @@ window.saveAdjModal = async function() {
     var j    = (_schedJobs || []).find(function(x) { return x.id === jid; });
     if (!j) return;
     if (type === 'co') {
-      tmr.textContent = fmtSecs(_safeProdSecs(j.changeover_start, null, 0));
+      tmr.textContent = fmtSecs(_netChangeoverSecs(j));
     } else if (type === 'run') {
       tmr.textContent = fmtSecs(_safeProdSecs(j.actual_start, j.paused_at, j.total_paused_secs));
     }
@@ -59548,15 +59582,16 @@ window.saveAdjModal = async function() {
     var active = (_schedJobs || []).filter(_schedJobIsActiveLine);
     active.forEach(function(j) {
       var isCo = j.changeover_start && !j.actual_start;
+      var isCoPaused = isCo && j.paused_at;
       rows.now.push({
         kind: 'now',
         event: isCo ? 'Changeover' : (j.paused_at ? 'Run paused' : 'Run'),
         job: j,
         start: isCo ? new Date(j.changeover_start) : new Date(j.actual_start),
-        end: isCo ? null : (j.paused_at ? new Date(j.paused_at) : null),
-        len: isCo ? Math.round(_safeProdSecs(j.changeover_start, null, 0) / 60) : Math.round(_safeProdSecs(j.actual_start, j.paused_at, j.total_paused_secs) / 60),
+        end: isCoPaused ? new Date(j.paused_at) : (isCo ? null : (j.paused_at ? new Date(j.paused_at) : null)),
+        len: isCo ? Math.round(_netChangeoverSecs(j) / 60) : Math.round(_safeProdSecs(j.actual_start, j.paused_at, j.total_paused_secs) / 60),
         rate: isCo ? '—' : ((_lastBphMap[j.bom_id] || DEFAULT_BPH) + ' BPH'),
-        status: isCo ? 'In changeover' : (j.paused_at ? 'Paused' : 'Running')
+        status: isCoPaused ? 'Paused' : (isCo ? 'In changeover' : (j.paused_at ? 'Paused' : 'Running'))
       });
     });
 
@@ -59671,6 +59706,64 @@ window.saveAdjModal = async function() {
 
   function _hm(d) { return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
 
+  // Pauses that start during this changeover, before bottling. Closed seconds
+  // are subtracted from the changeover clock. They are not run pause time.
+  function _changeoverPauseRows(job) {
+    if (!job || !job.changeover_start) return [];
+    var coStart = new Date(job.changeover_start);
+    if (isNaN(coStart.getTime())) return [];
+    var runStart = job.actual_start ? new Date(job.actual_start) : null;
+    var rows = _pausesForJob(job.id).filter(function(p) {
+      var ps = new Date(p.paused_at);
+      if (isNaN(ps.getTime()) || ps < coStart) return false;
+      if (runStart && !(ps < runStart)) return false;
+      return true;
+    });
+    if (!job.actual_start && job.paused_at && !rows.some(function(p) { return !p.resumed_at; })) {
+      rows.push({ job_id: job.id, paused_at: job.paused_at, resumed_at: null });
+      rows.sort(function(a, b) { return new Date(a.paused_at) - new Date(b.paused_at); });
+    }
+    return rows;
+  }
+
+  function _closedChangeoverPauseSecs(job) {
+    var total = 0;
+    var runStart = job && job.actual_start ? new Date(job.actual_start) : null;
+    _changeoverPauseRows(job).forEach(function(p) {
+      if (!p.resumed_at) return;
+      var ps = new Date(p.paused_at);
+      var pe = new Date(p.resumed_at);
+      if (runStart && pe > runStart) pe = runStart;
+      if (pe > ps) total += _calcProdSecs(ps, pe);
+    });
+    return total;
+  }
+
+  function _netChangeoverSecs(job) {
+    if (!job || !job.changeover_start) return 0;
+    var pausedAt = (!job.actual_start && job.paused_at) ? job.paused_at : null;
+    return _safeProdSecs(job.changeover_start, pausedAt, _closedChangeoverPauseSecs(job));
+  }
+
+  function _appendPhase(acts, type, job, start, end, pauses, now) {
+    if (!pauses.length) {
+      acts.push({ type: type, job: job, start: start, end: end });
+      return;
+    }
+    var cursor = new Date(start.getTime());
+    pauses.forEach(function(p) {
+      var ps = new Date(p.paused_at);
+      var pe = p.resumed_at ? new Date(p.resumed_at) : now;
+      if (ps < start) ps = start;
+      if (ps > end) ps = end;
+      if (pe > end) pe = end;
+      if (ps > cursor) acts.push({ type: type, job: job, start: new Date(cursor.getTime()), end: new Date(ps.getTime()) });
+      if (pe > ps) acts.push({ type: 'pause', job: job, start: new Date(ps.getTime()), end: new Date(pe.getTime()) });
+      if (pe > cursor) cursor = pe;
+    });
+    if (cursor < end) acts.push({ type: type, job: job, start: new Date(cursor.getTime()), end: new Date(end.getTime()) });
+  }
+
   function _diaryActivities(now) {
     var acts = [];
     (_schedJobs || []).forEach(function(j) {
@@ -59678,10 +59771,19 @@ window.saveAdjModal = async function() {
       var runEndIso = j.actual_end || j.date_completed;
       var live = !!(j.actual_start && !runEndIso);
       var runEnd = runEndIso ? new Date(runEndIso) : (live ? now : null);
+      var coRows = _changeoverPauseRows(j);
       if (j.changeover_start && j.actual_start && new Date(j.changeover_start) < new Date(j.actual_start)) {
-        acts.push({ type: 'changeover', job: j, start: new Date(j.changeover_start), end: new Date(j.actual_start) });
+        if (!coRows.length) {
+          acts.push({ type: 'changeover', job: j, start: new Date(j.changeover_start), end: new Date(j.actual_start) });
+        } else {
+          _appendPhase(acts, 'changeover', j, new Date(j.changeover_start), new Date(j.actual_start), coRows, now);
+        }
       } else if (j.changeover_start && !j.actual_start) {
-        acts.push({ type: 'changeover', job: j, start: new Date(j.changeover_start), end: now });
+        if (!coRows.length) {
+          acts.push({ type: 'changeover', job: j, start: new Date(j.changeover_start), end: now });
+        } else {
+          _appendPhase(acts, 'changeover', j, new Date(j.changeover_start), now, coRows, now);
+        }
       }
       if (!j.actual_start || !runEnd || !(runEnd > new Date(j.actual_start))) return;
       var start = new Date(j.actual_start);
@@ -59689,6 +59791,7 @@ window.saveAdjModal = async function() {
         var cursor = start;
         pauses.forEach(function(p) {
           var ps = new Date(p.paused_at);
+          if (ps < start) return;
           var pe = p.resumed_at ? new Date(p.resumed_at) : now;
           if (ps < start) ps = start;
           if (ps > runEnd) ps = runEnd;
@@ -59896,9 +59999,9 @@ window.saveAdjModal = async function() {
     // Bottles moved into the Job cell as a sub-line, Status moved into an inline pill on Event.
     var cols = 'minmax(200px,2.2fr) minmax(110px,1fr) 130px 120px 120px 90px minmax(110px,1fr)';
     function statusPill(r) {
-      var col = r.event === 'Changeover' ? 'var(--amber)'
+      var col = r.status === 'Paused' ? 'var(--muted)'
+        : r.event === 'Changeover' ? 'var(--amber)'
         : r.kind === 'projected' ? 'var(--blue, #4a9edd)'
-        : r.status === 'Paused' ? 'var(--muted)'
         : r.status === 'Complete' ? '#888'
         : r.status === 'Awaiting sign-off' ? 'var(--gold)'
         : 'var(--green)';
@@ -59909,13 +60012,13 @@ window.saveAdjModal = async function() {
               : label === 'Projected'        ? 'Projection from last actual rates (or fallback defaults).'
               : label === 'Running'          ? 'Run is currently in progress.'
               : label === 'In changeover'    ? 'Changeover is currently in progress.'
-              : label === 'Paused'           ? 'Run is paused.'
+              : label === 'Paused'           ? (r.event === 'Changeover' ? 'Changeover is paused.' : 'Run is paused.')
               : '';
       return '<span title="' + esc(tip) + '" style="display:inline-block;font-size:9px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:' + col + ';border:1px solid ' + col + ';border-radius:3px;padding:1px 6px;">' + esc(label) + '</span>';
     }
     function rowHtml(r) {
       var j = r.job || {};
-      var accent = r.event === 'Changeover' ? 'var(--amber)' : r.kind === 'projected' ? 'var(--blue, #4a9edd)' : 'var(--green)';
+      var accent = r.status === 'Paused' ? 'var(--muted)' : r.event === 'Changeover' ? 'var(--amber)' : r.kind === 'projected' ? 'var(--blue, #4a9edd)' : 'var(--green)';
       var bottlesSub = _fmtSchedBottles(r);
       var jobLine = window.jobLabel ? (window.jobLabel(j, _schedBomMap) || j.id || '—') : (j.product_name || j.id || '—');
       var subLine = (j.id || '') + (bottlesSub && bottlesSub !== '—' ? ' · ' + bottlesSub : '');
@@ -60062,6 +60165,11 @@ window.saveAdjModal = async function() {
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
   };
 
+  async function _closeChangeoverPause(jobId, iso) {
+    try { await sbPatch('job_pause_log', '?job_id=eq.' + jobId + '&resumed_at=is.null', { resumed_at: iso }); }
+    catch (eLog) { /* a pause that started before production is left off the run */ }
+  }
+
   // ── Start Production ─────────────────────────────────────────────────────────
   // Sets actual_start = now. If a changeover was already running for this job we DO NOT
   // overwrite date_commenced — Results-tab "Job Commenced" stays anchored to changeover_start.
@@ -60088,6 +60196,9 @@ window.saveAdjModal = async function() {
       };
       // Preserve date_commenced when changeover already anchored it; otherwise anchor to run start.
       if (!hadChangeover) patch.date_commenced = startIso;
+      if (existing && existing.paused_at && !existing.actual_start) {
+        await _closeChangeoverPause(jobId, startIso);
+      }
       await sbPatch('jobs', '?id=eq.' + jobId, patch);
       _schedApplyLocalStart(jobId, patch);
       window.toast && window.toast(hadChangeover ? 'Production started.' : 'Job started (no changeover).', 'success');
@@ -60116,11 +60227,17 @@ window.saveAdjModal = async function() {
     var j = _schedJobs.find(function(x) { return x.id === jobId; });
     if (!j || !j.paused_at) { window.toast && window.toast('Job is not paused.', 'error'); return; }
     var nowIso = new Date().toISOString();
-    var extraSecs = Math.round(_calcProdSecs(new Date(j.paused_at), new Date()));
+    var duringChangeover = !!(j.changeover_start && !j.actual_start);
     try {
-      await sbPatch('jobs', '?id=eq.' + jobId, { paused_at: null, total_paused_secs: (j.total_paused_secs || 0) + extraSecs });
-      try { await sbPatch('job_pause_log', '?job_id=eq.' + jobId + '&resumed_at=is.null', { resumed_at: nowIso }); }
-      catch (eLog) { /* total is already saved */ }
+      if (duringChangeover) {
+        await sbPatch('jobs', '?id=eq.' + jobId, { paused_at: null });
+        await _closeChangeoverPause(jobId, nowIso);
+      } else {
+        var extraSecs = Math.round(_calcProdSecs(new Date(j.paused_at), new Date()));
+        await sbPatch('jobs', '?id=eq.' + jobId, { paused_at: null, total_paused_secs: (j.total_paused_secs || 0) + extraSecs });
+        try { await sbPatch('job_pause_log', '?job_id=eq.' + jobId + '&resumed_at=is.null', { resumed_at: nowIso }); }
+        catch (eLog) { /* total is already saved */ }
+      }
       window.toast && window.toast('Job resumed.', 'success');
       await loadSchedule();
     } catch(e) { window.toast && window.toast('Error: ' + (e && e.message), 'error'); }
@@ -60234,7 +60351,7 @@ window.saveAdjModal = async function() {
       +   '<div style="min-width:0;">'
       +     '<div style="font-size:9px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:var(--red);margin-bottom:4px;">Stop Job</div>'
       +     '<div style="font-size:15px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(label) + '</div>'
-      +     '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + esc(j.id) + ' \u00b7 ' + (isCo ? 'In changeover' : 'Running') + ' for ' + elapsedTxt + '</div>'
+      +     '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + esc(j.id) + ' \u00b7 ' + (isCo ? (j.paused_at ? 'Changeover paused' : 'In changeover') : 'Running') + ' for ' + elapsedTxt + '</div>'
       +   '</div>'
       +   '<button id="_sso_close" style="background:none;border:none;color:rgba(255,255,255,0.4);cursor:pointer;font-size:22px;line-height:1;padding:0;flex-shrink:0;">&times;</button>'
       + '</div>'
@@ -60314,6 +60431,7 @@ window.saveAdjModal = async function() {
   // Actual stop execution: patch job, re-queue at top, log downtime, optionally release bay.
   async function _schedDoStop(j, isCo, isRunning, reason, releaseBay, elapsedMs) {
     var nowIso = new Date().toISOString();
+    if (isCo && j.paused_at) await _closeChangeoverPause(j.id, nowIso);
     var who    = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || 'Unknown';
     var when   = new Date().toLocaleString('en-IE', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 
@@ -60498,6 +60616,10 @@ window.saveAdjModal = async function() {
 
       if (startVal) {
         patch.actual_start = new Date(startVal).toISOString();
+      }
+      if (patch.actual_start && !j.actual_start && j.paused_at) {
+        patch.paused_at = null;
+        await _closeChangeoverPause(j.id, patch.actual_start);
       }
 
       if (endVal) {
