@@ -162,17 +162,20 @@ Deno.serve(async (req: Request) => {
       if (reqRow.app_user_id) {
         const { data: sh } = await admin
           .from('roster_shifts')
-          .select('shift_date,start_time,end_time')
+          .select('shift_date,start_time,end_time,created_at')
           .eq('user_id', reqRow.app_user_id)
           .gte('shift_date', monday)
-          .lte('shift_date', sunday);
+          .lte('shift_date', sunday)
+          .order('created_at', { ascending: false });
         shifts = sh || [];
       }
       const rosterMap: Record<string, number> = {};
       const rosterTimes: Record<string, { start: string; end: string }> = {};
+      // One shift per day. Duplicate rows for the same cell must not be added together.
       shifts.forEach((s) => {
-        rosterMap[s.shift_date] = (rosterMap[s.shift_date] || 0) + shiftMs(s.start_time, s.end_time);
-        if (!rosterTimes[s.shift_date]) rosterTimes[s.shift_date] = { start: (s.start_time||'').slice(0,5), end: (s.end_time||'').slice(0,5) };
+        if (rosterTimes[s.shift_date]) return;
+        rosterMap[s.shift_date] = shiftMs(s.start_time, s.end_time);
+        rosterTimes[s.shift_date] = { start: (s.start_time||'').slice(0,5), end: (s.end_time||'').slice(0,5) };
       });
 
       const recs = buildRecs((evts || []) as ClockEvent[]);

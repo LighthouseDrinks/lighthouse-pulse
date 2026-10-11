@@ -69169,8 +69169,12 @@ window.rosterSaveCustom=async function(){
   if(!s||!e){window.toast&&window.toast('Enter times','error');return;}
   await svShift(_pt.userId,_pt.dateStr,nm,s,e,br);window.closeShiftPicker();
 };
+var _shiftSaving={};
 async function svShift(uid,d2,nm,st,et,br){
   if(!canEditRoster()){denyRosterEdit();return;}
+  var lock=uid+'|'+d2;
+  if(_shiftSaving[lock]) return;
+  _shiftSaving[lock]=true;
   br=br||0;
   var ws=ds(wdays(_wo)[0]),key=rk(uid,d2),ex=_roster[key];
   try{
@@ -69182,10 +69186,23 @@ async function svShift(uid,d2,nm,st,et,br){
     else{
       // Guard: clear any orphan rows for this cell before inserting the single row.
       try{ await del('roster_shifts','?user_id=eq.'+uid+'&shift_date=eq.'+d2); }catch(_e){ window.logError&&window.logError('svShift dedupe (insert)',_e); }
-      var r=await post('roster_shifts',{user_id:uid,shift_date:d2,shift_name:nm,start_time:st,end_time:et,break_minutes:br,week_start:ws,published:false,created_by:window.CURRENT_USER&&(window.CURRENT_USER.app_user_id||window.CURRENT_USER.id)});var rc=Array.isArray(r)?r[0]:r;_roster[key]={id:rc.id,sn:nm,st:st,et:et,bm:br,pub:false};
+      try{
+        var r=await post('roster_shifts',{user_id:uid,shift_date:d2,shift_name:nm,start_time:st,end_time:et,break_minutes:br,week_start:ws,published:false,created_by:window.CURRENT_USER&&(window.CURRENT_USER.app_user_id||window.CURRENT_USER.id)});var rc=Array.isArray(r)?r[0]:r;_roster[key]={id:rc.id,sn:nm,st:st,et:et,bm:br,pub:false};
+      }catch(insErr){
+        // A second save for this day hits roster_shifts_user_date_uidx. Keep the
+        // row that won the race and apply this edit to it.
+        var dup=String(insErr&&insErr.message||'');
+        if(dup.indexOf('23505')<0 && dup.indexOf('roster_shifts_user_date_uidx')<0) throw insErr;
+        var existing=await get('roster_shifts?user_id=eq.'+uid+'&shift_date=eq.'+d2+'&select=id,published&limit=1');
+        var row=existing&&existing[0];
+        if(!row) throw insErr;
+        await patch('roster_shifts','?id=eq.'+row.id,{shift_name:nm,start_time:st,end_time:et,break_minutes:br});
+        _roster[key]={id:row.id,sn:nm,st:st,et:et,bm:br,pub:!!row.published};
+      }
     }
     renderRoster();
   }catch(e){window.toast&&window.toast('Error: '+e.message,'error');}
+  finally{ delete _shiftSaving[lock]; }
 }
 // Remove a cell's shift. Deletes by employee/day (not just the tracked id) so any orphan duplicates are cleared too.
 async function rmShift(uid,d2){if(!canEditRoster()){denyRosterEdit();return;}var key=rk(uid,d2),ex=_roster[key];if(!ex) return;try{await del('roster_shifts','?user_id=eq.'+uid+'&shift_date=eq.'+d2);delete _roster[key];renderRoster();}catch(e){window.toast&&window.toast('Error: '+e.message,'error');}}
@@ -81242,20 +81259,23 @@ window.loadAttendanceReport=async function(){
     var reqByAuth={};   // latest request per employee (auth uid)
     requests.forEach(function(r){ if(!reqByAuth[r.user_id]) reqByAuth[r.user_id]=r; });
 
-    // Roster minutes by app_users.id + day, plus the day's start/end envelope
-    // (earliest start, latest end) for the directional variance comparison.
+    // One shift per person per day — the same rule as the roster grid. A second
+    // saved copy of the same cell used to be added here, which is how a 40-hour
+    // week showed as 64. If a stray copy is still present, keep the latest save.
     var rosterMap={};
-    var rosterBreakMap={};   // entitled break (ms) baked into the rostered shift(s)
+    var rosterBreakMap={};   // entitled break (ms) baked into the rostered shift
     var rosterTimesMap={};
+    var rosterSavedAt={};
     (shifts||[]).forEach(function(s){
       var k=s.user_id+'|'+s.shift_date;
-      rosterMap[k]=(rosterMap[k]||0)+shiftMs(s.start_time,s.end_time);
-      rosterBreakMap[k]=(rosterBreakMap[k]||0)+((s.break_minutes||0)*60000);
+      var savedAt=s.created_at||'';
+      if(rosterSavedAt[k]!=null && savedAt<rosterSavedAt[k]) return;
+      rosterSavedAt[k]=savedAt;
+      rosterMap[k]=shiftMs(s.start_time,s.end_time);
+      rosterBreakMap[k]=(s.break_minutes||0)*60000;
       var sm=hhmmToMin(s.start_time), em=hhmmToMin(s.end_time);
-      if(sm==null||em==null) return;
-      var cur=rosterTimesMap[k];
-      if(!cur) rosterTimesMap[k]={startMin:sm,endMin:em};
-      else { cur.startMin=Math.min(cur.startMin,sm); cur.endMin=Math.max(cur.endMin,em); }
+      if(sm==null||em==null){ delete rosterTimesMap[k]; return; }
+      rosterTimesMap[k]={startMin:sm,endMin:em};
     });
     // Approved leave overlapping this week, keyed by app_users.id|ymd. Lets us
     // show "On leave" instead of "Absent"/blank so a missing clock-in is
