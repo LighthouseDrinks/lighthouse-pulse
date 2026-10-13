@@ -15988,7 +15988,7 @@ async function saveBomDraft() {
     bottling_abv:        parseFloat(abv)    || null,
     chill_filtration:    gv('bm-chill-bom')      === 'yes',
     colouring:           gv('bm-colouring-bom')  === 'yes',
-    colour_spec:         gv('bm-colour-spec-bom') || null,
+    colour_spec:         gv('bm-colouring-bom') === 'yes' ? (gv('bm-colour-spec-bom') || null) : null,
     additional_info:     additionalInfo,
     notes:               gv('bm-notes') || null,
     gi_verified:         false,
@@ -16027,7 +16027,8 @@ async function saveBomDraft() {
       giftBoxBackLabelSkuId: skuId('bm-label-giftbox-back-sel'), labelGiftBoxBack: skuDesc('bm-label-giftbox-back-sel'),
       bottlesPerShipper: gv('bm-bottles-per-shipper'),
       bph: gv('bm-bph'), bottlingAbv: abv,
-      chill: gv('bm-chill-bom'), colour: gv('bm-colouring-bom'), colourSpec: gv('bm-colour-spec-bom'),
+      chill: gv('bm-chill-bom'), colour: gv('bm-colouring-bom'),
+      colourSpec: gv('bm-colouring-bom') === 'yes' ? (gv('bm-colour-spec-bom') || '') : '',
       blendRecipe: _blendRecipe.slice(), sourceSpiritType: gv('bm-source-spirit') || '',
       labelBarcode: gv('bm-label-barcode'), shipperBarcode: gv('bm-shipper-barcode'),
       intendedMarket: gv('bm-intended-market'), dutyStamp: gv('bm-duty-stamp'),
@@ -16160,7 +16161,7 @@ async function saveBom() {
     bottling_abv:        parseFloat(gv('bm-abv'))||null,
     chill_filtration:    gv('bm-chill-bom') === 'yes',
     colouring:           gv('bm-colouring-bom') === 'yes',
-    colour_spec:         gv('bm-colour-spec-bom')||null,
+    colour_spec:         gv('bm-colouring-bom') === 'yes' ? (gv('bm-colour-spec-bom') || null) : null,
     additional_info:     additionalInfo,
     notes:               gv('bm-notes')||null,
     gi_verified:         false,
@@ -16203,7 +16204,7 @@ async function saveBom() {
       bottlingAbv: gv('bm-abv'),
       chill: gv('bm-chill-bom'),
       colour: gv('bm-colouring-bom'),
-      colourSpec: gv('bm-colour-spec-bom'),
+      colourSpec: gv('bm-colouring-bom') === 'yes' ? (gv('bm-colour-spec-bom') || '') : '',
       blendRecipe: _blendRecipe.slice(), sourceSpiritType: gv('bm-source-spirit') || '',
       labelBarcode: gv('bm-label-barcode'), shipperBarcode: gv('bm-shipper-barcode'),
       intendedMarket: gv('bm-intended-market'), dutyStamp: gv('bm-duty-stamp'),
@@ -16368,11 +16369,11 @@ async function _bomCountActiveJobs(bomId) {
 // in its own try/catch so a sync failure can never mask the BOM approval itself.
 async function _propagateBomToActiveJobs(bomId, opts) {
   var soft = !!(opts && opts.soft);
-  var summary = { jobsTouched: 0, inserted: 0, updated: 0, removed: 0, signoffsCleared: 0, keptOrdered: 0, swapped: 0, swappedOrdered: 0 };
+  var summary = { jobsTouched: 0, inserted: 0, updated: 0, removed: 0, signoffsCleared: 0, keptOrdered: 0, swapped: 0, swappedOrdered: 0, colouringUpdated: 0 };
   var jobs = await window.db.select('jobs',
     '?bom_id=eq.' + bomId +
     '&stage=in.(new,active,on_hold)' +
-    '&select=id,bom_id,job_target_type,bottle_target,liquid_litres,abv_in,bottling_abv,final_litres'
+    '&select=id,bom_id,job_target_type,bottle_target,liquid_litres,abv_in,bottling_abv,final_litres,colouring'
   );
   if (!Array.isArray(jobs) || !jobs.length) return summary;
 
@@ -16517,6 +16518,27 @@ async function _propagateBomToActiveJobs(bomId, opts) {
         } catch(e) { window.logError && window.logError('propagate: insert row', e); }
       }
 
+      // Colouring is snapshotted onto the job at creation. Keep live jobs
+      // (new / active / on hold — this query's stage filter) aligned with the
+      // BOM. Completed jobs are left alone, and this is not a component change
+      // so it does not clear the Supply Chain sign-off.
+      var bomColouring = !!bom.colouring;
+      if (!!job.colouring !== bomColouring) {
+        try {
+          await window.db.update('jobs', '?id=eq.' + job.id, { colouring: bomColouring });
+          job.colouring = bomColouring;
+          jobChanged = true;
+          summary.colouringUpdated += 1;
+          [window._jobs, window.JOBS].forEach(function(list) {
+            if (!Array.isArray(list)) return;
+            var live = list.find(function(x){ return x && x.id === job.id; });
+            if (!live) return;
+            live.colouring = bomColouring;
+            if ('colour' in live) live.colour = bomColouring ? 'Yes' : 'No';
+          });
+        } catch(e) { window.logError && window.logError('propagate: patch colouring', e); }
+      }
+
       // 4. Invalidate Supply Chain sign-off when the component set changed
       if (setChanged) {
         try {
@@ -16547,6 +16569,15 @@ async function _propagateBomToActiveJobs(bomId, opts) {
     } catch(e) {
       window.logError && window.logError('propagate: per-job sync', e);
     }
+  }
+
+  if (summary.colouringUpdated) {
+    try {
+      var jobsPage = document.getElementById('page-jobs');
+      if (jobsPage && jobsPage.classList.contains('active') && typeof window.loadJobs === 'function') {
+        window.loadJobs();
+      }
+    } catch(e) {}
   }
 
   return summary;
@@ -31173,7 +31204,7 @@ window._vbmConfirmApprove = async function(id) {
     notes:            gv('vbm-notes')      || null,
     liquidSpec:       gv('vbm-liquid-spec')|| null,
     giVerified:       gv('vbm-gi')         === 'yes',
-    colourSpec:       gv('vbm-colour-spec')|| null,
+    colourSpec:       gv('vbm-colouring') === 'yes' ? (gv('vbm-colour-spec') || null) : null,
     bottleSkuId:      gv('vbm-bottle')     || null,
     corkSkuId:        gv('vbm-cork')       || null,
     roppSkuId:        gv('vbm-ropp')       || null,
@@ -31418,7 +31449,7 @@ window.approveBomSubmission = async function(id, skipConfirm, opts) {
       bph:                 s.bph                 || null,
       chill_filtration:    confirmedChill,
       colouring:           confirmedColour,
-      colour_spec:         confirmedColSpec,
+      colour_spec:         confirmedColour ? (confirmedColSpec || null) : null,
       additional_info:     additionalInfo,
       notes:               confirmedNotes,
       // Set the BOM as approved and locked immediately — Lighthouse has already reviewed it
@@ -45304,7 +45335,8 @@ window.saveAdjModal = async function() {
         sv('njm-dilution', j.dilution ? 'yes' : 'no');
         sv('njm-bottling-abv', j.bottling_abv||'');
         sv('njm-chill', j.chill_filtration ? 'yes' : 'no');
-        sv('njm-colouring', j.colouring ? 'yes' : 'no');
+        var _editBomColour = _njmBoms.find(function(b){ return b.id === j.bom_id; });
+        sv('njm-colouring', (_editBomColour ? _editBomColour.colouring : j.colouring) ? 'yes' : 'no');
         if (j.job_target_type === 'liquid') {
           document.getElementById('njm-target-liquid').checked = true;
           sv('njm-litres-in', j.liquid_litres);
@@ -56983,7 +57015,7 @@ window.saveAdjModal = async function() {
         _bsRow('Gift Box Back Label',  null,                bomRec.gift_box_back_label_sku_id);
         if (bomRec.chill_filtration)    snap.components.push({ label: 'Chill Filtration',          value: 'Yes',                   sku: '' });
         if (bomRec.colouring)           snap.components.push({ label: 'Colouring',                  value: 'Yes',                   sku: '' });
-        if (bomRec.colour_spec)         snap.components.push({ label: 'Colour Spec',                value: bomRec.colour_spec,      sku: '' });
+        if (bomRec.colouring && bomRec.colour_spec) snap.components.push({ label: 'Colour Spec',    value: bomRec.colour_spec,      sku: '' });
         if (bomRec.bottles_per_shipper) snap.components.push({ label: 'Bottles per Shipper',        value: String(bomRec.bottles_per_shipper), sku: '' });
         if (ai.labelBarcode)            snap.components.push({ label: 'Label Barcode',              value: ai.labelBarcode,         sku: '' });
         if (ai.shipperBarcode)          snap.components.push({ label: 'Shipper Barcode',            value: ai.shipperBarcode,       sku: '' });
@@ -57026,7 +57058,7 @@ window.saveAdjModal = async function() {
         _snapRow('Gift Box Back Label',  b.labelGiftBoxBack || b.giftBoxBackLabelSkuId, b.giftBoxBackLabelSkuId);
         if (b.chill === 'yes')           snap.components.push({ label: 'Chill Filtration',       value: 'Yes',              sku: '' });
         if (b.colour === 'yes')          snap.components.push({ label: 'Colouring',               value: 'Yes',              sku: '' });
-        if (b.colourSpec)                snap.components.push({ label: 'Colour Spec',             value: b.colourSpec,       sku: '' });
+        if (b.colour === 'yes' && b.colourSpec) snap.components.push({ label: 'Colour Spec',      value: b.colourSpec,       sku: '' });
         if (b.bottlesPerShipper)         snap.components.push({ label: 'Bottles per Shipper',     value: String(b.bottlesPerShipper), sku: '' });
         if (b.labelBarcode)              snap.components.push({ label: 'Label Barcode',           value: b.labelBarcode,     sku: '' });
         if (b.shipperBarcode)            snap.components.push({ label: 'Shipper Barcode',         value: b.shipperBarcode,   sku: '' });
