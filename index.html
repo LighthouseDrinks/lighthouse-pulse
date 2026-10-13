@@ -27051,7 +27051,7 @@ window.loadBoms = async function initBoms() {
         <span style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--blue);font-weight:700;display:block;margin-bottom:6px;">Logging finished stock</span>
         <span style="color:var(--white);font-weight:600;">In:</span> <span style="background:rgba(61,186,120,0.15);color:var(--green);padding:1px 6px;border-radius:3px;font-size:11px;font-weight:700;">+ Add stock</span> when cases arrive.
         <span style="color:var(--white);font-weight:600;"> Out:</span> <span style="background:rgba(232,79,79,0.15);color:var(--red);padding:1px 6px;border-radius:3px;font-size:11px;font-weight:700;">Sold</span> when cases leave — that takes them off the stock value.
-        <span style="display:block;margin-top:4px;"><span style="color:var(--white);font-weight:600;">Location:</span> Choose it on <span style="background:rgba(61,186,120,0.15);color:var(--green);padding:1px 6px;border-radius:3px;font-size:11px;font-weight:700;">+ Add stock</span>. The same SKU can sit in more than one place. To move one lot, open the row and use Edit on that stock line.</span>
+        <span style="display:block;margin-top:4px;"><span style="color:var(--white);font-weight:600;">History:</span> Click a SKU to see who added stock and when it left. To move one lot, use Edit on that stock line.</span>
         <span style="display:block;margin-top:4px;"><span style="color:var(--white);font-weight:600;">Owner:</span> Lighthouse Drinks stock needs a cost per case and is included in stock value. Hibernia Distillers stock is counted in cases only.</span>
       </div>
     </div>
@@ -27227,6 +27227,31 @@ window.loadBoms = async function initBoms() {
       <div style="display:flex;justify-content:flex-end;gap:10px;">
         <button onclick="window.closeFinishedSaleModal()" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:12px;padding:8px 18px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Cancel</button>
         <button id="fs-sale-save-btn" onclick="window.saveFinishedSale()" class="btn btn-gold" style="font-size:12px;padding:8px 20px;">Record sale</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Finished Stock — SKU detail -->
+  <div id="fs-detail-overlay" style="display:none;position:fixed;inset:0;z-index:560;background:rgba(5,12,20,0.82);align-items:flex-start;justify-content:center;padding:32px 12px;overflow-y:auto;" onclick="if(event.target===this)window.closeFinishedSkuPanel()">
+    <div style="background:var(--navy-mid);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;width:100%;max-width:860px;margin:auto;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="padding:20px 24px 16px;border-bottom:1px solid var(--navy-border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+        <div style="min-width:0;">
+          <div id="fs-detail-id" style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);margin-bottom:4px;">SKU</div>
+          <div id="fs-detail-name" style="font-size:20px;font-weight:700;color:var(--white);font-family:Merriweather,serif;">—</div>
+          <div id="fs-detail-meta" style="font-size:12px;color:var(--muted);margin-top:4px;">—</div>
+          <div id="fs-detail-audit" style="font-size:11px;color:var(--muted);margin-top:6px;"></div>
+        </div>
+        <div id="fs-detail-actions" style="display:flex;gap:8px;align-items:center;flex-shrink:0;flex-wrap:wrap;"></div>
+      </div>
+      <div style="padding:20px 24px 28px;">
+        <div id="fs-detail-notes-wrap" style="display:none;margin-bottom:22px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.24);border-left:3px solid var(--gold);border-radius:4px;padding:12px 14px;">
+          <div style="font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:6px;font-weight:700;">Notes</div>
+          <div id="fs-detail-notes" style="font-size:13px;color:var(--text);line-height:1.55;white-space:pre-wrap;word-break:break-word;">—</div>
+        </div>
+        <div style="font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-bottom:12px;font-weight:700;">Stock on hand</div>
+        <div id="fs-detail-lots"></div>
+        <div style="font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:var(--gold);margin-top:28px;margin-bottom:12px;font-weight:700;">History</div>
+        <div id="fs-detail-history"></div>
       </div>
     </div>
   </div>
@@ -42540,6 +42565,7 @@ window.saveAdjModal = async function() {
   var _fsProducts = [];
   var _fsLots = [];
   var _fsMovements = [];
+  window._fsPanelId = null;
 
   function esc(s) {
     return window.escapeHtml ? window.escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
@@ -42596,7 +42622,11 @@ window.saveAdjModal = async function() {
     var el = document.getElementById(id);
     if (!el) return;
     el.style.display = show ? 'flex' : 'none';
-    document.body.style.overflow = show ? 'hidden' : '';
+    var stillOpen = ['fs-detail-overlay', 'fs-sku-overlay', 'fs-lot-overlay', 'fs-adj-overlay', 'fs-sale-overlay'].some(function(oid) {
+      var node = document.getElementById(oid);
+      return node && node.style.display === 'flex';
+    });
+    document.body.style.overflow = stillOpen ? 'hidden' : '';
   }
   function uniqueLocations() {
     var set = {};
@@ -42669,6 +42699,7 @@ window.saveAdjModal = async function() {
         if (sub) sub.textContent = commonBpc + '-bottle case equivalent · ' + totalBottles.toLocaleString() + ' bottles';
       }
       window.renderFinishedStock();
+      if (window._fsPanelId) window.renderFinishedSkuPanel();
     } catch (e) {
       if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="color:var(--red);padding:24px;text-align:center;">⚠ ' + esc(e.message) + '</td></tr>';
     }
@@ -42724,7 +42755,7 @@ window.saveAdjModal = async function() {
       var locTip = locKeys.map(function(k) { return formatCasesBottles(locMap[k], bpc) + ' @ ' + k; }).join('\n');
       var stockCol = qty === 0 ? 'var(--red)' : 'var(--green)';
       var pid = esc(p.id);
-      rows.push('<tr class="mob-data-row" style="cursor:pointer;">'
+      rows.push('<tr class="mob-data-row" style="cursor:pointer;" onclick="window.openFinishedSkuPanel(\'' + pid + '\')">'
         + '<td class="mob-hide" style="font-family:monospace;font-size:11px;color:var(--gold);">' + pid + '</td>'
         + '<td style="color:var(--white);font-weight:600;">' + esc(p.name)
         + (p.sku && p.sku !== p.id ? ' <span style="font-size:11px;color:var(--muted);font-weight:400;">' + esc(p.sku) + '</span>' : '')
@@ -42740,79 +42771,8 @@ window.saveAdjModal = async function() {
         + (edit ? '<button onclick="window.openFinishedSkuModal(\'' + pid + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Edit</button>' : '')
         + (edit ? '<button onclick="window.deleteFinishedSku(\'' + pid + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Delete</button>' : '')
         + '</td></tr>');
-
-      var lotHtml = '';
-      if (!lots.length) {
-        lotHtml = '<div style="font-size:12px;color:var(--muted);padding:8px 0;">No stock logged yet.</div>';
-      } else {
-        lotHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
-          + '<tr style="color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">'
-          + '<th style="text-align:left;padding:4px 8px 8px 0;">Location</th>'
-          + '<th style="text-align:left;padding:4px 8px 8px;">Owner</th>'
-          + '<th style="text-align:left;padding:4px 8px 8px;">On hand</th>'
-          + '<th class="mob-hide" style="text-align:left;padding:4px 8px 8px;">Cost / case</th>'
-          + '<th class="mob-hide" style="text-align:left;padding:4px 8px 8px;">Value</th>'
-          + '<th></th></tr>';
-        lots.forEach(function(l) {
-          var lqty = parseInt(l.quantity_bottles, 10) || 0;
-          var lid = esc(l.id);
-          var lhLot = isLhOwner(l.owner);
-          lotHtml += '<tr>'
-            + '<td style="padding:6px 8px 6px 0;color:var(--white);">' + esc(l.location || '—') + '</td>'
-            + '<td style="padding:6px 8px;color:var(--text);">' + esc(ownerLabel(l.owner)) + '</td>'
-            + '<td style="padding:6px 8px;font-weight:700;color:' + (lqty ? 'var(--green)' : 'var(--muted)') + ';">' + formatCasesBottles(lqty, bpc) + '</td>'
-            + '<td class="mob-hide" style="padding:6px 8px;color:var(--muted);">' + (showVal && lhLot && l.unit_cost != null ? '€' + parseFloat(l.unit_cost).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—') + '</td>'
-            + '<td class="mob-hide" style="padding:6px 8px;color:var(--gold-light);">' + (showVal && lhLot ? fmtEuro(lotValue(lqty, l.unit_cost, bpc)) : '—') + '</td>'
-            + '<td style="padding:6px 0;white-space:nowrap;">'
-            + (edit ? '<button onclick="event.stopPropagation();window.openFinishedSaleModal(\'' + pid + '\',\'' + lid + '\')" style="background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Sold</button>' : '')
-            + (edit ? '<button onclick="event.stopPropagation();window.openFinishedAdjModal(\'' + lid + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Adjust</button>' : '')
-            + (edit ? '<button onclick="event.stopPropagation();window.openFinishedLotModal(\'' + pid + '\',\'' + lid + '\')" style="background:transparent;border:1px solid var(--navy-border);color:var(--muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">Edit</button>' : '')
-            + '</td></tr>';
-        });
-        lotHtml += '</table>';
-      }
-      var hist = _fsMovements.filter(function(m) { return m.product_id === p.id; }).slice(0, 20);
-      var histHtml = '<div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin:16px 0 8px;">History</div>';
-      if (!hist.length) {
-        histHtml += '<div style="font-size:12px;color:var(--muted);">No movements yet. Add stock or record a sale to start the trail.</div>';
-      } else {
-        histHtml += '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
-          + '<tr style="color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">'
-          + '<th style="text-align:left;padding:4px 8px 8px 0;">When</th>'
-          + '<th style="text-align:left;padding:4px 8px 8px;">What</th>'
-          + '<th style="text-align:left;padding:4px 8px 8px;">Qty</th>'
-          + '<th class="mob-hide" style="text-align:left;padding:4px 8px 8px;">Location</th>'
-          + '<th class="mob-hide" style="text-align:left;padding:4px 8px 8px;">By</th></tr>';
-        hist.forEach(function(m) {
-          var signed = parseInt(m.quantity_bottles, 10) || 0;
-          var qtyAbs = Math.abs(signed);
-          var qtyCol = signed < 0 ? 'var(--red)' : (signed > 0 ? 'var(--green)' : 'var(--muted)');
-          var qtyTxt = (signed > 0 ? '+' : (signed < 0 ? '−' : '')) + formatCasesBottles(qtyAbs, bpc);
-          histHtml += '<tr>'
-            + '<td style="padding:5px 8px 5px 0;color:var(--muted);white-space:nowrap;">' + esc(fmtWhen(m.created_at)) + '</td>'
-            + '<td style="padding:5px 8px;color:var(--white);">' + esc(movementLabel(m.movement_type))
-            + (m.notes ? ' <span style="color:var(--muted);">· ' + esc(m.notes) + '</span>' : '') + '</td>'
-            + '<td style="padding:5px 8px;font-weight:700;color:' + qtyCol + ';">' + qtyTxt + '</td>'
-            + '<td class="mob-hide" style="padding:5px 8px;color:var(--muted);">' + esc(m.location || '—')
-            + (m.owner ? ' · ' + esc(ownerLabel(m.owner)) : '') + '</td>'
-            + '<td class="mob-hide" style="padding:5px 8px;color:var(--muted);">' + esc(m.performed_by || '—') + '</td>'
-            + '</tr>';
-        });
-        histHtml += '</table>';
-      }
-      rows.push('<tr class="mob-detail-row"><td class="mob-detail-cell" colspan="8">'
-        + '<div class="mob-detail-inner" style="display:block;padding:12px 4px 8px;">'
-        + '<div class="mob-d-item" style="margin-bottom:8px;"><span class="mob-d-label">SKU</span><span class="mob-d-value" style="font-family:monospace;color:var(--gold);">' + pid + '</span></div>'
-        + '<div class="mob-d-item" style="margin-bottom:8px;"><span class="mob-d-label">Owner</span><span class="mob-d-value">' + esc(ownerCell) + '</span></div>'
-        + '<div class="mob-d-item" style="margin-bottom:8px;"><span class="mob-d-label">Case size</span><span class="mob-d-value">' + bpc + ' bottles</span></div>'
-        + (showVal && val > 0 ? '<div class="mob-d-item" style="margin-bottom:8px;"><span class="mob-d-label">Value</span><span class="mob-d-value">' + fmtEuro(val) + '</span></div>' : '')
-        + lotHtml
-        + histHtml
-        + '</div></td></tr>');
     });
     tbody.innerHTML = rows.join('');
-    var tbl = tbody.closest('table');
-    if (tbl && window.mobExpandInit) window.mobExpandInit(tbl);
   };
 
   window.openFinishedSkuModal = function(productId) {
@@ -43372,6 +43332,138 @@ window.saveAdjModal = async function() {
     a.download = 'finished-stock.csv';
     a.click();
     URL.revokeObjectURL(a.href);
+  };
+
+  function fmtCasePrice(n) {
+    if (n == null || n === '') return '—';
+    var v = parseFloat(n);
+    if (isNaN(v)) return '—';
+    return '€' + v.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function fsMiniBtn(label, onclick, color) {
+    return '<button onclick="event.stopPropagation();' + onclick + '" style="background:transparent;border:1px solid ' + color + ';color:' + color + ';font-size:11px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;margin-left:4px;">' + label + '</button>';
+  }
+
+  window.openFinishedSkuPanel = function(productId) {
+    var p = productById(productId);
+    if (!p) return;
+    window._fsPanelId = p.id;
+    window.renderFinishedSkuPanel();
+    showOverlay('fs-detail-overlay', true);
+  };
+  window.closeFinishedSkuPanel = function() {
+    window._fsPanelId = null;
+    showOverlay('fs-detail-overlay', false);
+  };
+  window.renderFinishedSkuPanel = function() {
+    var id = window._fsPanelId;
+    if (!id) return;
+    var p = productById(id);
+    if (!p) { window.closeFinishedSkuPanel(); return; }
+    var bpc = bpcOf(p);
+    var showVal = canSeeFsValue();
+    var edit = canEditFs();
+    var pid = esc(p.id);
+    var lots = lotsForProduct(p.id, '');
+    var qty = lots.reduce(function(s, l) { return s + (parseInt(l.quantity_bottles, 10) || 0); }, 0);
+    var idEl = document.getElementById('fs-detail-id');
+    var nameEl = document.getElementById('fs-detail-name');
+    var metaEl = document.getElementById('fs-detail-meta');
+    var auditEl = document.getElementById('fs-detail-audit');
+    var notesWrap = document.getElementById('fs-detail-notes-wrap');
+    var notesEl = document.getElementById('fs-detail-notes');
+    var actionsEl = document.getElementById('fs-detail-actions');
+    var lotsEl = document.getElementById('fs-detail-lots');
+    var histEl = document.getElementById('fs-detail-history');
+    if (idEl) idEl.textContent = p.sku && p.sku !== p.id ? (p.id + ' · ' + p.sku) : p.id;
+    if (nameEl) nameEl.textContent = p.name || '—';
+    if (metaEl) {
+      metaEl.textContent = bpc + ' per case · ' + formatCasesBottles(qty, bpc) + ' on hand'
+        + (showVal ? ' · ' + fmtCasePrice(p.default_unit_cost) + ' / case' : '');
+    }
+    if (auditEl) {
+      var who = p.created_by ? (' by ' + p.created_by) : '';
+      auditEl.textContent = p.created_at ? ('SKU added ' + fmtWhen(p.created_at) + who) : (who ? ('Added' + who) : '');
+    }
+    if (notesWrap && notesEl) {
+      if (p.notes) {
+        notesWrap.style.display = '';
+        notesEl.textContent = p.notes;
+      } else {
+        notesWrap.style.display = 'none';
+        notesEl.textContent = '';
+      }
+    }
+    if (actionsEl) {
+      var closeBtn = '<button onclick="window.closeFinishedSkuPanel()" class="modal-close" style="flex-shrink:0;">✕</button>';
+      actionsEl.innerHTML = (edit
+        ? '<button onclick="window.openFinishedLotModal(\'' + pid + '\')" class="btn btn-gold" style="font-size:12px;padding:6px 12px;">+ Add stock</button>'
+          + '<button onclick="window.openFinishedSaleModal(\'' + pid + '\')" class="btn btn-outline" style="color:var(--red);border-color:var(--red);font-size:12px;padding:6px 12px;">Sold</button>'
+          + '<button onclick="window.openFinishedSkuModal(\'' + pid + '\')" class="btn btn-outline" style="font-size:12px;padding:6px 12px;">Edit</button>'
+          + '<button onclick="window.deleteFinishedSku(\'' + pid + '\')" class="btn btn-outline" style="color:var(--red);border-color:var(--red);font-size:12px;padding:6px 12px;">Delete</button>'
+        : '') + closeBtn;
+    }
+    if (lotsEl) {
+      if (!lots.length) {
+        lotsEl.innerHTML = '<div style="font-size:13px;color:var(--muted);padding:8px 0;">No stock logged yet.</div>';
+      } else {
+        var lotHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+          + '<tr style="color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">'
+          + '<th style="text-align:left;padding:4px 8px 8px 0;">Location</th>'
+          + '<th style="text-align:left;padding:4px 8px 8px;">Owner</th>'
+          + '<th style="text-align:left;padding:4px 8px 8px;">On hand</th>'
+          + (showVal ? '<th style="text-align:left;padding:4px 8px 8px;">Value</th>' : '')
+          + '<th></th></tr>';
+        lots.forEach(function(l) {
+          var lqty = parseInt(l.quantity_bottles, 10) || 0;
+          var lid = esc(l.id);
+          var lhLot = isLhOwner(l.owner);
+          lotHtml += '<tr>'
+            + '<td style="padding:6px 8px 6px 0;color:var(--white);">' + esc(l.location || '—') + '</td>'
+            + '<td style="padding:6px 8px;color:var(--text);">' + esc(ownerLabel(l.owner)) + '</td>'
+            + '<td style="padding:6px 8px;font-weight:700;color:' + (lqty ? 'var(--green)' : 'var(--muted)') + ';">' + formatCasesBottles(lqty, bpc) + '</td>'
+            + (showVal ? '<td style="padding:6px 8px;color:var(--gold-light);">' + (lhLot ? fmtEuro(lotValue(lqty, l.unit_cost, bpc)) : '—') + '</td>' : '')
+            + '<td style="padding:6px 0;white-space:nowrap;text-align:right;">'
+            + (edit && lqty ? fsMiniBtn('Sold', 'window.openFinishedSaleModal(\'' + pid + '\',\'' + lid + '\')', 'var(--red)') : '')
+            + (edit ? fsMiniBtn('Adjust', 'window.openFinishedAdjModal(\'' + lid + '\')', 'var(--muted)') : '')
+            + (edit ? fsMiniBtn('Edit', 'window.openFinishedLotModal(\'' + pid + '\',\'' + lid + '\')', 'var(--muted)') : '')
+            + '</td></tr>';
+        });
+        lotHtml += '</table>';
+        lotsEl.innerHTML = lotHtml;
+      }
+    }
+    if (histEl) {
+      var hist = _fsMovements.filter(function(m) { return m.product_id === p.id; });
+      if (!hist.length) {
+        histEl.innerHTML = '<div style="font-size:13px;color:var(--muted);">No movements yet. Add stock or record a sale to start the trail.</div>';
+      } else {
+        var histHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+          + '<tr style="color:var(--muted);font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">'
+          + '<th style="text-align:left;padding:4px 8px 8px 0;">When</th>'
+          + '<th style="text-align:left;padding:4px 8px 8px;">What</th>'
+          + '<th style="text-align:left;padding:4px 8px 8px;">Qty</th>'
+          + '<th style="text-align:left;padding:4px 8px 8px;">Location</th>'
+          + '<th style="text-align:left;padding:4px 8px 8px;">By</th></tr>';
+        hist.forEach(function(m) {
+          var signed = parseInt(m.quantity_bottles, 10) || 0;
+          var qtyAbs = Math.abs(signed);
+          var qtyCol = signed < 0 ? 'var(--red)' : (signed > 0 ? 'var(--green)' : 'var(--muted)');
+          var qtyTxt = (signed > 0 ? '+' : (signed < 0 ? '−' : '')) + formatCasesBottles(qtyAbs, bpc);
+          histHtml += '<tr>'
+            + '<td style="padding:5px 8px 5px 0;color:var(--muted);white-space:nowrap;">' + esc(fmtWhen(m.created_at)) + '</td>'
+            + '<td style="padding:5px 8px;color:var(--white);">' + esc(movementLabel(m.movement_type))
+            + (m.notes ? ' <span style="color:var(--muted);">· ' + esc(m.notes) + '</span>' : '') + '</td>'
+            + '<td style="padding:5px 8px;font-weight:700;color:' + qtyCol + ';white-space:nowrap;">' + qtyTxt + '</td>'
+            + '<td style="padding:5px 8px;color:var(--muted);">' + esc(m.location || '—')
+            + (m.owner ? ' · ' + esc(ownerLabel(m.owner)) : '') + '</td>'
+            + '<td style="padding:5px 8px;color:var(--muted);">' + esc(m.performed_by || '—') + '</td>'
+            + '</tr>';
+        });
+        histHtml += '</table>';
+        histEl.innerHTML = histHtml;
+      }
+    }
   };
 
   // Prefill cost when SKU changes on the add-stock modal
