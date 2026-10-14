@@ -6920,7 +6920,7 @@ window.copyInviteLink = function() {
           <div style="margin-bottom:14px;">
             <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:5px;">From Address</label>
             <input type="text" id="sys-from-email" placeholder="pulse@lighthousedrinks.com" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:4px;font-family:Lato,sans-serif;">
-            <div style="font-size:10px;color:var(--muted);margin-top:4px;">Must be from a verified domain in Resend. Prefer a send subdomain (e.g. pulse@send.lighthousedrinks.com) for staff inboxes so Gmail does not treat the mail as spoofed.</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:4px;">Must be from a verified domain in Resend. BOM confirmations to @lighthousedrinks.com are sent from pulse@notifications.lighthousedrinks.com so Google Workspace does not treat them as spoofed.</div>
           </div>
           <button onclick="window.saveSystemSettings()" class="btn btn-gold" style="font-size:11px;padding:8px 20px;">Save Settings</button>
           <span id="sys-save-status" style="font-size:12px;margin-left:12px;"></span>
@@ -57622,16 +57622,23 @@ window.saveAdjModal = async function() {
       recId = existing.id;
       var link = window.location.origin + window.location.pathname + '#/bom-approval/' + existing.approval_token;
 
-      // Send email
-      if (window._emailTpl && window._emailTpl.bomConfirmRequestClient) {
-        window._sendEmail(
-          to,
-          'Please Confirm Your BOM — ' + jobLabelForEmail,
-          window._emailTpl.bomConfirmRequestClient(jobLabelForEmail, jobRef, String(volume), String(abv), link)
-        );
+      // Send email. Staff inboxes are on Google Workspace, so mail From
+      // @lighthousedrinks.com via Resend is treated as spoofed. Those
+      // recipients are sent from the notifications subdomain instead.
+      if (!(window._emailTpl && window._emailTpl.bomConfirmRequestClient) || !window.sendEmail) {
+        throw new Error('Email is not configured.');
       }
+      var emailOpts = {
+        to: [to],
+        subject: 'Please Confirm Your BOM — ' + jobLabelForEmail,
+        html: window._emailTpl.bomConfirmRequestClient(jobLabelForEmail, jobRef, String(volume), String(abv), link)
+      };
+      if (/@lighthousedrinks\.com$/i.test(to)) {
+        emailOpts.from = 'Pulse by Lighthouse Drinks <pulse@notifications.lighthousedrinks.com>';
+      }
+      await window.sendEmail(emailOpts);
 
-      // Record sent_at, email, and snapshot (ensures snapshot is always up to date)
+      // Record sent_at only after Resend accepts. Snapshot stays current on that same write.
       await supaMut('PATCH', 'job_bom_approvals', '?id=eq.' + recId, { client_email_to: to, client_email_sent_at: new Date().toISOString(), product_name: productName, client_name: clientName, bom_snapshot: bomSnapshot });
       window._bomApprovalCache[jobId] = null;
       await window._renderBomVerification(jobId);
