@@ -12166,6 +12166,16 @@ window._dgComputeLines = function(input) {
       dateText: new Date().toLocaleDateString('en-IE')
     };
   }
+  function quoteTerms(meta) {
+    var lines = ['Ex VAT. Onward shipping and duty are excluded.'];
+    if (meta.lineNames && meta.lineNames.length) {
+      lines.push('Labels ship from Cork, Ireland.');
+      lines.push(meta.lead
+        ? ('Lead time: ' + meta.lead + '.')
+        : 'Lead time: four weeks post final design sign-off.');
+    }
+    return lines;
+  }
   function buildPdf(calc) {
     var jsPDFns = window.jspdf || window.jsPDF;
     var Ctor = jsPDFns && (jsPDFns.jsPDF || jsPDFns);
@@ -12180,7 +12190,29 @@ window._dgComputeLines = function(input) {
     doc.text('LIGHTHOUSE DRINKS', 16, 13);
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(16);
-    doc.text('Dry goods price', 16, 23);
+    doc.text('Dry goods quotation', 16, 23);
+    var EURO_GAP = 1.6;
+    function euroWidth() {
+      var w = doc.getTextWidth('€');
+      var digit = doc.getTextWidth('0');
+      if (!(w > digit * 0.55)) w = Math.max(doc.getTextWidth('E'), digit);
+      return w;
+    }
+    function drawSpaced(str, x, y) {
+      var s = String(str);
+      var cursor = x;
+      for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        doc.text(ch, cursor, y);
+        cursor += ch === '€' ? euroWidth() + EURO_GAP : doc.getTextWidth(ch);
+      }
+    }
+    function drawMoney(amount, right, yPos) {
+      var v = Number(amount);
+      if (!isFinite(v)) v = 0;
+      var num = v.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      drawSpaced('€' + num, right - (euroWidth() + EURO_GAP + doc.getTextWidth(num)), yPos);
+    }
     function line(label, value) {
       if (y > 260) { doc.addPage(); y = 20; }
       doc.setFont(undefined, 'normal');
@@ -12190,60 +12222,68 @@ window._dgComputeLines = function(input) {
       doc.setFont(undefined, 'bold');
       doc.setTextColor(20, 20, 20);
       var lines = doc.splitTextToSize(String(value || '—'), 110);
-      doc.text(lines, 78, y);
+      lines.forEach(function(part, idx) { drawSpaced(part, 78, y + idx * 5); });
       y += Math.max(8, lines.length * 5 + 2);
     }
     line('Customer', meta.clientName);
     line(meta.lineNames && meta.lineNames.length > 1 ? 'Labels' : 'Component', meta.componentLabel);
     line('Description', meta.description);
     y += 2;
-    var multiPdf = meta.lineNames && meta.lineNames.length > 1;
-    if (multiPdf) {
-      meta.breaks.forEach(function(b) {
-        if (y > 240) { doc.addPage(); y = 20; }
-        doc.setFont(undefined, 'bold');
-        doc.setFontSize(12);
-        doc.setTextColor(20, 20, 20);
-        doc.text(qtyText(b.quantity) + ' pieces', 16, y);
-        doc.text(euroUnit(b.sellPerRaw, b.quantity) + ' per set', 78, y);
-        doc.text(euro(b.customerTotal, 2), 150, y);
-        y += 6;
-        (b.parts || []).forEach(function(p) {
-          if (y > 270) { doc.addPage(); y = 20; }
-          doc.setFont(undefined, 'normal');
-          doc.setFontSize(10);
-          doc.setTextColor(70, 70, 70);
-          doc.text(p.name, 20, y);
-          doc.text(euroUnit(p.sellPerRaw, b.quantity) + ' each', 78, y);
-          doc.text(euro(p.customerTotal, 2), 150, y);
-          y += 5;
-        });
-        y += 4;
-      });
-    } else {
-      if (y > 230) { doc.addPage(); y = 20; }
+    var labelQuote = !!(meta.lineNames && meta.lineNames.length);
+    var perThousand = labelQuote || calc.priceUnit === 'per_1000';
+    var unitHead = perThousand ? 'Per 1,000' : (calc.priceUnit === 'per_case' ? 'Per bottle' : 'Each');
+    var multiPdf = labelQuote && meta.lineNames.length > 1;
+    function rateOf(total, qty) {
+      var factor = perThousand ? 1000 : 1;
+      return money(Number(total) / qty * factor);
+    }
+    function priceHeader() {
+      if (y > 250) { doc.addPage(); y = 20; }
       doc.setFont(undefined, 'bold');
       doc.setFontSize(10);
       doc.setTextColor(90, 90, 90);
       doc.text('Quantity', 16, y);
-      doc.text(meta.priceHead, 90, y);
-      doc.text('Total', 150, y);
+      doc.text(unitHead, 148, y, { align: 'right' });
+      doc.text('Total', 194, y, { align: 'right' });
       y += 2;
       doc.setDrawColor(210, 210, 210);
       doc.line(16, y, 194, y);
       y += 7;
-      meta.breaks.forEach(function(b) {
-        if (y > 260) { doc.addPage(); y = 20; }
-        doc.setFont(undefined, 'normal');
+    }
+    function moneyRow(name, xName, rate, total, bold) {
+      if (y > 268) { doc.addPage(); y = 20; priceHeader(); }
+      doc.setFont(undefined, bold ? 'bold' : 'normal');
+      doc.setFontSize(11);
+      doc.setTextColor(20, 20, 20);
+      var nameLine = doc.splitTextToSize(String(name || ''), 88)[0] || '';
+      doc.text(nameLine, xName, y);
+      drawMoney(rate, 148, y);
+      drawMoney(total, 194, y);
+      y += 7;
+    }
+    priceHeader();
+    meta.breaks.forEach(function(b) {
+      if (multiPdf) {
+        if (y > 250) { doc.addPage(); y = 20; priceHeader(); }
+        doc.setFont(undefined, 'bold');
         doc.setFontSize(11);
         doc.setTextColor(20, 20, 20);
-        doc.text(qtyText(b.quantity) + meta.piece, 16, y);
-        doc.text(euroUnit(b.sellPerRaw, b.quantity), 90, y);
-        doc.setFont(undefined, 'bold');
-        doc.text(euro(b.customerTotal, 2), 150, y);
-        y += 8;
-      });
-    }
+        doc.text(qtyText(b.quantity) + ' pieces', 16, y);
+        y += 6;
+        var setRate = rateOf(b.customerTotal, b.quantity);
+        var used = 0;
+        (b.parts || []).forEach(function(p, idx) {
+          var rate = rateOf(p.customerTotal, b.quantity);
+          if (idx === b.parts.length - 1) rate = money(setRate - used);
+          else used = money(used + rate);
+          moneyRow(p.name, 22, rate, p.customerTotal, false);
+        });
+        moneyRow('Total', 22, setRate, b.customerTotal, true);
+        y += 2;
+      } else {
+        moneyRow(qtyText(b.quantity) + meta.piece, 16, rateOf(b.customerTotal, b.quantity), b.customerTotal, false);
+      }
+    });
     y += 4;
     if (calc.mentionsTooling && calc.toolingMode === 'included') {
       if (y > 260) { doc.addPage(); y = 20; }
@@ -12258,10 +12298,10 @@ window._dgComputeLines = function(input) {
       doc.setFont(undefined, 'normal');
       doc.setFontSize(11);
       doc.setTextColor(40, 40, 40);
-      doc.text('Tooling of ' + meta.toolingText + ' is included in each total.', 16, y);
+      drawSpaced('Tooling of ' + euro(calc.toolingOnQuote, 2) + ' is included in each total.', 16, y);
       y += 8;
     }
-    if (meta.lead) line('Lead time', meta.lead);
+    if (meta.lead && !labelQuote) line('Lead time', meta.lead);
     if (meta.valid) line('Valid until', meta.valid);
     if (meta.note) {
       if (y > 240) { doc.addPage(); y = 20; }
@@ -12269,15 +12309,19 @@ window._dgComputeLines = function(input) {
       doc.setFontSize(10);
       doc.setTextColor(60, 60, 60);
       var noteLines = doc.splitTextToSize(meta.note, 178);
-      doc.text(noteLines, 16, y);
+      noteLines.forEach(function(part, idx) { drawSpaced(part, 16, y + idx * 5); });
       y += noteLines.length * 5 + 6;
     }
-    if (y > 268) { doc.addPage(); y = 20; }
+    var terms = quoteTerms(meta);
+    if (y + terms.length * 5 > 278) { doc.addPage(); y = 20; }
     y += 4;
     doc.setFont(undefined, 'normal');
     doc.setFontSize(9);
     doc.setTextColor(120, 120, 120);
-    doc.text('Ex VAT. Onward shipping and duty are excluded.', 16, y);
+    terms.forEach(function(term) {
+      doc.text(term, 16, y);
+      y += 5;
+    });
     doc.text('Lighthouse Drinks  ·  ' + meta.dateText, 16, 287);
     return doc;
   }
@@ -12286,7 +12330,7 @@ window._dgComputeLines = function(input) {
     function slug(s) {
       return String(s || 'price').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 40) || 'price';
     }
-    return 'Dry-goods-price-' + slug(labelFor(_dg.componentKey)) + '-' + slug(client && client.name) + '.pdf';
+    return 'Dry-goods-quotation-' + slug(labelFor(_dg.componentKey)) + '-' + slug(client && client.name) + '.pdf';
   }
   function payload(calc) {
     var client = selectedClient();
@@ -12589,13 +12633,15 @@ window._dgComputeLines = function(input) {
       if (meta.lineNames && meta.lineNames.length > 1) optionLine += '<p>Labels: ' + esc(meta.lineNames.join(', ')) + '.</p>';
       if (meta.breaks.length > 1) optionLine += '<p>The quote has ' + meta.breaks.length + ' quantity options.</p>';
       var html = '<div style="font-family:Arial,sans-serif;color:#1a1a2e;max-width:560px;">'
-        + '<p>Please find attached our price for <strong>' + esc(meta.description) + '</strong> (' + esc(meta.componentLabel) + ').</p>'
+        + '<p>Please find attached our quotation for <strong>' + esc(meta.description) + '</strong> (' + esc(meta.componentLabel) + ').</p>'
         + optionLine
-        + '<p style="color:#666;font-size:12px;">Ex VAT. Onward shipping and duty are excluded.</p>'
+        + quoteTerms(meta).map(function(term) {
+          return '<p style="color:#666;font-size:12px;">' + esc(term) + '</p>';
+        }).join('')
         + '<p style="color:#666;font-size:12px;">Lighthouse Drinks</p></div>';
       await window.sendEmail({
         to: to,
-        subject: 'Dry goods price — ' + meta.componentLabel + ' — ' + meta.clientName,
+        subject: 'Dry goods quotation — ' + meta.componentLabel + ' — ' + meta.clientName,
         html: html,
         attachments: [{ filename: fileName(), content: b64, type: 'application/pdf' }]
       });
