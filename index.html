@@ -11493,10 +11493,134 @@ window._dgCompute = function(input) {
     mentionsTooling: tooling > 0
   };
 };
+
+// Several labels on one quote. Each line has its own supplier price.
+// Transport, tooling, and margin apply once to the set, at each quantity.
+window._dgComputeLines = function(input) {
+  function num(v) {
+    if (v === '' || v === null || v === undefined) return null;
+    var n = typeof v === 'number' ? v : parseFloat(v);
+    return isNaN(n) ? null : n;
+  }
+  function money(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
+  function unit6(n) { return Math.round((n + Number.EPSILON) * 1e6) / 1e6; }
+  var lines = input.lines || [];
+  if (!lines.length) return { ok: false, error: 'Add a label.' };
+  var qty = num(input.quantity);
+  var margin = num(input.marginPct);
+  var overage = num(input.overagePct);
+  var transport = num(input.transport);
+  var tooling = num(input.tooling);
+  var moq = num(input.moq);
+  var toolingMode = input.toolingMode === 'separate' ? 'separate' : 'included';
+  var transportMode = input.transportMode === 'per_unit' ? 'per_unit' : 'order';
+  if (qty === null) return { ok: false, error: 'Enter the quantity.' };
+  if (!(qty > 0)) return { ok: false, error: 'Quantity must be greater than zero.' };
+  if (margin === null) margin = 30;
+  if (margin < 0 || margin > 80) return { ok: false, error: 'Margin must be between 0 and 80%.' };
+  if (overage === null) overage = 0;
+  if (overage < 0 || overage > 100) return { ok: false, error: 'Overage must be between 0 and 100%.' };
+  if (transport === null) transport = 0;
+  if (transport < 0) return { ok: false, error: 'Transport cannot be negative.' };
+  if (tooling === null) tooling = 0;
+  if (tooling < 0) return { ok: false, error: 'Tooling cannot be negative.' };
+  if (moq !== null && moq <= 0) moq = null;
+  var priced = [];
+  var unitsPurchased = null;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i] || {};
+    var one = window._dgCompute({
+      supplierPrice: line.supplierPrice,
+      quantity: qty,
+      marginPct: 0,
+      overagePct: overage,
+      transport: 0,
+      tooling: 0,
+      moq: moq,
+      priceUnit: line.priceUnit || 'per_1000',
+      toolingMode: 'included',
+      transportMode: 'order'
+    });
+    if (!one.ok) return { ok: false, error: (line.name ? line.name + ': ' : '') + one.error };
+    unitsPurchased = one.unitsPurchased;
+    priced.push({
+      name: line.name || 'Label',
+      componentKey: line.componentKey || '',
+      supplierPrice: line.supplierPrice,
+      priceUnit: one.priceUnit,
+      perPiece: one.supplierPerPiece,
+      materialTotal: one.materialTotal
+    });
+  }
+  var materialTotal = 0;
+  for (var m = 0; m < priced.length; m++) materialTotal += priced[m].materialTotal;
+  var transportTotal = transportMode === 'per_unit' ? transport * unitsPurchased : transport;
+  var toolingInCost = toolingMode === 'included' ? tooling : 0;
+  var landedTotal = materialTotal + transportTotal + toolingInCost;
+  var landedPer = landedTotal / qty;
+  var sellPer = landedPer / (1 - margin / 100);
+  var componentTotal = money(sellPer * qty);
+  var toolingOnQuote = (toolingMode === 'separate' && tooling > 0) ? money(tooling) : 0;
+  var customerTotal = money(componentTotal + toolingOnQuote);
+  var profit = money(customerTotal - (materialTotal + transportTotal + tooling));
+  var parts = [];
+  var used = 0;
+  for (var p = 0; p < priced.length; p++) {
+    var share;
+    if (p === priced.length - 1) share = money(customerTotal - used);
+    else if (materialTotal > 0) share = money(customerTotal * priced[p].materialTotal / materialTotal);
+    else share = money(customerTotal / priced.length);
+    if (p !== priced.length - 1) used = money(used + share);
+    parts.push({
+      name: priced[p].name,
+      materialTotal: money(priced[p].materialTotal),
+      perPiece: priced[p].perPiece,
+      customerTotal: share,
+      sellPerRaw: qty ? share / qty : 0
+    });
+  }
+  var moqValue = 0;
+  if (moq) {
+    for (var q = 0; q < priced.length; q++) moqValue += moq * priced[q].perPiece;
+  }
+  return {
+    ok: true,
+    priceUnit: 'each',
+    supplierPerPiece: priced.length === 1 ? priced[0].perPiece : null,
+    unitsPurchased: unitsPurchased,
+    materialTotal: materialTotal,
+    transportTotal: transportTotal,
+    tooling: tooling,
+    toolingMode: toolingMode,
+    transportMode: transportMode,
+    landedPerPiece: landedPer,
+    sellPerRaw: sellPer,
+    sellPerPiece: unit6(sellPer),
+    componentTotal: componentTotal,
+    toolingOnQuote: toolingOnQuote,
+    customerTotal: customerTotal,
+    profit: profit,
+    marginPct: margin,
+    moqShort: !!(moq && unitsPurchased < moq),
+    moq: moq,
+    moqValue: moqValue,
+    mentionsTooling: tooling > 0,
+    lines: priced,
+    parts: parts
+  };
+};
 // DG_COMPUTE_END
 
 (function() {
   var CASE_KEYS = { shipperSkuId: true, dividerSkuId: true };
+  var LABEL_KEYS = {
+    frontLabelSkuId: 'Front label',
+    backLabelSkuId: 'Back label',
+    neckLabelSkuId: 'Neck label',
+    outerCaseLabelSkuId: 'Outer case label',
+    giftBoxLabelSkuId: 'Gift box front label',
+    giftBoxBackLabelSkuId: 'Gift box back label'
+  };
   var _dg = {
     clients: [],
     quotes: [],
@@ -11516,9 +11640,19 @@ window._dgCompute = function(input) {
   function val(id) { var n = el(id); return n ? n.value : ''; }
   function types() { return window._bomCheckComponentFields || []; }
   function labelFor(key) {
+    if (key === 'labelSet') return 'Labels';
     var list = types();
     for (var i = 0; i < list.length; i++) if (list[i][0] === key) return list[i][1];
-    return key || 'Component';
+    return LABEL_KEYS[key] || key || 'Component';
+  }
+  function isLabelKey(key) { return key === 'labelSet' || !!LABEL_KEYS[key]; }
+  function isLabelQuote() { return isLabelKey(_dg.componentKey); }
+  function typeChoices() {
+    var list = types().filter(function(t) { return !LABEL_KEYS[t[0]]; });
+    var at = list.length;
+    for (var i = 0; i < list.length; i++) if (list[i][0] === 'foilSkuId') at = i + 1;
+    list.splice(at, 0, ['labelSet', 'Labels']);
+    return list;
   }
   function isCase(key) { return !!CASE_KEYS[key || _dg.componentKey]; }
   function money(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
@@ -11580,10 +11714,63 @@ window._dgCompute = function(input) {
     }
     return out;
   }
+  function labelTypeOptions(optional) {
+    var html = optional ? '<option value="">Not on this quote</option>' : '';
+    Object.keys(LABEL_KEYS).forEach(function(key) {
+      html += '<option value="' + key + '">' + LABEL_KEYS[key] + '</option>';
+    });
+    html += '<option value="otherLabel">Other label</option>';
+    return html;
+  }
+  function readLabelLineRaw() {
+    var rows = [];
+    for (var i = 1; i <= 4; i++) {
+      rows.push({
+        type: val('dgp-line-type-' + i),
+        name: val('dgp-line-name-' + i).trim(),
+        price: val('dgp-line-price-' + i),
+        unit: val('dgp-line-unit-' + i)
+      });
+    }
+    return rows;
+  }
+  function readLabelLines() {
+    var raw = readLabelLineRaw();
+    var lines = [];
+    var seen = {};
+    for (var i = 0; i < raw.length; i++) {
+      var row = raw[i];
+      if (!row.type) continue;
+      var name = row.type === 'otherLabel' ? row.name : (LABEL_KEYS[row.type] || row.name);
+      if (row.type === 'otherLabel' && !name) return { ok: false, error: 'Name the other label.' };
+      if (name.length > 80) return { ok: false, error: 'A label name must be 80 characters or less.' };
+      if (String(row.price).trim() === '') return { ok: false, error: 'Enter a supplier price for ' + name + '.' };
+      var price = parseFloat(row.price);
+      if (isNaN(price) || price < 0) return { ok: false, error: 'Supplier price cannot be negative.' };
+      var unit = row.unit === 'each' ? 'each' : 'per_1000';
+      var idKey = row.type === 'otherLabel' ? 'other:' + name.toLowerCase() : row.type;
+      if (seen[idKey]) return { ok: false, error: name + ' is already on this quote.' };
+      seen[idKey] = true;
+      lines.push({
+        name: name,
+        componentKey: row.type,
+        supplierPrice: price,
+        priceUnit: unit
+      });
+    }
+    if (!lines.length) return { ok: false, error: 'Add a label.' };
+    return { ok: true, lines: lines };
+  }
   function computeBreaks() {
     var base = readInput();
     var raw = readQuantities();
     if (!raw.length) return { ok: false, error: 'Enter a quantity.' };
+    var labelLines = null;
+    if (isLabelQuote()) {
+      var parsed = readLabelLines();
+      if (!parsed.ok) return parsed;
+      labelLines = parsed.lines;
+    }
     var seen = {};
     var breaks = [];
     var shared = null;
@@ -11593,7 +11780,10 @@ window._dgCompute = function(input) {
       var key = String(Math.round(qty * 1000) / 1000);
       if (seen[key]) return { ok: false, error: 'Each price break needs a different quantity.' };
       seen[key] = true;
-      var calc = window._dgCompute(Object.assign({}, base, { quantity: qty }));
+      var input = Object.assign({}, base, { quantity: qty });
+      var calc = labelLines
+        ? window._dgComputeLines(Object.assign({}, input, { lines: labelLines }))
+        : window._dgCompute(input);
       if (!calc.ok) return calc;
       if (!shared) shared = calc;
       breaks.push({
@@ -11606,7 +11796,8 @@ window._dgCompute = function(input) {
         componentTotal: calc.componentTotal,
         customerTotal: calc.customerTotal,
         profit: calc.profit,
-        moqShort: calc.moqShort
+        moqShort: calc.moqShort,
+        parts: calc.parts || null
       });
     }
     breaks.sort(function(a, b) { return a.quantity - b.quantity; });
@@ -11623,7 +11814,9 @@ window._dgCompute = function(input) {
       marginPct: shared.marginPct,
       moq: shared.moq,
       moqValue: shared.moqValue,
-      moqShort: breaks.some(function(b) { return b.moqShort; })
+      moqShort: breaks.some(function(b) { return b.moqShort; }),
+      lines: shared.lines || null,
+      lineNames: shared.lines ? shared.lines.map(function(l) { return l.name; }) : null
     };
   }
   function fingerprint() {
@@ -11634,6 +11827,7 @@ window._dgCompute = function(input) {
       desc: val('dgp-desc').trim(),
       input: readInput(),
       qtys: readQuantities(),
+      lines: isLabelQuote() ? readLabelLineRaw() : null,
       lead: val('dgp-lead').trim(),
       valid: val('dgp-valid'),
       note: val('dgp-note').trim()
@@ -11679,7 +11873,7 @@ window._dgCompute = function(input) {
       priceLabel.textContent = sel.value === 'per_1000' ? 'Supplier price (€ per 1,000)'
         : (sel.value === 'per_case' ? 'Supplier price (€ per case)' : 'Supplier price (€ per piece)');
     }
-    var pieceWord = sel.value === 'per_case' ? 'bottles' : 'pieces';
+    var pieceWord = isLabelQuote() ? 'pieces' : (sel.value === 'per_case' ? 'bottles' : 'pieces');
     for (var qi = 1; qi <= 4; qi++) {
       var qtyLabel = el('dgp-qty-label-' + qi);
       if (qtyLabel) qtyLabel.textContent = 'Quantity ' + qi + ' (' + pieceWord + ')' + (qi === 1 ? '' : ' — optional');
@@ -11688,9 +11882,11 @@ window._dgCompute = function(input) {
   function renderTypes() {
     var host = el('dgp-component');
     if (!host) return;
-    var current = _dg.componentKey;
-    host.innerHTML = types().map(function(t) {
-      var n = _dg.quotes.filter(function(q) { return q.component_key === t[0]; }).length;
+    var current = isLabelKey(_dg.componentKey) ? 'labelSet' : _dg.componentKey;
+    host.innerHTML = typeChoices().map(function(t) {
+      var n = _dg.quotes.filter(function(q) {
+        return t[0] === 'labelSet' ? isLabelKey(q.component_key) : q.component_key === t[0];
+      }).length;
       return '<option value="' + esc(t[0]) + '">' + esc(t[1] + (n ? ' (' + n + ')' : '')) + '</option>';
     }).join('');
     if (current) host.value = current;
@@ -11724,7 +11920,7 @@ window._dgCompute = function(input) {
       return '<div class="dgp-saved-item' + (q.id === _dg.openedId ? ' is-on' : '') + '">'
         + '<button type="button" class="dgp-saved-open" data-quote="' + esc(q.id) + '">'
         + '<strong>' + esc(q.description || labelFor(q.component_key)) + '</strong>'
-        + '<span>' + esc(labelFor(q.component_key)) + ' · ' + esc(shortDate(q.created_at)) + ' · ' + esc(breakLabel(q)) + '</span>'
+        + '<span>' + esc(q.component_key === 'labelSet' && q.component_label ? q.component_label : labelFor(q.component_key)) + ' · ' + esc(shortDate(q.created_at)) + ' · ' + esc(breakLabel(q)) + '</span>'
         + '</button>'
         + '<button type="button" class="dgp-saved-delete" data-delete="' + esc(q.id) + '">Delete</button>'
         + '</div>';
@@ -11746,14 +11942,20 @@ window._dgCompute = function(input) {
       if (moq) moq.innerHTML = '';
       return calc;
     }
-    var eachWord = calc.priceUnit === 'per_case' ? 'bottle' : 'piece';
+    var multi = calc.lines && calc.lines.length > 1;
+    var eachWord = multi ? 'set' : (calc.priceUnit === 'per_case' ? 'bottle' : 'piece');
     var transportAmount = euro(parseFloat(val('dgp-transport') || '0') || 0, 2);
-    var lines = [
-      ['Supplier cost / ' + eachWord, euroUnit(calc.supplierPerPiece, calc.breaks[0].unitsPurchased)],
-      ['Transport', transportAmount + (calc.transportMode === 'per_unit' ? ' per unit we buy' : ' on each option')],
-      ['Tooling', euro(calc.tooling, 2) + (calc.toolingMode === 'separate' ? ' · quoted separately' : ' · in the unit price')],
-      ['Margin on this price', calc.marginPct + '%']
-    ];
+    var lines = [];
+    if (calc.lines && calc.lines.length) {
+      calc.lines.forEach(function(l) {
+        lines.push([l.name + ' / piece', euroUnit(l.perPiece, calc.breaks[0].unitsPurchased)]);
+      });
+    } else {
+      lines.push(['Supplier cost / ' + eachWord, euroUnit(calc.supplierPerPiece, calc.breaks[0].unitsPurchased)]);
+    }
+    lines.push(['Transport', transportAmount + (calc.transportMode === 'per_unit' ? ' per unit we buy' : ' on each option')]);
+    lines.push(['Tooling', euro(calc.tooling, 2) + (calc.toolingMode === 'separate' ? ' · quoted separately' : ' · in the unit price')]);
+    lines.push(['Margin on this price', calc.marginPct + '%']);
     var table = '<div class="dgp-break-scroll"><table class="dgp-break-table"><thead><tr>'
       + '<th>Quantity</th><th class="num">Units we buy</th><th class="num">Material</th>'
       + '<th class="num">Landed / ' + esc(eachWord) + '</th><th class="num">Sell / ' + esc(eachWord) + '</th>'
@@ -11769,9 +11971,24 @@ window._dgCompute = function(input) {
           + '<td class="num">' + esc(euro(b.profit, 2)) + '</td></tr>';
       }).join('')
       + '</tbody></table></div>';
+    var split = '';
+    if (multi) {
+      split = '<div class="dgp-break-scroll"><table class="dgp-break-table"><thead><tr><th>Label</th><th class="num">Supplier / piece</th>'
+        + calc.breaks.map(function(b) { return '<th class="num">' + esc(qtyText(b.quantity)) + '</th>'; }).join('')
+        + '</tr></thead><tbody>'
+        + calc.lines.map(function(l, idx) {
+          return '<tr><td>' + esc(l.name) + '</td><td class="num">' + esc(euroUnit(l.perPiece, calc.breaks[0].unitsPurchased)) + '</td>'
+            + calc.breaks.map(function(b) {
+              var part = (b.parts || [])[idx];
+              return '<td class="num">' + esc(euro(part ? part.materialTotal : 0, 2)) + '</td>';
+            }).join('')
+            + '</tr>';
+        }).join('')
+        + '</tbody></table></div>';
+    }
     host.innerHTML = '<div class="dgp-shared">' + lines.map(function(row) {
       return '<div class="dgp-line"><span>' + esc(row[0]) + '</span><span>' + esc(row[1]) + '</span></div>';
-    }).join('') + '</div>' + table + (reason ? '<p class="dgp-note">' + esc(reason) + '</p>' : '');
+    }).join('') + '</div>' + table + split + (reason ? '<p class="dgp-note">' + esc(reason) + '</p>' : '');
     if (moq) {
       var short = calc.breaks.filter(function(b) { return b.moqShort; }).map(function(b) { return qtyText(b.quantity); });
       moq.innerHTML = short.length
@@ -11783,11 +12000,40 @@ window._dgCompute = function(input) {
     }
     return calc;
   }
+  function syncLineNames() {
+    for (var i = 1; i <= 4; i++) {
+      var wrap = el('dgp-line-name-wrap-' + i);
+      var row = el('dgp-line-row-' + i);
+      var other = val('dgp-line-type-' + i) === 'otherLabel';
+      if (wrap) wrap.style.display = other ? '' : 'none';
+      if (row) row.classList.toggle('is-other', other);
+    }
+  }
+  function ensureLabelDefaults() {
+    if (!isLabelQuote()) return;
+    var any = false;
+    for (var i = 1; i <= 4; i++) if (val('dgp-line-type-' + i)) any = true;
+    if (!any && el('dgp-line-type-1')) el('dgp-line-type-1').value = 'frontLabelSkuId';
+  }
+  function syncLabelMode() {
+    var on = isLabelQuote();
+    var nodes = document.querySelectorAll('#tools-panel-drygoods .dgp-single');
+    for (var i = 0; i < nodes.length; i++) nodes[i].style.display = on ? 'none' : '';
+    var box = el('dgp-label-lines');
+    if (box) box.style.display = on ? '' : 'none';
+    if (on) {
+      ensureLabelDefaults();
+      var bpc = el('dgp-bpc-wrap');
+      if (bpc) bpc.style.display = 'none';
+    }
+    syncLineNames();
+  }
   function refreshLabels() {
     var title = el('dgp-component-title');
-    if (title) title.textContent = labelFor(_dg.componentKey);
+    if (title) title.textContent = isLabelQuote() ? 'Labels' : labelFor(_dg.componentKey);
     syncUnitOptions();
     syncModes();
+    syncLabelMode();
   }
   function renderAll() {
     refreshLabels();
@@ -11799,10 +12045,11 @@ window._dgCompute = function(input) {
     var client = selectedClient();
     return {
       clientName: client ? (client.name || client.id) : '',
-      componentLabel: labelFor(_dg.componentKey),
+      componentLabel: (calc.lineNames && calc.lineNames.length) ? calc.lineNames.join(', ') : labelFor(_dg.componentKey),
+      lineNames: calc.lineNames || null,
       description: val('dgp-desc').trim(),
       piece: calc.priceUnit === 'per_case' ? ' bottles' : ' pieces',
-      priceHead: calc.priceUnit === 'per_case' ? 'Price per bottle' : 'Price each',
+      priceHead: (calc.lineNames && calc.lineNames.length > 1) ? 'Price per set' : (calc.priceUnit === 'per_case' ? 'Price per bottle' : 'Price each'),
       breaks: calc.breaks,
       toolingText: euro(calc.toolingOnQuote, 2),
       lead: val('dgp-lead').trim(),
@@ -11839,31 +12086,56 @@ window._dgCompute = function(input) {
       y += Math.max(8, lines.length * 5 + 2);
     }
     line('Customer', meta.clientName);
-    line('Component', meta.componentLabel);
+    line(meta.lineNames && meta.lineNames.length > 1 ? 'Labels' : 'Component', meta.componentLabel);
     line('Description', meta.description);
     y += 2;
-    if (y > 230) { doc.addPage(); y = 20; }
-    doc.setFont(undefined, 'bold');
-    doc.setFontSize(10);
-    doc.setTextColor(90, 90, 90);
-    doc.text('Quantity', 16, y);
-    doc.text(meta.priceHead, 90, y);
-    doc.text('Total', 150, y);
-    y += 2;
-    doc.setDrawColor(210, 210, 210);
-    doc.line(16, y, 194, y);
-    y += 7;
-    meta.breaks.forEach(function(b) {
-      if (y > 260) { doc.addPage(); y = 20; }
-      doc.setFont(undefined, 'normal');
-      doc.setFontSize(11);
-      doc.setTextColor(20, 20, 20);
-      doc.text(qtyText(b.quantity) + meta.piece, 16, y);
-      doc.text(euroUnit(b.sellPerRaw, b.quantity), 90, y);
+    var multiPdf = meta.lineNames && meta.lineNames.length > 1;
+    if (multiPdf) {
+      meta.breaks.forEach(function(b) {
+        if (y > 240) { doc.addPage(); y = 20; }
+        doc.setFont(undefined, 'bold');
+        doc.setFontSize(12);
+        doc.setTextColor(20, 20, 20);
+        doc.text(qtyText(b.quantity) + ' pieces', 16, y);
+        doc.text(euroUnit(b.sellPerRaw, b.quantity) + ' per set', 78, y);
+        doc.text(euro(b.customerTotal, 2), 150, y);
+        y += 6;
+        (b.parts || []).forEach(function(p) {
+          if (y > 270) { doc.addPage(); y = 20; }
+          doc.setFont(undefined, 'normal');
+          doc.setFontSize(10);
+          doc.setTextColor(70, 70, 70);
+          doc.text(p.name, 20, y);
+          doc.text(euroUnit(p.sellPerRaw, b.quantity) + ' each', 78, y);
+          doc.text(euro(p.customerTotal, 2), 150, y);
+          y += 5;
+        });
+        y += 4;
+      });
+    } else {
+      if (y > 230) { doc.addPage(); y = 20; }
       doc.setFont(undefined, 'bold');
-      doc.text(euro(b.customerTotal, 2), 150, y);
-      y += 8;
-    });
+      doc.setFontSize(10);
+      doc.setTextColor(90, 90, 90);
+      doc.text('Quantity', 16, y);
+      doc.text(meta.priceHead, 90, y);
+      doc.text('Total', 150, y);
+      y += 2;
+      doc.setDrawColor(210, 210, 210);
+      doc.line(16, y, 194, y);
+      y += 7;
+      meta.breaks.forEach(function(b) {
+        if (y > 260) { doc.addPage(); y = 20; }
+        doc.setFont(undefined, 'normal');
+        doc.setFontSize(11);
+        doc.setTextColor(20, 20, 20);
+        doc.text(qtyText(b.quantity) + meta.piece, 16, y);
+        doc.text(euroUnit(b.sellPerRaw, b.quantity), 90, y);
+        doc.setFont(undefined, 'bold');
+        doc.text(euro(b.customerTotal, 2), 150, y);
+        y += 8;
+      });
+    }
     y += 4;
     if (calc.mentionsTooling && calc.toolingMode === 'included') {
       if (y > 260) { doc.addPage(); y = 20; }
@@ -11910,17 +12182,20 @@ window._dgCompute = function(input) {
   }
   function payload(calc) {
     var client = selectedClient();
-    var unit = calc.priceUnit;
+    var labelMode = !!(calc.lines && calc.lines.length);
+    var firstLine = labelMode ? calc.lines[0] : null;
+    var unit = labelMode ? firstLine.priceUnit : calc.priceUnit;
     var user = window.CURRENT_USER || {};
     var primary = calc.breaks[0];
+    var labelNames = labelMode ? calc.lineNames.join(', ') : '';
     return {
       client_id: client.id,
-      component_key: _dg.componentKey,
-      component_label: labelFor(_dg.componentKey),
+      component_key: labelMode ? 'labelSet' : _dg.componentKey,
+      component_label: labelMode ? labelNames.slice(0, 80) : labelFor(_dg.componentKey),
       description: val('dgp-desc').trim(),
-      supplier_unit_price: parseFloat(val('dgp-price')),
+      supplier_unit_price: labelMode ? Number(firstLine.supplierPrice) : parseFloat(val('dgp-price')),
       price_unit: unit,
-      bottles_per_case: unit === 'per_case' ? parseInt(val('dgp-bpc'), 10) : null,
+      bottles_per_case: !labelMode && unit === 'per_case' ? parseInt(val('dgp-bpc'), 10) : null,
       quantity: primary.quantity,
       transport_amount: parseFloat(val('dgp-transport') || '0') || 0,
       transport_mode: _dg.transportMode,
@@ -11945,6 +12220,14 @@ window._dgCompute = function(input) {
           customer_total: b.customerTotal
         };
       }),
+      lines: labelMode ? calc.lines.map(function(l) {
+        return {
+          component_key: l.componentKey,
+          component_label: l.name,
+          supplier_unit_price: Number(l.supplierPrice),
+          price_unit: l.priceUnit
+        };
+      }) : null,
       created_by: user.display_name || user.email || null
     };
   }
@@ -11988,7 +12271,7 @@ window._dgCompute = function(input) {
     var rows = [];
     if (id) {
       rows = await window.db.select('dry_goods_price_quotes',
-        '?client_id=eq.' + encodeURIComponent(id) + '&select=id,component_key,description,sell_unit_price,customer_total,quantity,price_breaks,created_at,tooling_mode&order=created_at.desc&limit=100');
+        '?client_id=eq.' + encodeURIComponent(id) + '&select=id,component_key,component_label,description,sell_unit_price,customer_total,quantity,price_breaks,created_at,tooling_mode&order=created_at.desc&limit=100');
     }
     if (seq !== quoteSeq) return;
     _dg.quotes = rows || [];
@@ -12006,7 +12289,7 @@ window._dgCompute = function(input) {
     var rows = await window.db.select('dry_goods_price_quotes', '?id=eq.' + encodeURIComponent(id) + '&limit=1');
     var row = rows && rows[0];
     if (!row) { window.toast && window.toast('That price is no longer on file.', 'error'); return; }
-    _dg.componentKey = row.component_key;
+    _dg.componentKey = isLabelKey(row.component_key) ? 'labelSet' : row.component_key;
     _dg.toolingMode = row.tooling_mode === 'separate' ? 'separate' : 'included';
     _dg.transportMode = row.transport_mode === 'per_unit' ? 'per_unit' : 'order';
     if (el('dgp-tooling-mode')) el('dgp-tooling-mode').value = _dg.toolingMode;
@@ -12035,6 +12318,7 @@ window._dgCompute = function(input) {
     if (el('dgp-valid')) el('dgp-valid').value = row.valid_until ? String(row.valid_until).slice(0, 10) : '';
     if (el('dgp-note')) el('dgp-note').value = row.note || '';
     if (el('dgp-margin')) el('dgp-margin').value = row.margin_pct;
+    fillLabelLines(row, row.component_key);
     _dg.openedId = row.id;
     _dg.lastSavedId = row.id;
     _dg.lastFingerprint = fingerprint();
@@ -12055,10 +12339,50 @@ window._dgCompute = function(input) {
     if (el('dgp-unit')) el('dgp-unit').value = 'each';
     if (el('dgp-tooling-mode')) el('dgp-tooling-mode').value = 'included';
     if (el('dgp-transport-mode')) el('dgp-transport-mode').value = 'order';
+    for (var li = 1; li <= 4; li++) {
+      if (el('dgp-line-type-' + li)) el('dgp-line-type-' + li).value = (li === 1 && isLabelQuote()) ? 'frontLabelSkuId' : '';
+      if (el('dgp-line-name-' + li)) el('dgp-line-name-' + li).value = '';
+      if (el('dgp-line-price-' + li)) el('dgp-line-price-' + li).value = '';
+      if (el('dgp-line-unit-' + li)) el('dgp-line-unit-' + li).value = 'per_1000';
+    }
     _dg.toolingMode = 'included';
     _dg.transportMode = 'order';
     syncUnitOptions();
     syncModes();
+    syncLabelMode();
+  }
+  function fillLabelLines(row, sourceKey) {
+    var stored = Array.isArray(row.lines) ? row.lines.slice() : [];
+    if (!stored.length && isLabelKey(sourceKey) && sourceKey !== 'labelSet') {
+      stored = [{
+        component_key: LABEL_KEYS[sourceKey] ? sourceKey : 'otherLabel',
+        component_label: row.component_label || labelFor(sourceKey),
+        supplier_unit_price: row.supplier_unit_price,
+        price_unit: row.price_unit
+      }];
+    }
+    if (!isLabelKey(sourceKey)) stored = [];
+    for (var i = 1; i <= 4; i++) {
+      var item = stored[i - 1];
+      var typeEl = el('dgp-line-type-' + i);
+      var nameEl = el('dgp-line-name-' + i);
+      var priceEl = el('dgp-line-price-' + i);
+      var unitEl = el('dgp-line-unit-' + i);
+      if (!typeEl) continue;
+      if (!item) {
+        typeEl.value = '';
+        if (nameEl) nameEl.value = '';
+        if (priceEl) priceEl.value = '';
+        if (unitEl) unitEl.value = 'per_1000';
+        continue;
+      }
+      var key = item.component_key || '';
+      if (!LABEL_KEYS[key] && key !== 'otherLabel') key = 'otherLabel';
+      typeEl.value = key;
+      if (nameEl) nameEl.value = key === 'otherLabel' ? (item.component_label || '') : '';
+      if (priceEl) priceEl.value = item.supplier_unit_price != null ? String(Number(item.supplier_unit_price)) : '';
+      if (unitEl) unitEl.value = item.price_unit === 'each' ? 'each' : 'per_1000';
+    }
   }
   function startNew() {
     _dg.openedId = null;
@@ -12147,9 +12471,9 @@ window._dgCompute = function(input) {
       var dataUri = doc.output('datauristring');
       var b64 = String(dataUri).split(',')[1] || '';
       var meta = quoteMeta(calc);
-      var optionLine = meta.breaks.length > 1
-        ? '<p>The quote has ' + meta.breaks.length + ' quantity options.</p>'
-        : '';
+      var optionLine = '';
+      if (meta.lineNames && meta.lineNames.length > 1) optionLine += '<p>Labels: ' + esc(meta.lineNames.join(', ')) + '.</p>';
+      if (meta.breaks.length > 1) optionLine += '<p>The quote has ' + meta.breaks.length + ' quantity options.</p>';
       var html = '<div style="font-family:Arial,sans-serif;color:#1a1a2e;max-width:560px;">'
         + '<p>Please find attached our price for <strong>' + esc(meta.description) + '</strong> (' + esc(meta.componentLabel) + ').</p>'
         + optionLine
@@ -12181,6 +12505,18 @@ window._dgCompute = function(input) {
     var root = el('tools-panel-drygoods');
     if (!root || _dg.bound) return;
     _dg.bound = true;
+    for (var li = 1; li <= 4; li++) {
+      var typeSel = el('dgp-line-type-' + li);
+      if (typeSel) {
+        typeSel.innerHTML = labelTypeOptions(li > 1);
+        typeSel.value = li === 1 ? 'frontLabelSkuId' : '';
+      }
+      var unitSel = el('dgp-line-unit-' + li);
+      if (unitSel) {
+        unitSel.innerHTML = '<option value="per_1000">Per 1,000</option><option value="each">Per piece</option>';
+        unitSel.value = 'per_1000';
+      }
+    }
     root.addEventListener('input', function(e) {
       var t = e.target;
       if (t && t.id === 'dgp-unit') syncUnitOptions();
@@ -12202,6 +12538,7 @@ window._dgCompute = function(input) {
         refreshLabels();
         renderSaved();
       }
+      if (e.target && e.target.id && e.target.id.indexOf('dgp-line-type-') === 0) syncLineNames();
       if (e.target && (e.target.id === 'dgp-tooling-mode' || e.target.id === 'dgp-transport-mode')) syncModes();
       renderResults();
     });
@@ -18564,7 +18901,7 @@ window.loadBoms = async function initBoms() {
       <a href="#" class="dgp-back" onclick="window.backToToolsGrid(); return false;">&larr; Back to Tools</a>
       <p class="cc-page-title">Dry Goods</p>
       <h1 class="cc-page-heading">Dry Goods Pricing Tool</h1>
-      <p style="font-size:13px;color:var(--muted);max-width:720px;margin:-4px 0 18px;line-height:1.5;">Price one component for one client. Supplier cost and inbound transport sit under the unit price. Tooling can be included in that price, or quoted on its own at the supplier amount.</p>
+      <p style="font-size:13px;color:var(--muted);max-width:720px;margin:-4px 0 18px;line-height:1.5;">Price one component for one client. A label quote can include the front, back, neck, and one more label on the same PDF. Supplier cost and inbound transport sit under the unit price. Tooling can be included in that price, or quoted on its own at the supplier amount.</p>
 
       <div class="dgp-layout">
           <div class="card">
@@ -18588,13 +18925,90 @@ window.loadBoms = async function initBoms() {
             <div class="dgp-grid">
               <div class="dgp-field dgp-span-2">
                 <label for="dgp-desc">Description</label>
-                <input type="text" id="dgp-desc" maxlength="200" placeholder="e.g. Loch flint 70cl" autocomplete="off">
+                <input type="text" id="dgp-desc" maxlength="200" placeholder="e.g. Waterford Legacy labels" autocomplete="off">
               </div>
-              <div class="dgp-field">
+              <div id="dgp-label-lines" class="dgp-span" style="display:none;">
+                <p class="dgp-note" style="margin-top:0;">These labels share the quantity breaks and go on one PDF. Leave a row as “Not on this quote” to skip it.</p>
+                <div class="dgp-label-rows">
+                  <div class="dgp-label-row" id="dgp-line-row-1">
+                    <div class="dgp-field">
+                      <label for="dgp-line-type-1">Label 1</label>
+                      <select id="dgp-line-type-1"></select>
+                    </div>
+                    <div class="dgp-field" id="dgp-line-name-wrap-1" style="display:none;">
+                      <label for="dgp-line-name-1">Name</label>
+                      <input type="text" id="dgp-line-name-1" maxlength="80" placeholder="e.g. Medallion label" autocomplete="off">
+                    </div>
+                    <div class="dgp-field">
+                      <label for="dgp-line-price-1">Supplier price (€)</label>
+                      <input type="number" id="dgp-line-price-1" min="0" step="0.0001" placeholder="0.00">
+                    </div>
+                    <div class="dgp-field">
+                      <label for="dgp-line-unit-1">Price is</label>
+                      <select id="dgp-line-unit-1"></select>
+                    </div>
+                  </div>
+                  <div class="dgp-label-row" id="dgp-line-row-2">
+                    <div class="dgp-field">
+                      <label for="dgp-line-type-2">Label 2</label>
+                      <select id="dgp-line-type-2"></select>
+                    </div>
+                    <div class="dgp-field" id="dgp-line-name-wrap-2" style="display:none;">
+                      <label for="dgp-line-name-2">Name</label>
+                      <input type="text" id="dgp-line-name-2" maxlength="80" placeholder="e.g. Medallion label" autocomplete="off">
+                    </div>
+                    <div class="dgp-field">
+                      <label for="dgp-line-price-2">Supplier price (€)</label>
+                      <input type="number" id="dgp-line-price-2" min="0" step="0.0001" placeholder="0.00">
+                    </div>
+                    <div class="dgp-field">
+                      <label for="dgp-line-unit-2">Price is</label>
+                      <select id="dgp-line-unit-2"></select>
+                    </div>
+                  </div>
+                  <div class="dgp-label-row" id="dgp-line-row-3">
+                    <div class="dgp-field">
+                      <label for="dgp-line-type-3">Label 3</label>
+                      <select id="dgp-line-type-3"></select>
+                    </div>
+                    <div class="dgp-field" id="dgp-line-name-wrap-3" style="display:none;">
+                      <label for="dgp-line-name-3">Name</label>
+                      <input type="text" id="dgp-line-name-3" maxlength="80" placeholder="e.g. Medallion label" autocomplete="off">
+                    </div>
+                    <div class="dgp-field">
+                      <label for="dgp-line-price-3">Supplier price (€)</label>
+                      <input type="number" id="dgp-line-price-3" min="0" step="0.0001" placeholder="0.00">
+                    </div>
+                    <div class="dgp-field">
+                      <label for="dgp-line-unit-3">Price is</label>
+                      <select id="dgp-line-unit-3"></select>
+                    </div>
+                  </div>
+                  <div class="dgp-label-row" id="dgp-line-row-4">
+                    <div class="dgp-field">
+                      <label for="dgp-line-type-4">Label 4</label>
+                      <select id="dgp-line-type-4"></select>
+                    </div>
+                    <div class="dgp-field" id="dgp-line-name-wrap-4" style="display:none;">
+                      <label for="dgp-line-name-4">Name</label>
+                      <input type="text" id="dgp-line-name-4" maxlength="80" placeholder="e.g. Medallion label" autocomplete="off">
+                    </div>
+                    <div class="dgp-field">
+                      <label for="dgp-line-price-4">Supplier price (€)</label>
+                      <input type="number" id="dgp-line-price-4" min="0" step="0.0001" placeholder="0.00">
+                    </div>
+                    <div class="dgp-field">
+                      <label for="dgp-line-unit-4">Price is</label>
+                      <select id="dgp-line-unit-4"></select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="dgp-field dgp-single">
                 <label for="dgp-price" id="dgp-price-label">Supplier price (€ per piece)</label>
                 <input type="number" id="dgp-price" min="0" step="0.0001" placeholder="0.00">
               </div>
-              <div class="dgp-field">
+              <div class="dgp-field dgp-single">
                 <label for="dgp-unit">Supplier price is</label>
                 <select id="dgp-unit">
                   <option value="each">Per piece</option>
