@@ -57735,6 +57735,7 @@ window.saveAdjModal = async function() {
         html += '<div style="padding:20px 0 24px;color:var(--muted);font-size:12px;text-align:center;">No weight samples recorded yet.</div>';
       } else {
         wmBatches.forEach(function(b){ html += renderWMBatch(b, jobId); });
+        html += await renderWMFillSection(jobId, wmBatches, 'quality');
       }
 
       // Production Sign-Off is automatic now: driven by (a) client label approval
@@ -58706,6 +58707,7 @@ window.saveAdjModal = async function() {
         batches.forEach(function(b) {
           html += renderWMBatch(b, jobId);
         });
+        html += await renderWMFillSection(jobId, batches, 'weights');
       }
 
       el.innerHTML = html;
@@ -58755,6 +58757,393 @@ window.saveAdjModal = async function() {
     html += '</div>';
     return html;
   }
+
+  // ── Fill weight checks ──────────────────────────────────────────────────────
+  // A later scale check of one finished bottle. It does not redo empty / cap /
+  // SG / liquid mL. Reference = saved override, or the average Full (g) on the
+  // first sample batch. Gram band = that batch's T1 (mL) × its average SG,
+  // because a volume miss of T1 mL changes the gross weight by T1 × SG grams.
+  // Pass when |weighed − reference| ≤ tolerance, compared at 0.01 g.
+  // Each saved row snapshots the reference and tolerance in force at the time.
+
+  function _wmCents(n) { return Math.round(Number(n) * 100); }
+
+  function _wmRound2(n) { return Math.round(Number(n) * 100) / 100; }
+
+  function _wmFmtG(n) {
+    return Number(n).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function _wmFmtT1(t1) {
+    var n = Number(t1);
+    if (!isFinite(n)) return '15';
+    if (_wmCents(n) % 100 === 0) return String(Math.round(n));
+    return _wmFmtG(n);
+  }
+
+  function _wmFmtWhen(iso) {
+    if (!iso) return '\u2014';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    var p = function(n) { return (n < 10 ? '0' : '') + n; };
+    return p(d.getDate()) + '/' + p(d.getMonth() + 1) + '/' + d.getFullYear()
+      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function _wmFmtDelta(weighed, target) {
+    var cents = _wmCents(weighed) - _wmCents(target);
+    var body = _wmFmtG(Math.abs(cents) / 100) + ' g';
+    if (cents > 0) return '+' + body;
+    if (cents < 0) return '\u2212' + body;
+    return body;
+  }
+
+  function _wmFillPassed(weighed, target, tol) {
+    return Math.abs(_wmCents(weighed) - _wmCents(target)) <= _wmCents(tol);
+  }
+
+  function _wmCanEditFill() {
+    return !!(window.canDo && (window.canDo('jobs_create') || window.canDo('production_control') || window.canDo('jobs_signoff_quality')));
+  }
+
+  function _wmActorName() {
+    var u = window.CURRENT_USER;
+    return (u && (u.display_name || u.email)) || '';
+  }
+
+  function _wmFillDom(surface, part) {
+    return 'wm-fill-' + (surface === 'weights' ? 'weights' : 'quality') + '-' + part;
+  }
+
+  function _wmFirstFillBatch(batches) {
+    var best = null;
+    (batches || []).forEach(function(b) {
+      var n = Number(b.sample_batch);
+      if (!isFinite(n)) return;
+      if (!best || n < best.n) best = { n: n, b: b };
+    });
+    return best ? best.b : null;
+  }
+
+  function _wmFillStats(batch) {
+    if (!batch) return null;
+    var fulls = [], sgs = [];
+    for (var i = 1; i <= 5; i++) {
+      var f = parseFloat(batch['bottle_' + i + '_full_g']);
+      var s = parseFloat(batch['bottle_' + i + '_sg']);
+      if (isFinite(f)) fulls.push(f);
+      if (isFinite(s) && s > 0) sgs.push(s);
+    }
+    var t1 = parseFloat(batch.t1_tolerance_ml);
+    if (!isFinite(t1) || t1 < 0) t1 = 15;
+    var meanFull = fulls.length ? fulls.reduce(function(a, b) { return a + b; }, 0) / fulls.length : null;
+    var meanSg = sgs.length ? sgs.reduce(function(a, b) { return a + b; }, 0) / sgs.length : null;
+    return {
+      batchNum: batch.sample_batch,
+      meanFull2: meanFull == null ? null : _wmRound2(meanFull),
+      meanSg: meanSg,
+      t1: t1,
+      toleranceG: meanSg == null ? null : _wmRound2(t1 * meanSg)
+    };
+  }
+
+  function _wmFillBtnStyle(extra) {
+    return 'font-size:11px;padding:6px 12px;font-family:Lato,sans-serif;' + (extra || '');
+  }
+
+  async function _wmReloadFill(jobId) {
+    var pending = [];
+    if (typeof loadQualityTab === 'function') pending.push(loadQualityTab(jobId));
+    if (typeof loadWeightsTab === 'function') pending.push(loadWeightsTab(jobId));
+    await Promise.all(pending);
+  }
+
+  async function renderWMFillSection(jobId, batches, surface) {
+    if (!batches || !batches.length) return '';
+    surface = surface === 'weights' ? 'weights' : 'quality';
+    var esc = window.escapeHtml || function(s) { return String(s == null ? '' : s); };
+    var ref = null, checks = [], loadErr = '';
+    try {
+      var refs = await supaGet('job_wm_fill_refs?job_id=eq.' + encodeURIComponent(jobId) + '&limit=1');
+      ref = refs && refs[0] ? refs[0] : null;
+    } catch (e) {
+      loadErr = (e && e.message) ? e.message : 'Could not load the saved reference.';
+    }
+    try {
+      checks = await supaGet('job_wm_fill_checks?job_id=eq.' + encodeURIComponent(jobId) + '&order=checked_at.desc') || [];
+    } catch (e) {
+      if (!loadErr) loadErr = (e && e.message) ? e.message : 'Could not load fill weight checks.';
+      checks = [];
+    }
+    checks = checks.slice().sort(function(a, b) {
+      var ta = new Date(a.checked_at).getTime();
+      var tb = new Date(b.checked_at).getTime();
+      if (isNaN(ta)) ta = 0;
+      if (isNaN(tb)) tb = 0;
+      return tb - ta;
+    });
+
+    var stats = _wmFillStats(_wmFirstFillBatch(batches));
+    var override = ref && isFinite(parseFloat(ref.target_full_g)) ? _wmRound2(parseFloat(ref.target_full_g)) : null;
+    var suggested = stats && stats.meanFull2 != null ? stats.meanFull2 : null;
+    var effective = override != null ? override : suggested;
+    var tolerance = stats ? stats.toleranceG : null;
+    var canEdit = _wmCanEditFill();
+    var id = function(part) { return _wmFillDom(surface, part); };
+    var jobAttr = esc(jobId);
+    var noSpin = '-webkit-appearance:none;-moz-appearance:textfield;appearance:textfield;';
+    var inpStyle = 'background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:6px 8px;font-size:12px;border-radius:3px;box-sizing:border-box;font-family:Lato,sans-serif;' + noSpin;
+
+    var note;
+    if (!stats) {
+      note = 'No sample batch could be used as the reference.';
+    } else if (stats.meanFull2 == null) {
+      note = 'Sample batch ' + stats.batchNum + ' has no full weights, so there is no batch average.';
+    } else if (override == null) {
+      note = 'Average of the full weights on sample batch ' + stats.batchNum + '.';
+    } else if (_wmCents(override) === _wmCents(stats.meanFull2)) {
+      note = 'Saved reference. It matches the sample batch ' + stats.batchNum + ' average.';
+    } else {
+      note = 'Saved reference. It no longer matches the sample batch ' + stats.batchNum + ' average of ' + _wmFmtG(stats.meanFull2) + ' g.';
+    }
+
+    var bandHtml;
+    if (effective == null) {
+      bandHtml = '<div style="font-size:12px;color:var(--muted);margin-top:8px;">A reference full weight is needed before a check can be added.</div>';
+    } else if (tolerance == null) {
+      bandHtml = '<div style="font-size:12px;color:var(--amber);margin-top:8px;">No gram band yet. Sample batch ' + esc(stats ? stats.batchNum : '') + ' needs an SG on at least one bottle before a check can be added.</div>';
+    } else {
+      var lo = (_wmCents(effective) - _wmCents(tolerance)) / 100;
+      var hi = (_wmCents(effective) + _wmCents(tolerance)) / 100;
+      bandHtml = '<div style="font-size:13px;color:var(--white);margin-top:10px;">\u00b1' + _wmFmtG(tolerance) + ' g'
+        + ' <span style="color:var(--muted);">from T1 ' + esc(_wmFmtT1(stats.t1)) + ' mL \u00d7 SG ' + esc(Number(stats.meanSg).toFixed(4)) + '</span></div>'
+        + '<div style="font-size:12px;color:var(--muted);margin-top:2px;">Pass range ' + _wmFmtG(lo) + ' \u2013 ' + _wmFmtG(hi) + ' g</div>';
+    }
+
+    var fieldHtml;
+    if (!canEdit) {
+      fieldHtml = '<div style="font-size:18px;font-weight:700;color:var(--white);">' + (effective == null ? '\u2014' : _wmFmtG(effective) + ' g') + '</div>';
+    } else if (effective == null) {
+      fieldHtml = '<div style="font-size:12px;color:var(--muted);">The first sample batch has no full weight to adjust.</div>';
+    } else {
+      fieldHtml = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+        + '<input type="number" step="0.01" min="0.01" id="' + id('target') + '" value="' + effective.toFixed(2) + '" data-committed="' + effective.toFixed(2) + '" oninput="window._wmFillSync(\'' + surface + '\')" style="' + inpStyle + 'width:120px;text-align:right;">'
+        + '<span style="font-size:12px;color:var(--muted);">g</span>'
+        + '<button type="button" class="btn btn-outline" id="' + id('save') + '" data-job="' + jobAttr + '" data-surface="' + surface + '" onclick="window.saveWMFillRef(this)" disabled style="' + _wmFillBtnStyle('opacity:0.45;cursor:not-allowed;') + '">Save reference</button>'
+        + (override != null
+            ? '<button type="button" class="btn btn-outline" data-job="' + jobAttr + '" onclick="window.clearWMFillRef(this)" style="' + _wmFillBtnStyle() + '">Use batch average</button>'
+            : '')
+        + '</div>'
+        + '<div id="' + id('dirty') + '" style="display:none;font-size:11px;color:var(--amber);margin-top:6px;"></div>';
+    }
+
+    var addHtml = '';
+    if (canEdit && effective != null && tolerance != null) {
+      addHtml = '<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--navy-border);">'
+        + '<div><label style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:4px;">Scale weight (g)</label>'
+        +   '<input type="number" step="0.01" min="0.01" id="' + id('weight') + '" placeholder="e.g. ' + effective.toFixed(2) + '" style="' + inpStyle + 'width:130px;text-align:right;"></div>'
+        + '<div style="flex:1;min-width:160px;"><label style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:4px;">Checked by</label>'
+        +   '<input type="text" id="' + id('who') + '" value="' + esc(_wmActorName()) + '" style="' + inpStyle + 'width:100%;"></div>'
+        + '<button type="button" class="btn btn-gold" id="' + id('add') + '" data-job="' + jobAttr + '" data-surface="' + surface + '" data-tol="' + tolerance.toFixed(2) + '" onclick="window.addWMFillCheck(this)" style="' + _wmFillBtnStyle() + '">Add check</button>'
+        + '</div>';
+    }
+
+    var rows = '';
+    if (!checks.length) {
+      rows = '<div style="font-size:12px;color:var(--muted);margin-top:14px;">No fill weight checks yet.</div>';
+    } else {
+      rows = '<div style="overflow-x:auto;margin-top:14px;">'
+        + '<table class="data-table" style="width:100%;font-size:11px;">'
+        + '<thead><tr><th>When</th><th>Person</th><th>Weight (g)</th><th>Difference</th><th>Result</th>'
+        + (canEdit ? '<th></th>' : '')
+        + '</tr></thead><tbody>';
+      checks.forEach(function(c) {
+        var passed = c.passed === true || c.passed === 'true' || c.passed === 't';
+        var who = c.checked_by ? esc(c.checked_by) : '\u2014';
+        rows += '<tr>'
+          + '<td style="white-space:nowrap;">' + esc(_wmFmtWhen(c.checked_at)) + '</td>'
+          + '<td>' + who + '</td>'
+          + '<td>' + (isFinite(parseFloat(c.weighed_g)) ? _wmFmtG(c.weighed_g) : '\u2014') + '</td>'
+          + '<td>' + (isFinite(parseFloat(c.weighed_g)) && isFinite(parseFloat(c.target_full_g))
+              ? _wmFmtDelta(c.weighed_g, c.target_full_g)
+                + ' <span style="color:var(--muted);">vs ' + _wmFmtG(c.target_full_g)
+                + (isFinite(parseFloat(c.tolerance_g)) ? ' \u00b1' + _wmFmtG(c.tolerance_g) : '')
+                + '</span>'
+              : '\u2014')
+          + '</td>'
+          + '<td style="font-weight:700;color:' + (passed ? 'var(--green)' : 'var(--red)') + ';">' + (passed ? 'PASS' : 'FAIL') + '</td>'
+          + (canEdit
+              ? '<td style="text-align:right;"><button type="button" class="btn btn-outline" data-id="' + esc(c.id) + '" data-job="' + jobAttr + '" onclick="window.deleteWMFillCheck(this)" style="font-size:10px;padding:3px 8px;color:var(--red);border-color:rgba(255,80,80,0.4);">Delete</button></td>'
+              : '')
+          + '</tr>';
+      });
+      rows += '</tbody></table></div>';
+    }
+
+    return '<div style="margin-top:8px;">'
+      + '<div style="display:flex;align-items:center;gap:0;margin-bottom:8px;">'
+      +   '<span style="font-size:10px;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);white-space:nowrap;padding-right:14px;">Fill weight checks</span>'
+      +   '<div style="flex:1;height:1px;background:linear-gradient(to right,rgba(201,168,76,0.5),transparent);"></div>'
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-bottom:14px;line-height:1.6;">Weigh one finished bottle on the calibrated scales and compare it with the reference full weight. This does not replace a sample batch.</div>'
+      + '<div style="background:var(--navy-card);border:1px solid var(--navy-border);border-radius:6px;padding:16px;margin-bottom:16px;">'
+      +   (loadErr ? '<div style="font-size:12px;color:var(--red);margin-bottom:10px;">' + esc(loadErr) + '</div>' : '')
+      +   '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Reference full weight</div>'
+      +   fieldHtml
+      +   '<div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5;">' + esc(note) + '</div>'
+      +   bandHtml
+      +   addHtml
+      +   rows
+      + '</div></div>';
+  }
+
+  window._wmFillSync = function(surface) {
+    surface = surface === 'weights' ? 'weights' : 'quality';
+    var target = document.getElementById(_wmFillDom(surface, 'target'));
+    var save = document.getElementById(_wmFillDom(surface, 'save'));
+    var add = document.getElementById(_wmFillDom(surface, 'add'));
+    var hint = document.getElementById(_wmFillDom(surface, 'dirty'));
+    var typed = target ? parseFloat(target.value) : NaN;
+    var committed = target ? parseFloat(target.getAttribute('data-committed')) : NaN;
+    var typedOk = isFinite(typed) && typed > 0;
+    var matches = typedOk && isFinite(committed) && _wmCents(typed) === _wmCents(committed);
+    if (save) {
+      save.disabled = !typedOk || matches;
+      save.style.opacity = (!typedOk || matches) ? '0.45' : '';
+      save.style.cursor = (!typedOk || matches) ? 'not-allowed' : 'pointer';
+    }
+    if (add) {
+      var block = !matches || add.getAttribute('data-noband') === '1';
+      add.disabled = block;
+      add.style.opacity = block ? '0.45' : '';
+      add.style.cursor = block ? 'not-allowed' : 'pointer';
+    }
+    if (hint) {
+      if (matches || !target) hint.style.display = 'none';
+      else {
+        hint.style.display = '';
+        hint.textContent = typedOk
+          ? 'Save the reference before adding a check.'
+          : 'Enter a reference full weight in grams.';
+      }
+    }
+  };
+
+  window.saveWMFillRef = async function(btn) {
+    if (!_wmCanEditFill()) { window.toast && window.toast('You do not have permission to save W&M records.', 'error'); return; }
+    var surface = btn.getAttribute('data-surface') === 'weights' ? 'weights' : 'quality';
+    var jobId = btn.getAttribute('data-job');
+    var input = document.getElementById(_wmFillDom(surface, 'target'));
+    var v = input ? parseFloat(input.value) : NaN;
+    if (!(isFinite(v) && v > 0)) { window.toast && window.toast('Enter a reference full weight in grams.', 'error'); return; }
+    var target = _wmRound2(v);
+    btn.disabled = true;
+    try {
+      var existing = await supaGet('job_wm_fill_refs?job_id=eq.' + encodeURIComponent(jobId) + '&select=job_id&limit=1');
+      var payload = { target_full_g: target, updated_at: new Date().toISOString(), updated_by: _wmActorName() || null };
+      if (existing && existing.length) {
+        await supaMut('PATCH', 'job_wm_fill_refs', '?job_id=eq.' + encodeURIComponent(jobId), payload);
+      } else {
+        payload.job_id = jobId;
+        await supaMut('POST', 'job_wm_fill_refs', '', payload);
+      }
+      window.toast && window.toast('Reference full weight saved.', 'success');
+      await _wmReloadFill(jobId);
+    } catch (e) {
+      window.toast && window.toast('Error: ' + (e && e.message ? e.message : e), 'error');
+      btn.disabled = false;
+      btn.style.opacity = '';
+      btn.style.cursor = 'pointer';
+    }
+  };
+
+  window.clearWMFillRef = async function(btn) {
+    if (!_wmCanEditFill()) { window.toast && window.toast('You do not have permission to save W&M records.', 'error'); return; }
+    var jobId = btn.getAttribute('data-job');
+    var ok = window.lpConfirm
+      ? await window.lpConfirm('Drop the saved reference and use the sample batch average?', { title: 'Use batch average', confirmLabel: 'Use average' })
+      : false;
+    if (!ok) return;
+    try {
+      await supaMut('DELETE', 'job_wm_fill_refs', '?job_id=eq.' + encodeURIComponent(jobId), null);
+      window.toast && window.toast('Using the sample batch average.', 'success');
+      await _wmReloadFill(jobId);
+    } catch (e) {
+      window.toast && window.toast('Error: ' + (e && e.message ? e.message : e), 'error');
+    }
+  };
+
+  window.addWMFillCheck = async function(btn) {
+    if (!_wmCanEditFill()) { window.toast && window.toast('You do not have permission to save W&M records.', 'error'); return; }
+    if (window._wmFillBusy) return;
+    window._wmFillBusy = true;
+    var surface = btn.getAttribute('data-surface') === 'weights' ? 'weights' : 'quality';
+    var jobId = btn.getAttribute('data-job');
+    try {
+    var tol = parseFloat(btn.getAttribute('data-tol'));
+    var targetEl = document.getElementById(_wmFillDom(surface, 'target'));
+    var weightEl = document.getElementById(_wmFillDom(surface, 'weight'));
+    var whoEl = document.getElementById(_wmFillDom(surface, 'who'));
+    var committed = targetEl ? parseFloat(targetEl.getAttribute('data-committed')) : NaN;
+    var typed = targetEl ? parseFloat(targetEl.value) : NaN;
+    if (!(isFinite(typed) && isFinite(committed) && _wmCents(typed) === _wmCents(committed))) {
+      window.toast && window.toast('Save the reference before adding a check.', 'error');
+      return;
+    }
+    if (!(isFinite(tol) && tol >= 0)) {
+      window.toast && window.toast('A gram band is needed before a check can be added.', 'error');
+      return;
+    }
+    var weighed = weightEl ? parseFloat(weightEl.value) : NaN;
+    if (!(isFinite(weighed) && weighed > 0)) {
+      window.toast && window.toast('Enter the weight from the calibrated scales.', 'error');
+      return;
+    }
+    weighed = _wmRound2(weighed);
+    var target = _wmRound2(committed);
+    tol = _wmRound2(tol);
+    var who = whoEl ? whoEl.value.trim() : '';
+    var passed = _wmFillPassed(weighed, target, tol);
+    btn.disabled = true;
+    await supaMut('POST', 'job_wm_fill_checks', '', {
+      job_id: jobId,
+      weighed_g: weighed,
+      target_full_g: target,
+      tolerance_g: tol,
+      passed: passed,
+      checked_at: new Date().toISOString(),
+      checked_by: who || null
+    });
+    window.toast && window.toast(
+      'Fill weight check saved \u2014 ' + (passed ? 'PASS' : 'FAIL') + '.',
+      passed ? 'success' : 'error'
+    );
+    await _wmReloadFill(jobId);
+    } catch (e) {
+      window.toast && window.toast('Error: ' + (e && e.message ? e.message : e), 'error');
+      if (btn) btn.disabled = false;
+    } finally {
+      window._wmFillBusy = false;
+    }
+  };
+
+  window.deleteWMFillCheck = async function(btn) {
+    if (!_wmCanEditFill()) { window.toast && window.toast('You do not have permission to delete W&M records.', 'error'); return; }
+    var checkId = btn.getAttribute('data-id');
+    var jobId = btn.getAttribute('data-job');
+    if (!checkId) return;
+    var ok = window.lpConfirm
+      ? await window.lpConfirm('Delete this fill weight check? This cannot be undone.', { title: 'Delete fill weight check', confirmLabel: 'Delete', destructive: true })
+      : false;
+    if (!ok) return;
+    try {
+      await supaMut('DELETE', 'job_wm_fill_checks', '?id=eq.' + encodeURIComponent(checkId), null);
+      window.toast && window.toast('Fill weight check deleted.', 'success');
+      await _wmReloadFill(jobId);
+    } catch (e) {
+      window.toast && window.toast('Error: ' + (e && e.message ? e.message : e), 'error');
+    }
+  };
 
   var _wmJobId = null, _wmNextBatch = null;
 
