@@ -2284,6 +2284,24 @@ window.loadOverviewBottleKPIs = async function loadOverviewBottleKPIs() {
   setText('ov-bottles-total-sub', 'Year to date + queue');
 };
 
+window.loadOverviewNcOverdue = async function loadOverviewNcOverdue() {
+  var card = document.getElementById('ov-nc-overdue');
+  var countEl = document.getElementById('ov-nc-overdue-count');
+  if (!card || !window.db) return;
+  try {
+    var rows = await window.db.select('qms_nonconformity', '?status=eq.open&select=id,due_on,review_due_on,review_date,status') || [];
+    var n = rows.filter(function(r) {
+      return window.QMS && window.QMS.isNonconformityOverdue && window.QMS.isNonconformityOverdue(r);
+    }).length;
+    if (!n) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    if (countEl) countEl.textContent = String(n);
+  } catch (e) {
+    card.style.display = 'none';
+    window.logError('loadOverviewNcOverdue', e);
+  }
+};
+
 async function loadContainers() {
   try {
     APP.containers = await db.select('liquid_containers', '?order=type.asc,reference.asc');
@@ -2751,6 +2769,7 @@ async function showDashboard(user) {
     if (typeof window.loadOverviewValues       === 'function') window.loadOverviewValues();
     if (typeof window.loadEcomStockValue       === 'function') window.loadEcomStockValue();
     if (typeof window.loadOverviewBottleKPIs   === 'function') window.loadOverviewBottleKPIs();
+    if (typeof window.loadOverviewNcOverdue    === 'function') window.loadOverviewNcOverdue();
   }, 400);
   // Reload jobs after auth — give any pre-auth in-flight load time to finish
   // before we try again (Supabase cold-start can add 1–2 s to first queries).
@@ -18227,6 +18246,17 @@ window.loadBoms = async function initBoms() {
 
   </div><!-- /kpi-stock-section -->
 
+  <div id="ov-nc-overdue" class="card" style="display:none;margin-bottom:24px;padding:18px 22px;cursor:pointer;border-left:3px solid var(--red);" onclick="if(window.QMS&&window.QMS.setNonconformityFilter){window.QMS.setNonconformityFilter('overdue');} if(window.showPage){showPage('qms-nonconformity', document.getElementById('sbnav-qms'));}">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+      <div>
+        <div style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;">Nonconformity</div>
+        <div style="font-size:15px;font-weight:700;color:var(--white);">Overdue</div>
+      </div>
+      <div id="ov-nc-overdue-count" style="font-size:22px;font-weight:800;color:var(--red);font-variant-numeric:tabular-nums;">0</div>
+      <div style="color:var(--red);font-size:11px;font-weight:700;letter-spacing:0.08em;">Open log →</div>
+    </div>
+  </div>
+
   <!-- GND Portfolio tile — hidden until loadGndPortfolio() finds matching customers -->
   <div id="ov-gnd-portfolio" class="card" style="display:none;margin-bottom:24px;padding:18px 22px;cursor:pointer;border-left:3px solid var(--blue);" onclick="if(window.showPage&&window.applyCustomerFilter){showPage('clients',document.getElementById('sbnav-clients'));setTimeout(function(){window.applyCustomerFilter({referral:'GND'});},80);}">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
@@ -20452,10 +20482,22 @@ window.loadBoms = async function initBoms() {
       </div>
     </div>
     <div class="qms-page-sub">Corrective action log 3.01.03.01.06. A report is kept. Nothing is deleted.</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center;">
       <button type="button" class="btn" id="qms-nc-filter-all" onclick="window.QMS&&window.QMS.setNonconformityFilter('all')">All</button>
       <button type="button" class="btn" id="qms-nc-filter-open" onclick="window.QMS&&window.QMS.setNonconformityFilter('open')">Open</button>
       <button type="button" class="btn" id="qms-nc-filter-closed" onclick="window.QMS&&window.QMS.setNonconformityFilter('closed')">Closed</button>
+      <button type="button" class="btn" id="qms-nc-filter-overdue" onclick="window.QMS&&window.QMS.setNonconformityFilter('overdue')">Overdue</button>
+      <select id="qms-nc-origin-filter" onchange="window.QMS&&window.QMS.setNonconformityOrigin(this.value)" style="min-width:180px;">
+        <option value="">All origins</option>
+        <option>Observation</option>
+        <option>QMS audit</option>
+        <option>Process</option>
+        <option>Customer feedback</option>
+        <option>Internal meeting</option>
+        <option>Supplier issue</option>
+      </select>
+      <button type="button" class="btn btn-outline" onclick="window.QMS&&window.QMS.exportNonconformityExcel()">Excel</button>
+      <button type="button" class="btn btn-outline" onclick="window.QMS&&window.QMS.exportNonconformityPdf()">PDF</button>
     </div>
     <div class="card qms-table-card">
       <div class="table-wrap">
@@ -20466,12 +20508,13 @@ window.loadBoms = async function initBoms() {
               <th>Date</th>
               <th>Source of issue</th>
               <th>Origin</th>
+              <th>Due</th>
               <th>Status</th>
               <th></th>
             </tr>
           </thead>
           <tbody id="qms-nc-tbody">
-            <tr><td colspan="6" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">Loading…</td></tr>
+            <tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -20494,12 +20537,6 @@ window.loadBoms = async function initBoms() {
         <div class="mfield span2"><label>Details of non-conformance</label><textarea id="qms-nc-description" style="min-height:90px;"></textarea></div>
         <div class="mfield span2"><label>Actions taken to address the problem</label><textarea id="qms-nc-correction" style="min-height:70px;"></textarea></div>
         <div class="mfield span2"><label>Background</label><textarea id="qms-nc-input" style="min-height:70px;"></textarea></div>
-        <div class="mfield"><label>Completed by</label><input type="text" id="qms-nc-raised" readonly></div>
-      </div>
-    </div>
-    <div class="card qms-form-card" id="qms-nc-followup" style="display:none;">
-      <div class="qms-form-title">Corrective action log</div>
-      <div class="modal-grid">
         <div class="mfield"><label>Origin of nonconformity</label>
           <select id="qms-nc-origin">
             <option value="">—</option>
@@ -20511,6 +20548,37 @@ window.loadBoms = async function initBoms() {
             <option>Supplier issue</option>
           </select>
         </div>
+        <div class="mfield"><label>Severity</label>
+          <select id="qms-nc-severity">
+            <option value="">—</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="food_safety">Food safety</option>
+          </select>
+        </div>
+        <div class="mfield"><label>BRC clause</label><input type="text" id="qms-nc-brc" autocomplete="off"></div>
+        <div class="mfield"><label>Owner (by who)</label><input type="text" id="qms-nc-by" autocomplete="off"></div>
+        <div class="mfield"><label>Due date</label><input type="date" id="qms-nc-due"></div>
+        <div class="mfield"><label>Linked record</label>
+          <select id="qms-nc-link-kind" onchange="window.QMS&&window.QMS.onNcLinkKind()">
+            <option value="">—</option>
+            <option value="complaint">Complaint</option>
+            <option value="supplier">Supplier</option>
+            <option value="job">Job / lot</option>
+            <option value="glass">Glass report</option>
+          </select>
+        </div>
+        <div class="mfield" id="qms-nc-link-text-wrap" style="display:none;"><label>Complaint reference</label><input type="text" id="qms-nc-link-text" autocomplete="off"></div>
+        <div class="mfield" id="qms-nc-link-pick-wrap" style="display:none;"><label id="qms-nc-link-pick-label">Record</label>
+          <select id="qms-nc-link-pick"><option value="">—</option></select>
+        </div>
+        <div class="mfield"><label>Completed by</label><input type="text" id="qms-nc-raised" readonly></div>
+      </div>
+    </div>
+    <div class="card qms-form-card" id="qms-nc-followup" style="display:none;">
+      <div class="qms-form-title">Corrective action log</div>
+      <div class="modal-grid">
         <div class="mfield"><label>Status</label>
           <select id="qms-nc-status">
             <option value="open">Open</option>
@@ -20519,15 +20587,19 @@ window.loadBoms = async function initBoms() {
         </div>
         <div class="mfield span2"><label>Root cause (where RCA is required)</label><textarea id="qms-nc-root" style="min-height:70px;"></textarea></div>
         <div class="mfield span2"><label>Planned corrective / preventative action</label><textarea id="qms-nc-planned" style="min-height:70px;"></textarea></div>
-        <div class="mfield"><label>By who</label><input type="text" id="qms-nc-by" autocomplete="off"></div>
-        <div class="mfield"><label>Within X days</label><input type="text" id="qms-nc-within" placeholder="90 days" autocomplete="off"></div>
         <div class="mfield span2"><label>How will this be implemented?</label><textarea id="qms-nc-how" style="min-height:70px;"></textarea></div>
         <div class="mfield"><label>Completed on</label><input type="date" id="qms-nc-completed"></div>
-        <div class="mfield"><label>Review within X days</label><input type="text" id="qms-nc-review-within" placeholder="1 month" autocomplete="off"></div>
+        <div class="mfield"><label>Review due date</label><input type="date" id="qms-nc-review-due"></div>
         <div class="mfield"><label>Review date</label><input type="date" id="qms-nc-review-date"></div>
         <div class="mfield"><label>Review conducted by</label><input type="text" id="qms-nc-review-by" autocomplete="off"></div>
         <div class="mfield span2"><label>Review of effectiveness</label><textarea id="qms-nc-review-effect" style="min-height:70px;"></textarea></div>
       </div>
+    </div>
+    <div class="card qms-form-card" id="qms-nc-files-card">
+      <div class="qms-form-title">Attachments</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Lab results, photos, and supplier replies. A file stays with the report.</div>
+      <input type="file" id="qms-nc-file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.docx,application/pdf,image/*" onchange="window.QMS&&window.QMS.onNcFilesPicked(this)">
+      <div id="qms-nc-files" style="margin-top:10px;"></div>
     </div>
     <div class="modal-actions qms-form-actions">
       <button type="button" class="btn" onclick="window.QMS&&window.QMS.showNonconformityList()">Cancel</button>
@@ -28789,6 +28861,7 @@ window.loadBoms = async function initBoms() {
     }
     if (name === 'overview' && typeof window.loadGndPortfolio === 'function') setTimeout(window.loadGndPortfolio, 350);
     if (name === 'overview' && typeof window.loadOverviewBottleKPIs === 'function') setTimeout(window.loadOverviewBottleKPIs, 200);
+    if (name === 'overview' && typeof window.loadOverviewNcOverdue === 'function') setTimeout(window.loadOverviewNcOverdue, 200);
     if (name === 'pipeline' && typeof window.loadPipelinePage === 'function') setTimeout(window.loadPipelinePage, 100);
     if (name === 'forecast' && typeof window.loadForecastPage === 'function') setTimeout(window.loadForecastPage, 100);
     if (name === 'samples'  && typeof window.loadSamplesPage  === 'function') setTimeout(window.loadSamplesPage,  100);
@@ -31267,21 +31340,82 @@ window.loadBoms = async function initBoms() {
     }
 
     var _ncRows = [];
+    var _ncFiles = [];
+    var _ncPending = [];
     var _ncFilter = 'all';
+    var _ncOrigin = '';
+    var _ncLinkCache = null;
 
+    function ncToday() {
+      return new Date().toISOString().slice(0, 10);
+    }
+    function isNonconformityOverdue(row) {
+      if (!row || row.status === 'closed') return false;
+      var today = ncToday();
+      var due = row.due_on ? String(row.due_on).slice(0, 10) : '';
+      var reviewDue = row.review_due_on ? String(row.review_due_on).slice(0, 10) : '';
+      var reviewed = row.review_date ? String(row.review_date).slice(0, 10) : '';
+      if (due && due < today) return true;
+      if (reviewDue && reviewDue < today && !reviewed) return true;
+      return false;
+    }
     function ncStatusLabel(status) {
       return status === 'closed' ? 'Closed' : 'Open';
     }
+    function ncSeverityLabel(value) {
+      if (value === 'low') return 'Low';
+      if (value === 'medium') return 'Medium';
+      if (value === 'high') return 'High';
+      if (value === 'food_safety') return 'Food safety';
+      return '';
+    }
+    function ncLinkKindLabel(kind) {
+      if (kind === 'complaint') return 'Complaint';
+      if (kind === 'supplier') return 'Supplier';
+      if (kind === 'job') return 'Job / lot';
+      if (kind === 'glass') return 'Glass report';
+      return '';
+    }
+    function ncFileKind(file) {
+      if (!file) return { error: 'Choose a file.' };
+      if (file.size > 26214400) return { error: 'Each file must be 25MB or smaller.' };
+      var ext = String(file.name || '').split('.').pop().toLowerCase();
+      var mime = {
+        pdf: 'application/pdf',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        png: 'image/png',
+        webp: 'image/webp',
+        gif: 'image/gif',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      }[ext];
+      if (!mime) return { error: 'Use a PDF, photo, or Word file (.docx).' };
+      return { mime: mime };
+    }
     function setNcFilterButtons() {
-      ['all', 'open', 'closed'].forEach(function(key) {
+      ['all', 'open', 'closed', 'overdue'].forEach(function(key) {
         var btn = document.getElementById('qms-nc-filter-' + key);
         if (!btn) return;
         btn.classList.toggle('btn-gold', _ncFilter === key);
       });
+      var origin = document.getElementById('qms-nc-origin-filter');
+      if (origin && origin.value !== _ncOrigin) origin.value = _ncOrigin;
     }
     function setNonconformityFilter(key) {
       _ncFilter = key || 'all';
       renderNonconformityList();
+    }
+    function setNonconformityOrigin(value) {
+      _ncOrigin = value || '';
+      renderNonconformityList();
+    }
+    function ncFilteredRows() {
+      return _ncRows.filter(function(r) {
+        if (_ncOrigin && (r.origin || '') !== _ncOrigin) return false;
+        if (_ncFilter === 'overdue') return isNonconformityOverdue(r);
+        if (_ncFilter === 'all') return true;
+        return (r.status || 'open') === _ncFilter;
+      });
     }
     function showNcPanels(which) {
       show('qms-nc-list', which === 'list');
@@ -31295,6 +31429,8 @@ window.loadBoms = async function initBoms() {
         save.style.display = (!isNew && !canEdit) ? 'none' : '';
         save.textContent = isNew ? 'Submit report' : 'Save';
       }
+      var file = document.getElementById('qms-nc-file');
+      if (file) file.style.display = (!isNew && !canEdit) ? 'none' : '';
       document.querySelectorAll('#qms-nc-form input, #qms-nc-form select, #qms-nc-form textarea').forEach(function(el) {
         if (el.id === 'qms-nc-id' || el.id === 'qms-nc-raised') {
           if (el.id === 'qms-nc-raised') el.readOnly = true;
@@ -31302,6 +31438,124 @@ window.loadBoms = async function initBoms() {
         }
         el.disabled = !isNew && !canEdit;
       });
+    }
+    async function ensureNcLinks() {
+      if (_ncLinkCache) return _ncLinkCache;
+      var suppliers = [];
+      var jobs = [];
+      var glass = [];
+      try { suppliers = await window.db.select('suppliers', '?select=id,name&order=name.asc&limit=500') || []; } catch (e) { suppliers = []; }
+      try { jobs = await window.db.select('jobs', '?select=id,job_number,reference,product_name&order=created_at.desc&limit=300') || []; } catch (e) { jobs = []; }
+      try { glass = await window.db.select('qms_glass_breakage', '?select=id,report_no,breakage_date&order=created_at.desc&limit=200') || []; } catch (e) { glass = []; }
+      _ncLinkCache = { suppliers: suppliers, jobs: jobs, glass: glass };
+      return _ncLinkCache;
+    }
+    function syncNcLinkUi(row) {
+      var kind = val('qms-nc-link-kind');
+      show('qms-nc-link-text-wrap', kind === 'complaint');
+      show('qms-nc-link-pick-wrap', kind === 'supplier' || kind === 'job' || kind === 'glass');
+      var label = document.getElementById('qms-nc-link-pick-label');
+      if (label) label.textContent = ncLinkKindLabel(kind) || 'Record';
+      var pick = document.getElementById('qms-nc-link-pick');
+      if (!pick || !kind || kind === 'complaint') return;
+      var cache = _ncLinkCache || { suppliers: [], jobs: [], glass: [] };
+      var options = [];
+      if (kind === 'supplier') {
+        options = (cache.suppliers || []).map(function(s) {
+          return { id: s.id, label: s.name || 'Supplier' };
+        });
+      } else if (kind === 'job') {
+        options = (cache.jobs || []).map(function(j) {
+          var ref = j.job_number || j.reference || '';
+          return { id: j.id, label: [ref, j.product_name].filter(Boolean).join(' · ') || 'Job' };
+        });
+      } else if (kind === 'glass') {
+        options = (cache.glass || []).map(function(g) {
+          return { id: g.id, label: [g.report_no, g.breakage_date].filter(Boolean).join(' · ') || 'Glass report' };
+        });
+      }
+      var current = (row && row.link_kind === kind && row.link_id) ? row.link_id : '';
+      pick.innerHTML = '<option value="">—</option>' + options.map(function(o) {
+        return '<option value="' + esc(o.id) + '">' + esc(o.label) + '</option>';
+      }).join('');
+      if (current) {
+        pick.value = current;
+        if (pick.value !== current) {
+          var extra = document.createElement('option');
+          extra.value = current;
+          extra.textContent = (row && row.link_label) || 'Linked record';
+          pick.appendChild(extra);
+          pick.value = current;
+        }
+      }
+    }
+    function onNcLinkKind() {
+      syncNcLinkUi(null);
+      ensureNcLinks().then(function() { syncNcLinkUi(null); });
+    }
+    function renderNcFiles() {
+      var host = document.getElementById('qms-nc-files');
+      if (!host) return;
+      var id = val('qms-nc-id');
+      var saved = _ncFiles.filter(function(f) { return f.report_id === id; });
+      var html = saved.map(function(f) {
+        return '<div style="font-size:12px;margin-bottom:6px;"><button type="button" class="btn" data-nc-path="' + esc(f.storage_path) + '" onclick="window.QMS.openNcFile(this.getAttribute(\'data-nc-path\'))">' + esc(f.file_name) + '</button></div>';
+      }).join('');
+      html += _ncPending.map(function(f, i) {
+        return '<div style="font-size:12px;margin-bottom:6px;color:var(--muted);">' + esc(f.name) + ' · added with this save <button type="button" class="btn" onclick="window.QMS.removeNcPending(' + i + ')">Remove</button></div>';
+      }).join('');
+      host.innerHTML = html || '<div style="color:var(--muted);font-size:12px;">No files yet.</div>';
+    }
+    function onNcFilesPicked(input) {
+      var list = input && input.files ? Array.prototype.slice.call(input.files) : [];
+      list.forEach(function(file) {
+        var kind = ncFileKind(file);
+        if (kind.error) {
+          if (window.toast) window.toast(file.name + ': ' + kind.error, 'error');
+          return;
+        }
+        _ncPending.push(file);
+      });
+      if (input) input.value = '';
+      renderNcFiles();
+    }
+    function removeNcPending(index) {
+      _ncPending.splice(index, 1);
+      renderNcFiles();
+    }
+    async function openNcFile(path) {
+      if (!path || !window._sb || !window._sb.storage) return;
+      var res = await window._sb.storage.from('qms-nc-files').createSignedUrl(path, 120);
+      if (res.error || !res.data || !res.data.signedUrl) {
+        if (window.toast) window.toast('Could not open that file.', 'error');
+        return;
+      }
+      window.open(res.data.signedUrl, '_blank', 'noopener');
+    }
+    async function storeNcFiles(reportId) {
+      if (!_ncPending.length) return;
+      if (!window._sb || !window._sb.storage) throw new Error('Storage is not ready.');
+      var w = who();
+      var pending = _ncPending.slice();
+      _ncPending = [];
+      for (var i = 0; i < pending.length; i++) {
+        var file = pending[i];
+        var kind = ncFileKind(file);
+        if (kind.error) throw new Error(kind.error);
+        var safe = String(file.name || 'file').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'file';
+        var path = reportId + '/' + Date.now() + '-' + i + '-' + safe;
+        var res = await window._sb.storage.from('qms-nc-files').upload(path, file, { contentType: kind.mime, upsert: false });
+        if (res.error) throw new Error(res.error.message || 'Upload failed.');
+        await window.db.insert('qms_nonconformity_files', {
+          report_id: reportId,
+          storage_path: path,
+          file_name: file.name || safe,
+          mime: kind.mime,
+          created_by_id: w.id,
+          created_by_name: w.name,
+          created_by_email: w.email
+        });
+      }
     }
     function fillNonconformity(row, isNew) {
       setVal('qms-nc-id', row && row.id ? row.id : '');
@@ -31313,41 +31567,68 @@ window.loadBoms = async function initBoms() {
       setVal('qms-nc-input', (row && row.manager_input) || '');
       setVal('qms-nc-raised', (row && row.created_by_name) || who().name);
       setVal('qms-nc-origin', (row && row.origin) || '');
+      setVal('qms-nc-severity', (row && row.severity) || '');
+      setVal('qms-nc-brc', (row && row.brc_clause) || '');
+      setVal('qms-nc-by', (row && row.action_by) || '');
+      setVal('qms-nc-due', (row && row.due_on) ? String(row.due_on).slice(0, 10) : '');
+      setVal('qms-nc-link-kind', (row && row.link_kind) || '');
+      setVal('qms-nc-link-text', row && row.link_kind === 'complaint' ? (row.link_label || '') : '');
       setVal('qms-nc-status', (row && row.status) || 'open');
       setVal('qms-nc-root', (row && row.root_cause) || '');
       setVal('qms-nc-planned', (row && row.planned_action) || '');
-      setVal('qms-nc-by', (row && row.action_by) || '');
-      setVal('qms-nc-within', (row && row.within_days) || '');
-      setVal('qms-nc-completed', (row && row.completed_on) || '');
-      setVal('qms-nc-review-within', (row && row.review_within) || '');
-      setVal('qms-nc-review-date', (row && row.review_date) || '');
+      setVal('qms-nc-completed', (row && row.completed_on) ? String(row.completed_on).slice(0, 10) : '');
+      setVal('qms-nc-review-due', (row && row.review_due_on) ? String(row.review_due_on).slice(0, 10) : '');
+      setVal('qms-nc-review-date', (row && row.review_date) ? String(row.review_date).slice(0, 10) : '');
       setVal('qms-nc-review-by', (row && row.review_by) || '');
       setVal('qms-nc-review-effect', (row && row.review_effectiveness) || '');
       setVal('qms-nc-how', (row && row.how_implemented) || '');
+      var file = document.getElementById('qms-nc-file');
+      if (file) file.value = '';
+      _ncPending = [];
+      syncNcLinkUi(row || null);
+      ensureNcLinks().then(function() { syncNcLinkUi(row || null); });
+      renderNcFiles();
+    }
+    function ncLinkPayload() {
+      var kind = val('qms-nc-link-kind');
+      if (!kind) return { link_kind: null, link_id: null, link_label: '' };
+      if (kind === 'complaint') return { link_kind: 'complaint', link_id: null, link_label: val('qms-nc-link-text') };
+      var pick = document.getElementById('qms-nc-link-pick');
+      var id = pick && pick.value ? pick.value : null;
+      var label = (pick && pick.selectedIndex > 0) ? (pick.options[pick.selectedIndex].textContent || '') : '';
+      return { link_kind: kind, link_id: id, link_label: label };
     }
     function ncPayload(isNew) {
       var area = val('qms-nc-area');
       var source = val('qms-nc-source');
       var sourceOfIssue = isNew ? [area, source].filter(Boolean).join(' — ') : source;
+      var link = ncLinkPayload();
       var payload = {
         nc_date: val('qms-nc-date') || null,
         source_of_issue: sourceOfIssue,
         description: val('qms-nc-description'),
         manager_input: val('qms-nc-input'),
         correction: val('qms-nc-correction'),
+        origin: val('qms-nc-origin'),
+        action_by: val('qms-nc-by'),
+        due_on: val('qms-nc-due') || null,
+        severity: val('qms-nc-severity') || null,
+        brc_clause: val('qms-nc-brc'),
+        link_kind: link.link_kind,
+        link_id: link.link_id,
+        link_label: link.link_label,
         updated_at: new Date().toISOString()
       };
-      if (!isNew) {
+      if (isNew) {
+        payload.status = 'open';
+      } else {
         var w = who();
-        payload.origin = val('qms-nc-origin');
         payload.status = val('qms-nc-status') === 'closed' ? 'closed' : 'open';
         payload.root_cause = val('qms-nc-root');
         payload.planned_action = val('qms-nc-planned');
-        payload.action_by = val('qms-nc-by');
         payload.how_implemented = val('qms-nc-how');
-        payload.within_days = val('qms-nc-within');
         payload.completed_on = val('qms-nc-completed') || null;
-        payload.review_within = val('qms-nc-review-within');
+        payload.review_due_on = val('qms-nc-review-due') || null;
         payload.review_date = val('qms-nc-review-date') || null;
         payload.review_by = val('qms-nc-review-by');
         payload.review_effectiveness = val('qms-nc-review-effect');
@@ -31355,6 +31636,23 @@ window.loadBoms = async function initBoms() {
         payload.updated_by_name = w.name;
       }
       return payload;
+    }
+    function ncOpenGaps(payload) {
+      var gaps = [];
+      if (!payload.description) gaps.push('details');
+      if (!payload.origin) gaps.push('origin');
+      if (!payload.action_by) gaps.push('owner (by who)');
+      if (!payload.due_on) gaps.push('due date');
+      return gaps;
+    }
+    function ncCloseGaps(payload) {
+      var gaps = [];
+      if (!payload.root_cause) gaps.push('root cause');
+      if (!payload.planned_action) gaps.push('corrective action');
+      if (!payload.completed_on) gaps.push('completed on');
+      if (!payload.review_effectiveness) gaps.push('review of effectiveness');
+      if (!payload.review_by) gaps.push('reviewed by');
+      return gaps;
     }
     async function writeNcHist(reportId, action, snapshot) {
       var w = who();
@@ -31388,22 +31686,26 @@ window.loadBoms = async function initBoms() {
       setNcFilterButtons();
       var tb = document.getElementById('qms-nc-tbody');
       if (!tb) return;
-      var rows = _ncRows.filter(function(r) {
-        if (_ncFilter === 'all') return true;
-        return (r.status || 'open') === _ncFilter;
-      });
+      var rows = ncFilteredRows();
       if (!rows.length) {
-        var empty = _ncFilter === 'open' ? 'None open.' : (_ncFilter === 'closed' ? 'None closed.' : 'No nonconformities yet.');
-        tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">'+empty+'</td></tr>';
+        var empty = 'No nonconformities yet.';
+        if (_ncFilter === 'open') empty = 'None open.';
+        else if (_ncFilter === 'closed') empty = 'None closed.';
+        else if (_ncFilter === 'overdue') empty = 'None overdue.';
+        else if (_ncOrigin) empty = 'None for that origin.';
+        tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">'+empty+'</td></tr>';
         return;
       }
       tb.innerHTML = rows.map(function(r) {
+        var status = esc(ncStatusLabel(r.status));
+        if (isNonconformityOverdue(r)) status += ' <span style="color:var(--red);font-weight:700;letter-spacing:0.06em;font-size:10px;">OVERDUE</span>';
         return '<tr>'
           + '<td>'+esc(r.nc_no||'—')+'</td>'
           + '<td>'+esc(r.nc_date||'—')+'</td>'
           + '<td>'+esc(r.source_of_issue||'—')+'</td>'
           + '<td>'+esc(r.origin||'—')+'</td>'
-          + '<td>'+esc(ncStatusLabel(r.status))+'</td>'
+          + '<td>'+esc(r.due_on ? String(r.due_on).slice(0, 10) : '—')+'</td>'
+          + '<td>'+status+'</td>'
           + '<td><button type="button" class="btn" onclick="window.QMS.openNonconformity(\''+r.id+'\')">Open</button></td>'
           + '</tr>';
       }).join('');
@@ -31411,13 +31713,16 @@ window.loadBoms = async function initBoms() {
     async function loadNonconformity() {
       showNcPanels('list');
       var tb = document.getElementById('qms-nc-tbody');
-      if (tb) tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">Loading…</td></tr>';
+      if (tb) tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted);font-size:12px;">Loading…</td></tr>';
       try {
         _ncRows = await window.db.select('qms_nonconformity', '?order=created_at.desc') || [];
       } catch (e) {
-        if (tb) tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--muted);">Could not load the log.</td></tr>';
+        if (tb) tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted);">Could not load the log.</td></tr>';
         return;
       }
+      try {
+        _ncFiles = await window.db.select('qms_nonconformity_files', '?select=id,report_id,storage_path,file_name&order=created_at.asc') || [];
+      } catch (e) { _ncFiles = []; }
       renderNonconformityList();
     }
     function newNonconformity() {
@@ -31433,13 +31738,78 @@ window.loadBoms = async function initBoms() {
       var row = _ncRows.filter(function(r){ return r.id === id; })[0];
       if (!row) return;
       showNcPanels('form');
-      document.getElementById('qms-nc-form-title').textContent = (row.nc_no || 'Report') + ' · ' + ncStatusLabel(row.status);
+      var title = (row.nc_no || 'Report') + ' · ' + ncStatusLabel(row.status);
+      if (isNonconformityOverdue(row)) title += ' · Overdue';
+      document.getElementById('qms-nc-form-title').textContent = title;
       fillNonconformity(row, false);
       setNcFormMode(false, canLog());
       loadNcHist(id);
     }
     function showNonconformityList() {
       loadNonconformity();
+    }
+    function ncExportRows() {
+      return ncFilteredRows().map(function(r) {
+        var files = _ncFiles.filter(function(f) { return f.report_id === r.id; }).map(function(f) { return f.file_name; }).join('; ');
+        return [
+          r.nc_no || '',
+          r.nc_date || '',
+          r.source_of_issue || '',
+          r.origin || '',
+          ncSeverityLabel(r.severity),
+          r.brc_clause || '',
+          [ncLinkKindLabel(r.link_kind), r.link_label].filter(Boolean).join(': '),
+          r.due_on ? String(r.due_on).slice(0, 10) : '',
+          r.review_due_on ? String(r.review_due_on).slice(0, 10) : '',
+          ncStatusLabel(r.status),
+          isNonconformityOverdue(r) ? 'Yes' : '',
+          r.action_by || '',
+          r.root_cause || '',
+          r.planned_action || '',
+          r.completed_on ? String(r.completed_on).slice(0, 10) : '',
+          r.review_effectiveness || '',
+          r.review_by || '',
+          files
+        ];
+      });
+    }
+    function ncExportHeaders() {
+      return ['No.','Date','Source of issue','Origin','Severity','BRC clause','Linked record','Due date','Review due','Status','Overdue','Owner','Root cause','Corrective action','Completed on','Review of effectiveness','Reviewed by','Attachments'];
+    }
+    function exportNonconformityExcel() {
+      var headers = ncExportHeaders();
+      var rows = ncExportRows();
+      if (!rows.length) { if (window.toast) window.toast('Nothing to export.', 'error'); return; }
+      function cell(value) {
+        return '<Cell><Data ss:Type="String">' + String(value == null ? '' : value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</Data></Cell>';
+      }
+      var xml = '<?xml version="1.0"?>'
+        + '<?mso-application progid="Excel.Sheet"?>'
+        + '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">'
+        + '<Worksheet ss:Name="Nonconformity"><Table>'
+        + '<Row>' + headers.map(cell).join('') + '</Row>'
+        + rows.map(function(row) { return '<Row>' + row.map(cell).join('') + '</Row>'; }).join('')
+        + '</Table></Worksheet></Workbook>';
+      var blob = new Blob([xml], { type: 'application/vnd.ms-excel' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'nonconformity-log.xls';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    function exportNonconformityPdf() {
+      var headers = ncExportHeaders();
+      var rows = ncExportRows();
+      if (!rows.length) { if (window.toast) window.toast('Nothing to export.', 'error'); return; }
+      var win = window.open('', '_blank', 'noopener');
+      if (!win) { if (window.toast) window.toast('Allow pop-ups to export the PDF.', 'error'); return; }
+      var head = headers.map(function(h) { return '<th>' + esc(h) + '</th>'; }).join('');
+      var body = rows.map(function(row) {
+        return '<tr>' + row.map(function(value) { return '<td>' + esc(value) + '</td>'; }).join('') + '</tr>';
+      }).join('');
+      win.document.write('<!DOCTYPE html><html><head><title>Nonconformity log</title><style>body{font-family:sans-serif;font-size:11px;color:#111;}h1{font-size:16px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ccc;padding:4px 6px;vertical-align:top;text-align:left;}th{background:#f3f3f3;}</style></head><body><h1>Nonconformity log</h1><p>Rows currently filtered on the log.</p><table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table><script>window.onload=function(){window.print();}<\/script></body></html>');
+      win.document.close();
     }
     async function notifyQualityNonconformity(row) {
       try {
@@ -31473,8 +31843,10 @@ window.loadBoms = async function initBoms() {
           +   rowFn('Date', row.nc_date)
           +   rowFn('Source of issue', row.source_of_issue)
           +   rowFn('Details', row.description)
-          +   rowFn('Actions already taken', row.correction)
-          +   rowFn('Background', row.manager_input)
+          +   rowFn('Origin', row.origin)
+          +   rowFn('Owner', row.action_by)
+          +   rowFn('Due date', row.due_on)
+          +   rowFn('Severity', ncSeverityLabel(row.severity))
           +   rowFn('Completed by', row.created_by_name)
           + '</table>'
           + '<p style="color:#555;font-size:12px;line-height:1.6;margin-top:18px;">Open <strong>Pulse</strong> → QMS → Nonconformity and open <strong>'+esc(ncNo || 'this report')+'</strong>.</p>'
@@ -31501,8 +31873,24 @@ window.loadBoms = async function initBoms() {
       var payload = ncPayload(isNew);
       if (!payload.nc_date) { if (window.toast) window.toast('Date is required.', 'error'); return; }
       if (!payload.source_of_issue) { if (window.toast) window.toast('Source of issue is required.', 'error'); return; }
-      if (!payload.description) { if (window.toast) window.toast('Details of non-conformance are required.', 'error'); return; }
+      var openGaps = ncOpenGaps(payload);
+      if (openGaps.length && (isNew || payload.status !== 'closed')) {
+        if (window.toast) window.toast('To save as Open, add ' + openGaps.join(', ') + '.', 'error');
+        return;
+      }
+      if (!isNew && payload.status === 'closed') {
+        if (openGaps.length) {
+          if (window.toast) window.toast('To close, this report still needs ' + openGaps.join(', ') + '.', 'error');
+          return;
+        }
+        var closeGaps = ncCloseGaps(payload);
+        if (closeGaps.length) {
+          if (window.toast) window.toast('To close, add ' + closeGaps.join(', ') + '.', 'error');
+          return;
+        }
+      }
       try {
+        var savedId = id;
         if (isNew) {
           var w = who();
           payload.status = 'open';
@@ -31511,11 +31899,16 @@ window.loadBoms = async function initBoms() {
           payload.created_by_email = w.email;
           var created = await window.db.insert('qms_nonconformity', payload);
           var row = Array.isArray(created) ? created[0] : created;
-          if (row && row.id) await writeNcHist(row.id, 'created', payload);
+          savedId = row && row.id;
+          if (savedId) {
+            await writeNcHist(savedId, 'created', payload);
+            await storeNcFiles(savedId);
+          }
           if (window.toast) window.toast('Report ' + ((row && row.nc_no) || '') + ' raised.', 'success');
           notifyQualityNonconformity(Object.assign({}, payload, row || {}));
         } else {
           await window.db.update('qms_nonconformity', '?id=eq.' + id, payload);
+          await storeNcFiles(id);
           await writeNcHist(id, 'updated', payload);
           if (window.toast) window.toast('Saved.', 'success');
         }
@@ -31524,7 +31917,6 @@ window.loadBoms = async function initBoms() {
         if (window.toast) window.toast((e && e.message) || 'Could not save the report.', 'error');
       }
     }
-
     return {
       loadGlass: loadGlass,
       loadNonconformity: loadNonconformity,
@@ -31533,6 +31925,14 @@ window.loadBoms = async function initBoms() {
       showNonconformityList: showNonconformityList,
       saveNonconformity: saveNonconformity,
       setNonconformityFilter: setNonconformityFilter,
+      setNonconformityOrigin: setNonconformityOrigin,
+      exportNonconformityExcel: exportNonconformityExcel,
+      exportNonconformityPdf: exportNonconformityPdf,
+      onNcLinkKind: onNcLinkKind,
+      onNcFilesPicked: onNcFilesPicked,
+      removeNcPending: removeNcPending,
+      openNcFile: openNcFile,
+      isNonconformityOverdue: isNonconformityOverdue,
       newGlass: newGlass,
       openGlass: openGlass,
       showGlassList: showGlassList,
@@ -45887,12 +46287,20 @@ window.saveAdjModal = async function() {
   window._lpWeekStartIso = _lpWeekStartIso;
   window._lpClampWeekKeyForOpenJob = _lpClampWeekKeyForOpenJob;
 
-  window._jobInThisWeekBlock = function(j) {
-    if (!j || !j.job_ready_date) return false;
-    var ns = _normStage(j.stage);
-    if (ns === 'complete' || ns === 'cancelled') return false;
+  // Displayed Live Queue week (Monday). Same clamp as the week headers — does not move a job.
+  function _jobDisplayWeekKey(j) {
+    if (!j || !j.job_ready_date) return null;
     var key = _lpWeekStartIso(String(j.job_ready_date).slice(0, 10));
+    if (!key || key === 'unknown') return null;
     key = _lpClampWeekKeyForOpenJob(key, j);
+    if (!key || key === 'unknown' || key === 'awaiting') return null;
+    return key;
+  }
+
+  window._jobInThisWeekBlock = function(j) {
+    var ns = _normStage(j && j.stage);
+    if (ns === 'complete' || ns === 'cancelled') return false;
+    var key = _jobDisplayWeekKey(j);
     return !!(key && key === _lpThisWeekStartIso());
   };
 
@@ -45924,37 +46332,58 @@ window.saveAdjModal = async function() {
     return _jobsReadyCmp(a, b);
   };
 
+  // Order inside one displayed week. Positions count only when keyed to that Monday.
+  function _jobsSortInWeek(a, b, weekKey) {
+    var aKey = a.week_queue_key ? String(a.week_queue_key).slice(0, 10) : '';
+    var bKey = b.week_queue_key ? String(b.week_queue_key).slice(0, 10) : '';
+    var aOk = weekKey && aKey === weekKey && a.week_queue_pos != null;
+    var bOk = weekKey && bKey === weekKey && b.week_queue_pos != null;
+    if (aOk && bOk && a.week_queue_pos !== b.week_queue_pos) return a.week_queue_pos - b.week_queue_pos;
+    if (aOk && !bOk) return -1;
+    if (!aOk && bOk) return 1;
+    return _jobsReadyCmp(a, b);
+  }
+
   function _canReorderJobs() {
     return !!(window.canDo && (window.canDo('jobs_create') || window.canDo('production_control')));
   }
 
-  function _jobsThisWeekQueued() {
-    return (_jobs || []).filter(function(j) {
-      var ns = _normStage(j.stage);
-      if (ns === 'complete' || ns === 'cancelled') return false;
-      if (j.actual_start || j.changeover_start) return false;
-      return window._jobInThisWeekBlock(j);
-    }).sort(window._jobsQueueSort);
+  function _jobQueueMovable(j) {
+    if (!j) return false;
+    var ns = _normStage(j.stage);
+    if (ns === 'complete' || ns === 'cancelled') return false;
+    if (j.actual_start || j.changeover_start) return false;
+    return !!_jobDisplayWeekKey(j);
   }
 
-  async function _ensureWeekQueueSeeded(list) {
-    var thisWeek = _lpThisWeekStartIso();
-    if (!thisWeek || !list || !list.length) return list;
+  function _jobsQueuedInWeek(weekKey) {
+    if (!weekKey || weekKey === 'unknown' || weekKey === 'awaiting') return [];
+    return (_jobs || []).filter(function(j) {
+      return _jobQueueMovable(j) && _jobDisplayWeekKey(j) === weekKey;
+    }).sort(function(a, b) { return _jobsSortInWeek(a, b, weekKey); });
+  }
+
+  function _jobsThisWeekQueued() {
+    return _jobsQueuedInWeek(_lpThisWeekStartIso());
+  }
+
+  async function _ensureWeekQueueSeeded(list, weekKey) {
+    if (!weekKey || !list || !list.length) return list;
     var need = list.some(function(j) {
       var key = j.week_queue_key ? String(j.week_queue_key).slice(0, 10) : '';
-      return key !== thisWeek || j.week_queue_pos == null;
+      return key !== weekKey || j.week_queue_pos == null;
     });
     if (!need) return list;
     for (var i = 0; i < list.length; i++) {
       var pos = i + 1;
       var key = list[i].week_queue_key ? String(list[i].week_queue_key).slice(0, 10) : '';
-      if (key === thisWeek && list[i].week_queue_pos === pos) continue;
+      if (key === weekKey && list[i].week_queue_pos === pos) continue;
       list[i].week_queue_pos = pos;
-      list[i].week_queue_key = thisWeek;
+      list[i].week_queue_key = weekKey;
       try {
         await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(list[i].id), {
           week_queue_pos: pos,
-          week_queue_key: thisWeek
+          week_queue_key: weekKey
         });
       } catch (e) { console.warn('week queue seed', list[i].id, e); }
     }
@@ -45967,27 +46396,29 @@ window.saveAdjModal = async function() {
       return;
     }
     dir = dir < 0 ? -1 : 1;
-    var list = _jobsThisWeekQueued();
+    var job = (_jobs || []).find(function(j) { return j.id === jobId; });
+    var weekKey = job ? _jobDisplayWeekKey(job) : null;
+    if (!weekKey) return;
+    var list = _jobsQueuedInWeek(weekKey);
     if (list.length < 2) return;
-    await _ensureWeekQueueSeeded(list);
-    list.sort(window._jobsQueueSort);
+    await _ensureWeekQueueSeeded(list, weekKey);
+    list.sort(function(a, b) { return _jobsSortInWeek(a, b, weekKey); });
     var idx = -1;
     for (var i = 0; i < list.length; i++) {
       if (list[i].id === jobId) { idx = i; break; }
     }
     var swap = idx + dir;
     if (idx < 0 || swap < 0 || swap >= list.length) return;
-    var thisWeek = _lpThisWeekStartIso();
     var a = list[idx], b = list[swap];
     var tmp = a.week_queue_pos;
     a.week_queue_pos = b.week_queue_pos;
     b.week_queue_pos = tmp;
-    a.week_queue_key = thisWeek;
-    b.week_queue_key = thisWeek;
+    a.week_queue_key = weekKey;
+    b.week_queue_key = weekKey;
     try {
       await Promise.all([
-        supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(a.id), { week_queue_pos: a.week_queue_pos, week_queue_key: thisWeek }),
-        supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(b.id), { week_queue_pos: b.week_queue_pos, week_queue_key: thisWeek })
+        supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(a.id), { week_queue_pos: a.week_queue_pos, week_queue_key: weekKey }),
+        supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(b.id), { week_queue_pos: b.week_queue_pos, week_queue_key: weekKey })
       ]);
     } catch (e) {
       window.toast && window.toast('Error: ' + (e && e.message), 'error');
@@ -46001,7 +46432,8 @@ window.saveAdjModal = async function() {
       ]);
     }
     if (typeof window._broadcastJobQueue === 'function') window._broadcastJobQueue(_queueSnapshot());
-    if (typeof window.syncScheduleSlotsFromReady === 'function') {
+    // Next Jobs mirrors the current week only. A future-week swap must not rewrite slots.
+    if (weekKey === _lpThisWeekStartIso() && typeof window.syncScheduleSlotsFromReady === 'function') {
       window.syncScheduleSlotsFromReady({ silent: true }).then(function() {
         if (typeof window._refreshScheduleQueue === 'function') window._refreshScheduleQueue();
         if (typeof window._broadcastJobQueue === 'function') window._broadcastJobQueue(_queueSnapshot());
@@ -46482,7 +46914,7 @@ window.saveAdjModal = async function() {
       var row = '<tr class="mob-data-row" style="' + _rowStyle + '" onclick="window.openJobDetail(\'' + jid + '\')"'
         + (_bomDraft ? ' title="BOM is still in draft. Spec is not locked."' : '') + '>';
       var qInfo = weekMeta && weekMeta.queued && weekMeta.queued[j.id];
-      var showArrows = !!(weekMeta && weekMeta.thisWeek && qInfo && _canReorderJobs());
+      var showArrows = !!(qInfo && _canReorderJobs());
       var arrows = '';
       if (showArrows) {
         var upDis = qInfo.idx === 0;
@@ -46598,24 +47030,28 @@ window.saveAdjModal = async function() {
     var flat = !useWeekBlocks && (_showCompleted || _jobStageFilter === 'cancelled' || groupBy === 'none');
     if (useWeekBlocks) {
       var weekBuckets = _bucketJobsByReadyWeek(list);
-      var thisWeekKey = _lpThisWeekStartIso();
-      var queuedMap = {};
-      var queuedList = _jobsThisWeekQueued();
-      queuedList.forEach(function(qj, qi) {
-        queuedMap[qj.id] = { idx: qi, len: queuedList.length };
-      });
       weekBuckets.forEach(function(week) {
-        if (week.weekKey !== thisWeekKey) return;
+        if (!week.weekKey || week.weekKey === 'awaiting' || week.weekKey === 'unknown') return;
         week.jobs.sort(function(a, b) {
           var aStarted = !!(a.actual_start || a.changeover_start);
           var bStarted = !!(b.actual_start || b.changeover_start);
           if (aStarted !== bStarted) return aStarted ? -1 : 1;
-          return window._jobsQueueSort(a, b);
+          return _jobsSortInWeek(a, b, week.weekKey);
         });
+      });
+      var queuedByWeek = {};
+      weekBuckets.forEach(function(week) {
+        var queuedList = _jobsQueuedInWeek(week.weekKey);
+        if (queuedList.length < 2) return;
+        var queuedMap = {};
+        queuedList.forEach(function(qj, qi) {
+          queuedMap[qj.id] = { idx: qi, len: queuedList.length };
+        });
+        queuedByWeek[week.weekKey] = queuedMap;
       });
       tbody.innerHTML = weekBuckets.map(function(week) {
         var head = _jobsWeekHeaderRow(week.weekLabel, week.jobs.length, _colCount, _jobsPlannedBottles(week.jobs));
-        var meta = { thisWeek: week.weekKey === thisWeekKey, queued: queuedMap };
+        var meta = { queued: queuedByWeek[week.weekKey] || null };
         return head + week.jobs.map(function(j, i) { return buildRow(j, i + 1, meta); }).join('');
       }).join('');
     } else if (flat) {
