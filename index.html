@@ -53080,21 +53080,42 @@ window.saveAdjModal = async function() {
     html += frow('Cases per Layer', inp('cases-layer', casesPerLayer, 'From BOM', 'text', !!casesPerLayer));
     html += frow('Cases per Pallet', inp('cases-pallet', casesPerPallet, 'Auto-calculated', 'text', !!(casesPerLayer && layersPerPallet)));
     var _removedDry = (j.pallets_removed_dry != null && j.pallets_removed_dry !== '') ? parseInt(j.pallets_removed_dry, 10) : null;
+    if (_removedDry == null || isNaN(_removedDry)) {
+      try {
+        var _prepRows = await supaGet('job_drygoods_prep?job_id=eq.' + jobId + '&select=signoff_history&limit=1');
+        var _prepHist = window._scParseSignoffHistory ? window._scParseSignoffHistory(_prepRows[0] && _prepRows[0].signoff_history) : [];
+        for (var _hi = _prepHist.length - 1; _hi >= 0; _hi--) {
+          var _h = _prepHist[_hi];
+          if (_h && _h.action === 'signed' && _h.pallets_removed_dry != null && _h.pallets_removed_dry !== '') {
+            _removedDry = parseInt(_h.pallets_removed_dry, 10);
+            break;
+          }
+        }
+      } catch (e) { window.logError && window.logError('results removed pallets', e); }
+    }
+    if (isNaN(_removedDry)) _removedDry = null;
+    window._resRemovedDry = _removedDry;
     var _returnedDry = (j.pallets_returned_dry != null && j.pallets_returned_dry !== '') ? parseInt(j.pallets_returned_dry, 10) : null;
-    var _usedDryShown = (_removedDry != null && _returnedDry != null) ? Math.max(_removedDry - _returnedDry, 0) : '';
+    var _usedDryShown = (_removedDry != null && _returnedDry != null && _returnedDry < _removedDry) ? (_removedDry - _returnedDry) : '';
     window._resSyncDryUsed = function() {
       var retEl = document.getElementById('res-pallets-returned-dry');
       var usedEl = document.getElementById('res-pallets-used-calc');
       if (!usedEl) return;
-      if (_removedDry == null) { usedEl.value = ''; return; }
+      if (window._resRemovedDry == null) { usedEl.value = ''; return; }
       var raw = retEl ? String(retEl.value).trim() : '';
       if (!/^\d+$/.test(raw)) { usedEl.value = ''; return; }
       var back = parseInt(raw, 10);
-      usedEl.value = back >= _removedDry ? '' : String(_removedDry - back);
+      usedEl.value = back >= window._resRemovedDry ? '' : String(window._resRemovedDry - back);
     };
-    html += frow('Dry Goods Pallets Removed', inp('pallets-removed-dry', _removedDry == null ? '' : _removedDry, 'Recorded at supply chain sign-off', 'number', true) + sub(_removedDry == null ? 'Not recorded yet. Supply chain sign-off must enter how many were taken out of storage.' : 'Recorded when supply chain was signed off. This is the number taken out of storage.'), true);
+    var _calcStyle = 'background:rgba(13,27,42,0.4);border:1px solid var(--navy-border);color:var(--gold);font-weight:700;padding:7px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;';
+    var _removedBox = _removedDry == null
+      ? '<div style="padding:8px 10px;border:1px dashed var(--navy-border);border-radius:3px;color:var(--muted);font-size:13px;">Not on the supply chain sign-off yet</div>'
+        + sub('This number is entered once, when supply chain is signed off. It is not typed again here. Reopen that sign-off if this job was signed off before the pallet count was asked.')
+      : '<input id="res-pallets-removed-dry" type="text" readonly value="' + _removedDry + '" style="' + _calcStyle + '">'
+        + sub('Brought across from the supply chain sign-off. Not entered again here.');
+    html += frow('Dry Goods Pallets Removed', _removedBox);
     html += frow('Dry Goods Pallets Returning', inp('pallets-returned-dry', _returnedDry == null ? '' : _returnedDry, '0 if none are going back', 'number') + sub('Whole dry-goods pallets going back into storage. You can return some, or 0, but at least 1 pallet must stay used on the job.'), true);
-    html += frow('Dry Goods Pallets Used', '<input id="res-pallets-used-calc" type="text" readonly value="' + (_usedDryShown === '' ? '' : _usedDryShown) + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--gold);font-weight:700;padding:7px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;">' + sub('Removed minus returned. Must be at least 1. This number is checked off the client&rsquo;s dry goods pallets for this job.'));
+    html += frow('Dry Goods Pallets Used', '<input id="res-pallets-used-calc" type="text" readonly value="' + (_usedDryShown === '' ? '' : _usedDryShown) + '" placeholder="Fills in automatically" style="' + _calcStyle + '">' + sub('Filled in automatically. Pallets removed minus pallets going back. That difference is checked off the client&rsquo;s dry goods pallets.'));
     var _finPallets = (j.finished_pallets != null && j.finished_pallets !== '') ? parseInt(j.finished_pallets, 10) : null;
     var _finLocked = j.finished_pallets_disposition === 'stored' || j.finished_pallets_disposition === 'dispatched';
     var _finNote = _finLocked
@@ -53181,6 +53202,7 @@ window.saveAdjModal = async function() {
     el.innerHTML = html;
     var _retPalletEl = document.getElementById('res-pallets-returned-dry');
     if (_retPalletEl) _retPalletEl.addEventListener('input', window._resSyncDryUsed);
+    if (window._resSyncDryUsed) window._resSyncDryUsed();
 
     // Auto-calculate cases and hours on change
     var btlsEl = document.getElementById('res-bottles');
