@@ -5605,23 +5605,42 @@ window._portalLhDryGoodsHtml = async function(esc) {
       + '<th style="text-align:left;">SKU No.</th><th>Category</th><th>Description</th><th>Photo</th><th style="text-align:right;">On Site</th><th>Used On</th>'
       + '</tr></thead><tbody>';
     var catRows = [];
+    var byUsed = {};
     lhSkus.forEach(function(s) {
       var used = [];
       try { used = Array.isArray(s.used_on_boms) ? s.used_on_boms : (s.used_on_boms ? JSON.parse(s.used_on_boms) : []); } catch(_e) { used = []; }
       var usedLabel = used.map(function(b){ return b.product_name || b.id; }).filter(Boolean).join(', ') || '—';
-      var qty = Number(s.qty_on_site || 0);
-      var displayName = window.skuDisplayName({
-        id: s.sku_id, description: s.description, volume: s.volume, abv: s.abv, region: s.region
-      }) || s.sku_id;
+      if (!byUsed[usedLabel]) byUsed[usedLabel] = [];
+      byUsed[usedLabel].push(s);
+    });
+    var usedLabels = Object.keys(byUsed).sort(function(a, b) {
+      if (a === '—') return 1;
+      if (b === '—') return -1;
+      return a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true });
+    });
+    usedLabels.forEach(function(usedLabel) {
+      var group = byUsed[usedLabel];
       html += '<tr>'
-        + '<td style="text-align:left;"><span style="font-size:11px;font-weight:700;color:var(--gold);background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.25);padding:2px 7px;border-radius:3px;letter-spacing:0.06em;white-space:nowrap;">' + esc(s.sku_id) + '</span></td>'
-        + '<td style="color:var(--muted);">' + esc(s.category_name || 'Uncategorised') + '</td>'
-        + '<td style="color:var(--white);font-weight:600;">' + esc(displayName) + '</td>'
-        + '<td>' + window._portalDgPhotoCell(esc, s.photo_url, displayName) + '</td>'
-        + '<td style="text-align:right;color:var(--white);">' + qty.toLocaleString() + '</td>'
-        + '<td style="color:var(--muted);font-size:12px;">' + esc(usedLabel) + '</td>'
-        + '</tr>';
-      catRows.push({ id: s.sku_id, description: displayName, qty: qty, category: s.category_name || 'Uncategorised' });
+        + '<td colspan="6" style="background:rgba(201,168,76,0.08);color:var(--gold);font-weight:700;font-size:12px;letter-spacing:0.04em;padding:10px 12px;border-top:1px solid rgba(201,168,76,0.28);">'
+        + esc(usedLabel)
+        + '<span style="color:var(--muted);font-weight:500;letter-spacing:0;margin-left:8px;">'
+        + group.length + (group.length === 1 ? ' line' : ' lines')
+        + '</span></td></tr>';
+      group.forEach(function(s) {
+        var qty = Number(s.qty_on_site || 0);
+        var displayName = window.skuDisplayName({
+          id: s.sku_id, description: s.description, volume: s.volume, abv: s.abv, region: s.region
+        }) || s.sku_id;
+        html += '<tr>'
+          + '<td style="text-align:left;"><span style="font-size:11px;font-weight:700;color:var(--gold);background:rgba(201,168,76,0.1);border:1px solid rgba(201,168,76,0.25);padding:2px 7px;border-radius:3px;letter-spacing:0.06em;white-space:nowrap;">' + esc(s.sku_id) + '</span></td>'
+          + '<td style="color:var(--muted);">' + esc(s.category_name || 'Uncategorised') + '</td>'
+          + '<td style="color:var(--white);font-weight:600;">' + esc(displayName) + '</td>'
+          + '<td>' + window._portalDgPhotoCell(esc, s.photo_url, displayName) + '</td>'
+          + '<td style="text-align:right;color:var(--white);">' + qty.toLocaleString() + '</td>'
+          + '<td style="color:var(--muted);font-size:12px;">' + esc(usedLabel) + '</td>'
+          + '</tr>';
+        catRows.push({ id: s.sku_id, description: displayName, qty: qty, category: s.category_name || 'Uncategorised' });
+      });
     });
     html += '</tbody></table></div></div>';
     groups.push({ name: 'Lighthouse-provided', rows: catRows, noValues: true });
@@ -8035,16 +8054,16 @@ window.copyInviteLink = function() {
       </div>
       <div class="mfield">
         <label>ABV (%)</label>
-        <input type="number" id="cm-abv" placeholder="e.g. 63.5" min="0" max="100" step="0.1">
+        <input type="number" id="cm-abv" placeholder="e.g. 63.5" min="0" max="100" step="0.1" oninput="calcContainerLPA()">
       </div>
       <div class="mfield">
         <label>Current Litres</label>
-        <input type="number" id="cm-litres" placeholder="e.g. 195.4" min="0" step="0.1" oninput="calcContainerLPA()">
+        <input type="number" id="cm-litres" placeholder="e.g. 195.4" min="0" step="0.1" oninput="calcContainerLPA(true)">
       </div>
       <div class="mfield">
         <label>LPA (auto-calculated)</label>
         <input type="number" id="cm-lpa" placeholder="0.00" step="0.01" style="color:var(--gold);" oninput="calcContainerLPAValue()">
-        <div class="field-hint">Litres × ABV% ÷ 100</div>
+        <div class="field-hint" id="cm-lpa-hint">Litres × ABV% ÷ 100. An IBC, tank, or drum cannot store a different LPA.</div>
       </div>
       <div class="mfield">
         <label>LPA Price (€ per LPA)</label>
@@ -34568,6 +34587,7 @@ window.ccxPrintRecord = function() {
 
   <div id="pallet-pane-overview">
     <div id="pallet-kpis" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:16px 0;"></div>
+    <div id="pallet-finished-waiting"></div>
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
       <input id="pallet-search" type="text" placeholder="Search client…" oninput="window.renderPallets()" style="flex:1;min-width:180px;background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--white);padding:8px 12px;border-radius:4px;font-family:Lato,sans-serif;font-size:13px;">
       <label style="display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;cursor:pointer;white-space:nowrap;"><input type="checkbox" id="pallet-active-only" checked onchange="window.renderPallets()" style="accent-color:var(--gold);"> Active only</label>
@@ -34584,7 +34604,7 @@ window.ccxPrintRecord = function() {
       <button class="btn btn-gold" onclick="window.loadPalletBilling()">Calculate</button>
       <button class="btn btn-outline" onclick="window.exportPalletBillingCSV()">Export CSV</button>
     </div>
-    <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Monthly invoice = each Monday&rsquo;s pallet count summed into pallet-weeks &times; the client&rsquo;s weekly rate. Marking a client invoiced locks that month&rsquo;s figures.</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Monthly invoice = each Monday&rsquo;s dry-goods pallets &times; the dry-goods rate, plus liquid pallets &times; the liquid rate, plus finished-goods pallets &times; the finished-goods rate. Unclassified pallets use the original single rate. Marking a client invoiced locks that month&rsquo;s figures.</div>
     <div id="pallet-billing-wrap"><div style="color:var(--muted);padding:40px;text-align:center;">Pick a month and press Calculate.</div></div>
   </div>
 </div>
@@ -34597,6 +34617,8 @@ window.ccxPrintRecord = function() {
   var _pBilling = [];     // last billing calculation
   var _pBillingPeriod = null;
   var _pClientsCache = {};  // id -> display name, prefetched in loadPallets()
+  var _pSourceSplit = {};   // client_id -> { dry, liquid } checked-in pallets
+  var _pFinishedWaiting = []; // jobs with a finished-goods count not yet stored or dispatched
 
   function _pClients() {
     return (window.CLIENTS && window.CLIENTS.length) ? window.CLIENTS
@@ -34619,6 +34641,98 @@ window.ccxPrintRecord = function() {
   function _pMoney(n) {
     if (n == null || isNaN(n)) return '—';
     return '€' + Number(n).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function _pNumOrNull(v) { return (v == null || v === '' || isNaN(v)) ? null : Number(v); }
+  function _pSideOf(b) {
+    if (b && (b.current_dry != null || b.current_liquid != null || b.current_finished != null)) {
+      return {
+        dry: parseInt(b.current_dry, 10) || 0,
+        liquid: parseInt(b.current_liquid, 10) || 0,
+        finished: parseInt(b.current_finished, 10) || 0,
+        other: parseInt(b.current_other, 10) || 0
+      };
+    }
+    var s = (b && _pSourceSplit[b.client_id]) || { dry: 0, liquid: 0 };
+    return { dry: s.dry, liquid: s.liquid, finished: 0, other: 0 };
+  }
+  function _pRatePair(b) {
+    if (!b) return { dry: null, liquid: null, finished: null, other: null };
+    var other = _pNumOrNull(b.weekly_rate);
+    var dry = _pNumOrNull(b.dry_weekly_rate);
+    var liquid = _pNumOrNull(b.liquid_weekly_rate);
+    var finished = _pNumOrNull(b.finished_weekly_rate);
+    return {
+      dry: dry != null ? dry : other,
+      liquid: liquid != null ? liquid : other,
+      finished: finished != null ? finished : other,
+      other: other
+    };
+  }
+  function _pRateText(b) {
+    var r = _pRatePair(b);
+    if (r.dry == null && r.liquid == null && r.finished == null) return '—';
+    if (r.dry === r.liquid && r.liquid === r.finished) return _pMoney(r.dry);
+    var parts = [];
+    if (r.dry != null) parts.push(_pMoney(r.dry) + ' dry');
+    if (r.liquid != null) parts.push(_pMoney(r.liquid) + ' liquid');
+    if (r.finished != null) parts.push(_pMoney(r.finished) + ' finished');
+    return parts.join(' · ') || '—';
+  }
+  function _pMissingRate(b) {
+    var side = _pSideOf(b);
+    var r = _pRatePair(b);
+    var cur = parseInt(b && b.current_pallets, 10) || 0;
+    if (side.dry > 0 && r.dry == null) return true;
+    if (side.liquid > 0 && r.liquid == null) return true;
+    if (side.finished > 0 && r.finished == null) return true;
+    if (side.other > 0 && r.other == null) return true;
+    if (!side.dry && !side.liquid && !side.finished && !side.other && cur > 0 && r.dry == null && r.liquid == null && r.finished == null) return true;
+    return false;
+  }
+  function _pDaysSince(iso) {
+    if (!iso) return null;
+    var day = String(iso).slice(0, 10);
+    var then = new Date(day + 'T00:00:00');
+    if (isNaN(then.getTime())) return null;
+    var now = new Date();
+    now.setHours(0, 0, 0, 0);
+    return Math.floor((now.getTime() - then.getTime()) / 86400000);
+  }
+  function _pRenderFinishedWaiting() {
+    var el = document.getElementById('pallet-finished-waiting');
+    if (!el) return;
+    var rows = _pFinishedWaiting || [];
+    var canEdit = _pCanEdit();
+    var h = '<div style="background:var(--navy-card,var(--navy-mid));border:1px solid var(--navy-border);border-radius:8px;padding:14px 16px;margin-bottom:16px;">'
+      + '<div style="font-size:13px;font-weight:800;color:var(--white);margin-bottom:4px;">Finished goods from jobs</div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">These appear as soon as the job results record a finished-goods pallet count. Add to storage puts them on the client from today. Dispatched means they have left and are not stored. The day count stays green until it reaches 14 days.</div>';
+    if (!rows.length) {
+      el.innerHTML = h + '<div style="font-size:12px;color:var(--muted);">None waiting.</div></div>';
+      return;
+    }
+    h += '<table class="data-table" style="width:100%;border-collapse:collapse;"><thead><tr>'
+      + '<th style="text-align:left;">Job</th><th style="text-align:left;">Client</th>'
+      + '<th style="text-align:right;">Pallets</th><th style="text-align:right;">Days since job</th>'
+      + '<th style="text-align:right;">Action</th></tr></thead><tbody>';
+    rows.forEach(function(j) {
+      var days = _pDaysSince(j.date_completed || j.results_signed_at);
+      if (days != null && days < 0) days = 0;
+      var dayText = days == null ? '—' : (days === 1 ? '1 day' : days + ' days');
+      var dayCol = days == null ? 'var(--muted)' : (days < 14 ? 'var(--green)' : 'var(--amber)');
+      var label = (window.jobLabel && window.jobLabel(j)) || j.product_name || j.id;
+      var acts = canEdit
+        ? '<button class="btn btn-outline" style="border-color:var(--green);color:var(--green);padding:5px 12px;font-size:12px;" onclick="window.addFinishedToStorage(\'' + _pEsc(j.id) + '\')">Add to storage</button>'
+          + '<button class="btn btn-outline" style="padding:5px 12px;font-size:12px;margin-left:6px;" onclick="window.markFinishedDispatched(\'' + _pEsc(j.id) + '\')">Dispatched</button>'
+        : '<span style="color:var(--muted);font-size:11px;">—</span>';
+      h += '<tr>'
+        + '<td style="text-align:left;font-weight:700;color:var(--white);">' + _pEsc(label) + '</td>'
+        + '<td style="text-align:left;color:var(--text);">' + _pEsc(_pClientName(j.client_id)) + '</td>'
+        + '<td style="text-align:right;font-weight:800;color:var(--gold);">' + (parseInt(j.finished_pallets, 10) || 0) + '</td>'
+        + '<td style="text-align:right;font-weight:800;color:' + dayCol + ';">' + dayText + '</td>'
+        + '<td style="text-align:right;white-space:nowrap;">' + acts + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+    el.innerHTML = h;
   }
   function _pToday() { return new Date().toISOString().slice(0, 10); }
   function _pMonthStart() { var d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01'; }
@@ -34659,15 +34773,31 @@ window.ccxPrintRecord = function() {
       var monthStart = _pMonthStart();
       var results = await Promise.all([
         window.db.select('pallet_balances', '?order=current_pallets.desc'),
-        window.db.select('pallet_movements', '?movement_date=gte.' + monthStart + '&select=movement_type,quantity'),
+        window.db.select('pallet_movements', '?movement_date=gte.' + monthStart + '&select=movement_type,quantity,source'),
         // Prefetch client names BEFORE rendering. The clients table's id IS the
         // client code (e.g. "CLI-007") and the display name lives in `name`, so
         // without this a cold load shows raw CLI-xxx codes in the Client column.
-        window.db.select('clients', '?select=id,name&limit=500').catch(function(){ return []; })
+        window.db.select('clients', '?select=id,name&limit=500').catch(function(){ return []; }),
+        // Checked-in pallets by side. Opening balances, manual ins/outs, job
+        // usage, and adjustments are not tagged dry vs liquid.
+        (window.fetchAll
+          ? window.fetchAll('pallet_movements', '?source=in.(dry_goods_batch,liquid_container)&select=client_id,source,quantity&order=id.asc')
+          : window.db.select('pallet_movements', '?source=in.(dry_goods_batch,liquid_container)&select=client_id,source,quantity')),
+        window.db.select('jobs', '?finished_pallets=gt.0&finished_pallets_disposition=is.null&select=id,client_id,product_name,finished_pallets,date_completed,results_signed_at&order=date_completed.asc')
+          .catch(function(){ return []; })
       ]);
       _pBalances   = results[0] || [];
       _pMonthMoves = results[1] || [];
+      _pFinishedWaiting = results[4] || [];
       (results[2] || []).forEach(function(c){ if (c && c.id) _pClientsCache[c.id] = c.name || c.id; });
+      _pSourceSplit = {};
+      (results[3] || []).forEach(function(m){
+        if (!m || !m.client_id) return;
+        var slot = _pSourceSplit[m.client_id] || (_pSourceSplit[m.client_id] = { dry: 0, liquid: 0 });
+        var q = parseInt(m.quantity, 10) || 0;
+        if (m.source === 'dry_goods_batch') slot.dry += q;
+        else if (m.source === 'liquid_container') slot.liquid += q;
+      });
       window.renderPallets();
     } catch (e) {
       if (wrap) wrap.innerHTML = '<div style="color:var(--red);padding:30px;text-align:center;">Could not load pallet data: ' + _pEsc(e.message) + '</div>';
@@ -34679,24 +34809,42 @@ window.ccxPrintRecord = function() {
     if (!el) return;
     var active = _pBalances.filter(function(b){ return b.is_active; });
     var totalPallets = active.reduce(function(s, b){ return s + (parseInt(b.current_pallets) || 0); }, 0);
-    var inThisMonth = 0, outThisMonth = 0;
+    var inThisMonth = 0, outThisMonth = 0, dryMonth = 0, liquidMonth = 0;
+    var dryStored = 0, liquidStored = 0, finishedStored = 0, otherStored = 0;
+    active.forEach(function(b){
+      var split = _pSideOf(b);
+      dryStored += split.dry;
+      liquidStored += split.liquid;
+      finishedStored += split.finished;
+      otherStored += split.other;
+    });
     _pMonthMoves.forEach(function(m){
       var q = parseInt(m.quantity) || 0;
-      if (q > 0) inThisMonth += q; else outThisMonth += -q;
+      if (q > 0) {
+        inThisMonth += q;
+        if (m.source === 'dry_goods_batch') dryMonth += q;
+        else if (m.source === 'liquid_container') liquidMonth += q;
+      } else outThisMonth += -q;
     });
-    function kpi(label, val, col) {
+    function kpi(label, val, col, sub) {
       return '<div class="kpi-card" style="background:var(--navy-card,var(--navy-mid));border:1px solid var(--navy-border);border-radius:8px;padding:14px 16px;">'
         + '<div style="font-size:22px;font-weight:800;color:' + (col || 'var(--white)') + ';">' + val + '</div>'
-        + '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-top:2px;">' + label + '</div></div>';
+        + '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-top:2px;">' + label + '</div>'
+        + (sub ? '<div style="font-size:11px;color:var(--muted);margin-top:4px;">' + sub + '</div>' : '')
+        + '</div>';
     }
-    el.innerHTML = kpi('Pallets Stored', totalPallets.toLocaleString(), 'var(--gold)')
+    var monthSplit = (dryMonth || liquidMonth) ? (dryMonth.toLocaleString() + ' dry goods · ' + liquidMonth.toLocaleString() + ' liquid') : '';
+    var storedSub = dryStored.toLocaleString() + ' dry goods · ' + liquidStored.toLocaleString() + ' liquid · ' + finishedStored.toLocaleString() + ' finished goods'
+      + (otherStored ? ' · ' + otherStored.toLocaleString() + ' unclassified' : '');
+    el.innerHTML = kpi('Pallets Stored', totalPallets.toLocaleString(), 'var(--gold)', storedSub)
       + kpi('Active Clients', active.length)
-      + kpi('Pallets In (this month)', inThisMonth.toLocaleString(), 'var(--green)')
+      + kpi('Pallets In (this month)', inThisMonth.toLocaleString(), 'var(--green)', monthSplit)
       + kpi('Pallets Out / Used (this month)', outThisMonth.toLocaleString(), 'var(--red)');
   }
 
   window.renderPallets = function() {
     _pRenderKpis();
+    _pRenderFinishedWaiting();
     var wrap = document.getElementById('pallet-table-wrap');
     if (!wrap) return;
     var q = (document.getElementById('pallet-search') || {}).value || '';
@@ -34713,11 +34861,14 @@ window.ccxPrintRecord = function() {
       return;
     }
     var canEdit = _pCanEdit();
-    var h = '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Click a client to open their movement history &amp; ledger.</div>'
+    var h = '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Dry goods, liquid, and finished goods are the pallets of each kind still stored. Unclassified pallets are opening stock or older movements not yet marked. Click a client for the ledger.</div>'
       + '<table class="data-table" style="width:100%;border-collapse:collapse;"><thead><tr>'
       + '<th style="text-align:left;">Client</th>'
       + '<th style="text-align:right;">Opening</th>'
       + '<th style="text-align:right;">In</th>'
+      + '<th style="text-align:right;" title="Pallets checked in on dry goods deliveries">Dry goods</th>'
+      + '<th style="text-align:right;" title="Pallets checked in on liquid intake">Liquid</th>'
+      + '<th style="text-align:right;" title="Finished goods added to storage from closed jobs">Finished goods</th>'
       + '<th style="text-align:right;">Out</th>'
       + '<th style="text-align:right;">Current</th>'
       + '<th style="text-align:right;">Weekly Rate</th>'
@@ -34725,9 +34876,10 @@ window.ccxPrintRecord = function() {
     rows.forEach(function(b){
       var id = _pEsc(b.client_id);
       var cur = parseInt(b.current_pallets) || 0;
-      var noRate = (b.weekly_rate == null || b.weekly_rate === '');
-      var flag = (cur > 0 && noRate)
-        ? ' <span title="No weekly rate set — this stock is not being billed" style="color:var(--amber);font-size:11px;">&#9888; no rate</span>' : '';
+      var split = _pSideOf(b);
+      var noRate = _pMissingRate(b);
+      var flag = (noRate ? ' <span title="A stored pallet has no rate for its kind" style="color:var(--amber);font-size:11px;">&#9888; no rate</span>' : '')
+        + (split.other > 0 ? ' <span title="These pallets are not marked dry goods or liquid, so they bill at the original single rate" style="color:var(--amber);font-size:11px;">&#9888; ' + split.other + ' unclassified</span>' : '');
       var acts = '';
       if (canEdit) {
         acts += '<button class="btn btn-outline" style="border-color:var(--green);color:var(--green);padding:5px 12px;font-size:12px;" onclick="event.stopPropagation();window.openPalletMovementModal(\'' + id + '\',\'pallet_in\')">+ Pallets In</button>'
@@ -34738,9 +34890,12 @@ window.ccxPrintRecord = function() {
         + '<td style="text-align:left;font-weight:600;color:var(--white);">' + _pEsc(_pClientName(b.client_id)) + (b.is_active ? '' : ' <span style="color:var(--muted);font-size:11px;">(inactive)</span>') + flag + '</td>'
         + '<td style="text-align:right;color:var(--muted);">' + (parseInt(b.opening_pallets) || 0) + '</td>'
         + '<td style="text-align:right;color:var(--green);">' + (parseInt(b.total_in) || 0) + '</td>'
+        + '<td style="text-align:right;color:var(--text);">' + split.dry + '</td>'
+        + '<td style="text-align:right;color:var(--text);">' + split.liquid + '</td>'
+        + '<td style="text-align:right;color:var(--text);">' + split.finished + '</td>'
         + '<td style="text-align:right;color:var(--red);">' + (parseInt(b.total_out) || 0) + '</td>'
         + '<td style="text-align:right;font-weight:800;color:var(--gold);">' + cur + '</td>'
-        + '<td style="text-align:right;color:var(--text);">' + (noRate ? '—' : _pMoney(b.weekly_rate)) + '</td>'
+        + '<td style="text-align:right;color:var(--text);">' + _pRateText(b) + '</td>'
         + '<td style="text-align:right;white-space:nowrap;">' + acts + '</td></tr>';
     });
     h += '</tbody></table>';
@@ -34781,34 +34936,66 @@ window.ccxPrintRecord = function() {
       }).map(function(c){ return '<option value="' + _pEsc(c.id) + '">' + _pEsc(c.company || c.name || c.id) + '</option>'; }).join('');
       clientPicker = '<select id="pa-client" style="' + _pFieldStyle() + '">' + opts + '</select>';
     }
+    var openDry = existing ? (parseInt(existing.opening_dry, 10) || 0) : 0;
+    var openLiq = existing ? (parseInt(existing.opening_liquid, 10) || 0) : 0;
+    var openFin = existing ? (parseInt(existing.opening_finished, 10) || 0) : 0;
+    var openTotal = existing ? (parseInt(existing.opening_pallets, 10) || 0) : 0;
+    var openOther = existing ? Math.max(openTotal - openDry - openLiq - openFin, 0) : 0;
+    var rates = _pRatePair(existing || {});
     var inner = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">'
       + '<div style="font-size:16px;font-weight:800;color:var(--white);">' + (existing ? 'Edit Pallet Account' : 'Add Client to Pallet Tracker') + '</div>'
       + '<button onclick="window._pCloseOverlays()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;">&times;</button></div>'
       + '<div style="display:grid;gap:14px;">'
       + '<div>' + _pLabel('Client') + clientPicker + '</div>'
-      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
-      +   '<div>' + _pLabel('Opening Pallets') + '<input type="number" id="pa-opening" min="0" step="1" value="' + (existing ? (parseInt(existing.opening_pallets) || 0) : 0) + '" style="' + _pFieldStyle() + '"></div>'
-      +   '<div>' + _pLabel('Opening Date') + '<input type="date" id="pa-opening-date" value="' + (existing ? existing.opening_date : '2026-08-01') + '" style="' + _pFieldStyle() + '"></div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;">'
+      +   '<div>' + _pLabel('Opening Dry Goods') + '<input type="number" id="pa-open-dry" min="0" step="1" value="' + openDry + '" style="' + _pFieldStyle() + '"></div>'
+      +   '<div>' + _pLabel('Opening Liquid') + '<input type="number" id="pa-open-liquid" min="0" step="1" value="' + openLiq + '" style="' + _pFieldStyle() + '"></div>'
+      +   '<div>' + _pLabel('Opening Finished Goods') + '<input type="number" id="pa-open-finished" min="0" step="1" value="' + openFin + '" style="' + _pFieldStyle() + '"></div>'
+      +   '<div>' + _pLabel('Opening Unclassified') + '<input type="number" id="pa-open-other" min="0" step="1" value="' + openOther + '" style="' + _pFieldStyle() + '"></div>'
       + '</div>'
-      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'
-      +   '<div>' + _pLabel('Weekly Rate (€ / pallet / week)') + '<input type="number" id="pa-rate" min="0" step="0.01" value="' + (existing && existing.weekly_rate != null ? existing.weekly_rate : '') + '" placeholder="e.g. 2.50" style="' + _pFieldStyle() + '"></div>'
-      +   '<div>' + _pLabel('Active') + '<select id="pa-active" style="' + _pFieldStyle() + '"><option value="true"' + (!existing || existing.is_active ? ' selected' : '') + '>Active</option><option value="false"' + (existing && !existing.is_active ? ' selected' : '') + '>Inactive</option></select></div>'
+      + '<div>' + _pLabel('Opening Date') + '<input type="date" id="pa-opening-date" value="' + (existing ? existing.opening_date : '2026-08-01') + '" style="' + _pFieldStyle() + '"></div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">'
+      +   '<div>' + _pLabel('Dry Goods Rate (€ / pallet / week)') + '<input type="number" id="pa-dry-rate" min="0" step="0.01" value="' + (rates.dry != null ? rates.dry : '') + '" placeholder="e.g. 2.50" style="' + _pFieldStyle() + '"></div>'
+      +   '<div>' + _pLabel('Liquid Rate (€ / pallet / week)') + '<input type="number" id="pa-liquid-rate" min="0" step="0.01" value="' + (rates.liquid != null ? rates.liquid : '') + '" placeholder="e.g. 4.00" style="' + _pFieldStyle() + '"></div>'
+      +   '<div>' + _pLabel('Finished Goods Rate (€ / pallet / week)') + '<input type="number" id="pa-finished-rate" min="0" step="0.01" value="' + (rates.finished != null ? rates.finished : '') + '" placeholder="e.g. 3.00" style="' + _pFieldStyle() + '"></div>'
       + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);">Leave a rate blank to use the shared rate. Unclassified pallets keep the original single rate when the rates differ.</div>'
+      + '<div>' + _pLabel('Active') + '<select id="pa-active" style="' + _pFieldStyle() + '"><option value="true"' + (!existing || existing.is_active ? ' selected' : '') + '>Active</option><option value="false"' + (existing && !existing.is_active ? ' selected' : '') + '>Inactive</option></select></div>'
       + '</div>'
       + '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">'
       + '<button class="btn btn-outline" onclick="window._pCloseOverlays()">Cancel</button>'
       + '<button class="btn btn-gold" onclick="window.savePalletAccount(\'' + _pEsc(existing ? clientId : '') + '\')">Save</button></div>';
-    _pOverlay(inner, 560);
+    _pOverlay(inner, 820);
   };
 
   window.savePalletAccount = async function(existingId) {
     var gv = function(id){ var e = document.getElementById(id); return e ? e.value : ''; };
     var clientId = existingId || gv('pa-client');
     if (!clientId) { window.lpAlert && window.lpAlert('Please select a client.'); return; }
+    var openDry = parseInt(gv('pa-open-dry'), 10) || 0;
+    var openLiq = parseInt(gv('pa-open-liquid'), 10) || 0;
+    var openFin = parseInt(gv('pa-open-finished'), 10) || 0;
+    var openOther = parseInt(gv('pa-open-other'), 10) || 0;
+    var dryRate = gv('pa-dry-rate') !== '' ? parseFloat(gv('pa-dry-rate')) : null;
+    var liqRate = gv('pa-liquid-rate') !== '' ? parseFloat(gv('pa-liquid-rate')) : null;
+    var finRate = gv('pa-finished-rate') !== '' ? parseFloat(gv('pa-finished-rate')) : null;
+    var prior = existingId ? _pBalances.find(function(b){ return b.client_id === existingId; }) : null;
+    var sharedRate = null;
+    var setRates = [dryRate, liqRate, finRate].filter(function(n){ return n != null; });
+    if (!setRates.length) sharedRate = null;
+    else if (setRates.every(function(n){ return n === setRates[0]; })) sharedRate = setRates[0];
+    else if (prior && prior.weekly_rate != null && prior.weekly_rate !== '') sharedRate = Number(prior.weekly_rate);
+    else sharedRate = setRates[0];
     var payload = {
-      opening_pallets: parseInt(gv('pa-opening')) || 0,
+      opening_dry:     openDry,
+      opening_liquid:  openLiq,
+      opening_finished: openFin,
+      opening_pallets: openDry + openLiq + openFin + openOther,
       opening_date:    gv('pa-opening-date') || '2026-08-01',
-      weekly_rate:     gv('pa-rate') !== '' ? parseFloat(gv('pa-rate')) : null,
+      dry_weekly_rate: dryRate,
+      liquid_weekly_rate: liqRate,
+      finished_weekly_rate: finRate,
+      weekly_rate:     sharedRate,
       is_active:       gv('pa-active') === 'true',
       updated_at:      new Date().toISOString()
     };
@@ -34840,6 +35027,12 @@ window.ccxPrintRecord = function() {
     moves.forEach(function(m){ run += (parseInt(m.quantity) || 0); m._running = run; });
     var canEdit = _pCanEdit();
     var cur = parseInt(bal.current_pallets) || 0;
+    var dryIn = 0, liquidIn = 0;
+    moves.forEach(function(m){
+      var qIn = parseInt(m.quantity, 10) || 0;
+      if (m.source === 'dry_goods_batch') dryIn += qIn;
+      else if (m.source === 'liquid_container') liquidIn += qIn;
+    });
 
     var ledger = moves.slice().reverse().map(function(m){
       var meta = MT[m.movement_type] || { label: m.movement_type, col: 'var(--muted)' };
@@ -34853,7 +35046,7 @@ window.ccxPrintRecord = function() {
         + '<td style="padding:6px 8px;"><span style="color:' + meta.col + ';font-weight:600;font-size:12px;">' + meta.label + '</span></td>'
         + '<td style="padding:6px 8px;text-align:right;font-weight:700;color:' + (q >= 0 ? 'var(--green)' : 'var(--red)') + ';">' + (q >= 0 ? '+' : '') + q + '</td>'
         + '<td style="padding:6px 8px;text-align:right;font-weight:700;color:var(--white);">' + m._running + '</td>'
-        + '<td style="padding:6px 8px;color:var(--muted);font-size:11px;">' + _pEsc(SRC[m.source] || m.source) + (m.reference ? ' · ' + _pEsc(m.reference) : '') + (m.notes ? '<br>' + _pEsc(m.notes) : '') + '</td>'
+        + '<td style="padding:6px 8px;color:var(--muted);font-size:11px;">' + _pEsc(SRC[m.source] || m.source) + (m.pallet_kind === 'dry' ? ' · Dry goods' : m.pallet_kind === 'liquid' ? ' · Liquid' : m.pallet_kind === 'finished' ? ' · Finished goods' : '') + (m.reference ? ' · ' + _pEsc(m.reference) : '') + (m.notes ? '<br>' + _pEsc(m.notes) : '') + '</td>'
         + '<td style="padding:6px 8px;text-align:center;">' + del + '</td></tr>';
     }).join('');
 
@@ -34872,8 +35065,10 @@ window.ccxPrintRecord = function() {
       + '<button onclick="window._pCloseOverlays()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;">&times;</button></div>'
       + '<div style="display:flex;gap:24px;margin:12px 0;flex-wrap:wrap;">'
       +   '<div><div style="font-size:28px;font-weight:800;color:var(--gold);">' + cur + '</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Current Pallets</div></div>'
-      +   '<div><div style="font-size:28px;font-weight:800;color:var(--white);">' + (parseInt(bal.opening_pallets) || 0) + '</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Opening (' + _pEsc(bal.opening_date || '—') + ')</div></div>'
-      +   '<div><div style="font-size:28px;font-weight:800;color:var(--white);">' + (bal.weekly_rate != null ? _pMoney(bal.weekly_rate) : '—') + '</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Weekly Rate</div></div>'
+      +   '<div><div style="font-size:28px;font-weight:800;color:var(--white);">' + ((bal.current_dry != null || bal.current_liquid != null) ? (parseInt(bal.current_dry, 10) || 0) : dryIn) + '</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Dry Goods</div></div>'
+      +   '<div><div style="font-size:28px;font-weight:800;color:var(--white);">' + ((bal.current_dry != null || bal.current_liquid != null) ? (parseInt(bal.current_liquid, 10) || 0) : liquidIn) + '</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Liquid</div></div>'
+      +   '<div><div style="font-size:28px;font-weight:800;color:var(--white);">' + (parseInt(bal.current_finished, 10) || 0) + '</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Finished Goods</div></div>'
+      +   '<div><div style="font-size:16px;font-weight:800;color:var(--white);padding-top:10px;">' + _pRateText(bal) + '</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;">Weekly Rates</div></div>'
       + '</div>'
       + actionsBar
       + '<div style="max-height:46vh;overflow-y:auto;border-top:1px solid var(--navy-border);margin-top:6px;">'
@@ -34891,20 +35086,36 @@ window.ccxPrintRecord = function() {
   };
 
   // ── Movement modal (manual in / out / adjustment) ──────────────
+  function _pKindBal(bal, kind) {
+    if (!bal) return 0;
+    if (bal.current_dry == null && bal.current_liquid == null && bal.current_finished == null) return parseInt(bal.current_pallets, 10) || 0;
+    if (kind === 'liquid') return parseInt(bal.current_liquid, 10) || 0;
+    if (kind === 'finished') return parseInt(bal.current_finished, 10) || 0;
+    return parseInt(bal.current_dry, 10) || 0;
+  }
+  window._pSyncMoveSide = function() {
+    var kindEl = document.getElementById('pm-kind');
+    var hint = document.getElementById('pm-side-hint');
+    var qty = document.getElementById('pm-qty');
+    var ctx = window._pMoveCtx || {};
+    var kind = kindEl ? kindEl.value : 'dry';
+    var n = _pKindBal(ctx.bal, kind);
+    if (hint) hint.innerHTML = 'Recorded ' + (kind === 'liquid' ? 'liquid' : kind === 'finished' ? 'finished goods' : 'dry goods') + ' balance: <strong style="color:var(--white);">' + n + '</strong>';
+    if (qty && ctx.type === 'adjustment') qty.value = n;
+  };
   window.openPalletMovementModal = function(clientId, type) {
     if (!_pCanEdit()) return;
     var bal = _pBalances.find(function(b){ return b.client_id === clientId; }) || { current_pallets: 0 };
-    var cur = parseInt(bal.current_pallets) || 0;
+    window._pMoveCtx = { bal: bal, type: type };
     var title = type === 'pallet_in' ? 'Record Pallets In'
               : type === 'pallet_out' ? 'Record Pallets Out'
               : 'Adjust / Stocktake';
-    var body;
-    if (type === 'adjustment') {
-      body = '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Current recorded balance: <strong style="color:var(--white);">' + cur + '</strong> pallets. Enter the true count from your stocktake — the correcting adjustment is calculated automatically.</div>'
-        + _pLabel('Corrected Pallet Count') + '<input type="number" id="pm-qty" min="0" step="1" value="' + cur + '" style="' + _pFieldStyle() + '">';
-    } else {
-      body = _pLabel('Number of Pallets') + '<input type="number" id="pm-qty" min="1" step="1" value="1" style="' + _pFieldStyle() + '">';
-    }
+    var kindSel = _pLabel('Pallet Kind')
+      + '<select id="pm-kind" onchange="window._pSyncMoveSide()" style="' + _pFieldStyle() + '"><option value="dry">Dry goods</option><option value="liquid">Liquid</option><option value="finished">Finished goods</option></select>'
+      + '<div id="pm-side-hint" style="font-size:12px;color:var(--muted);margin-top:8px;"></div>';
+    var body = type === 'adjustment'
+      ? (kindSel + '<div style="margin-top:12px;">' + _pLabel('Corrected Pallet Count') + '<input type="number" id="pm-qty" min="0" step="1" value="0" style="' + _pFieldStyle() + '"></div>')
+      : (kindSel + '<div style="margin-top:12px;">' + _pLabel('Number of Pallets') + '<input type="number" id="pm-qty" min="1" step="1" value="1" style="' + _pFieldStyle() + '"></div>');
     var inner = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">'
       + '<div style="font-size:16px;font-weight:800;color:var(--white);">' + title + '</div>'
       + '<button onclick="window._pCloseOverlays()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;">&times;</button></div>'
@@ -34917,24 +35128,30 @@ window.ccxPrintRecord = function() {
       + '</div>'
       + '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">'
       + '<button class="btn btn-outline" onclick="window._pCloseOverlays()">Cancel</button>'
-      + '<button class="btn btn-gold" onclick="window.savePalletMovement(\'' + _pEsc(clientId) + '\',\'' + type + '\',' + cur + ')">Save</button></div>';
+      + '<button class="btn btn-gold" onclick="window.savePalletMovement(\'' + _pEsc(clientId) + '\',\'' + type + '\')">Save</button></div>';
     _pOverlay(inner, 480);
+    window._pSyncMoveSide();
   };
 
-  window.savePalletMovement = async function(clientId, type, curBal) {
+  window.savePalletMovement = async function(clientId, type) {
     var gv = function(id){ var e = document.getElementById(id); return e ? e.value : ''; };
+    var kindRaw = gv('pm-kind');
+    var kind = kindRaw === 'liquid' ? 'liquid' : kindRaw === 'finished' ? 'finished' : 'dry';
+    var bal = _pBalances.find(function(b){ return b.client_id === clientId; }) || {};
+    var curBal = _pKindBal(bal, kind);
     var raw = parseInt(gv('pm-qty'));
     if (isNaN(raw)) { window.lpAlert && window.lpAlert('Enter a number.'); return; }
     var qty, note = gv('pm-notes') || null;
+    var kindWord = kind === 'liquid' ? 'liquid' : kind === 'finished' ? 'finished goods' : 'dry goods';
     if (type === 'adjustment') {
       qty = raw - (parseInt(curBal) || 0);
-      if (qty === 0) { window.lpAlert && window.lpAlert('That matches the current balance — no adjustment needed.'); return; }
-      if (!note) note = 'Stocktake: corrected to ' + raw;
+      if (qty === 0) { window.lpAlert && window.lpAlert('That matches the current ' + kindWord + ' balance — no adjustment needed.'); return; }
+      if (!note) note = 'Stocktake: ' + kindWord + ' corrected to ' + raw;
     } else if (type === 'pallet_out') {
       if (raw <= 0) { window.lpAlert && window.lpAlert('Enter at least 1 pallet.'); return; }
       qty = -raw;
       if (raw > (parseInt(curBal) || 0)) {
-        var ok = await (window.lpConfirm ? window.lpConfirm('This client only has ' + curBal + ' pallets recorded. Record ' + raw + ' out anyway?', { title: 'More than on record', confirmLabel: 'Record anyway' }) : Promise.resolve(true));
+        var ok = await (window.lpConfirm ? window.lpConfirm('This client only has ' + curBal + ' ' + kindWord + ' pallets recorded. Record ' + raw + ' out anyway?', { title: 'More than on record', confirmLabel: 'Record anyway' }) : Promise.resolve(true));
         if (!ok) return;
       }
     } else {
@@ -34950,6 +35167,7 @@ window.ccxPrintRecord = function() {
         reference:     gv('pm-ref') || null,
         notes:         note,
         source:        'manual',
+        pallet_kind:   kind,
         performed_by:  _pUser()
       });
       window.toast && window.toast('Movement recorded.', 'success');
@@ -34958,6 +35176,75 @@ window.ccxPrintRecord = function() {
       window.openPalletDetail(clientId);
     } catch (e) {
       window.toast && window.toast('Failed: ' + e.message, 'error');
+    }
+  };
+
+  window.addFinishedToStorage = async function(jobId) {
+    if (!_pCanEdit()) return;
+    var job = (_pFinishedWaiting || []).find(function(j){ return j.id === jobId; });
+    if (!job) { window.toast && window.toast('That job is no longer waiting.', 'error'); return; }
+    var qty = parseInt(job.finished_pallets, 10) || 0;
+    if (qty < 1) { window.lpAlert && window.lpAlert('This job has no finished-goods pallets to store.'); return; }
+    if (!job.client_id) { window.lpAlert && window.lpAlert('This job has no client, so it cannot be added to storage.'); return; }
+    var ok = await (window.lpConfirm ? window.lpConfirm('Add ' + qty + ' finished goods pallet' + (qty === 1 ? '' : 's') + ' to ' + _pClientName(job.client_id) + ' from today?', { title: 'Add to storage', confirmLabel: 'Add to storage' }) : Promise.resolve(true));
+    if (!ok) return;
+    try {
+      var found = await window.db.select('pallet_accounts', '?client_id=eq.' + encodeURIComponent(job.client_id) + '&select=client_id');
+      if (!found || !found.length) {
+        await window.db.insert('pallet_accounts', {
+          client_id: job.client_id,
+          opening_pallets: 0,
+          opening_date: _pToday(),
+          is_active: true
+        });
+      }
+      try {
+        await window.db.insert('pallet_movements', {
+          client_id:     job.client_id,
+          movement_type: 'pallet_in',
+          quantity:      qty,
+          movement_date: _pToday(),
+          reference:     'Job ' + job.id,
+          notes:         'Finished goods from ' + job.id,
+          source:        'job',
+          source_id:     job.id + ':finished',
+          pallet_kind:   'finished',
+          job_id:        job.id,
+          performed_by:  _pUser()
+        });
+      } catch (insErr) {
+        var insMsg = String((insErr && insErr.message) || insErr || '');
+        if (insMsg.indexOf('duplicate') < 0 && insMsg.indexOf('23505') < 0 && insMsg.indexOf('uq_pallet_movements_source') < 0) throw insErr;
+      }
+      await window.db.update('jobs', '?id=eq.' + encodeURIComponent(job.id), {
+        finished_pallets_disposition: 'stored',
+        finished_pallets_decided_at: new Date().toISOString(),
+        finished_pallets_decided_by: _pUser()
+      });
+      window.toast && window.toast(qty + ' finished goods pallet' + (qty === 1 ? '' : 's') + ' added to storage.', 'success');
+      await window.loadPallets();
+    } catch (e) {
+      window.toast && window.toast('Could not add to storage: ' + e.message, 'error');
+    }
+  };
+
+  window.markFinishedDispatched = async function(jobId) {
+    if (!_pCanEdit()) return;
+    var job = (_pFinishedWaiting || []).find(function(j){ return j.id === jobId; });
+    if (!job) { window.toast && window.toast('That job is no longer waiting.', 'error'); return; }
+    var qty = parseInt(job.finished_pallets, 10) || 0;
+    var ok = await (window.lpConfirm ? window.lpConfirm('Mark ' + qty + ' finished goods pallet' + (qty === 1 ? '' : 's') + ' from ' + job.id + ' as dispatched? They will not be added to storage.', { title: 'Dispatched', confirmLabel: 'Dispatched' }) : Promise.resolve(true));
+    if (!ok) return;
+    try {
+      await window.db.update('jobs', '?id=eq.' + encodeURIComponent(job.id), {
+        finished_pallets_disposition: 'dispatched',
+        finished_pallets_decided_at: new Date().toISOString(),
+        finished_pallets_decided_by: _pUser()
+      });
+      window.toast && window.toast('Marked dispatched. Nothing was added to storage.', 'success');
+      await window.loadPallets();
+    } catch (e) {
+      window.toast && window.toast('Could not mark dispatched: ' + e.message, 'error');
     }
   };
 
@@ -35004,6 +35291,22 @@ window.ccxPrintRecord = function() {
     }
   };
 
+  function _pWeekLine(w) {
+    var week = 'Week ' + _pIsoWeek(w.date);
+    if (w.dry == null && w.liquid == null && w.finished == null) return week + ': ' + w.pallets;
+    var bits = [w.dry + ' dry', w.liquid + ' liquid'];
+    if (w.finished) bits.push(w.finished + ' finished');
+    if (w.other) bits.push(w.other + ' unclassified');
+    return week + ': ' + bits.join(' · ');
+  }
+  function _pBillMissing(r) {
+    if (r.dry_pallet_weeks == null && r.liquid_pallet_weeks == null) return r.weekly_rate == null;
+    if ((parseInt(r.dry_pallet_weeks, 10) || 0) > 0 && r.dry_weekly_rate == null) return true;
+    if ((parseInt(r.liquid_pallet_weeks, 10) || 0) > 0 && r.liquid_weekly_rate == null) return true;
+    if ((parseInt(r.finished_pallet_weeks, 10) || 0) > 0 && r.finished_weekly_rate == null) return true;
+    if ((parseInt(r.other_pallet_weeks, 10) || 0) > 0 && r.weekly_rate == null) return true;
+    return false;
+  }
   function _pRenderBilling(invoiced, periodStart) {
     var wrap = document.getElementById('pallet-billing-wrap');
     if (!_pBilling.length) {
@@ -35011,22 +35314,26 @@ window.ccxPrintRecord = function() {
       return;
     }
     var canEdit = _pCanEdit();
+    var split = _pBilling.some(function(r){ return r.dry_pallet_weeks != null || r.liquid_pallet_weeks != null; });
     _pBilling.sort(function(a, b){ return _pClientName(a.client_id).localeCompare(_pClientName(b.client_id)); });
     var total = 0;
     var h = '<table class="data-table" style="width:100%;border-collapse:collapse;"><thead><tr>'
       + '<th style="text-align:left;">Client</th>'
       + '<th style="text-align:right;">Weeks</th>'
-      + '<th style="text-align:right;">Pallet-Weeks</th>'
-      + '<th style="text-align:right;">Weekly Rate</th>'
+      + (split
+          ? '<th style="text-align:right;">Dry Pallet-Weeks</th><th style="text-align:right;">Dry Rate</th><th style="text-align:right;">Liquid Pallet-Weeks</th><th style="text-align:right;">Liquid Rate</th><th style="text-align:right;">Finished Pallet-Weeks</th><th style="text-align:right;">Finished Rate</th>'
+          : '<th style="text-align:right;">Pallet-Weeks</th><th style="text-align:right;">Weekly Rate</th>')
       + '<th style="text-align:right;">Amount (ex VAT)</th>'
       + '<th style="text-align:left;">Weekly Breakdown</th>'
       + '<th style="text-align:center;">Status</th></tr></thead><tbody>';
     _pBilling.forEach(function(r){
-      var noRate = (r.weekly_rate == null);
+      var noRate = _pBillMissing(r);
       var amt = parseFloat(r.amount) || 0;
       if (!noRate) total += amt;
       var inv = invoiced[r.client_id];
-      var bd = (r.week_breakdown || []).map(function(w){ return 'Week ' + _pIsoWeek(w.date) + ': ' + w.pallets; }).join('  ·  ');
+      var bd = (r.week_breakdown || []).map(_pWeekLine).join('  ·  ');
+      var otherNote = (parseInt(r.other_pallet_weeks, 10) || 0) > 0
+        ? ' <span title="Unclassified pallet-weeks bill at the original single rate" style="color:var(--amber);font-size:11px;">&#9888; ' + r.other_pallet_weeks + ' unclassified weeks</span>' : '';
       var statusCell = inv
         ? '<span style="color:var(--green);font-weight:700;font-size:12px;">&#10003; Invoiced</span>'
         : (canEdit
@@ -35034,15 +35341,23 @@ window.ccxPrintRecord = function() {
             : '<span style="color:var(--muted);font-size:11px;">—</span>');
       h += '<tr style="border-bottom:1px solid var(--navy-border);">'
         + '<td style="text-align:left;font-weight:600;color:var(--white);">' + _pEsc(_pClientName(r.client_id))
-        +   (noRate ? ' <span title="No weekly rate set" style="color:var(--amber);font-size:11px;">&#9888; no rate</span>' : '') + '</td>'
+        +   (noRate ? ' <span title="A pallet kind in this month has no rate" style="color:var(--amber);font-size:11px;">&#9888; no rate</span>' : '') + otherNote + '</td>'
         + '<td style="text-align:right;color:var(--muted);">' + r.weeks_count + '</td>'
-        + '<td style="text-align:right;color:var(--white);font-weight:700;">' + r.pallet_weeks + '</td>'
-        + '<td style="text-align:right;color:var(--text);">' + (noRate ? '—' : _pMoney(r.weekly_rate)) + '</td>'
+        + (split
+            ? '<td style="text-align:right;color:var(--white);font-weight:700;">' + (r.dry_pallet_weeks || 0) + '</td>'
+              + '<td style="text-align:right;color:var(--text);">' + (r.dry_weekly_rate == null ? '—' : _pMoney(r.dry_weekly_rate)) + '</td>'
+              + '<td style="text-align:right;color:var(--white);font-weight:700;">' + (r.liquid_pallet_weeks || 0) + '</td>'
+              + '<td style="text-align:right;color:var(--text);">' + (r.liquid_weekly_rate == null ? '—' : _pMoney(r.liquid_weekly_rate)) + '</td>'
+              + '<td style="text-align:right;color:var(--white);font-weight:700;">' + (r.finished_pallet_weeks || 0) + '</td>'
+              + '<td style="text-align:right;color:var(--text);">' + (r.finished_weekly_rate == null ? '—' : _pMoney(r.finished_weekly_rate)) + '</td>'
+            : '<td style="text-align:right;color:var(--white);font-weight:700;">' + r.pallet_weeks + '</td>'
+              + '<td style="text-align:right;color:var(--text);">' + (r.weekly_rate == null ? '—' : _pMoney(r.weekly_rate)) + '</td>')
         + '<td style="text-align:right;font-weight:800;color:var(--gold);">' + (noRate ? '—' : _pMoney(amt)) + '</td>'
         + '<td style="text-align:left;color:var(--muted);font-size:11px;">' + bd + '</td>'
         + '<td style="text-align:center;">' + statusCell + '</td></tr>';
     });
-    h += '</tbody><tfoot><tr><td colspan="4" style="text-align:right;font-weight:700;color:var(--muted);padding-top:10px;">Total (rated clients)</td>'
+    var leadCols = split ? 8 : 4;
+    h += '</tbody><tfoot><tr><td colspan="' + leadCols + '" style="text-align:right;font-weight:700;color:var(--muted);padding-top:10px;">Total (rated clients)</td>'
       + '<td style="text-align:right;font-weight:800;color:var(--gold);padding-top:10px;">' + _pMoney(total) + '</td><td colspan="2"></td></tr></tfoot></table>';
     wrap.innerHTML = h;
   }
@@ -35057,9 +35372,20 @@ window.ccxPrintRecord = function() {
       period_end:     _pPeriodEnd(_pBillingPeriod),
       weeks_count:    r.weeks_count,
       pallet_weeks:   r.pallet_weeks,
+      dry_pallet_weeks:    r.dry_pallet_weeks,
+      liquid_pallet_weeks: r.liquid_pallet_weeks,
+      finished_pallet_weeks: r.finished_pallet_weeks,
+      other_pallet_weeks:  r.other_pallet_weeks,
       week_breakdown: r.week_breakdown,
       weekly_rate:    r.weekly_rate,
+      dry_weekly_rate:    r.dry_weekly_rate,
+      liquid_weekly_rate: r.liquid_weekly_rate,
+      finished_weekly_rate: r.finished_weekly_rate,
       amount:         r.amount,
+      dry_amount:     r.dry_amount,
+      liquid_amount:  r.liquid_amount,
+      finished_amount: r.finished_amount,
+      other_amount:   r.other_amount,
       status:         'invoiced',
       invoiced_at:    new Date().toISOString(),
       invoiced_by:    _pUser(),
@@ -35079,10 +35405,22 @@ window.ccxPrintRecord = function() {
 
   window.exportPalletBillingCSV = function() {
     if (!_pBilling.length) { window.lpAlert && window.lpAlert('Calculate a month first.'); return; }
-    var rows = [['Client', 'Client ID', 'Weeks', 'Pallet-Weeks', 'Weekly Rate', 'Amount']];
+    var split = _pBilling.some(function(r){ return r.dry_pallet_weeks != null || r.liquid_pallet_weeks != null; });
+    var rows = split
+      ? [['Client', 'Client ID', 'Weeks', 'Dry Pallet-Weeks', 'Dry Rate', 'Liquid Pallet-Weeks', 'Liquid Rate', 'Finished Pallet-Weeks', 'Finished Rate', 'Unclassified Pallet-Weeks', 'Unclassified Rate', 'Amount']]
+      : [['Client', 'Client ID', 'Weeks', 'Pallet-Weeks', 'Weekly Rate', 'Amount']];
     _pBilling.forEach(function(r){
-      rows.push([_pClientName(r.client_id), r.client_id, r.weeks_count, r.pallet_weeks,
-        (r.weekly_rate == null ? '' : r.weekly_rate), (r.amount == null ? '' : r.amount)]);
+      if (split) {
+        rows.push([_pClientName(r.client_id), r.client_id, r.weeks_count,
+          r.dry_pallet_weeks, (r.dry_weekly_rate == null ? '' : r.dry_weekly_rate),
+          r.liquid_pallet_weeks, (r.liquid_weekly_rate == null ? '' : r.liquid_weekly_rate),
+          r.finished_pallet_weeks, (r.finished_weekly_rate == null ? '' : r.finished_weekly_rate),
+          r.other_pallet_weeks, (r.weekly_rate == null ? '' : r.weekly_rate),
+          (r.amount == null ? '' : r.amount)]);
+      } else {
+        rows.push([_pClientName(r.client_id), r.client_id, r.weeks_count, r.pallet_weeks,
+          (r.weekly_rate == null ? '' : r.weekly_rate), (r.amount == null ? '' : r.amount)]);
+      }
     });
     var csv = rows.map(function(row){
       return row.map(function(v){ var s = String(v == null ? '' : v); return '"' + s.replace(/"/g, '""') + '"'; }).join(',');
@@ -39979,6 +40317,20 @@ window.handleCMTypeChange = function() {
       clientEl.disabled = false; clientEl.style.opacity = '1';
     }
   }
+  var lpaEl = document.getElementById('cm-lpa');
+  var lpaHint = document.getElementById('cm-lpa-hint');
+  if (lpaEl) {
+    if (type === 'cask') {
+      lpaEl.readOnly = false;
+      lpaEl.style.opacity = '1';
+      if (lpaHint) lpaHint.textContent = 'Casks keep the LPA booked at fill. Angel’s share is not rewritten from the ABV box.';
+    } else {
+      lpaEl.readOnly = true;
+      lpaEl.style.opacity = '0.75';
+      if (lpaHint) lpaHint.textContent = 'Always litres × ABV. This is filled in for you and cannot be typed separately.';
+      if (window.calcContainerLPA) window.calcContainerLPA();
+    }
+  }
   if (window._cmUpdateOwnership) window._cmUpdateOwnership();
   window.calcCMAngelShare();
 };
@@ -40261,7 +40613,16 @@ window.openLiqView = async function(id) {
   }
 };
 
-window.calcContainerLPA = function() {
+window.calcContainerLPA = function(force) {
+  var typeEl = document.getElementById('cm-type');
+  var isCask = typeEl && typeEl.value === 'cask';
+  // Cask LPA is the at-fill balance and is only refreshed when litres change.
+  // Changing the nominal ABV must not rewrite it. Every other vessel is
+  // litres × ABV, with no separate figure to get out of step.
+  if (isCask && !force) {
+    window.calcContainerLPAValue();
+    return;
+  }
   var l = parseFloat((document.getElementById('cm-litres')||{}).value||0);
   var a = parseFloat((document.getElementById('cm-abv')   ||{}).value||0);
   var lpa = l * a / 100;
@@ -40398,20 +40759,17 @@ window.saveContainer = async function() {
       return;
     }
   }
-  // Non-cask LPA consistency guard: for tanks/IBCs/etc. the stored LPA should track
-  // litres × ABV. Casks are exempt — their stored LPA is the at-fill value by design
-  // (angel-share evaporation is handled for display, not by rewriting stock LPA).
+  // Non-cask LPA is not an input. IBCs, tanks, and drums always store
+  // litres × ABV, so a strength change cannot leave the old LPA behind.
+  // Casks are exempt — their stored LPA is the at-fill value by design.
   var _cmAbv = gv('cm-abv') !== '' ? parseFloat(gv('cm-abv')) : null;
-  if (cmType !== 'cask' && cmLitres > 0 && _cmAbv != null && _cmAbv > 0 && _cmLpaIn != null) {
-    var _expLpa = cmLitres * _cmAbv / 100;
-    var _lpaTol = Math.max(0.5, _expLpa * 0.02); // allow 2% or 0.5 LPA, whichever is larger
-    if (Math.abs(_cmLpaIn - _expLpa) > _lpaTol) {
-      var _proceed = await window.lpConfirm(
-        'The LPA you entered (' + _cmLpaIn.toFixed(2) + ') does not match litres × ABV ('
-          + cmLitres.toFixed(1) + 'L × ' + _cmAbv.toFixed(2) + '% = ' + _expLpa.toFixed(2) + ' LPA). Save anyway?',
-        { title: 'Check LPA', confirmLabel: 'Save anyway', cancelLabel: 'Go back' });
-      if (!_proceed) return;
-    }
+  if (cmType !== 'cask') {
+    var _forcedLpa = (cmLitres > 0 && _cmAbv != null && _cmAbv > 0)
+      ? Math.round(cmLitres * _cmAbv) / 100
+      : 0;
+    var _lpaEl = document.getElementById('cm-lpa');
+    if (_lpaEl) _lpaEl.value = _forcedLpa.toFixed(2);
+    _cmLpaIn = _forcedLpa;
   }
   // Soft register check: warn (don't block) when the chosen spirit/product isn't
   // an active liquid-product register entry — keeps legacy rows editable while
@@ -45882,8 +46240,34 @@ window.saveAdjModal = async function() {
     if (_savedJobStage && _JOB_STAGE_TABS.indexOf(_savedJobStage) >= 0) _jobStageFilter = _savedJobStage;
   } catch(_){}
   var _staffMap = {}; // uuid -> display_name
-  var _bomDone    = {}; // job_id -> true if client approved BOM
-  var _bomFlagged = {}; // job_id -> true if client flagged a concern
+  var _bomDone    = {}; // job_id -> true if the latest client confirmation is approved
+  var _bomFlagged = {}; // job_id -> true if the latest client confirmation is flagged
+  var _bomAwaiting = {}; // job_id -> true if a confirmation was sent and is still open
+  // A later confirmation email supersedes an earlier client decision. The jobs
+  // list must follow the latest row, otherwise a previous approval stays green
+  // after the BOM is sent back for re-approval.
+  window._bomSignoffState = function(rec) {
+    if (!rec) return 'none';
+    var sent = rec.client_email_sent_at ? Date.parse(rec.client_email_sent_at) : NaN;
+    var decided = rec.client_decided_at ? Date.parse(rec.client_decided_at) : NaN;
+    var superseded = !!(rec.client_decision && !isNaN(sent) && !isNaN(decided) && sent > decided);
+    if (!rec.client_decision || superseded) return rec.client_email_sent_at ? 'sent' : 'draft';
+    if (rec.client_decision === 'approved') return 'approved';
+    if (rec.client_decision === 'flagged') return 'flagged';
+    return rec.client_email_sent_at ? 'sent' : 'draft';
+  };
+  window._bomSignoffMaps = function(rows) {
+    var done = {}, flagged = {}, awaiting = {}, seen = {};
+    (rows || []).forEach(function(r) {
+      if (!r || !r.job_id || seen[r.job_id]) return;
+      seen[r.job_id] = true;
+      var st = window._bomSignoffState(r);
+      if (st === 'approved') done[r.job_id] = true;
+      else if (st === 'flagged') flagged[r.job_id] = true;
+      else if (st === 'sent') awaiting[r.job_id] = true;
+    });
+    return { done: done, flagged: flagged, awaiting: awaiting };
+  };
   var _loadJobsInFlight = false; // prevents concurrent loadJobs() race
   var _scDone  = {}; // job_id -> true if supply-chain signed off
   var _scSkuReady = {}; // job_id -> true if every non-excluded SC SKU is on-site or ordered
@@ -45956,8 +46340,35 @@ window.saveAdjModal = async function() {
     return v;
   }
 
+  // While a reorder is being saved, ignore queue polls and full reloads that
+  // still carry the previous positions (those were snapping moves back).
+  var _queueHoldUntil = 0;
+  var _queueHoldPositions = null;
+  var _queueMoveBusy = false;
+  function _queueHoldActive() {
+    return !!(_queueHoldPositions && Date.now() < _queueHoldUntil);
+  }
+  function _stampQueueHold(list, weekKey) {
+    var map = {};
+    for (var i = 0; i < list.length; i++) {
+      map[list[i].id] = { week_queue_pos: i + 1, week_queue_key: weekKey };
+    }
+    _queueHoldPositions = map;
+    _queueHoldUntil = Date.now() + 8000;
+  }
+  function _applyHeldQueue(jobs) {
+    if (!_queueHoldActive() || !jobs) return;
+    for (var i = 0; i < jobs.length; i++) {
+      var h = _queueHoldPositions[jobs[i].id];
+      if (!h) continue;
+      jobs[i].week_queue_pos = h.week_queue_pos;
+      jobs[i].week_queue_key = h.week_queue_key;
+    }
+  }
+
   function _applyQueueFieldsToJob(j, row) {
     if (!j || !row) return false;
+    if (_queueHoldActive() && _queueHoldPositions[j.id]) return false;
     var changed = false;
     ['week_queue_pos', 'week_queue_key', 'schedule_slot', 'schedule_slot_pinned'].forEach(function(k) {
       if (!Object.prototype.hasOwnProperty.call(row, k)) return;
@@ -45968,6 +46379,7 @@ window.saveAdjModal = async function() {
   }
 
   window._applyRemoteJobQueue = function(rows) {
+    if (_queueHoldActive()) return;
     if (!rows || !rows.length) return;
     var changed = false;
     rows.forEach(function(r) {
@@ -46027,7 +46439,7 @@ window.saveAdjModal = async function() {
 
   var _queuePullInFlight = false;
   async function _pullJobQueueNow() {
-    if (_queuePullInFlight) return;
+    if (_queuePullInFlight || _queueHoldActive()) return;
     _queuePullInFlight = true;
     try {
       var rows = await supaGet('jobs?stage=in.(new,active)&select=id,week_queue_pos,week_queue_key,schedule_slot,schedule_slot_pinned');
@@ -46099,29 +46511,36 @@ window.saveAdjModal = async function() {
       supaGet('jobs?order=created_at.desc&select=*,clients(name)'),
       supaGet('job_drygoods_prep?select=job_id,signed_by_coordinator&signed_by_coordinator=not.is.null'),
       supaGet('job_liquid_signoff?select=job_id,signed_by&signed_by=not.is.null'),
-      supaGet('job_bom_approvals?select=job_id&client_decision=eq.approved'),
-      supaGet('job_bom_approvals?select=job_id&client_decision=eq.flagged'),
+      window.fetchAll('job_bom_approvals', '?select=job_id,client_decision,client_email_sent_at,client_decided_at,created_at&order=created_at.desc'),
       supaGet('boms?select=id,product_name,volume_cl,abv,additional_info,liquid_spec,bom_status'),
       supaGet('job_components?select=job_id,sku_id,qty_required,is_ordered,is_excluded,is_allocated')
     ]);
-    if (settled[0].status === 'fulfilled' && Array.isArray(settled[0].value)) _jobs = settled[0].value;
+    if (settled[0].status === 'fulfilled' && Array.isArray(settled[0].value)) {
+      _jobs = settled[0].value;
+      _applyHeldQueue(_jobs);
+    }
     else if (settled[0].status === 'rejected') console.warn('Jobs load error:', settled[0].reason);
     _scDone = {};
     if (settled[1].status === 'fulfilled') (settled[1].value||[]).forEach(function(r){ if (r.job_id) _scDone[r.job_id] = true; });
     _lsDone = {};
     if (settled[2].status === 'fulfilled') (settled[2].value||[]).forEach(function(r){ if (r.job_id) _lsDone[r.job_id] = true; });
     _bomDone = {};
-    if (settled[3].status === 'fulfilled') (settled[3].value||[]).forEach(function(r){ if (r.job_id) _bomDone[r.job_id] = true; });
     _bomFlagged = {};
-    if (settled[4].status === 'fulfilled') (settled[4].value||[]).forEach(function(r){ if (r.job_id) _bomFlagged[r.job_id] = true; });
+    _bomAwaiting = {};
+    if (settled[3].status === 'fulfilled') {
+      var _bomMaps = window._bomSignoffMaps(settled[3].value);
+      _bomDone = _bomMaps.done;
+      _bomFlagged = _bomMaps.flagged;
+      _bomAwaiting = _bomMaps.awaiting;
+    }
     _jobsBomMap = {};
-    if (settled[5].status === 'fulfilled') (settled[5].value||[]).forEach(function(b){ if (b.id) _jobsBomMap[b.id] = b; });
+    if (settled[4].status === 'fulfilled') (settled[4].value||[]).forEach(function(b){ if (b.id) _jobsBomMap[b.id] = b; });
     if (window._mergeBomMap) window._mergeBomMap(_jobsBomMap);
 
     // Supply Chain column: all non-excluded SKUs on-site (net stock) or ordered.
     _scSkuReady = {};
     try {
-      var compsAll = (settled[6].status === 'fulfilled' && Array.isArray(settled[6].value)) ? settled[6].value : [];
+      var compsAll = (settled[5].status === 'fulfilled' && Array.isArray(settled[5].value)) ? settled[5].value : [];
       var skuSet = {};
       compsAll.forEach(function(c) { if (c.sku_id) skuSet[c.sku_id] = true; });
       var uniqSkus = Object.keys(skuSet);
@@ -46314,35 +46733,35 @@ window.saveAdjModal = async function() {
     return ((a.created_at || '') < (b.created_at || '') ? -1 : 1);
   }
 
+  // Manual position for this displayed week, or null when the stored key is for another week.
+  function _queuePosForWeek(j, weekKey) {
+    if (!j || !weekKey) return null;
+    var key = j.week_queue_key ? String(j.week_queue_key).slice(0, 10) : '';
+    if (key !== weekKey || j.week_queue_pos == null || j.week_queue_pos === '') return null;
+    var n = Number(j.week_queue_pos);
+    return isNaN(n) ? null : n;
+  }
+
+  // Order inside one displayed week. Positions count only when keyed to that Monday.
+  // Equal positions are not a real order — Job Ready breaks the tie (see moveJobInWeek).
+  function _jobsSortInWeek(a, b, weekKey) {
+    var aPos = _queuePosForWeek(a, weekKey);
+    var bPos = _queuePosForWeek(b, weekKey);
+    if (aPos != null && bPos != null && aPos !== bPos) return aPos - bPos;
+    if (aPos != null && bPos == null) return -1;
+    if (aPos == null && bPos != null) return 1;
+    return _jobsReadyCmp(a, b);
+  }
+
   window._jobsQueueSort = function(a, b) {
     var thisWeek = _lpThisWeekStartIso();
     var aWeek = window._jobInThisWeekBlock(a);
     var bWeek = window._jobInThisWeekBlock(b);
     if (aWeek && !bWeek) return -1;
     if (!aWeek && bWeek) return 1;
-    if (aWeek && bWeek) {
-      var aKey = a.week_queue_key ? String(a.week_queue_key).slice(0, 10) : '';
-      var bKey = b.week_queue_key ? String(b.week_queue_key).slice(0, 10) : '';
-      var aOk = thisWeek && aKey === thisWeek && a.week_queue_pos != null;
-      var bOk = thisWeek && bKey === thisWeek && b.week_queue_pos != null;
-      if (aOk && bOk && a.week_queue_pos !== b.week_queue_pos) return a.week_queue_pos - b.week_queue_pos;
-      if (aOk && !bOk) return -1;
-      if (!aOk && bOk) return 1;
-    }
+    if (aWeek && bWeek) return _jobsSortInWeek(a, b, thisWeek);
     return _jobsReadyCmp(a, b);
   };
-
-  // Order inside one displayed week. Positions count only when keyed to that Monday.
-  function _jobsSortInWeek(a, b, weekKey) {
-    var aKey = a.week_queue_key ? String(a.week_queue_key).slice(0, 10) : '';
-    var bKey = b.week_queue_key ? String(b.week_queue_key).slice(0, 10) : '';
-    var aOk = weekKey && aKey === weekKey && a.week_queue_pos != null;
-    var bOk = weekKey && bKey === weekKey && b.week_queue_pos != null;
-    if (aOk && bOk && a.week_queue_pos !== b.week_queue_pos) return a.week_queue_pos - b.week_queue_pos;
-    if (aOk && !bOk) return -1;
-    if (!aOk && bOk) return 1;
-    return _jobsReadyCmp(a, b);
-  }
 
   function _canReorderJobs() {
     return !!(window.canDo && (window.canDo('jobs_create') || window.canDo('production_control')));
@@ -46367,30 +46786,25 @@ window.saveAdjModal = async function() {
     return _jobsQueuedInWeek(_lpThisWeekStartIso());
   }
 
-  async function _ensureWeekQueueSeeded(list, weekKey) {
-    if (!weekKey || !list || !list.length) return list;
-    var need = list.some(function(j) {
-      var key = j.week_queue_key ? String(j.week_queue_key).slice(0, 10) : '';
-      return key !== weekKey || j.week_queue_pos == null;
-    });
-    if (!need) return list;
+  // Write 1..n for the week in the order given. Swapping stored numbers fails when two
+  // jobs share a position: the swap changes nothing, and Job Ready then pins the
+  // later-dated job under the earlier one (Knappogue could only trade the last two rows).
+  async function _persistWeekQueue(list, weekKey) {
+    var writes = [];
     for (var i = 0; i < list.length; i++) {
       var pos = i + 1;
-      var key = list[i].week_queue_key ? String(list[i].week_queue_key).slice(0, 10) : '';
-      if (key === weekKey && list[i].week_queue_pos === pos) continue;
       list[i].week_queue_pos = pos;
       list[i].week_queue_key = weekKey;
-      try {
-        await supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(list[i].id), {
-          week_queue_pos: pos,
-          week_queue_key: weekKey
-        });
-      } catch (e) { console.warn('week queue seed', list[i].id, e); }
+      writes.push(supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(list[i].id), {
+        week_queue_pos: pos,
+        week_queue_key: weekKey
+      }));
     }
-    return list;
+    await Promise.all(writes);
   }
 
   window.moveJobInWeek = async function(jobId, dir) {
+    if (_queueMoveBusy) return;
     if (!_canReorderJobs()) {
       window.toast && window.toast('Permission denied.', 'error');
       return;
@@ -46401,35 +46815,37 @@ window.saveAdjModal = async function() {
     if (!weekKey) return;
     var list = _jobsQueuedInWeek(weekKey);
     if (list.length < 2) return;
-    await _ensureWeekQueueSeeded(list, weekKey);
-    list.sort(function(a, b) { return _jobsSortInWeek(a, b, weekKey); });
     var idx = -1;
     for (var i = 0; i < list.length; i++) {
       if (list[i].id === jobId) { idx = i; break; }
     }
-    var swap = idx + dir;
-    if (idx < 0 || swap < 0 || swap >= list.length) return;
-    var a = list[idx], b = list[swap];
-    var tmp = a.week_queue_pos;
-    a.week_queue_pos = b.week_queue_pos;
-    b.week_queue_pos = tmp;
-    a.week_queue_key = weekKey;
-    b.week_queue_key = weekKey;
+    var dest = idx + dir;
+    if (idx < 0 || dest < 0 || dest >= list.length) return;
+    var moved = list.splice(idx, 1)[0];
+    list.splice(dest, 0, moved);
+    for (var p = 0; p < list.length; p++) {
+      list[p].week_queue_pos = p + 1;
+      list[p].week_queue_key = weekKey;
+    }
+    _stampQueueHold(list, weekKey);
+    if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
+    _queueMoveBusy = true;
     try {
-      await Promise.all([
-        supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(a.id), { week_queue_pos: a.week_queue_pos, week_queue_key: weekKey }),
-        supaMut('PATCH', 'jobs', '?id=eq.' + encodeURIComponent(b.id), { week_queue_pos: b.week_queue_pos, week_queue_key: weekKey })
-      ]);
+      await _persistWeekQueue(list, weekKey);
     } catch (e) {
+      _queueHoldUntil = 0;
+      _queueHoldPositions = null;
+      _queueMoveBusy = false;
       window.toast && window.toast('Error: ' + (e && e.message), 'error');
+      _pullJobQueueNow();
       return;
     }
-    if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
+    _queueMoveBusy = false;
+    _stampQueueHold(list, weekKey);
     if (typeof window._applyRemoteSchedQueue === 'function') {
-      window._applyRemoteSchedQueue([
-        { id: a.id, week_queue_pos: a.week_queue_pos, week_queue_key: a.week_queue_key },
-        { id: b.id, week_queue_pos: b.week_queue_pos, week_queue_key: b.week_queue_key }
-      ]);
+      window._applyRemoteSchedQueue(list.map(function(j) {
+        return { id: j.id, week_queue_pos: j.week_queue_pos, week_queue_key: j.week_queue_key };
+      }));
     }
     if (typeof window._broadcastJobQueue === 'function') window._broadcastJobQueue(_queueSnapshot());
     // Next Jobs mirrors the current week only. A future-week swap must not rewrite slots.
@@ -46871,6 +47287,7 @@ window.saveAdjModal = async function() {
       var pill = 'display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;white-space:nowrap;';
       if (_bomDone[jobId])    return '<span title="' + title + ': client approved" style="' + pill + 'background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.35);">&#10003; ' + label + '</span>';
       if (_bomFlagged[jobId]) return '<span title="' + title + ': client flagged a concern" style="' + pill + 'background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.45);">&#9888; ' + label + '</span>';
+      if (_bomAwaiting[jobId]) return '<span title="' + title + ': awaiting client confirmation" style="' + pill + 'background:rgba(232,156,58,0.16);color:var(--amber);border:1px solid rgba(232,156,58,0.5);">&#9679; ' + label + '</span>';
       if (bomSt === 'draft' || bomSt === 'pending') return '<span title="BOM is not locked. Spec is not approved." style="' + pill + 'background:rgba(232,156,58,0.16);color:var(--amber);border:1px solid rgba(232,156,58,0.5);">Pending QC</span>';
       return '<span title="' + title + ': not yet confirmed" style="' + pill + 'background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);">&#10007; ' + label + '</span>';
     }
@@ -48490,14 +48907,15 @@ window.saveAdjModal = async function() {
     try {
       var rows = await supaGet('job_bom_approvals?job_id=eq.' + jobId + '&order=created_at.desc&limit=1');
       var rec = rows && rows[0];
-      if (rec && rec.client_decision === 'approved') return true;
+      var bomState = window._bomSignoffState(rec);
+      if (bomState === 'approved') return true;
       if (!opts.silent) {
         var msg;
         if (!rec) {
           msg = 'Send the BOM to the client for confirmation before signing off the BOM task.';
-        } else if (rec.client_decision === 'flagged') {
+        } else if (bomState === 'flagged') {
           msg = 'Client has flagged a concern with the BOM — review their notes and re-send for confirmation.';
-        } else if (rec.client_email_sent_at) {
+        } else if (bomState === 'sent' || rec.client_email_sent_at) {
           msg = 'Waiting on client BOM confirmation — the BOM sign-off is blocked until the client responds.';
         } else {
           msg = 'Send the BOM to the client for confirmation first.';
@@ -48610,8 +49028,8 @@ window.saveAdjModal = async function() {
       var job = jobData && jobData[0];
       if (!job || job.stage !== 'new' || !job.job_bay || job.bay_released_at) return;
       if (job.bom_id && window._linkedBomIsApproved && !(await window._linkedBomIsApproved(job.bom_id))) return;
-      var bom = await supaGet('job_bom_approvals?job_id=eq.' + jobId + '&client_decision=eq.approved&limit=1');
-      if (!bom || !bom.length) return;
+      var bomRows = await supaGet('job_bom_approvals?job_id=eq.' + jobId + '&select=client_decision,client_email_sent_at,client_decided_at&order=created_at.desc&limit=1');
+      if (window._bomSignoffState(bomRows && bomRows[0]) !== 'approved') return;
       await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, { stage: 'active' });
       _writeAuditLog(jobId, 'new', 'active', 'auto-promoted');
       window.toast && window.toast('Job ' + jobId + ' auto-moved to Active.', 'success');
@@ -48658,8 +49076,8 @@ window.saveAdjModal = async function() {
       if (j.bom_id && window._linkedBomIsApproved && !(await window._linkedBomIsApproved(j.bom_id))) {
         blockers1.push({ label: 'BOM approved & locked', hint: 'The linked BOM is still in draft or awaiting QC. Approve it before this job can become Active.' });
       }
-      var bomApproval = await supaGet('job_bom_approvals?job_id=eq.' + _currentJobId + '&client_decision=eq.approved&limit=1');
-      if (!bomApproval || !bomApproval.length) {
+      var bomApproval = await supaGet('job_bom_approvals?job_id=eq.' + _currentJobId + '&select=client_decision,client_email_sent_at,client_decided_at&order=created_at.desc&limit=1');
+      if (window._bomSignoffState(bomApproval && bomApproval[0]) !== 'approved') {
         blockers1.push({ label: 'Bill of Materials', hint: 'Client must confirm the BOM before the job can become active.' });
       }
       // Must be holding a bay. Released bays don't count — the job's dry-goods
@@ -50716,8 +51134,11 @@ window.saveAdjModal = async function() {
       var signoffMount = document.getElementById('sc-signoff-mount');
       if (signoffMount) {
         if (isSignedOff) {
+          var _removedShown = (j && j.pallets_removed_dry != null) ? j.pallets_removed_dry : null;
           signoffMount.innerHTML = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
-            + '<div style="background:rgba(61,186,120,0.1);border:1px solid var(--green);border-radius:5px;padding:8px 14px;font-size:12px;color:var(--green);">\u2713 Signed off by ' + escH(compSignoff.signed_by_coordinator) + (compSignoff.signed_at_coordinator ? ' on ' + compSignoff.signed_at_coordinator.slice(0,10) : '') + '</div>'
+            + '<div style="background:rgba(61,186,120,0.1);border:1px solid var(--green);border-radius:5px;padding:8px 14px;font-size:12px;color:var(--green);">\u2713 Signed off by ' + escH(compSignoff.signed_by_coordinator) + (compSignoff.signed_at_coordinator ? ' on ' + compSignoff.signed_at_coordinator.slice(0,10) : '')
+            + (_removedShown != null ? ' · ' + _removedShown + ' dry goods pallet' + (_removedShown === 1 ? '' : 's') + ' removed from storage' : '')
+            + '</div>'
             + '<button id="comp-reopen-btn" class="btn btn-outline" style="font-size:11px;padding:6px 14px;border-color:var(--amber);color:var(--amber);">&#9888; Reopen</button>'
             + '</div>';
           var roBtn = document.getElementById('comp-reopen-btn');
@@ -50838,14 +51259,54 @@ window.saveAdjModal = async function() {
       }
     } catch(e) { window.logError && window.logError('signOffComponents label gate', e); }
     var name = (window.CURRENT_USER && (window.CURRENT_USER.display_name || window.CURRENT_USER.email)) || '';
-    var displayName = await window.lpPrompt('Enter your name to sign off the Supply Chain Tracker.', name, { title: 'Supply Chain sign-off', placeholder: 'Full name' });
-    if (displayName === null || !String(displayName).trim()) return;
-    displayName = String(displayName).trim();
+    var signoffAnswers = await new Promise(function(resolve) {
+      var ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(5,12,20,0.88);z-index:2000000;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Lato,sans-serif;';
+      ov.innerHTML = '<div style="background:var(--navy-mid,#0e1e38);border:1px solid var(--navy-border);border-top:3px solid var(--gold);border-radius:8px;padding:26px 28px 22px;max-width:460px;width:100%;box-shadow:0 16px 48px rgba(0,0,0,0.45);">'
+        + '<div style="font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:8px;">Supply Chain sign-off</div>'
+        + '<div style="font-size:14px;font-weight:700;color:var(--white);margin-bottom:6px;">How many dry goods pallets were removed from storage?</div>'
+        + '<div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px;">Whole pallets taken out for this job. At least 1. A job cannot run without dry goods from storage.</div>'
+        + '<input id="sc-pallets-removed" type="number" min="1" step="1" placeholder="e.g. 8" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:4px;border:1px solid var(--navy-border);background:var(--navy-dark,#0a1628);color:var(--white);font-size:14px;font-family:Lato,sans-serif;margin-bottom:14px;" />'
+        + '<label style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);display:block;margin-bottom:6px;">Your name</label>'
+        + '<input id="sc-signoff-name" type="text" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:4px;border:1px solid var(--navy-border);background:var(--navy-dark,#0a1628);color:var(--white);font-size:13px;font-family:Lato,sans-serif;margin-bottom:8px;" />'
+        + '<div id="sc-signoff-err" style="font-size:12px;color:var(--red);min-height:16px;margin-bottom:12px;"></div>'
+        + '<div style="display:flex;gap:10px;justify-content:flex-end;">'
+        + '<button type="button" id="sc-signoff-cancel" style="padding:9px 18px;background:transparent;border:1px solid var(--navy-border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;font-family:Lato,sans-serif;">Cancel</button>'
+        + '<button type="button" id="sc-signoff-ok" style="padding:9px 20px;background:var(--gold);border:none;border-radius:4px;color:var(--navy-dark,#0a1628);cursor:pointer;font-size:12px;font-weight:700;font-family:Lato,sans-serif;">Sign off</button>'
+        + '</div></div>';
+      document.body.appendChild(ov);
+      var palletEl = ov.querySelector('#sc-pallets-removed');
+      var nameEl = ov.querySelector('#sc-signoff-name');
+      var errEl = ov.querySelector('#sc-signoff-err');
+      nameEl.value = name;
+      setTimeout(function(){ palletEl.focus(); }, 40);
+      function close(val) { ov.remove(); resolve(val); }
+      ov.querySelector('#sc-signoff-cancel').onclick = function(){ close(null); };
+      ov.onclick = function(e){ if (e.target === ov) close(null); };
+      function submit() {
+        var raw = String(palletEl.value == null ? '' : palletEl.value).trim();
+        var who = String(nameEl.value || '').trim();
+        if (!/^\d+$/.test(raw) || parseInt(raw, 10) < 1) { errEl.textContent = 'Enter at least 1 dry goods pallet. A job cannot be signed off with none removed from storage.'; palletEl.focus(); return; }
+        if (!who) { errEl.textContent = 'Enter your name to sign off.'; nameEl.focus(); return; }
+        close({ pallets: parseInt(raw, 10), name: who });
+      }
+      ov.querySelector('#sc-signoff-ok').onclick = submit;
+      palletEl.onkeydown = function(e){ if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+      nameEl.onkeydown = function(e){ if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+    });
+    if (!signoffAnswers) return;
+    var displayName = signoffAnswers.name;
+    var palletsRemoved = signoffAnswers.pallets;
+    var _jobForPallets = _jobs.find(function(x){ return x.id === jobId; });
+    if (_jobForPallets && _jobForPallets.pallets_returned_dry != null && _jobForPallets.pallets_returned_dry >= palletsRemoved) {
+      window.toast && window.toast('Results already record ' + _jobForPallets.pallets_returned_dry + ' dry goods pallets returned. At least 1 of the pallets removed must stay used on the job.', 'error');
+      return;
+    }
     try {
       // Upsert into job_drygoods_prep as sign-off record
       var existing = await supaGet('job_drygoods_prep?job_id=eq.'+jobId+'&limit=1');
       var hist = window._scParseSignoffHistory(existing.length ? existing[0].signoff_history : null);
-      hist.push({ action: 'signed', by: displayName, at: new Date().toISOString() });
+      hist.push({ action: 'signed', by: displayName, at: new Date().toISOString(), pallets_removed_dry: palletsRemoved });
       if (existing.length) {
         await supaMut('PATCH','job_drygoods_prep','?id=eq.'+existing[0].id,{
           signed_by_coordinator: displayName,
@@ -50865,7 +51326,20 @@ window.saveAdjModal = async function() {
         var tasks = await supaGet('job_tasks?job_id=eq.'+jobId+'&task_type=eq.components&limit=1');
         if (tasks.length) await supaMut('PATCH','job_tasks','?id=eq.'+tasks[0].id,{status:'completed',completed_at:new Date().toISOString()});
       } catch(e) { window.logError('complete components task', e); }
-      window.toast && window.toast('Supply Chain signed off.','success');
+      var _palletPatch = { pallets_removed_dry: palletsRemoved };
+      if (_jobForPallets && _jobForPallets.pallets_returned_dry != null) {
+        _palletPatch.pallets_used_dry = palletsRemoved - (parseInt(_jobForPallets.pallets_returned_dry, 10) || 0);
+        _palletPatch.pallets_used = _palletPatch.pallets_used_dry + (parseInt(_jobForPallets.pallets_used_liquid, 10) || 0);
+      }
+      await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, _palletPatch);
+      if (_jobForPallets) {
+        _jobForPallets.pallets_removed_dry = palletsRemoved;
+        if (_palletPatch.pallets_used_dry != null) {
+          _jobForPallets.pallets_used_dry = _palletPatch.pallets_used_dry;
+          _jobForPallets.pallets_used = _palletPatch.pallets_used;
+        }
+      }
+      window.toast && window.toast('Supply Chain signed off. ' + palletsRemoved + ' dry goods pallet' + (palletsRemoved === 1 ? '' : 's') + ' removed from storage.','success');
       // Optimistic: flip the pill green immediately for the acting user so the
       // jobs table / overview dots don't wait for the realtime round-trip.
       try {
@@ -52605,7 +53079,28 @@ window.saveAdjModal = async function() {
     html += frow('Total Cases', inp('cases', actualCasesDisplay, 'Auto-calculated', 'number', false, '0.01') + sub('Auto-calculated as full cases . leftover bottles (e.g. 45.05 = 45 cases + 5 bottles)'), true);
     html += frow('Cases per Layer', inp('cases-layer', casesPerLayer, 'From BOM', 'text', !!casesPerLayer));
     html += frow('Cases per Pallet', inp('cases-pallet', casesPerPallet, 'Auto-calculated', 'text', !!(casesPerLayer && layersPerPallet)));
-    html += frow('Client Pallets Used', inp('pallets-used', j.pallets_used || 0, '0 if none', 'number') + sub('Whole pallets of the client&rsquo;s stored stock consumed by this job — deducted from their Pallet Tracker on completion'));
+    var _removedDry = (j.pallets_removed_dry != null && j.pallets_removed_dry !== '') ? parseInt(j.pallets_removed_dry, 10) : null;
+    var _returnedDry = (j.pallets_returned_dry != null && j.pallets_returned_dry !== '') ? parseInt(j.pallets_returned_dry, 10) : null;
+    var _usedDryShown = (_removedDry != null && _returnedDry != null) ? Math.max(_removedDry - _returnedDry, 0) : '';
+    window._resSyncDryUsed = function() {
+      var retEl = document.getElementById('res-pallets-returned-dry');
+      var usedEl = document.getElementById('res-pallets-used-calc');
+      if (!usedEl) return;
+      if (_removedDry == null) { usedEl.value = ''; return; }
+      var raw = retEl ? String(retEl.value).trim() : '';
+      if (!/^\d+$/.test(raw)) { usedEl.value = ''; return; }
+      var back = parseInt(raw, 10);
+      usedEl.value = back >= _removedDry ? '' : String(_removedDry - back);
+    };
+    html += frow('Dry Goods Pallets Removed', inp('pallets-removed-dry', _removedDry == null ? '' : _removedDry, 'Recorded at supply chain sign-off', 'number', true) + sub(_removedDry == null ? 'Not recorded yet. Supply chain sign-off must enter how many were taken out of storage.' : 'Recorded when supply chain was signed off. This is the number taken out of storage.'), true);
+    html += frow('Dry Goods Pallets Returning', inp('pallets-returned-dry', _returnedDry == null ? '' : _returnedDry, '0 if none are going back', 'number') + sub('Whole dry-goods pallets going back into storage. You can return some, or 0, but at least 1 pallet must stay used on the job.'), true);
+    html += frow('Dry Goods Pallets Used', '<input id="res-pallets-used-calc" type="text" readonly value="' + (_usedDryShown === '' ? '' : _usedDryShown) + '" style="background:var(--navy-dark);border:1px solid var(--navy-border);color:var(--gold);font-weight:700;padding:7px 10px;font-size:13px;width:100%;box-sizing:border-box;border-radius:3px;">' + sub('Removed minus returned. Must be at least 1. This number is checked off the client&rsquo;s dry goods pallets for this job.'));
+    var _finPallets = (j.finished_pallets != null && j.finished_pallets !== '') ? parseInt(j.finished_pallets, 10) : null;
+    var _finLocked = j.finished_pallets_disposition === 'stored' || j.finished_pallets_disposition === 'dispatched';
+    var _finNote = _finLocked
+      ? (j.finished_pallets_disposition === 'stored' ? 'Already added to pallet storage.' : 'Marked dispatched. These pallets are not in storage.')
+      : 'Whole pallets of finished goods from this job. Enter 0 if there are none. This shows on the Pallet Tracker straight away, where someone can add them to storage or mark them dispatched.';
+    html += frow('Finished Goods Pallets', inp('pallets-finished', _finPallets == null ? '' : _finPallets, '0 if none', 'number', _finLocked) + sub(_finNote), true);
     var autoFilledNote = '<div style="font-size:10px;color:#22c55e;margin-top:4px;display:flex;align-items:center;gap:4px;">&#10003; Auto-filled from Schedule — edit only if incorrect</div>';
     html += frow('Date / Time Job Commenced', inp('commenced', localDateTimeValue(j.date_commenced || j.actual_start), '', 'datetime-local') + ((j.date_commenced || j.actual_start) ? autoFilledNote : ''), true);
     html += frow('Date / Time Job Ended', inp('completed', localDateTimeValue(j.date_completed || j.actual_end), '', 'datetime-local') + ((j.date_completed || j.actual_end) ? autoFilledNote : ''), true);
@@ -52684,6 +53179,8 @@ window.saveAdjModal = async function() {
       + '</div>';
 
     el.innerHTML = html;
+    var _retPalletEl = document.getElementById('res-pallets-returned-dry');
+    if (_retPalletEl) _retPalletEl.addEventListener('input', window._resSyncDryUsed);
 
     // Auto-calculate cases and hours on change
     var btlsEl = document.getElementById('res-bottles');
@@ -52752,7 +53249,9 @@ window.saveAdjModal = async function() {
         ['lot-no','Batch / Lot No'], ['bottles','Total Bottles Produced'],
         ['cases','Total Cases'],     ['commenced','Date / Time Commenced'],
         ['completed','Date / Time Ended'],
-        ['signed-by','Production Manager Name'], ['signed-at','Sign-Off Date']
+        ['signed-by','Production Manager Name'], ['signed-at','Sign-Off Date'],
+        ['pallets-returned-dry','Dry goods pallets returning to storage'],
+        ['pallets-finished','Finished goods pallets']
       ];
       for (var i = 0; i < required.length; i++) {
         var val = gv(required[i][0]);
@@ -52765,6 +53264,33 @@ window.saveAdjModal = async function() {
       }
       if (!gv('line-clearance')) { window.toast && window.toast('Line Clearance must be confirmed.', 'error'); return; }
       if (!gv('delivery-cleared')) { window.toast && window.toast('Delivery must be cleared with Management.', 'error'); return; }
+      var _retCheck = gv('pallets-returned-dry');
+      if (!/^\d+$/.test(String(_retCheck || '').trim())) {
+        window.toast && window.toast('Dry goods pallets returning to storage must be a whole number, or 0 if none.', 'error');
+        var _retEl = document.getElementById('res-pallets-returned-dry');
+        if (_retEl) { _retEl.style.borderColor = 'var(--red)'; _retEl.focus(); }
+        return;
+      }
+      var _removedRows = await supaGet('jobs?id=eq.' + jobId + '&select=pallets_removed_dry&limit=1');
+      var _removedNow = (_removedRows[0] && _removedRows[0].pallets_removed_dry != null) ? parseInt(_removedRows[0].pallets_removed_dry, 10) : null;
+      window._resRemovedDry = _removedNow;
+      if (_removedNow == null || isNaN(_removedNow) || _removedNow < 1) {
+        window.toast && window.toast('Supply chain sign-off must record at least 1 dry goods pallet removed from storage before results can be completed.', 'error');
+        return;
+      }
+      if (parseInt(_retCheck, 10) >= _removedNow) {
+        window.toast && window.toast('At least 1 dry goods pallet must be used. ' + _removedNow + ' were removed, so fewer than that can go back to storage.', 'error');
+        var _retEl2 = document.getElementById('res-pallets-returned-dry');
+        if (_retEl2) { _retEl2.style.borderColor = 'var(--red)'; _retEl2.focus(); }
+        return;
+      }
+      var _finCheck = gv('pallets-finished');
+      if (!/^\d+$/.test(String(_finCheck || '').trim())) {
+        window.toast && window.toast('Finished goods pallets must be a whole number, or 0 if none.', 'error');
+        var _finEl = document.getElementById('res-pallets-finished');
+        if (_finEl) { _finEl.style.borderColor = 'var(--red)'; _finEl.focus(); }
+        return;
+      }
     } else if (!commenced) {
       window.toast && window.toast('Please enter at least the Date / Time Job Commenced.', 'error');
       var commEl2 = document.getElementById('res-commenced');
@@ -52802,12 +53328,23 @@ window.saveAdjModal = async function() {
       payload.results_notes           = gv('notes') || null;
       payload.results_signed_by       = gv('signed-by') || null;
       payload.results_signed_at       = gv('signed-at') ? gv('signed-at') + 'T00:00:00Z' : null;
-      payload.pallets_used            = parseInt(gv('pallets-used')) || null;
+      var _returnedSave = parseInt(gv('pallets-returned-dry'), 10);
+      var _removedSave = window._resRemovedDry != null ? window._resRemovedDry : (_resJob && _resJob.pallets_removed_dry != null ? parseInt(_resJob.pallets_removed_dry, 10) : null);
+      payload.pallets_returned_dry = _returnedSave;
+      payload.pallets_used_dry = (_removedSave == null ? 0 : _removedSave) - _returnedSave;
+      payload.pallets_used = payload.pallets_used_dry;
+      payload.finished_pallets = parseInt(gv('pallets-finished'), 10);
       payload.cbw_new_rotation_no     = gv('cbw-new-rotation') || null;
     }
     try {
       await supaMut('PATCH', 'jobs', '?id=eq.' + jobId, payload);
-      window.toast && window.toast(_completionAttempted ? 'Results saved.' : 'Times saved.', 'success');
+      var _usedNote = (_completionAttempted && payload.pallets_used_dry != null)
+        ? (' ' + payload.pallets_used_dry + ' dry goods pallet' + (payload.pallets_used_dry === 1 ? '' : 's') + ' checked off this client.')
+        : '';
+      var _finNoteSave = (_completionAttempted && payload.finished_pallets > 0)
+        ? ' Finished goods are waiting on the Pallet Tracker.'
+        : '';
+      window.toast && window.toast((_completionAttempted ? 'Results saved.' : 'Times saved.') + _usedNote + _finNoteSave, 'success');
       await loadJobs();
     } catch(e) { window.toast && window.toast('Error: ' + e.message, 'error'); }
   };
@@ -53923,16 +54460,19 @@ window.saveAdjModal = async function() {
   // which works off measured actuals.
   var LSO_PREP_OVERAGE_L = 50;
   window.LSO_PREP_OVERAGE_L = LSO_PREP_OVERAGE_L;
-  // Effective ABV: alcohol-accurate strength derived from the authoritative
-  // stored LPA balance (current_lpa). Casks store full litres + angel-share
-  // decayed LPA, so nominal `abv` over-states their strength — always prefer
-  // current_lpa / current_litres so draws and dilution maths reconcile.
+  // Effective ABV. Casks store full litres plus an angel-share-decayed LPA, so
+  // the nominal ABV over-states their strength and LPA ÷ litres is the figure
+  // draws must use. Every other vessel stores ABV as the measured strength;
+  // a stale LPA must not be shown as if the liquid were still at the old strength.
   function _lsoEffAbv(cont) {
     if (!cont) return 0;
     var lit = parseFloat(cont.current_litres || 0);
     var lpa = parseFloat(cont.current_lpa || 0);
+    var nominal = parseFloat(cont.abv || 0);
+    if (cont.type === 'cask' && lit > 0 && lpa > 0) return lpa / lit * 100;
+    if (nominal > 0) return nominal;
     if (lit > 0 && lpa > 0) return lpa / lit * 100;
-    return parseFloat(cont.abv || 0);
+    return 0;
   }
   window._lsoEffAbv = _lsoEffAbv;
 
@@ -56412,7 +56952,8 @@ window.saveAdjModal = async function() {
       var liveLpa    = parseFloat((live && live.current_lpa) || 0);
       var before     = liveLitres;
       var nomAbv     = parseFloat((live && live.abv) || lc.abv || 0);
-      var effAbv     = (before > 0 && liveLpa > 0) ? (liveLpa / before * 100) : nomAbv;
+      var isCask     = live && live.type === 'cask';
+      var effAbv     = (isCask && before > 0 && liveLpa > 0) ? (liveLpa / before * 100) : nomAbv;
       var ownerBeforeId = (live && (live.liquid_owner_client_id || live.client_id)) || null;
       return { id: lc.id, reference: ref, before: before, abv: effAbv,
                lpaBefore: liveLpa > 0 ? liveLpa : (before * effAbv / 100),
@@ -58893,7 +59434,7 @@ window.saveAdjModal = async function() {
     var container = document.getElementById('jd-bom-verif-tasks');
     if (!container) return;
     var rec = await window._loadBomApproval(jobId);
-    var status = !rec ? 'none' : (rec.client_decision === 'approved' ? 'approved' : rec.client_decision === 'flagged' ? 'flagged' : rec.client_email_sent_at ? 'sent' : 'draft');
+    var status = window._bomSignoffState(rec);
 
     var bomLocked = true;
     try {
@@ -59168,8 +59709,10 @@ window.saveAdjModal = async function() {
         bomSnapshot = snap;
       }
 
-      // Insert or reuse job_bom_approvals row
-      var existing = window._bomApprovalCache[jobId];
+      // Reuse the latest confirmation for this job. A cache miss must not
+      // insert a second row and leave the previous approval in place.
+      var priorRows = await supaGet('job_bom_approvals?job_id=eq.' + jobId + '&order=created_at.desc');
+      var existing = (priorRows && priorRows[0]) || null;
       var recId;
       if (!existing) {
         var inserted = await supaMut('POST', 'job_bom_approvals', '', { job_id: jobId, bom_id: bomId || null, product_name: productName, client_name: clientName, bom_snapshot: bomSnapshot });
@@ -59200,8 +59743,47 @@ window.saveAdjModal = async function() {
       }
       await window.sendEmail(emailOpts);
 
-      // Record sent_at only after Resend accepts. Snapshot stays current on that same write.
-      await supaMut('PATCH', 'job_bom_approvals', '?id=eq.' + recId, { client_email_to: to, client_email_sent_at: new Date().toISOString(), product_name: productName, client_name: clientName, bom_snapshot: bomSnapshot });
+      // Record sent_at only after Resend accepts. A new send supersedes any
+      // earlier client decision, including approvals on older rows for this job.
+      var sentPatch = {
+        client_email_to: to,
+        client_email_sent_at: new Date().toISOString(),
+        product_name: productName,
+        client_name: clientName,
+        bom_snapshot: bomSnapshot,
+        client_decision: null,
+        client_decided_at: null,
+        client_notes: null,
+        client_approver_name: null
+      };
+      if (existing.client_decision) {
+        var priorHistory = Array.isArray(existing.flag_history) ? existing.flag_history.slice() : [];
+        priorHistory.push({
+          prior_decision: existing.client_decision,
+          flagged_by: existing.client_approver_name || null,
+          flagged_at: existing.client_decided_at || null,
+          client_notes: existing.client_notes || null,
+          staff_response: 'Sent again for client confirmation',
+          responded_by: window.CURRENT_USER ? window.CURRENT_USER.email : null,
+          responded_at: sentPatch.client_email_sent_at
+        });
+        sentPatch.flag_history = priorHistory;
+      }
+      await supaMut('PATCH', 'job_bom_approvals', '?id=eq.' + recId, sentPatch);
+      for (var _stale = 1; priorRows && _stale < priorRows.length; _stale++) {
+        if (!priorRows[_stale].client_decision) continue;
+        await supaMut('PATCH', 'job_bom_approvals', '?id=eq.' + priorRows[_stale].id, {
+          client_decision: null,
+          client_decided_at: null,
+          client_notes: null,
+          client_approver_name: null
+        });
+      }
+      delete _bomDone[jobId];
+      delete _bomFlagged[jobId];
+      _bomAwaiting[jobId] = true;
+      if (typeof window.renderJobsTable === 'function') window.renderJobsTable();
+      if (typeof window.loadOverviewCurrentJobs === 'function') window.loadOverviewCurrentJobs();
       window._bomApprovalCache[jobId] = null;
       await window._renderBomVerification(jobId);
       window.toast && window.toast('BOM confirmation sent to ' + to, 'success');
@@ -60713,12 +61295,13 @@ window.saveAdjModal = async function() {
       var target = j.job_target_type === 'liquid' ? (j.liquid_litres||'—') + ' L' : (j.bottle_target||'—') + ' btls';
       var bomOk = !!_bomDone[j.id], scOk = !!_scDone[j.id], lsOk = !!_lsDone[j.id];
       var bomFlagged = !!_bomFlagged[j.id];
+      var bomAwaiting = !!_bomAwaiting[j.id];
       function dot(ok) {
         return '<div style="text-align:center;"><span style="width:8px;height:8px;border-radius:50%;display:inline-block;background:' + (ok?'var(--green)':'rgba(201,56,56,0.85)') + ';"></span></div>';
       }
       function bomDot() {
-        var bg = bomOk ? 'var(--green)' : bomFlagged ? 'var(--gold)' : 'rgba(201,56,56,0.85)';
-        var title = bomOk ? 'BOM: client approved' : bomFlagged ? 'BOM: client flagged a concern' : 'BOM: awaiting client confirmation';
+        var bg = bomOk ? 'var(--green)' : bomFlagged ? 'var(--gold)' : bomAwaiting ? 'var(--amber)' : 'rgba(201,56,56,0.85)';
+        var title = bomOk ? 'BOM: client approved' : bomFlagged ? 'BOM: client flagged a concern' : bomAwaiting ? 'BOM: awaiting client confirmation' : 'BOM: not yet confirmed';
         return '<div style="text-align:center;" title="' + title + '"><span style="width:8px;height:8px;border-radius:50%;display:inline-block;background:' + bg + ';"></span></div>';
       }
       var jid = String(j.id).replace(/'/g,"\\'");
@@ -61229,6 +61812,7 @@ window.saveAdjModal = async function() {
   var _lastBphMap         = {};   // bom_id -> last actual BPH
   var _schedBomDone    = {};   // job_id -> true if BOM client-approved
   var _schedBomFlagged = {};   // job_id -> true if BOM client-flagged
+  var _schedBomAwaiting = {};  // job_id -> true if BOM confirmation is still open
   var _schedScDone     = {};   // job_id -> true if supply-chain signed off
   var _schedLsDone     = {};   // job_id -> true if liquid signed off
 
@@ -61509,17 +62093,21 @@ window.saveAdjModal = async function() {
       var soSettled = await Promise.allSettled([
         sbGet('job_drygoods_prep?select=job_id&signed_by_coordinator=not.is.null'),
         sbGet('job_liquid_signoff?select=job_id&signed_by=not.is.null'),
-        sbGet('job_bom_approvals?select=job_id&client_decision=eq.approved'),
-        sbGet('job_bom_approvals?select=job_id&client_decision=eq.flagged')
+        window.fetchAll('job_bom_approvals', '?select=job_id,client_decision,client_email_sent_at,client_decided_at,created_at&order=created_at.desc')
       ]);
       _schedScDone = {};
       if (soSettled[0].status === 'fulfilled') (soSettled[0].value||[]).forEach(function(r){ if (r.job_id) _schedScDone[r.job_id] = true; });
       _schedLsDone = {};
       if (soSettled[1].status === 'fulfilled') (soSettled[1].value||[]).forEach(function(r){ if (r.job_id) _schedLsDone[r.job_id] = true; });
       _schedBomDone = {};
-      if (soSettled[2].status === 'fulfilled') (soSettled[2].value||[]).forEach(function(r){ if (r.job_id) _schedBomDone[r.job_id] = true; });
       _schedBomFlagged = {};
-      if (soSettled[3].status === 'fulfilled') (soSettled[3].value||[]).forEach(function(r){ if (r.job_id) _schedBomFlagged[r.job_id] = true; });
+      _schedBomAwaiting = {};
+      if (soSettled[2].status === 'fulfilled' && window._bomSignoffMaps) {
+        var _schedBomMaps = window._bomSignoffMaps(soSettled[2].value);
+        _schedBomDone = _schedBomMaps.done;
+        _schedBomFlagged = _schedBomMaps.flagged;
+        _schedBomAwaiting = _schedBomMaps.awaiting;
+      }
       // Load downtime logs for the last 60 days
       try {
         var sixtyDaysAgo = new Date(Date.now() - 60 * 86400000).toISOString();
@@ -61914,6 +62502,7 @@ window.saveAdjModal = async function() {
     function _gBomTick(jobId) {
       if (_schedBomDone[jobId])    return '<span title="BOM: client approved" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(61,186,120,0.15);color:var(--green);border:1px solid rgba(61,186,120,0.35);white-space:nowrap;">&#10003; BOM</span>';
       if (_schedBomFlagged[jobId]) return '<span title="BOM: client flagged a concern" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,168,76,0.15);color:var(--gold);border:1px solid rgba(201,168,76,0.45);white-space:nowrap;">&#9888; BOM</span>';
+      if (_schedBomAwaiting[jobId]) return '<span title="BOM: awaiting client confirmation" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(232,156,58,0.16);color:var(--amber);border:1px solid rgba(232,156,58,0.5);white-space:nowrap;">&#9679; BOM</span>';
       return '<span title="BOM: not yet confirmed" style="display:inline-flex;align-items:center;gap:3px;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:rgba(201,56,56,0.12);color:#e07070;border:1px solid rgba(201,56,56,0.35);white-space:nowrap;">&#10007; BOM</span>';
     }
     function _gSoTick(done, lbl) {
@@ -74906,7 +75495,8 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
   function renderBomBody(rec) {
     var host = document.getElementById('ba-body');
     if (!host) return;
-    var isDecided = !!rec.client_decision;
+    var _baState = window._bomSignoffState ? window._bomSignoffState(rec) : (rec.client_decision || 'draft');
+    var isDecided = _baState === 'approved' || _baState === 'flagged';
     var snap = rec.bom_snapshot || {};
     var rawProductName = rec.product_name || snap.product || '—';
     var clientName  = rec.client_name  || snap.client  || '';
@@ -74972,7 +75562,7 @@ window.showPeopleTab=function(tab,btn){if(_oSPT)_oSPT(tab,btn);if(tab==='clockin
 
     var formOrResult = '';
     if (isDecided) {
-      var isApproved = rec.client_decision === 'approved';
+      var isApproved = _baState === 'approved';
       formOrResult = '<div style="text-align:center;padding:40px 20px;background:rgba(255,255,255,0.02);border:1px solid var(--navy-border);border-radius:6px;">'
         + '<div style="font-size:32px;margin-bottom:12px;">' + (isApproved ? '✓' : '⚠') + '</div>'
         + '<div style="font-size:18px;font-weight:700;color:' + (isApproved ? 'var(--green)' : '#e84f4f') + ';margin-bottom:8px;">'
