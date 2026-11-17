@@ -20577,7 +20577,9 @@ window.loadBoms = async function initBoms() {
           </select>
         </div>
         <div class="mfield"><label>BRC clause</label><input type="text" id="qms-nc-brc" autocomplete="off"></div>
-        <div class="mfield"><label>Owner (by who)</label><input type="text" id="qms-nc-by" autocomplete="off"></div>
+        <div class="mfield"><label>Owner (by who)</label>
+          <select id="qms-nc-by"><option value="">—</option></select>
+        </div>
         <div class="mfield"><label>Due date</label><input type="date" id="qms-nc-due"></div>
         <div class="mfield"><label>Linked record</label>
           <select id="qms-nc-link-kind" onchange="window.QMS&&window.QMS.onNcLinkKind()">
@@ -31364,6 +31366,7 @@ window.loadBoms = async function initBoms() {
     var _ncFilter = 'all';
     var _ncOrigin = '';
     var _ncLinkCache = null;
+    var _ncStaff = null;
 
     function ncToday() {
       return new Date().toISOString().slice(0, 10);
@@ -31576,6 +31579,51 @@ window.loadBoms = async function initBoms() {
         });
       }
     }
+    async function ensureNcStaff() {
+      if (_ncStaff) return _ncStaff;
+      try {
+        var rows = await window.db.activeUsers('&select=id,display_name,email,role&order=display_name.asc') || [];
+        _ncStaff = rows.filter(function(u) { return u.role !== 'client'; });
+      } catch (e) {
+        window.logError('loadNcStaff', e);
+        if (window.toast) window.toast('Could not load the staff list for the owner.', 'error');
+        return [];
+      }
+      return _ncStaff;
+    }
+    function fillNcOwnerSelect(currentName) {
+      var sel = document.getElementById('qms-nc-by');
+      if (!sel) return;
+      var current = String(currentName || '').trim();
+      var html = '<option value="">—</option>';
+      var matched = '';
+      var escAttr = function(s) { return esc(s).replace(/'/g, '&#39;'); };
+      (_ncStaff || []).forEach(function(u) {
+        var name = staffLabel(u);
+        if (!matched && current && name.toLowerCase() === current.toLowerCase()) matched = u.id;
+        html += '<option value="' + escAttr(u.id) + '">' + esc(name) + '</option>';
+      });
+      if (current && !matched) {
+        matched = 'name:' + current;
+        html += '<option value="' + escAttr(matched) + '">' + esc(current) + '</option>';
+      }
+      sel.innerHTML = html;
+      if (matched) sel.value = matched;
+    }
+    function ncOwnerUser() {
+      var sel = document.getElementById('qms-nc-by');
+      var id = sel && sel.value;
+      if (!id || id.indexOf('name:') === 0) return null;
+      return (_ncStaff || []).filter(function(u) { return u.id === id; })[0] || null;
+    }
+    function ncOwnerName() {
+      var user = ncOwnerUser();
+      if (user) return staffLabel(user);
+      var sel = document.getElementById('qms-nc-by');
+      var id = sel && sel.value;
+      if (id && id.indexOf('name:') === 0) return id.slice(5);
+      return '';
+    }
     function fillNonconformity(row, isNew) {
       setVal('qms-nc-id', row && row.id ? row.id : '');
       setVal('qms-nc-date', (row && row.nc_date) || '');
@@ -31588,8 +31636,9 @@ window.loadBoms = async function initBoms() {
       setVal('qms-nc-origin', (row && row.origin) || '');
       setVal('qms-nc-severity', (row && row.severity) || '');
       setVal('qms-nc-brc', (row && row.brc_clause) || '');
-      setVal('qms-nc-by', (row && row.action_by) || '');
       setVal('qms-nc-due', (row && row.due_on) ? String(row.due_on).slice(0, 10) : '');
+      var ownerName = (row && row.action_by) || '';
+      ensureNcStaff().then(function() { fillNcOwnerSelect(ownerName); });
       setVal('qms-nc-link-kind', (row && row.link_kind) || '');
       setVal('qms-nc-link-text', row && row.link_kind === 'complaint' ? (row.link_label || '') : '');
       setVal('qms-nc-status', (row && row.status) || 'open');
@@ -31629,7 +31678,7 @@ window.loadBoms = async function initBoms() {
         manager_input: val('qms-nc-input'),
         correction: val('qms-nc-correction'),
         origin: val('qms-nc-origin'),
-        action_by: val('qms-nc-by'),
+        action_by: ncOwnerName(),
         due_on: val('qms-nc-due') || null,
         severity: val('qms-nc-severity') || null,
         brc_clause: val('qms-nc-brc'),
@@ -31830,56 +31879,81 @@ window.loadBoms = async function initBoms() {
       win.document.write('<!DOCTYPE html><html><head><title>Nonconformity log</title><style>body{font-family:sans-serif;font-size:11px;color:#111;}h1{font-size:16px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ccc;padding:4px 6px;vertical-align:top;text-align:left;}th{background:#f3f3f3;}</style></head><body><h1>Nonconformity log</h1><p>Rows currently filtered on the log.</p><table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table><script>window.onload=function(){window.print();}<\/script></body></html>');
       win.document.close();
     }
-    async function notifyQualityNonconformity(row) {
+    function ncRaisedEmailHtml(row, eyebrow, headline) {
+      var ncNo = row.nc_no || '';
+      var rowFn = function(k, v) {
+        return '<tr><td style="padding:6px 14px 6px 0;color:#7a93a8;font-size:12px;white-space:nowrap;vertical-align:top;">'+esc(k)+'</td><td style="padding:6px 0;color:#0d1b2a;font-size:13px;font-weight:600;vertical-align:top;">'+(v?esc(v):'—')+'</td></tr>';
+      };
+      return '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:28px 24px;background:#f9f9f9;">'
+        + '<div style="background:#0d1b2a;padding:22px;border-radius:8px;text-align:center;margin-bottom:20px;">'
+        +   '<h1 style="color:#c9a84c;font-size:18px;margin:0;">Lighthouse Drinks</h1>'
+        +   '<p style="color:#7a93a8;font-size:11px;margin:4px 0 0;letter-spacing:0.12em;text-transform:uppercase;">Pulse · Nonconformity</p>'
+        + '</div>'
+        + '<div style="background:#fff;border-left:4px solid #c9a84c;padding:18px 20px;border-radius:4px;margin-bottom:16px;">'
+        +   '<div style="font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:#c9a84c;font-weight:700;margin-bottom:6px;">'+esc(eyebrow)+'</div>'
+        +   '<div style="font-size:16px;color:#0d1b2a;font-weight:700;">'+esc(headline)+'</div>'
+        + '</div>'
+        + '<table style="width:100%;border-collapse:collapse;background:#fff;padding:12px;border-radius:4px;">'
+        +   rowFn('Number', ncNo)
+        +   rowFn('Date', row.nc_date)
+        +   rowFn('Source of issue', row.source_of_issue)
+        +   rowFn('Details', row.description)
+        +   rowFn('Origin', row.origin)
+        +   rowFn('Owner', row.action_by)
+        +   rowFn('Due date', row.due_on)
+        +   rowFn('Severity', ncSeverityLabel(row.severity))
+        +   rowFn('Completed by', row.created_by_name)
+        + '</table>'
+        + '<p style="color:#555;font-size:12px;line-height:1.6;margin-top:18px;">Open <strong>Pulse</strong> → QMS → Nonconformity and open <strong>'+esc(ncNo || 'this report')+'</strong>.</p>'
+        + '<p style="color:#888;font-size:11px;margin-top:18px;">This is an automated notification from Pulse by Lighthouse Drinks.</p>'
+        + '</div>';
+    }
+    async function notifyQualityNonconformity(row, ownerUser) {
+      var notes = [];
+      var ncNo = row.nc_no || '';
+      if (!window.sendEmail) {
+        console.warn('No sendEmail; skipping nonconformity notification.');
+        if (window.toast) window.toast('Report saved. The notification emails were not sent.', 'error');
+        return;
+      }
       try {
-        if (!window.sendEmail) {
-          console.warn('No sendEmail; skipping nonconformity Quality notification.');
-          if (window.toast) window.toast('Report saved. Quality & Compliance email was not sent.', 'error');
-          return;
-        }
         var qcUsers = await window.db.select('app_users', '?status=eq.active&role=eq.quality_compliance&select=email,display_name');
         var recipients = (qcUsers || []).map(function(u){ return u.email; }).filter(Boolean);
         if (!recipients.length) {
           console.warn('No Quality & Compliance users with email found; skipping nonconformity notification.');
-          if (window.toast) window.toast('Report saved. No Quality & Compliance email on file.', 'error');
-          return;
+          notes.push('No Quality & Compliance email on file.');
+        } else {
+          await window.sendEmail({
+            to: recipients,
+            subject: 'Nonconformity ' + ncNo + ' — raised and open on the log',
+            html: ncRaisedEmailHtml(row, 'Log this report', 'A nonconformity has been raised and is Open on the log.')
+          });
+          notes.push('Quality & Compliance notified.');
         }
-        var ncNo = row.nc_no || '';
-        var rowFn = function(k, v) {
-          return '<tr><td style="padding:6px 14px 6px 0;color:#7a93a8;font-size:12px;white-space:nowrap;vertical-align:top;">'+esc(k)+'</td><td style="padding:6px 0;color:#0d1b2a;font-size:13px;font-weight:600;vertical-align:top;">'+(v?esc(v):'—')+'</td></tr>';
-        };
-        var html = '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:28px 24px;background:#f9f9f9;">'
-          + '<div style="background:#0d1b2a;padding:22px;border-radius:8px;text-align:center;margin-bottom:20px;">'
-          +   '<h1 style="color:#c9a84c;font-size:18px;margin:0;">Lighthouse Drinks</h1>'
-          +   '<p style="color:#7a93a8;font-size:11px;margin:4px 0 0;letter-spacing:0.12em;text-transform:uppercase;">Pulse · Nonconformity</p>'
-          + '</div>'
-          + '<div style="background:#fff;border-left:4px solid #c9a84c;padding:18px 20px;border-radius:4px;margin-bottom:16px;">'
-          +   '<div style="font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:#c9a84c;font-weight:700;margin-bottom:6px;">Log this report</div>'
-          +   '<div style="font-size:16px;color:#0d1b2a;font-weight:700;">A nonconformity has been raised and is Open on the log.</div>'
-          + '</div>'
-          + '<table style="width:100%;border-collapse:collapse;background:#fff;padding:12px;border-radius:4px;">'
-          +   rowFn('Number', ncNo)
-          +   rowFn('Date', row.nc_date)
-          +   rowFn('Source of issue', row.source_of_issue)
-          +   rowFn('Details', row.description)
-          +   rowFn('Origin', row.origin)
-          +   rowFn('Owner', row.action_by)
-          +   rowFn('Due date', row.due_on)
-          +   rowFn('Severity', ncSeverityLabel(row.severity))
-          +   rowFn('Completed by', row.created_by_name)
-          + '</table>'
-          + '<p style="color:#555;font-size:12px;line-height:1.6;margin-top:18px;">Open <strong>Pulse</strong> → QMS → Nonconformity and open <strong>'+esc(ncNo || 'this report')+'</strong>.</p>'
-          + '<p style="color:#888;font-size:11px;margin-top:18px;">This is an automated notification from Pulse by Lighthouse Drinks.</p>'
-          + '</div>';
-        await window.sendEmail({
-          to: recipients,
-          subject: 'Nonconformity ' + ncNo + ' — raised and open on the log',
-          html: html
-        });
-        if (window.toast) window.toast('Quality & Compliance notified.', 'success');
       } catch (e) {
         console.warn('Nonconformity Quality email failed:', e);
-        if (window.toast) window.toast('Report saved. Quality & Compliance email could not be sent.', 'error');
+        notes.push('Quality & Compliance email could not be sent.');
+      }
+      var ownerName = (ownerUser && staffLabel(ownerUser)) || row.action_by || '';
+      var ownerEmail = ownerUser && ownerUser.email ? String(ownerUser.email).trim() : '';
+      if (!ownerEmail) {
+        notes.push(ownerName ? ('No email on file for ' + ownerName + '.') : 'No owner email on file.');
+      } else {
+        try {
+          await window.sendEmail({
+            to: [ownerEmail],
+            subject: 'Nonconformity ' + ncNo + ' — you are the owner',
+            html: ncRaisedEmailHtml(row, 'You are the owner', 'A nonconformity has been raised and you are named as the owner.')
+          });
+          notes.push(ownerName + ' notified.');
+        } catch (e) {
+          console.warn('Nonconformity owner email failed:', e);
+          notes.push(ownerName + ' could not be emailed.');
+        }
+      }
+      if (window.toast) {
+        var failed = notes.some(function(n) { return /could not|No /.test(n); });
+        window.toast('Report saved. ' + notes.join(' '), failed ? 'error' : 'success');
       }
     }
     async function saveNonconformity() {
@@ -31910,6 +31984,7 @@ window.loadBoms = async function initBoms() {
       }
       try {
         var savedId = id;
+        var ownerUser = isNew ? ncOwnerUser() : null;
         if (isNew) {
           var w = who();
           payload.status = 'open';
@@ -31924,7 +31999,7 @@ window.loadBoms = async function initBoms() {
             await storeNcFiles(savedId);
           }
           if (window.toast) window.toast('Report ' + ((row && row.nc_no) || '') + ' raised.', 'success');
-          notifyQualityNonconformity(Object.assign({}, payload, row || {}));
+          notifyQualityNonconformity(Object.assign({}, payload, row || {}), ownerUser);
         } else {
           await window.db.update('qms_nonconformity', '?id=eq.' + id, payload);
           await storeNcFiles(id);
