@@ -33376,7 +33376,7 @@ window._approvalsBadgePoll = async function() {
 
   <!-- Search + Sort -->
   <div style="margin-bottom:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-    <input type="text" id="jobs-search" placeholder="Search jobs, clients, products…" oninput="window.renderJobsTable()"
+    <input type="text" id="jobs-search" placeholder="Search jobs, clients, products, SKUs…" oninput="window.renderJobsTable()"
       style="font-family:Lato,sans-serif;font-size:12px;background:var(--navy-card);border:1px solid var(--navy-border);padding:9px 14px;color:var(--white);outline:none;width:300px;border-radius:4px;"
       onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='var(--navy-border)'">
     <button id="jobs-liquid-plan-export" type="button" onclick="window.exportLiquidPlanPDF&&window.exportLiquidPlanPDF()" style="display:none;background:transparent;border:1px solid var(--gold);color:var(--gold);font-size:11px;padding:8px 14px;cursor:pointer;border-radius:3px;font-family:Lato,sans-serif;">Export PDF</button>
@@ -46272,6 +46272,9 @@ window.saveAdjModal = async function() {
   var _loadJobsInFlight = false; // prevents concurrent loadJobs() race
   var _scDone  = {}; // job_id -> true if supply-chain signed off
   var _scSkuReady = {}; // job_id -> true if every non-excluded SC SKU is on-site or ordered
+  var _jobsSkuByJob = {}; // job_id -> { sku_id: true } for non-excluded dry-goods lines
+  var _skuSearchBlob = {}; // sku_id -> lowercase "sku-123 description"
+  var _skuIndexGen = 0;
   var _lsDone  = {}; // job_id -> true if liquid signed off
   var _qaDone  = {}; // job_id -> true if quality check exists
   var _bomNameBackfilled = new Set(); // job ids already converged to their BOM name this session
@@ -46489,6 +46492,73 @@ window.saveAdjModal = async function() {
 
   window._initJobsRealtime = _initSignoffRealtime;
 
+  // True when this job has a non-excluded component whose Dry Goods id or
+  // description contains the search text. Ids match immediately; descriptions
+  // fill in once _indexJobSkus finishes its lookup.
+  function _jobMatchesSkuSearch(jobId, needle) {
+    if (!needle || !jobId) return false;
+    var set = _jobsSkuByJob[jobId];
+    if (!set) return false;
+    for (var skuId in set) {
+      var blob = _skuSearchBlob[skuId] || String(skuId).toLowerCase();
+      if (blob.indexOf(needle) !== -1) return true;
+    }
+    return false;
+  }
+
+  // Build job → SKU ids from the component rows already loaded for the stock
+  // ticks. Descriptions are a separate, chunked lookup so a long URL or a
+  // failed request cannot delay or blank the jobs table.
+  function _indexJobSkus(compsAll) {
+    var gen = ++_skuIndexGen;
+    var byJob = {};
+    var skuSet = {};
+    (compsAll || []).forEach(function(c) {
+      if (!c || !c.job_id || !c.sku_id || c.is_excluded) return;
+      if (!byJob[c.job_id]) byJob[c.job_id] = {};
+      byJob[c.job_id][c.sku_id] = true;
+      skuSet[c.sku_id] = true;
+    });
+    _jobsSkuByJob = byJob;
+    var blobs = {};
+    var ids = Object.keys(skuSet);
+    ids.forEach(function(id) { blobs[id] = String(id).toLowerCase(); });
+    _skuSearchBlob = blobs;
+    if (!ids.length) return;
+
+    var size = 80;
+    var chunks = [];
+    for (var i = 0; i < ids.length; i += size) chunks.push(ids.slice(i, i + size));
+    Promise.all(chunks.map(function(slice) {
+      return supaGet('dry_goods_skus?id=in.(' + slice.join(',') + ')&select=id,description');
+    })).then(function(parts) {
+      if (gen !== _skuIndexGen) return;
+      var searchEl = document.getElementById('jobs-search');
+      var needle = searchEl && searchEl.value ? String(searchEl.value).toLowerCase() : '';
+      var matchFlipped = false;
+      parts.forEach(function(rows) {
+        (rows || []).forEach(function(s) {
+          if (!s || !s.id || !blobs[s.id]) return;
+          var desc = s.description ? String(s.description).toLowerCase() : '';
+          var next = (String(s.id).toLowerCase() + (desc ? ' ' + desc : '')).trim();
+          if (next === blobs[s.id]) return;
+          if (needle) {
+            var was = blobs[s.id].indexOf(needle) !== -1;
+            var now = next.indexOf(needle) !== -1;
+            if (was !== now) matchFlipped = true;
+          }
+          blobs[s.id] = next;
+        });
+      });
+      if (gen !== _skuIndexGen) return;
+      // Repaint only when the typed search would gain or lose a job. A client
+      // or job-number search must not rebuild the table when descriptions arrive.
+      if (matchFlipped && typeof window.renderJobsTable === 'function') window.renderJobsTable();
+    }).catch(function(e) {
+      console.warn('Job SKU search descriptions failed:', e);
+    });
+  }
+
   async function _doLoadJobs() {
     // Load staff map for name lookups. Key by BOTH auth_user_id and the
     // app_users.id so name resolution works regardless of which id a row stored
@@ -46539,9 +46609,11 @@ window.saveAdjModal = async function() {
     if (window._mergeBomMap) window._mergeBomMap(_jobsBomMap);
 
     // Supply Chain column: all non-excluded SKUs on-site (net stock) or ordered.
+    // compsAll is hoisted so the SKU search index can use the same rows without
+    // sitting inside this try — a search-index failure must not clear the ticks.
+    var compsAll = (settled[5].status === 'fulfilled' && Array.isArray(settled[5].value)) ? settled[5].value : [];
     _scSkuReady = {};
     try {
-      var compsAll = (settled[5].status === 'fulfilled' && Array.isArray(settled[5].value)) ? settled[5].value : [];
       var skuSet = {};
       compsAll.forEach(function(c) { if (c.sku_id) skuSet[c.sku_id] = true; });
       var uniqSkus = Object.keys(skuSet);
@@ -46587,6 +46659,10 @@ window.saveAdjModal = async function() {
       console.warn('Supply Chain ready map failed:', e);
       _scSkuReady = {};
     }
+
+    // SKU search index. Id matches are ready before the table paints. Descriptions
+    // load afterwards and only repaint if a search is already typed.
+    _indexJobSkus(compsAll);
 
     // Backfill any job whose stored product_name has drifted from its linked
     // BOM's name (the BOM is the source of truth). Display already resolves the
@@ -46948,7 +47024,8 @@ window.saveAdjModal = async function() {
         return label.indexOf(search) >= 0
           || (j.id || '').toLowerCase().indexOf(search) >= 0
           || spirit.indexOf(search) >= 0
-          || ((j.clients && j.clients.name) || '').toLowerCase().indexOf(search) >= 0;
+          || ((j.clients && j.clients.name) || '').toLowerCase().indexOf(search) >= 0
+          || _jobMatchesSkuSearch(j.id, search);
       }
       return true;
     }).map(function(j) {
@@ -47182,7 +47259,8 @@ window.saveAdjModal = async function() {
         return label.includes(s)
           || (j.id||'').toLowerCase().includes(s)
           || (j.po_number||'').toLowerCase().includes(s)
-          || ((j.clients&&j.clients.name)||'').toLowerCase().includes(s);
+          || ((j.clients&&j.clients.name)||'').toLowerCase().includes(s)
+          || _jobMatchesSkuSearch(j.id, s);
       }
       return true;
     });
