@@ -3526,8 +3526,11 @@ async function loadPortalSummary(clientId) {
 
   // Litres On Site + Value of Liquid On Site (driven by client-entered LPA prices)
   try {
+    // Match the staff inventory and the customer-detail container list:
+    // archived vessels are off site (combined, returned, collected) and must
+    // not keep adding litres to "on site".
     var liqRows = await db.select('liquid_containers',
-      '?client_id=eq.' + clientId + '&select=id,current_litres,current_lpa');
+      '?client_id=eq.' + clientId + '&archived=is.false&select=id,current_litres,current_lpa');
     var totalLitres = 0;
     (liqRows || []).forEach(function(r) { totalLitres += parseFloat(r.current_litres) || 0; });
     _portalSet('portal-kpi-litres', totalLitres ? Math.round(totalLitres).toLocaleString() + ' L' : '0 L');
@@ -3536,8 +3539,9 @@ async function loadPortalSummary(clientId) {
       '?client_id=eq.' + clientId + '&select=container_id,lpa_price');
     var priceMap = {};
     (prices || []).forEach(function(p) { priceMap[p.container_id] = parseFloat(p.lpa_price) || 0; });
+    var holding = (liqRows || []).filter(function(r) { return (parseFloat(r.current_litres) || 0) > 0; });
     var totalLiqVal = 0, pricedRows = 0;
-    (liqRows || []).forEach(function(r) {
+    holding.forEach(function(r) {
       var lpa = parseFloat(r.current_lpa) || 0;
       var p   = priceMap[r.id] || 0;
       if (p > 0) { totalLiqVal += lpa * p; pricedRows++; }
@@ -3545,7 +3549,7 @@ async function loadPortalSummary(clientId) {
     _portalSet('portal-kpi-liqval', totalLiqVal ? _portalFmtEur(totalLiqVal) : '—');
     _portalSet('portal-kpi-liqval-sub',
       pricedRows
-        ? pricedRows + ' of ' + (liqRows || []).length + ' containers priced'
+        ? pricedRows + ' of ' + holding.length + ' containers priced'
         : 'Add LPA prices on the Liquid tab');
   } catch(e) { window.logError('loadPortalSummary:liquid', e); }
 
@@ -6085,8 +6089,16 @@ window.loadPortalLiquid = async function(clientId) {
   if (!clientId) { body.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--muted);">No client context.</div>'; return; }
 
   try {
+    // Archived rows stay in the table (combine/return does not zero litres)
+    // but they are not on site. Staff inventory already hides them.
     var liq = await db.select('liquid_containers',
-      '?client_id=eq.' + clientId + '&order=reference.asc');
+      '?client_id=eq.' + clientId + '&archived=is.false&order=reference.asc');
+    liq = (liq || []).slice().sort(function(a, b) {
+      var la = parseFloat(a.current_litres) || 0;
+      var lb = parseFloat(b.current_litres) || 0;
+      if ((la > 0) !== (lb > 0)) return la > 0 ? -1 : 1;
+      return String(a.reference || '').localeCompare(String(b.reference || ''), undefined, { numeric: true });
+    });
 
     if (!liq || !liq.length) {
       body.innerHTML = '<div class="card" style="padding:24px;text-align:center;color:var(--muted);">No liquid containers on file.</div>';
@@ -6143,10 +6155,12 @@ window.loadPortalLiquid = async function(clientId) {
       var ref    = esc(c.reference   || '—');
       var type   = esc(c.type        || '—');
       var spirit = esc(c.spirit_type || '—');
-      var abvTxt = c.abv    ? esc(c.abv) + '%' : '—';
-      var litres = c.current_litres ? parseFloat(c.current_litres).toFixed(1) + ' L' : '—';
+      var litresNum = parseFloat(c.current_litres) || 0;
+      var abvNum = parseFloat(c.abv) || 0;
+      var abvTxt = abvNum > 0 ? esc(String(c.abv)) + '%' : '—';
+      var litres = litresNum > 0 ? litresNum.toFixed(1) + ' L' : '—';
       var lpaNum = parseFloat(c.current_lpa) || 0;
-      var lpaTxt = c.current_lpa    ? parseFloat(c.current_lpa).toFixed(3) : '—';
+      var lpaTxt = lpaNum > 0 ? lpaNum.toFixed(3) : '—';
       var price  = window._portalLiqGetPrice(clientId, c.id);
       var ownerCell = isLhHoused
         ? '<span style="color:var(--muted);">Lighthouse</span>'
